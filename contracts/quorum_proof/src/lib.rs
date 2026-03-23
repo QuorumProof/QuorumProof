@@ -36,6 +36,7 @@ pub struct Credential {
 #[derive(Clone)]
 pub struct QuorumSlice {
     pub id: u64,
+    pub creator: Address,
     pub attestors: Vec<Address>,
     pub threshold: u32,
 }
@@ -117,7 +118,8 @@ impl QuorumProofContract {
     }
 
     /// Create a quorum slice. Returns the slice ID.
-    pub fn create_slice(env: Env, attestors: Vec<Address>, threshold: u32) -> u64 {
+    pub fn create_slice(env: Env, creator: Address, attestors: Vec<Address>, threshold: u32) -> u64 {
+        creator.require_auth();
         let id: u64 = env
             .storage()
             .instance()
@@ -126,6 +128,7 @@ impl QuorumProofContract {
             + 1;
         let slice = QuorumSlice {
             id,
+            creator,
             attestors,
             threshold,
         };
@@ -146,6 +149,26 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .expect("slice not found")
+    }
+
+    /// Add a new attestor to an existing quorum slice.
+    /// Only the slice creator can call this. Panics if attestor is already in the slice.
+    pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
+        creator.require_auth();
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .expect("slice not found");
+        assert!(slice.creator == creator, "only the slice creator can add attestors");
+        for a in slice.attestors.iter() {
+            assert!(a != attestor, "attestor already in slice");
+        }
+        slice.attestors.push_back(attestor);
+        env.storage()
+            .instance()
+            .set(&DataKey::Slice(slice_id), &slice);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Attest a credential using a quorum slice.
@@ -314,7 +337,7 @@ mod tests {
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor1.clone());
         attestors.push_back(attestor2.clone());
-        let slice_id = client.create_slice(&attestors, &2u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &2u32);
 
         assert!(!client.is_attested(&cred_id, &slice_id));
         client.attest(&attestor1, &cred_id, &slice_id);
@@ -458,7 +481,7 @@ mod tests {
 
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor.clone());
-        let slice_id = client.create_slice(&attestors, &1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
 
         client.attest(&attestor, &cred_id, &slice_id);
         // Before expiry: attested
@@ -484,6 +507,94 @@ mod tests {
         // No expiry set — should never be expired
         set_ledger_timestamp(&env, 999_999_999);
         assert!(!client.is_expired(&id));
+    }
+
+    #[test]
+    fn test_add_attestor_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+
+        let mut initial = soroban_sdk::Vec::new(&env);
+        initial.push_back(attestor1.clone());
+        let slice_id = client.create_slice(&creator, &initial, &1u32);
+
+        // Add a second attestor
+        client.add_attestor(&creator, &slice_id, &attestor2);
+
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.attestors.len(), 2);
+        assert_eq!(slice.attestors.get(1).unwrap(), attestor2);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestor already in slice")]
+    fn test_add_attestor_duplicate_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let mut initial = soroban_sdk::Vec::new(&env);
+        initial.push_back(attestor.clone());
+        let slice_id = client.create_slice(&creator, &initial, &1u32);
+
+        // Adding the same attestor again should panic
+        client.add_attestor(&creator, &slice_id, &attestor);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the slice creator can add attestors")]
+    fn test_add_attestor_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let non_creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let initial = soroban_sdk::Vec::new(&env);
+        let slice_id = client.create_slice(&creator, &initial, &1u32);
+
+        // Non-creator trying to add an attestor should panic
+        client.add_attestor(&non_creator, &slice_id, &attestor);
+    }
+
+    #[test]
+    fn test_add_attestor_enables_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        // Create slice with no attestors initially
+        let initial = soroban_sdk::Vec::new(&env);
+        let slice_id = client.create_slice(&creator, &initial, &1u32);
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // Add attestor after creation
+        client.add_attestor(&creator, &slice_id, &attestor);
+
+        // Attestor can now attest
+        client.attest(&attestor, &cred_id, &slice_id);
+        assert!(client.is_attested(&cred_id, &slice_id));
     }
 }
 
