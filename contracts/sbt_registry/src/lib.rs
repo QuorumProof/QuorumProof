@@ -1,5 +1,18 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Bytes, Env, String, Vec,
+};
+
+// Event topic for Mint event
+const TOPIC_MINT: &str = "Mint";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct MintEventData {
+    pub token_id: u64,
+    pub owner: Address,
+    pub credential_id: u64,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -47,6 +60,18 @@ impl SbtRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::TokenCount, &id);
+
+        // Emit Mint event
+        let event_data = MintEventData {
+            token_id: id,
+            owner: owner.clone(),
+            credential_id,
+        };
+        let topic = String::from_str(&env, TOPIC_MINT);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
         id
     }
 
@@ -70,7 +95,7 @@ impl SbtRegistryContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Bytes, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Events, Bytes, Env};
 
     #[test]
     fn test_mint_and_ownership() {
@@ -84,5 +109,24 @@ mod tests {
         let token_id = client.mint(&owner, &1u64, &uri);
         assert_eq!(token_id, 1);
         assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    fn test_mint_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &1u64, &uri);
+        assert_eq!(token_id, 1);
+
+        // Check that at least one event was emitted
+        let events = env.events().all();
+        // The events are stored as (contract_id, topics, data) tuples
+        // We just verify that some events were emitted
+        assert!(events.len() > 0, "Expected events to be emitted");
     }
 }
