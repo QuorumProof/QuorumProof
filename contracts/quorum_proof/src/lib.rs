@@ -16,6 +16,7 @@ pub enum DataKey {
 pub struct Credential {
     pub id: u64,
     pub subject: Address,
+    pub issuer: Address,
     pub credential_type: u32,
     pub metadata_hash: soroban_sdk::Bytes,
     pub revoked: bool,
@@ -35,13 +36,14 @@ pub struct QuorumProofContract;
 #[contractimpl]
 impl QuorumProofContract {
     /// Issue a new credential. Returns the credential ID.
-    pub fn issue_credential(
+pub fn issue_credential(
         env: Env,
+        issuer: Address,
         subject: Address,
         credential_type: u32,
         metadata_hash: soroban_sdk::Bytes,
     ) -> u64 {
-        subject.require_auth();
+        issuer.require_auth();
         let id: u64 = env
             .storage()
             .instance()
@@ -51,6 +53,7 @@ impl QuorumProofContract {
         let credential = Credential {
             id,
             subject,
+            issuer,
             credential_type,
             metadata_hash,
             revoked: false,
@@ -72,14 +75,18 @@ impl QuorumProofContract {
             .expect("credential not found")
     }
 
-    /// Revoke a credential.
-    pub fn revoke_credential(env: Env, credential_id: u64) {
+    /// Revoke a credential. Can be called by either the subject or the issuer.
+    pub fn revoke_credential(env: Env, caller: Address, credential_id: u64) {
+        caller.require_auth();
         let mut credential: Credential = env
             .storage()
             .instance()
             .get(&DataKey::Credential(credential_id))
             .expect("credential not found");
-        credential.subject.require_auth();
+        assert!(
+            caller == credential.subject || caller == credential.issuer,
+            "only subject or issuer can revoke"
+        );
         credential.revoked = true;
         env.storage()
             .instance()
@@ -181,13 +188,15 @@ mod tests {
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
+        let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&subject, &1u32, &metadata);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
         assert_eq!(id, 1);
 
         let cred = client.get_credential(&id);
         assert_eq!(cred.subject, subject);
+        assert_eq!(cred.issuer, issuer);
         assert!(!cred.revoked);
     }
 
@@ -198,12 +207,13 @@ mod tests {
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
+        let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor1 = Address::generate(&env);
         let attestor2 = Address::generate(&env);
 
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&subject, &1u32, &metadata);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
 
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -215,5 +225,65 @@ mod tests {
         assert!(!client.is_attested(&cred_id, &slice_id));
         client.attest(&attestor2, &cred_id, &slice_id);
         assert!(client.is_attested(&cred_id, &slice_id));
+    }
+
+    #[test]
+    fn test_issuer_revoke_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
+
+        // Revoke as issuer
+        client.revoke_credential(&issuer, &id);
+
+        let cred = client.get_credential(&id);
+        assert!(cred.revoked);
+        assert_eq!(cred.issuer, issuer);
+        assert_eq!(cred.subject, subject);
+    }
+
+    #[test]
+    fn test_subject_revoke_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
+
+        // Revoke as subject
+        client.revoke_credential(&subject, &id);
+
+        let cred = client.get_credential(&id);
+        assert!(cred.revoked);
+        assert_eq!(cred.issuer, issuer);
+        assert_eq!(cred.subject, subject);
+    }
+
+    #[test]
+    #[should_panic(expected = "only subject or issuer can revoke")]
+    fn test_unauthorized_revoke_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
+
+        // Attempt to revoke as unauthorized user - should panic
+        client.revoke_credential(&unauthorized, &id);
     }
 }
