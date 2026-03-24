@@ -11,6 +11,17 @@ pub struct RevokeEventData {
     pub subject: Address,
 }
 
+/// Event topic for credential issuance
+const TOPIC_ISSUE: &str = "CredentialIssued";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct IssueEventData {
+    pub id: u64,
+    pub subject: Address,
+    pub credential_type: u32,
+}
+
 /// TTL Strategy: Extends instance storage TTL after every write operation.
 /// - STANDARD_TTL: 16_384 ledgers (~3 hours at 5s/ledger)
 /// - EXTENDED_TTL: 524_288 ledgers (~4 days)
@@ -99,8 +110,20 @@ impl QuorumProofContract {
         subject_creds.push_back(id);
         env.storage()
             .instance()
-            .set(&DataKey::SubjectCredentials(credential.subject), &subject_creds);
+            .set(&DataKey::SubjectCredentials(credential.subject.clone()), &subject_creds);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit CredentialIssued event
+        let event_data = IssueEventData {
+            id,
+            subject: credential.subject.clone(),
+            credential_type,
+        };
+        let topic = String::from_str(&env, TOPIC_ISSUE);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
         id
     }
 
@@ -363,6 +386,33 @@ mod tests {
     }
 
     #[test]
+    fn test_issue_credential_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let events = env.events().all();
+        let (_addr, topics, data) = events.last().unwrap();
+        
+        let expected_topic = String::from_str(&env, TOPIC_ISSUE);
+        let stored_topic: String = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(stored_topic, expected_topic);
+
+        let event_data: IssueEventData = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.id, id);
+        assert_eq!(event_data.subject, subject);
+        assert_eq!(event_data.credential_type, 1u32);
+    }
+
+
+    #[test]
     fn test_quorum_slice_and_attestation() {
         let env = Env::default();
         env.mock_all_auths();
@@ -452,7 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_credentials_by_subject_single() {
     fn test_credential_not_expired_before_expiry() {
         let env = Env::default();
         env.mock_all_auths();
