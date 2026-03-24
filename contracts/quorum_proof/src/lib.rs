@@ -218,6 +218,28 @@ impl QuorumProofContract {
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
+    /// Update the threshold of an existing quorum slice.
+    /// Only the slice creator can call this.
+    /// Panics if new_threshold exceeds the current attestor count.
+    pub fn update_threshold(env: Env, creator: Address, slice_id: u64, new_threshold: u32) {
+        creator.require_auth();
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .expect("slice not found");
+        assert!(slice.creator == creator, "only the slice creator can update threshold");
+        assert!(
+            new_threshold <= slice.attestors.len(),
+            "threshold exceeds attestor count"
+        );
+        slice.threshold = new_threshold;
+        env.storage()
+            .instance()
+            .set(&DataKey::Slice(slice_id), &slice);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
     /// Attest a credential using a quorum slice.
     pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64) {
         attestor.require_auth();
@@ -986,6 +1008,66 @@ mod tests {
 
         assert_eq!(client.get_attestor_reputation(&attestor_a), 1);
         assert_eq!(client.get_attestor_reputation(&attestor_b), 0);
+    }
+
+    #[test]
+    fn test_update_threshold_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let slice_id = client.create_slice(&creator, &attestors, &2u32);
+
+        client.update_threshold(&creator, &slice_id, &1u32);
+
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.threshold, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the slice creator can update threshold")]
+    fn test_update_threshold_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let non_creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+
+        client.update_threshold(&non_creator, &slice_id, &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold exceeds attestor count")]
+    fn test_update_threshold_exceeds_attestor_count_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+
+        // 1 attestor, threshold of 2 should panic
+        client.update_threshold(&creator, &slice_id, &2u32);
     }
 }
 
