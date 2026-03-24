@@ -220,6 +220,15 @@ impl QuorumProofContract {
     /// Attest a credential using a quorum slice.
     pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64) {
         attestor.require_auth();
+
+        // Issue #8: load credential and panic if revoked
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .expect("credential not found");
+        assert!(!credential.revoked, "credential is revoked");
+
         let slice: QuorumSlice = env
             .storage()
             .instance()
@@ -480,6 +489,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
         client.revoke_credential(&subject, &id);
@@ -539,6 +549,9 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "credential is revoked")]
+    fn test_attest_revoked_credential_panics() {
+    fn test_get_credentials_by_subject_single() {
     fn test_credential_not_expired_before_expiry() {
         let env = Env::default();
         env.mock_all_auths();
