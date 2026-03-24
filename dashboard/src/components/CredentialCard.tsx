@@ -14,7 +14,7 @@ import clsx from 'clsx'
 import { Credential, CredentialStatus, CredentialType } from '../types/credential'
 import '../styles/credentialCard.css'
 
-interface CredentialCardProps {
+export interface CredentialCardProps {
   /**
    * The credential data to display
    */

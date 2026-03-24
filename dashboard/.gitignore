@@ -7,34 +7,35 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
-# Editor directories and files
+# IDE
 .vscode/*
 !.vscode/extensions.json
 .idea
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Environment
-.env
+.DS_Store
 .env.local
 .env.*.local
 
-# OS
-.DS_Store
-Thumbs.db
-
 # Build outputs
+dist/
+dist-ssr/
+*.local
 .next
 out
+build/
 
-# Test coverage
-coverage
-.nyc_output
+# Cache and testing
+.cache/
+.eslintcache
+.nyc_output/
+coverage/
+
+# OS files
+Thumbs.db
+.DS_Store
+
