@@ -1,14 +1,11 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, Address, Env, Vec};
 
-/// Event topic for credential revocation
-const TOPIC_REVOKE: &str = "RevokeCredential";
-
-#[contracttype]
-#[derive(Clone)]
-pub struct RevokeEventData {
-    pub credential_id: u64,
-    pub subject: Address,
+#[contracterror]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum ContractError {
+    CredentialNotFound = 1,
 }
 
 /// TTL Strategy: Extends instance storage TTL after every write operation.
@@ -106,28 +103,13 @@ impl QuorumProofContract {
         id
     }
 
-    /// Retrieve a credential by ID. Panics if the credential has expired.
+    /// Retrieve a credential by ID. Panics with ContractError::CredentialNotFound if missing.
     pub fn get_credential(env: Env, credential_id: u64) -> Credential {
         let credential: Credential = env
             .storage()
             .instance()
             .get(&DataKey::Credential(credential_id))
-            .expect("credential not found");
-        if let Some(expires_at) = credential.expires_at {
-            assert!(
-                env.ledger().timestamp() < expires_at,
-                "credential has expired"
-            );
-        }
-        credential
-    }
-
-    /// Return all credential IDs issued to a given subject address.
-    pub fn get_credentials_by_subject(env: Env, subject: Address) -> Vec<u64> {
-        env.storage()
-            .instance()
-            .get(&DataKey::SubjectCredentials(subject))
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound))
     }
 
     /// Revoke a credential. Can be called by either the subject or the issuer.
@@ -491,6 +473,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_get_credential_not_found() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        // credential ID 999 was never issued — should panic with ContractError::CredentialNotFound
+        client.get_credential(&999u64);
+    }
+}
     fn test_get_credentials_by_subject_single() {
     fn test_credential_not_expired_before_expiry() {
         let env = Env::default();
