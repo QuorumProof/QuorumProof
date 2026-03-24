@@ -97,7 +97,7 @@ function App() {
               <CredentialCard
                 key={credential.id}
                 credential={credential}
-                onNavigate={(id) => {
+                onNavigate={(id: string) => {
                   setSelectedId(id)
                   console.log('Navigating to credential:', id)
                 }}
