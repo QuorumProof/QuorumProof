@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { CredentialCard } from './components/CredentialCard'
+import { AttestationPanel } from './components/AttestationPanel'
 import { Credential } from './types/credential'
+import { Attestor } from './types/attestor'
 import './App.css'
 
 /**
@@ -72,8 +74,31 @@ const mockCredentials: Credential[] = [
   },
 ]
 
+/**
+ * Mock data for attestors
+ */
+const mockAttestors: Attestor[] = [
+  {
+    address: '0x742d35Cc6634C0532925a3b844Bc9e7595f42D74',
+    hasSigned: true,
+    signedAt: new Date('2024-03-20'),
+    name: 'Alice',
+  },
+  {
+    address: '0xA0b86991c6218b36d9ED5f9d7C7e5f4a1A7D93b1C',
+    hasSigned: false,
+    name: 'Bob',
+  },
+  {
+    address: '0xB0b86991c6218b36d9ED5f9d7C7e5f4a1A7D93b1C',
+    hasSigned: false,
+    name: 'Charlie',
+  },
+]
+
 function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [showAttestation, setShowAttestation] = useState(false)
 
   return (
     <div className="app">
@@ -94,17 +119,43 @@ function App() {
 
           <div className="credentials-grid">
             {mockCredentials.map((credential) => (
-              <CredentialCard
-                key={credential.id}
-                credential={credential}
-                onNavigate={(id) => {
-                  setSelectedId(id)
-                  console.log('Navigating to credential:', id)
-                }}
-              />
+              <div key={credential.id}>
+                <CredentialCard
+                  credential={credential}
+                  onNavigate={(id: string) => {
+                    setSelectedId(id)
+                    setShowAttestation(true)
+                    console.log('Navigating to credential:', id)
+                  }}
+                />
+              </div>
             ))}
           </div>
         </section>
+
+        {showAttestation && selectedId && (
+          <section className="attestation-section">
+            <button
+              className="close-attestation"
+              onClick={() => setShowAttestation(false)}
+            >
+              Close
+            </button>
+            <AttestationPanel
+              credential={
+                mockCredentials.find((c) => c.id === selectedId) || mockCredentials[0]
+              }
+              attestors={mockAttestors}
+              threshold={{ signed: 2, required: 3 }}
+              connectedWalletAddress="0x742d35Cc6634C0532925a3b844Bc9e7595f42D74"
+              onAttest={async (credentialId: string) => {
+                console.log('Attesting credential:', credentialId)
+                // Simulate blockchain interaction
+                await new Promise((resolve) => setTimeout(resolve, 2000))
+              }}
+            />
+          </section>
+        )}
 
         <section className="info-section">
           <h2>Component Features</h2>
