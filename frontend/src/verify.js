@@ -21,6 +21,8 @@ import {
   NETWORK,
 } from './stellar.js';
 
+import { renderNavbar, bindNavbarLinks } from './dashboard.js';
+
 // ── Credential type labels ──────────────────────────────────────────────────
 const CREDENTIAL_TYPES = {
   1: '🎓 Degree',
@@ -55,15 +57,7 @@ export function renderVerifyPage(container) {
   const prefilledId = params.get('credentialId') || '';
 
   container.innerHTML = `
-    <nav class="navbar">
-      <div class="container navbar__inner">
-        <a href="/" class="navbar__logo">
-          <div class="navbar__logo-icon">⬡</div>
-          QuorumProof
-        </a>
-        <span class="navbar__badge">TESTNET</span>
-      </div>
-    </nav>
+    ${renderNavbar('/verify')}
 
     <main class="container" style="padding-top: 0; padding-bottom: 64px;">
       <!-- Hero -->
@@ -147,6 +141,8 @@ export function renderVerifyPage(container) {
       </div>
     </footer>
   `;
+
+  bindNavbarLinks(container);
 
   // ── Wire up tabs ────────────────────────────────────────────────────────
   const tabId   = container.querySelector('#tab-id');
