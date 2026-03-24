@@ -67,6 +67,7 @@ impl QuorumProofContract {
         expires_at: Option<u64>,
     ) -> u64 {
         issuer.require_auth();
+        assert!(!metadata_hash.is_empty(), "metadata_hash cannot be empty");
         let id: u64 = env
             .storage()
             .instance()
@@ -333,6 +334,8 @@ mod tests {
             network_id: Default::default(),
             base_reserve: 10,
             max_entry_ttl: 311_040,
+            min_persistent_entry_ttl: 10_000,
+            min_temp_entry_ttl: 10,
             min_persistent_entry_ttl: 4_320,
             min_temp_entry_ttl: 16,
             min_persistent_entry_ttl: 4096,
@@ -442,6 +445,8 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "metadata_hash cannot be empty")]
+    fn test_empty_metadata_hash_rejection() {
     #[should_panic(expected = "attestor has already attested for this credential")]
     fn test_duplicate_attestation_rejection() {
     #[should_panic(expected = "only subject or issuer can revoke")]
@@ -453,6 +458,9 @@ mod tests {
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
+        let empty_metadata = Bytes::new(&env);
+        
+        client.issue_credential(&issuer, &subject, &1u32, &empty_metadata);
         let attestor1 = Address::generate(&env);
         let attestor2 = Address::generate(&env);
 
@@ -492,6 +500,13 @@ mod tests {
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
+
+        client.revoke_credential(&unauthorized, &id);
+    }
+}
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
