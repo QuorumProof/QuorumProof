@@ -1,5 +1,15 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
+
+/// Event topic for credential revocation
+const TOPIC_REVOKE: &str = "RevokeCredential";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RevokeEventData {
+    pub credential_id: u64,
+    pub subject: Address,
+}
 
 /// TTL Strategy: Extends instance storage TTL after every write operation.
 /// - STANDARD_TTL: 16_384 ledgers (~3 hours at 5s/ledger)
@@ -17,6 +27,7 @@ pub enum DataKey {
     Slice(u64),
     SliceCount,
     Attestors(u64),
+    SubjectCredentials(Address),
 }
 
 #[contracttype]
@@ -28,12 +39,15 @@ pub struct Credential {
     pub credential_type: u32,
     pub metadata_hash: soroban_sdk::Bytes,
     pub revoked: bool,
+    /// Optional Unix timestamp (seconds) after which the credential is considered expired.
+    pub expires_at: Option<u64>,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct QuorumSlice {
     pub id: u64,
+    pub creator: Address,
     pub attestors: Vec<Address>,
     pub threshold: u32,
 }
@@ -44,12 +58,13 @@ pub struct QuorumProofContract;
 #[contractimpl]
 impl QuorumProofContract {
     /// Issue a new credential. Returns the credential ID.
-pub fn issue_credential(
+    pub fn issue_credential(
         env: Env,
         issuer: Address,
         subject: Address,
         credential_type: u32,
         metadata_hash: soroban_sdk::Bytes,
+        expires_at: Option<u64>,
     ) -> u64 {
         issuer.require_auth();
         let id: u64 = env
@@ -65,6 +80,7 @@ pub fn issue_credential(
             credential_type,
             metadata_hash,
             revoked: false,
+            expires_at,
         };
         env.storage()
             .instance()
@@ -74,15 +90,42 @@ pub fn issue_credential(
             .instance()
             .set(&DataKey::CredentialCount, &id);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Track credential ID under the subject's address for reverse lookup
+        let mut subject_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(credential.subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        subject_creds.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::SubjectCredentials(credential.subject), &subject_creds);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         id
     }
 
-    /// Retrieve a credential by ID.
+    /// Retrieve a credential by ID. Panics if the credential has expired.
     pub fn get_credential(env: Env, credential_id: u64) -> Credential {
-        env.storage()
+        let credential: Credential = env
+            .storage()
             .instance()
             .get(&DataKey::Credential(credential_id))
-            .expect("credential not found")
+            .expect("credential not found");
+        if let Some(expires_at) = credential.expires_at {
+            assert!(
+                env.ledger().timestamp() < expires_at,
+                "credential has expired"
+            );
+        }
+        credential
+    }
+
+    /// Return all credential IDs issued to a given subject address.
+    pub fn get_credentials_by_subject(env: Env, subject: Address) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(subject))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Revoke a credential. Can be called by either the subject or the issuer.
@@ -102,10 +145,21 @@ pub fn issue_credential(
             .instance()
             .set(&DataKey::Credential(credential_id), &credential);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit RevokeCredential event
+        let event_data = RevokeEventData {
+            credential_id,
+            subject: credential.subject.clone(),
+        };
+        let topic = String::from_str(&env, TOPIC_REVOKE);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
     }
 
     /// Create a quorum slice. Returns the slice ID.
-    pub fn create_slice(env: Env, attestors: Vec<Address>, threshold: u32) -> u64 {
+    pub fn create_slice(env: Env, creator: Address, attestors: Vec<Address>, threshold: u32) -> u64 {
+        creator.require_auth();
         let id: u64 = env
             .storage()
             .instance()
@@ -114,6 +168,7 @@ pub fn issue_credential(
             + 1;
         let slice = QuorumSlice {
             id,
+            creator,
             attestors,
             threshold,
         };
@@ -134,6 +189,26 @@ pub fn issue_credential(
             .instance()
             .get(&DataKey::Slice(slice_id))
             .expect("slice not found")
+    }
+
+    /// Add a new attestor to an existing quorum slice.
+    /// Only the slice creator can call this. Panics if attestor is already in the slice.
+    pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
+        creator.require_auth();
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .expect("slice not found");
+        assert!(slice.creator == creator, "only the slice creator can add attestors");
+        for a in slice.attestors.iter() {
+            assert!(a != attestor, "attestor already in slice");
+        }
+        slice.attestors.push_back(attestor);
+        env.storage()
+            .instance()
+            .set(&DataKey::Slice(slice_id), &slice);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Attest a credential using a quorum slice.
@@ -167,7 +242,18 @@ pub fn issue_credential(
     }
 
     /// Check if a credential has met its quorum threshold.
+    /// Returns false if the credential is expired.
     pub fn is_attested(env: Env, credential_id: u64, slice_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .expect("credential not found");
+        if let Some(expires_at) = credential.expires_at {
+            if env.ledger().timestamp() >= expires_at {
+                return false;
+            }
+        }
         let slice: QuorumSlice = env
             .storage()
             .instance()
@@ -179,6 +265,19 @@ pub fn issue_credential(
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
         attestors.len() >= slice.threshold
+    }
+
+    /// Returns true if the credential exists and its expiry timestamp has passed.
+    pub fn is_expired(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .expect("credential not found");
+        match credential.expires_at {
+            Some(expires_at) => env.ledger().timestamp() >= expires_at,
+            None => false,
+        }
     }
 
     /// Get all attestors for a credential.
