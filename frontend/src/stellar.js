@@ -119,6 +119,17 @@ export async function isAttested(credentialId, sliceId) {
 }
 
 /**
+ * Retrieve a quorum slice by ID.
+ * Returns a plain JS object with fields: id, creator, attestors, threshold.
+ * @param {number|string} sliceId
+ * @returns {Promise<{id: bigint, creator: string, attestors: string[], threshold: number}>}
+ */
+export async function getSlice(sliceId) {
+  const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
+  return simulate(CONTRACT_ID, 'get_slice', [sliceVal]);
+}
+
+/**
  * Get all attestor addresses for a credential.
  * @returns {Promise<string[]>}
  */
