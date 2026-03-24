@@ -171,6 +171,7 @@ impl QuorumProofContract {
     /// Create a quorum slice. Returns the slice ID.
     pub fn create_slice(env: Env, creator: Address, attestors: Vec<Address>, threshold: u32) -> u64 {
         creator.require_auth();
+        assert!(!attestors.is_empty(), "attestors cannot be empty");
         let id: u64 = env
             .storage()
             .instance()
@@ -794,6 +795,8 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "attestors cannot be empty")]
+    fn test_create_slice_empty_attestors_panics() {
     fn test_add_attestor_enables_attestation() {
         let env = Env::default();
         env.mock_all_auths();
@@ -801,6 +804,9 @@ mod tests {
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
         let creator = Address::generate(&env);
+        let attestors = Vec::new(&env);
+
+        client.create_slice(&creator, &attestors, &1u32);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
