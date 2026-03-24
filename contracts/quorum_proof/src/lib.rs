@@ -150,6 +150,7 @@ impl QuorumProofContract {
             caller == credential.subject || caller == credential.issuer,
             "only subject or issuer can revoke"
         );
+        assert!(!credential.revoked, "credential already revoked");
         credential.revoked = true;
         env.storage()
             .instance()
