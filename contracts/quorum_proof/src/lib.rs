@@ -1,4 +1,7 @@
 #![no_std]
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
+use sbt_registry::SbtRegistryContractClient;
+use zk_verifier::{ClaimType, ZkVerifierContractClient};
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, Address, Env, Vec};
 
 #[contracterror]
@@ -6,6 +9,17 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_wit
 #[repr(u32)]
 pub enum ContractError {
     CredentialNotFound = 1,
+}
+
+/// Event topic for credential issuance
+const TOPIC_ISSUE: &str = "CredentialIssued";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct IssueEventData {
+    pub id: u64,
+    pub subject: Address,
+    pub credential_type: u32,
 }
 
 /// TTL Strategy: Extends instance storage TTL after every write operation.
@@ -98,8 +112,20 @@ impl QuorumProofContract {
         subject_creds.push_back(id);
         env.storage()
             .instance()
-            .set(&DataKey::SubjectCredentials(credential.subject), &subject_creds);
+            .set(&DataKey::SubjectCredentials(credential.subject.clone()), &subject_creds);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit CredentialIssued event
+        let event_data = IssueEventData {
+            id,
+            subject: credential.subject.clone(),
+            credential_type,
+        };
+        let topic = String::from_str(&env, TOPIC_ISSUE);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
         id
     }
 
@@ -124,6 +150,7 @@ impl QuorumProofContract {
             caller == credential.subject || caller == credential.issuer,
             "only subject or issuer can revoke"
         );
+        assert!(!credential.revoked, "credential already revoked");
         credential.revoked = true;
         env.storage()
             .instance()
@@ -274,6 +301,35 @@ impl QuorumProofContract {
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env))
     }
+
+    /// Unified engineer verification entry point.
+    /// 1. Confirms the subject owns at least one SBT linked to the credential.
+    /// 2. Verifies the ZK claim proof.
+    /// Returns true only when both checks pass.
+    pub fn verify_engineer(
+        env: Env,
+        sbt_registry_id: Address,
+        zk_verifier_id: Address,
+        subject: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: soroban_sdk::Bytes,
+    ) -> bool {
+        // 1. Confirm SBT ownership: subject must own a token linked to this credential
+        let sbt_client = SbtRegistryContractClient::new(&env, &sbt_registry_id);
+        let tokens = sbt_client.get_tokens_by_owner(&subject);
+        let has_sbt = tokens.iter().any(|token_id| {
+            let token = sbt_client.get_token(&token_id);
+            token.credential_id == credential_id
+        });
+        if !has_sbt {
+            return false;
+        }
+
+        // 2. Verify the ZK claim proof
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
+        zk_client.verify_claim(&credential_id, &claim_type, &proof)
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +409,33 @@ mod tests {
         assert!(!cred.revoked);
         assert_eq!(cred.expires_at, None);
     }
+
+    #[test]
+    fn test_issue_credential_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let events = env.events().all();
+        let (_addr, topics, data) = events.last().unwrap();
+        
+        let expected_topic = String::from_str(&env, TOPIC_ISSUE);
+        let stored_topic: String = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(stored_topic, expected_topic);
+
+        let event_data: IssueEventData = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.id, id);
+        assert_eq!(event_data.subject, subject);
+        assert_eq!(event_data.credential_type, 1u32);
+    }
+
 
     #[test]
     fn test_quorum_slice_and_attestation() {
@@ -782,6 +865,86 @@ mod tests {
         let attestors = Vec::new(&env);
 
         client.create_slice(&creator, &attestors, &1u32);
+    fn test_verify_engineer_success() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // Mint an SBT for the subject linked to the credential
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_verify_engineer_fails_without_sbt() {
+        use zk_verifier::ClaimType;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, sbt_registry::SbtRegistryContract);
+        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // No SBT minted — should return false
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_verify_engineer_fails_with_empty_proof() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::ClaimType;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        // Empty proof — ZK verifier stub returns false
+        let proof = Bytes::from_slice(&env, b"");
+        let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasLicense, &proof);
+        assert!(!result);
     }
 }
 
