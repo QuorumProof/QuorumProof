@@ -1,5 +1,15 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
+
+/// Event topic for credential revocation
+const TOPIC_REVOKE: &str = "RevokeCredential";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RevokeEventData {
+    pub credential_id: u64,
+    pub subject: Address,
+}
 
 /// TTL Strategy: Extends instance storage TTL after every write operation.
 /// - STANDARD_TTL: 16_384 ledgers (~3 hours at 5s/ledger)
@@ -135,6 +145,16 @@ impl QuorumProofContract {
             .instance()
             .set(&DataKey::Credential(credential_id), &credential);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit RevokeCredential event
+        let event_data = RevokeEventData {
+            credential_id,
+            subject: credential.subject.clone(),
+        };
+        let topic = String::from_str(&env, TOPIC_REVOKE);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
     }
 
     /// Create a quorum slice. Returns the slice ID.
