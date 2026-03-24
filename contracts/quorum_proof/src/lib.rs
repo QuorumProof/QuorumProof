@@ -706,6 +706,33 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_get_credential_not_found() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        // credential ID 999 was never issued — should panic with ContractError::CredentialNotFound
+        client.get_credential(&999u64);
+    }
+}
+    fn test_get_credentials_by_subject_single() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let ids = client.get_credentials_by_subject(&subject);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids.get(0).unwrap(), id);
+    }
+
+    #[test]
+    fn test_credential_not_expired_before_expiry() {
     #[should_panic(expected = "credential is revoked")]
     fn test_attest_revoked_credential_panics() {
     fn test_get_credentials_by_subject_single() {
@@ -961,24 +988,41 @@ mod tests {
         client.create_slice(&creator, &attestors, &1u32);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
-        // Create slice with no attestors initially
-        let initial = soroban_sdk::Vec::new(&env);
-        let slice_id = client.create_slice(&creator, &initial, &1u32);
+        // Create slice with one attestor initially, threshold 2
+        let mut initial = soroban_sdk::Vec::new(&env);
+        initial.push_back(attestor1.clone());
+        let slice_id = client.create_slice(&creator, &initial, &2u32);
 
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
-        // Add attestor after creation
-        client.add_attestor(&creator, &slice_id, &attestor);
+        // With only 1 attestor, not attested
+        client.attest(&attestor1, &cred_id, &slice_id);
+        assert!(!client.is_attested(&cred_id, &slice_id));
 
-        // Attestor can now attest
-        client.attest(&attestor, &cred_id, &slice_id);
+        // Add second attestor
+        client.add_attestor(&creator, &slice_id, &attestor2);
+
+        // Now with 2 attestors, attested
+        client.attest(&attestor2, &cred_id, &slice_id);
         assert!(client.is_attested(&cred_id, &slice_id));
     }
 
     #[test]
+    #[should_panic(expected = "attestors cannot be empty")]
+    fn test_create_slice_empty_attestors_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestors = Vec::new(&env);
+
+        client.create_slice(&creator, &attestors, &1u32);
     fn test_verify_engineer_success() {
         use sbt_registry::SbtRegistryContract;
         use zk_verifier::{ClaimType, ZkVerifierContract};
