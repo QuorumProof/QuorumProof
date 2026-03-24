@@ -146,6 +146,7 @@ impl QuorumProofContract {
         creator.require_auth();
         assert!(!attestors.is_empty(), "attestors cannot be empty");
         assert!(threshold > 0, "threshold must be greater than 0");
+        assert!(threshold <= attestors.len() as u32, "threshold cannot exceed attestors count");
         let id: u64 = env
             .storage()
             .instance()
@@ -398,6 +399,25 @@ mod tests {
         attestors.push_back(attestor);
         // This should panic with "threshold must be greater than 0"
         let _slice_id = client.create_slice(&creator, &attestors, &0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold cannot exceed attestors count")]
+    fn test_threshold_exceeds_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1);
+        attestors.push_back(attestor2);
+        // threshold=5 with only 2 attestors - impossible to reach quorum
+        let _slice_id = client.create_slice(&creator, &attestors, &5u32);
     }
 
     #[test]
