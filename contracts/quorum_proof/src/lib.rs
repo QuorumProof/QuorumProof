@@ -30,6 +30,7 @@ pub enum DataKey {
     SliceCount,
     Attestors(u64),
     SubjectCredentials(Address),
+    AttestorCount(Address),
 }
 
 #[contracttype]
@@ -236,10 +237,21 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
-        attestors.push_back(attestor);
+        attestors.push_back(attestor.clone());
         env.storage()
             .instance()
             .set(&DataKey::Attestors(credential_id), &attestors);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Increment attestor reputation count
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestorCount(attestor.clone()))
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::AttestorCount(attestor), &(count + 1));
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
@@ -288,6 +300,14 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns the total number of credentials an attestor has signed.
+    pub fn get_attestor_reputation(env: Env, attestor: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AttestorCount(attestor))
+            .unwrap_or(0u64)
     }
 
     /// Unified engineer verification entry point.
@@ -813,6 +833,69 @@ mod tests {
         let proof = Bytes::from_slice(&env, b"");
         let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasLicense, &proof);
         assert!(!result);
+    }
+
+    #[test]
+    fn test_get_attestor_reputation_zero_before_any_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let attestor = Address::generate(&env);
+        assert_eq!(client.get_attestor_reputation(&attestor), 0);
+    }
+
+    #[test]
+    fn test_get_attestor_reputation_increments_per_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+
+        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
+
+        assert_eq!(client.get_attestor_reputation(&attestor), 0);
+        client.attest(&attestor, &cred_id1, &slice_id);
+        assert_eq!(client.get_attestor_reputation(&attestor), 1);
+        client.attest(&attestor, &cred_id2, &slice_id);
+        assert_eq!(client.get_attestor_reputation(&attestor), 2);
+    }
+
+    #[test]
+    fn test_get_attestor_reputation_independent_per_attestor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor_a = Address::generate(&env);
+        let attestor_b = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor_a.clone());
+        attestors.push_back(attestor_b.clone());
+        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        client.attest(&attestor_a, &cred_id, &slice_id);
+
+        assert_eq!(client.get_attestor_reputation(&attestor_a), 1);
+        assert_eq!(client.get_attestor_reputation(&attestor_b), 0);
     }
 }
 
