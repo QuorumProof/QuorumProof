@@ -89,7 +89,7 @@ impl SbtRegistryContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Bytes, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Events, Bytes, Env};
 
     #[test]
     fn test_mint_and_ownership() {
