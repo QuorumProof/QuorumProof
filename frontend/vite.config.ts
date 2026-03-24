@@ -11,4 +11,8 @@ export default defineConfig({
       globals: { Buffer: true }
     })
   ],
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/setupTests.ts'],
+  },
 })
