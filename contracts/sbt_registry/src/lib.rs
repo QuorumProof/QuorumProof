@@ -1,5 +1,11 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Vec, panic_with_error};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ContractError {
+    SoulboundNonTransferable = 1,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -83,6 +89,18 @@ impl SbtRegistryContract {
             .instance()
             .get(&DataKey::OwnerTokens(owner))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Explicitly prevent transfer of soulbound tokens.
+    /// 
+    /// Soulbound tokens are non-transferable by design. This function
+    /// always panics to enforce this property on-chain.
+    /// 
+    /// # Panics
+    /// 
+    /// Always panics with `ContractError::SoulboundNonTransferable`.
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _token_id: u64) {
+        panic_with_error!(&Env::default(), ContractError::SoulboundNonTransferable);
     }
 }
 
@@ -176,5 +194,22 @@ mod tests {
         let tokens_b = client.get_tokens_by_owner(&owner_b);
         assert_eq!(tokens_b.len(), 1);
         assert_eq!(tokens_b.get(0).unwrap(), id_b1);
+    }
+
+    #[test]
+    #[should_panic(expected = "SoulboundNonTransferable")]
+    fn test_transfer_always_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &1u64, &uri);
+
+        let to = Address::generate(&env);
+        // This should always panic with SoulboundNonTransferable
+        client.transfer(&owner, &to, &token_id);
     }
 }
