@@ -73,6 +73,7 @@ impl QuorumProofContract {
             .get(&DataKey::CredentialCount)
             .unwrap_or(0u64)
             + 1;
+        let subject_key = subject.clone();
         let credential = Credential {
             id,
             subject,
@@ -172,13 +173,9 @@ impl QuorumProofContract {
             attestors,
             threshold,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Slice(id), &slice);
+        env.storage().instance().set(&DataKey::Slice(id), &slice);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        env.storage()
-            .instance()
-            .set(&DataKey::SliceCount, &id);
+        env.storage().instance().set(&DataKey::SliceCount, &id);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         id
     }
@@ -205,9 +202,7 @@ impl QuorumProofContract {
             assert!(a != attestor, "attestor already in slice");
         }
         slice.attestors.push_back(attestor);
-        env.storage()
-            .instance()
-            .set(&DataKey::Slice(slice_id), &slice);
+        env.storage().instance().set(&DataKey::Slice(slice_id), &slice);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
@@ -219,7 +214,6 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .expect("slice not found");
-        // Verify attestor is in the slice
         let mut found = false;
         for a in slice.attestors.iter() {
             if a == attestor {
@@ -250,6 +244,7 @@ impl QuorumProofContract {
     }
 
     /// Check if a credential has met its quorum threshold.
+    /// Returns false if revoked or expired.
     /// Returns false if the credential is expired.
     pub fn is_attested(env: Env, credential_id: u64, slice_id: u64) -> bool {
         let credential: Credential = env
@@ -384,16 +379,15 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor1 = Address::generate(&env);
         let attestor2 = Address::generate(&env);
+        let creator = Address::generate(&env);
 
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
-        let mut attestors = soroban_sdk::Vec::new(&env);
+        let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
         attestors.push_back(attestor2.clone());
-        let slice_id = client.create_slice(&attestors, &2u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &2u32);
+        let slice_id = client.create_slice(&creator, &attestors, &2u32);
 
         assert!(!client.is_attested(&cred_id, &slice_id));
         client.attest(&attestor1, &cred_id, &slice_id);
@@ -433,6 +427,9 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        client.revoke_credential(&subject, &id);
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata);
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
