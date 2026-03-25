@@ -278,6 +278,16 @@ impl QuorumProofContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound))
     }
 
+    /// Return the creator address of a slice without fetching the full struct.
+    pub fn get_slice_creator(env: Env, slice_id: u64) -> Address {
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        slice.creator
+    }
+
     /// Add a new attestor to an existing quorum slice.
     /// Only the slice creator can call this. Panics if attestor is already in the slice.
     pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
@@ -810,6 +820,30 @@ mod tests {
         let client = QuorumProofContractClient::new(&env, &contract_id);
         // slice ID 999 was never issued — should panic with ContractError::SliceNotFound
         client.get_slice(&999u64);
+    }
+
+    #[test]
+    fn test_get_slice_creator_matches() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+
+        assert_eq!(client.get_slice_creator(&slice_id), creator);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_slice_creator_not_found_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        client.get_slice_creator(&999u64);
     }
 
     #[test]
