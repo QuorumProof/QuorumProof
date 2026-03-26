@@ -14,18 +14,12 @@ import {
   nativeToScVal,
   Address,
 } from '@stellar/stellar-sdk';
-
-const RPC_URL =
-  import.meta.env.VITE_STELLAR_RPC_URL ||
-  'https://soroban-testnet.stellar.org';
-
-const NETWORK = import.meta.env.VITE_STELLAR_NETWORK || 'testnet';
-
-const CONTRACT_ID =
-  import.meta.env.VITE_CONTRACT_QUORUM_PROOF || '';
-
-const ZK_CONTRACT_ID =
-  import.meta.env.VITE_CONTRACT_ZK_VERIFIER || '';
+import {
+  STELLAR_NETWORK,
+  CONTRACT_QUORUM_PROOF,
+  CONTRACT_ZK_VERIFIER,
+} from './config/env';
+import { rpcClient } from './lib/rpcClient';
 
 /** Stellar network passphrase map */
 const PASSPHRASES = {
@@ -34,12 +28,7 @@ const PASSPHRASES = {
   futurenet: Networks.FUTURENET,
 };
 
-const networkPassphrase = PASSPHRASES[NETWORK] || Networks.TESTNET;
-
-/** Build an RPC server instance */
-function getServer() {
-  return new StellarRpc.Server(RPC_URL, { allowHttp: false });
-}
+const networkPassphrase = PASSPHRASES[STELLAR_NETWORK] || Networks.TESTNET;
 
 /**
  * Simulate a read-only contract call and return the parsed native JS value.
@@ -54,7 +43,6 @@ async function simulate(contractId, method, args = []) {
     );
   }
 
-  const server = getServer();
   const contract = new Contract(contractId);
 
   // Build a transaction to simulate (no source account needed for simulation)
@@ -73,7 +61,7 @@ async function simulate(contractId, method, args = []) {
     .setTimeout(30)
     .build();
 
-  const result = await server.simulateTransaction(tx);
+  const result = await rpcClient.simulateTransaction(tx);
 
   if (StellarRpc.Api.isSimulationError(result)) {
     throw new Error(result.error || 'Simulation failed');
@@ -154,7 +142,7 @@ export async function getSlice(sliceId) {
  * @returns {Promise<boolean>}
  */
 export async function verifyClaim(credentialId, claimType, proofHex) {
-  if (!ZK_CONTRACT_ID) {
+  if (!CONTRACT_ZK_VERIFIER) {
     throw new Error(
       'ZK Contract ID not configured. Set VITE_CONTRACT_ZK_VERIFIER in .env'
     );
@@ -164,7 +152,7 @@ export async function verifyClaim(credentialId, claimType, proofHex) {
   const claimVal = nativeToScVal(claimType, { type: 'string' });
   const proofBytes = hexToBytes(proofHex);
   const proofVal = xdr.ScVal.scvBytes(proofBytes);
-  return simulate(ZK_CONTRACT_ID, 'verify_claim', [credVal, claimVal, proofVal]);
+  return simulate(CONTRACT_ZK_VERIFIER, 'verify_claim', [credVal, claimVal, proofVal]);
 }
 
 /** Utility: hex string → Uint8Array */
@@ -197,4 +185,4 @@ function uint8ArrayToHex(arr) {
     .join('');
 }
 
-export { RPC_URL, NETWORK, CONTRACT_ID };
+export { STELLAR_NETWORK as NETWORK, CONTRACT_QUORUM_PROOF as CONTRACT_ID };
