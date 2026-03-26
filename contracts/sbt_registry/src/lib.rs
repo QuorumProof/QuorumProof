@@ -99,6 +99,34 @@ impl SbtRegistryContract {
     pub fn transfer(env: Env, _from: Address, _to: Address, _token_id: u64) {
         panic_with_error!(&env, ContractError::SoulboundNonTransferable);
     }
+
+    /// Burn (destroy) a soulbound token. Only the owner may call this.
+    /// Removes Token, Owner, and OwnerTokens records from storage.
+    pub fn burn(env: Env, owner: Address, token_id: u64) {
+        owner.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "only the token owner can burn");
+
+        env.storage().persistent().remove(&DataKey::Token(token_id));
+        env.storage().persistent().remove(&DataKey::Owner(token_id));
+
+        let mut owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = owner_tokens.iter().position(|id| id == token_id) {
+            owner_tokens.remove(pos as u32);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(owner), &owner_tokens);
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +172,6 @@ mod tests {
     #[test]
     fn test_get_tokens_by_owner_single() { /* impl from previous */ }
 
-    // ... (keep all other tests clean)
+
 }
 
