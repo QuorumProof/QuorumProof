@@ -5,6 +5,7 @@ import {
   setAllowed,
   getPublicKey,
 } from '@stellar/freighter-api';
+import { STELLAR_NETWORK } from '../config/env';
 
 interface WalletState {
   address: string | null;
@@ -28,7 +29,6 @@ export function WalletProvider({ children }: WalletProviderProps) {
   const [address, setAddress] = useState<string | null>(null);
   const [hasFreighter, setHasFreighter] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
-  const [network] = useState('Testnet'); // For now, hardcoded; could be configurable later
 
   useEffect(() => {
     const init = async () => {
@@ -84,7 +84,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     isConnected: address !== null,
     hasFreighter,
     isInitializing,
-    network,
+    network: STELLAR_NETWORK,
     connect,
     disconnect,
   };
