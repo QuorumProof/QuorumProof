@@ -48,6 +48,7 @@ pub struct IssueEventData {
 /// TTL is automatically extended on subsequent reads/bumps if needed.
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
+const MAX_ATTESTORS_PER_SLICE: u32 = 20;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -67,6 +68,15 @@ pub enum DataKey {
     Attestors(u64),
     SubjectCredentials(Address),
     AttestorCount(Address),
+    CredentialType(u32),
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialTypeDef {
+    pub type_id: u32,
+    pub name: soroban_sdk::String,
+    pub description: soroban_sdk::String,
 }
 
 #[contracttype]
@@ -249,6 +259,7 @@ impl QuorumProofContract {
     pub fn create_slice(env: Env, creator: Address, attestors: Vec<Address>, threshold: u32) -> u64 {
         creator.require_auth();
         assert!(!attestors.is_empty(), "attestors cannot be empty");
+        assert!(attestors.len() as u32 <= MAX_ATTESTORS_PER_SLICE, "attestors exceed maximum allowed per slice");
         assert!(threshold > 0, "threshold must be greater than 0");
         assert!(threshold <= attestors.len() as u32, "threshold cannot exceed attestors count");
         let id: u64 = env
@@ -278,6 +289,16 @@ impl QuorumProofContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound))
     }
 
+    /// Return the creator address of a slice without fetching the full struct.
+    pub fn get_slice_creator(env: Env, slice_id: u64) -> Address {
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        slice.creator
+    }
+
     /// Add a new attestor to an existing quorum slice.
     /// Only the slice creator can call this. Panics if attestor is already in the slice.
     pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
@@ -288,6 +309,7 @@ impl QuorumProofContract {
             .get(&DataKey::Slice(slice_id))
             .expect("slice not found");
         assert!(slice.creator == creator, "only the slice creator can add attestors");
+        assert!(slice.attestors.len() as u32 < MAX_ATTESTORS_PER_SLICE, "attestors exceed maximum allowed per slice");
         for a in slice.attestors.iter() {
             assert!(a != attestor, "attestor already in slice");
         }
@@ -469,6 +491,29 @@ impl QuorumProofContract {
         // 2. Verify the ZK claim proof
         let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
         zk_client.verify_claim(&credential_id, &claim_type, &proof)
+    }
+
+    /// Register a human-readable label for a credential type. Admin-only by convention
+    /// (caller must auth). Overwrites any existing entry for the same type_id.
+    pub fn register_credential_type(
+        env: Env,
+        admin: Address,
+        type_id: u32,
+        name: soroban_sdk::String,
+        description: soroban_sdk::String,
+    ) {
+        admin.require_auth();
+        let def = CredentialTypeDef { type_id, name, description };
+        env.storage().instance().set(&DataKey::CredentialType(type_id), &def);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Look up the registered name and description for a credential type.
+    pub fn get_credential_type(env: Env, type_id: u32) -> CredentialTypeDef {
+        env.storage()
+            .instance()
+            .get(&DataKey::CredentialType(type_id))
+            .expect("credential type not registered")
     }
 }
 
@@ -682,6 +727,40 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
+    fn test_create_slice_exceeds_max_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        for _ in 0..=MAX_ATTESTORS_PER_SLICE {
+            attestors.push_back(Address::generate(&env));
+        }
+        let _slice_id = client.create_slice(&creator, &attestors, &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
+    fn test_add_attestor_exceeds_max_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        for _ in 0..MAX_ATTESTORS_PER_SLICE {
+            attestors.push_back(Address::generate(&env));
+        }
+        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+        // This push should exceed the cap
+        client.add_attestor(&creator, &slice_id, &Address::generate(&env));
+    }
+
+    #[test]
     fn test_issuer_revoke_credential() {
         let env = Env::default();
         env.mock_all_auths();
@@ -810,6 +889,30 @@ mod tests {
         let client = QuorumProofContractClient::new(&env, &contract_id);
         // slice ID 999 was never issued — should panic with ContractError::SliceNotFound
         client.get_slice(&999u64);
+    }
+
+    #[test]
+    fn test_get_slice_creator_matches() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+
+        assert_eq!(client.get_slice_creator(&slice_id), creator);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_slice_creator_not_found_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        client.get_slice_creator(&999u64);
     }
 
     #[test]
@@ -1443,6 +1546,54 @@ mod tests {
         hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm2"));
 
         client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &None);
+    }
+
+    #[test]
+    fn test_register_and_get_credential_type() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let name = soroban_sdk::String::from_str(&env, "Mechanical Engineering Degree");
+        let desc = soroban_sdk::String::from_str(&env, "Bachelor or higher in Mechanical Engineering");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc);
+
+        let def = client.get_credential_type(&1u32);
+        assert_eq!(def.type_id, 1u32);
+        assert_eq!(def.name, name);
+        assert_eq!(def.description, desc);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential type not registered")]
+    fn test_get_credential_type_not_registered_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        client.get_credential_type(&99u32);
+    }
+
+    #[test]
+    fn test_register_credential_type_overwrites() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let name_v1 = soroban_sdk::String::from_str(&env, "Old Name");
+        let name_v2 = soroban_sdk::String::from_str(&env, "New Name");
+        let desc = soroban_sdk::String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name_v1, &desc);
+        client.register_credential_type(&admin, &1u32, &name_v2, &desc);
+
+        let def = client.get_credential_type(&1u32);
+        assert_eq!(def.name, name_v2);
     }
 }
 
