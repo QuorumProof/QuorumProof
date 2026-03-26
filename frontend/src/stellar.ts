@@ -20,6 +20,7 @@ import {
   CONTRACT_ZK_VERIFIER,
 } from './config/env';
 import { rpcClient } from './lib/rpcClient';
+import { handleContractError } from './lib/handleContractError';
 
 /** Stellar network passphrase map */
 const PASSPHRASES = {
@@ -61,17 +62,21 @@ async function simulate(contractId, method, args = []) {
     .setTimeout(30)
     .build();
 
-  const result = await rpcClient.simulateTransaction(tx);
+  try {
+    const result = await rpcClient.simulateTransaction(tx);
 
-  if (StellarRpc.Api.isSimulationError(result)) {
-    throw new Error(result.error || 'Simulation failed');
+    if (StellarRpc.Api.isSimulationError(result)) {
+      throw new Error(result.error || 'Simulation failed');
+    }
+
+    if (!result.result) {
+      throw new Error('No result returned from simulation');
+    }
+
+    return scValToNative(result.result.retval);
+  } catch (error) {
+    throw new Error(handleContractError(error));
   }
-
-  if (!result.result) {
-    throw new Error('No result returned from simulation');
-  }
-
-  return scValToNative(result.result.retval);
 }
 
 /**
@@ -81,8 +86,12 @@ async function simulate(contractId, method, args = []) {
  * Throws if the credential does not exist.
  */
 export async function getCredential(credentialId) {
-  const idVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-  return simulate(CONTRACT_ID, 'get_credential', [idVal]);
+  try {
+    const idVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return await simulate(CONTRACT_ID, 'get_credential', [idVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
 }
 
 /**
@@ -90,8 +99,12 @@ export async function getCredential(credentialId) {
  * Returns an array of BigInt credential IDs (may be empty).
  */
 export async function getCredentialsBySubject(stellarAddress) {
-  const addressVal = new Address(stellarAddress).toScVal();
-  return simulate(CONTRACT_ID, 'get_credentials_by_subject', [addressVal]);
+  try {
+    const addressVal = new Address(stellarAddress).toScVal();
+    return await simulate(CONTRACT_ID, 'get_credentials_by_subject', [addressVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
 }
 
 /**
@@ -101,9 +114,13 @@ export async function getCredentialsBySubject(stellarAddress) {
  * @returns {Promise<boolean>}
  */
 export async function isAttested(credentialId, sliceId) {
-  const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-  const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
-  return simulate(CONTRACT_ID, 'is_attested', [credVal, sliceVal]);
+  try {
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
+    return await simulate(CONTRACT_ID, 'is_attested', [credVal, sliceVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
 }
 
 /**
@@ -111,8 +128,12 @@ export async function isAttested(credentialId, sliceId) {
  * @returns {Promise<string[]>}
  */
 export async function getAttestors(credentialId) {
-  const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-  return simulate(CONTRACT_ID, 'get_attestors', [credVal]);
+  try {
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return await simulate(CONTRACT_ID, 'get_attestors', [credVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
 }
 
 /**
@@ -120,8 +141,12 @@ export async function getAttestors(credentialId) {
  * @returns {Promise<boolean>}
  */
 export async function isExpired(credentialId) {
-  const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-  return simulate(CONTRACT_ID, 'is_expired', [credVal]);
+  try {
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return await simulate(CONTRACT_ID, 'is_expired', [credVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
 }
 
 /**
@@ -130,8 +155,12 @@ export async function isExpired(credentialId) {
  * @returns {Promise<{id: bigint, creator: string, attestors: string[], threshold: number}>}
  */
 export async function getSlice(sliceId) {
-  const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
-  return simulate(CONTRACT_ID, 'get_slice', [sliceVal]);
+  try {
+    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
+    return await simulate(CONTRACT_ID, 'get_slice', [sliceVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
 }
 
 /**
@@ -142,17 +171,21 @@ export async function getSlice(sliceId) {
  * @returns {Promise<boolean>}
  */
 export async function verifyClaim(credentialId, claimType, proofHex) {
-  if (!CONTRACT_ZK_VERIFIER) {
-    throw new Error(
-      'ZK Contract ID not configured. Set VITE_CONTRACT_ZK_VERIFIER in .env'
-    );
+  try {
+    if (!CONTRACT_ZK_VERIFIER) {
+      throw new Error(
+        'ZK Contract ID not configured. Set VITE_CONTRACT_ZK_VERIFIER in .env'
+      );
+    }
+    const { nativeToScVal: n, xdr: x } = await import('@stellar/stellar-sdk');
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    const claimVal = nativeToScVal(claimType, { type: 'string' });
+    const proofBytes = hexToBytes(proofHex);
+    const proofVal = xdr.ScVal.scvBytes(proofBytes);
+    return await simulate(CONTRACT_ZK_VERIFIER, 'verify_claim', [credVal, claimVal, proofVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
   }
-  const { nativeToScVal: n, xdr: x } = await import('@stellar/stellar-sdk');
-  const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-  const claimVal = nativeToScVal(claimType, { type: 'string' });
-  const proofBytes = hexToBytes(proofHex);
-  const proofVal = xdr.ScVal.scvBytes(proofBytes);
-  return simulate(CONTRACT_ZK_VERIFIER, 'verify_claim', [credVal, claimVal, proofVal]);
 }
 
 /** Utility: hex string → Uint8Array */
