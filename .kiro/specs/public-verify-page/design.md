@@ -1,390 +1,519 @@
-# Design Document: public-verify-page
+# Design Document: Public Credential Verification Page
 
 ## Overview
 
-The public verification page (`/verify`) is a read-only React page that lets any third party
-confirm the authenticity of an on-chain engineering credential without connecting a Stellar wallet.
-This design closes five gaps in the existing `Verify.tsx` implementation:
+The Public Credential Verification Page (`/verify`) is a read-only, wallet-free React page that lets anyone verify engineering credentials stored on the Stellar Soroban blockchain. It is already substantially implemented in `frontend/src/pages/Verify.tsx`; this document describes the complete intended design, identifies what needs to be fixed, and defines correctness properties for property-based testing.
 
-1. Change the shareable URL query param from `?credentialId=` to `?id=`
-2. Wire in the `is_attested` on-chain call (requires `credentialId` + `sliceId`)
-3. Align the ZK claim dropdown to exactly the three on-chain `ClaimType` variants
-4. Import and call `verifyClaim` from `zkVerifier.ts` (correct ScVal encoding)
-5. Add a ZK privacy tooltip and show binary ✅ / ❌ result
+The page operates entirely through Soroban RPC *simulation* — no transaction signing, no wallet, no auth. All contract calls use a randomly-generated ephemeral keypair as the dummy source account, which is the standard pattern for read-only Soroban calls.
 
-All on-chain reads are performed via Soroban RPC simulation — no transaction signing, no wallet.
+### Key Design Decisions
+
+- **No WalletGate**: The route is registered directly in `App.tsx` without wrapping in `WalletGate`. This is intentional and must not change.
+- **is_attested proxy**: `is_attested(credId, sliceId)` requires a `sliceId` that is not publicly discoverable from the credential alone. The proxy is `getAttestors(credId).length > 0`, which is semantically equivalent for the "has any attestation" check and is already the pattern used in the existing implementation.
+- **Typed contract clients over legacy stellar.ts**: `Verify.tsx` currently imports from `../stellar` (untyped JS). The design calls for migrating to `../lib/contracts/quorumProof` and `../lib/contracts/zkVerifier` for type safety and correct ScVal encoding.
+- **Exactly 3 ZK claim types**: The ZK Verifier contract's `ClaimType` enum has exactly three variants. The UI dropdown must match this exactly.
 
 ---
 
 ## Architecture
 
-```mermaid
-graph TD
-    Browser["Browser (/verify?id=N)"]
-    Verify["Verify.tsx (page component)"]
-    QP["quorumProof.ts\n(getCredential, getAttestors,\nisAttested, isExpired,\ngetCredentialsBySubject)"]
-    ZK["zkVerifier.ts\n(verifyClaim)"]
-    RPC["Stellar Soroban RPC"]
-    QPC["QuorumProof Contract"]
-    ZKC["ZkVerifier Contract"]
+```
+App.tsx
+  └── <Route path="/verify" element={<Verify />} />   ← no WalletGate
 
-    Browser --> Verify
-    Verify --> QP
-    Verify --> ZK
-    QP --> RPC
-    ZK --> RPC
-    RPC --> QPC
-    RPC --> ZKC
+Verify (page component)
+  ├── Navbar                          (existing shared component)
+  ├── Hero section                    (title + subtitle)
+  ├── SearchCard                      (tab-based input)
+  │     ├── CredentialIdTab           (numeric input + verify button)
+  │     └── StellarAddressTab         (text input + look-up button)
+  ├── ResultsArea
+  │     ├── LoadingState              (spinner)
+  │     ├── ErrorCard                 (on contract call failure)
+  │     ├── EmptyState                (address lookup → 0 results)
+  │     ├── CredentialList            (address lookup → N results)
+  │     └── CredentialResult          (full result panel)
+  │           ├── StatusBanner        (Verified / Pending / Revoked / Expired)
+  │           ├── ShareBar            (URL display + copy button)
+  │           ├── MetadataCard        (credential fields grid)
+  │           ├── AttestorList        (attestor addresses + badges)
+  │           └── ZkClaimForm         (claim type dropdown + proof textarea + result)
+  └── Footer
+
+Contract layer (frontend/src/lib/contracts/)
+  ├── quorumProof.ts   → getCredential, getAttestors, getCredentialsBySubject, isExpired
+  └── zkVerifier.ts    → verifyClaim(credId, ClaimType, proof)
 ```
 
-The page is purely presentational — it owns UI state and delegates all contract I/O to the two
-typed clients. `stellar.ts` is no longer imported by `Verify.tsx`; the typed clients replace it.
+The page does **not** use `useContractClient` hook — it calls the contract module functions directly, which is simpler for a page-level component with its own loading/error state.
 
 ---
 
 ## Components and Interfaces
 
-### `Verify` (page root)
+### Verify (page)
 
-Owns all top-level state and orchestrates data fetching.
+The top-level page component. Owns all top-level state and orchestrates contract calls.
 
-```ts
+```typescript
 // State
 activeTab: 'id' | 'addr'
-credInput: string          // raw text in the credential-ID field
+credInput: string          // raw text in the credential ID field
 addrInput: string          // raw text in the address field
 loading: boolean
 error: string | null
-result: VerifyResult | null
+result: CredLookupResult | null
 addrResults: bigint[] | null
-autoTriggered: Ref<boolean>
 
-// Derived from ?id= query param on mount
+// Internal types
+interface CredLookupResult {
+  credential: Credential;   // from quorumProof.ts
+  attestors: string[];
+  expired: boolean;
+  attestorsError: boolean;  // true if getAttestors threw
+}
 ```
 
-On mount, reads `?id=` (not `?credentialId=`) from `useSearchParams()` and auto-triggers
-`fetchCred` if a valid positive integer is present.
+### CredentialResult
 
-When `fetchCred(id)` is called it:
-1. Sets `loading = true`, clears `error` and `result`
-2. Updates the URL to `?id={id}` via `setSearchParams({ id: id.toString() })`
-3. Calls in parallel:
-   - `getCredential(id)` from `quorumProof.ts`
-   - `getAttestors(id)` from `quorumProof.ts`
-   - `isExpired(id).catch(() => false)` from `quorumProof.ts`
-   - `isAttested(id, DEFAULT_SLICE_ID).catch(() => null)` from `quorumProof.ts`
-4. Sets `result` with all four values
+Receives a `CredLookupResult` and renders the full result panel. Owns ZK form state.
 
-### `CredentialResult`
+```typescript
+interface CredentialResultProps {
+  credential: Credential;
+  attestors: string[];
+  expired: boolean;
+  attestorsError: boolean;
+}
 
-Receives `{ credential, attestors, expired, attested }` and renders:
-- Status banner (logic described in Requirement 4/5)
-- Share bar with `?id=` URL
-- Credential metadata card
-- Attestors card
-- ZK claim card (`ZkClaimPanel`)
-
-### `ZkClaimPanel`
-
-Isolated sub-component for the ZK form. Props: `credentialId: bigint`.
-
-```ts
-// State
-claimType: ClaimType       // 'HasDegree' | 'HasLicense' | 'HasEmploymentHistory'
-proofHex: string
-zkResult: ZkResult | null  // { verified: boolean } | { error: string }
+// ZK form state (local)
+zkClaimType: ClaimType        // 'HasDegree' | 'HasLicense' | 'HasEmploymentHistory'
+zkProof: string               // raw hex input
+zkResult: ZkResultState | null
 zkLoading: boolean
+
+type ZkResultState =
+  | { type: 'success' }
+  | { type: 'fail' }
+  | { type: 'error'; message: string }
 ```
 
-On submit:
-1. Validates `proofHex` is non-empty
-2. Calls `verifyClaim(credentialId, claimType, proofHex)` from `zkVerifier.ts`
-3. Sets `zkResult` to `{ verified: true/false }` or `{ error: message }`
+### StatusBanner
 
-Renders the binary result banner and the ZK privacy tooltip (see UX spec below).
+Renders the attestation status with appropriate styling and `aria-label`.
+
+```typescript
+interface StatusBannerProps {
+  status: 'valid' | 'revoked' | 'expired' | 'pending';
+  title: string;
+  subtitle: string;
+}
+// Renders: <div className={`status-banner status-banner--${status}`} aria-label={title}>
+```
+
+### AttestorList
+
+Renders the list of attestor addresses or a fallback message.
+
+```typescript
+interface AttestorListProps {
+  attestors: string[];
+  error: boolean;   // if true, show "Attestor data unavailable"
+}
+```
+
+### ZkClaimForm
+
+The ZK verification sub-form. Calls `verifyClaim` from `zkVerifier.ts`.
+
+```typescript
+interface ZkClaimFormProps {
+  credentialId: bigint;
+}
+```
+
+### ShareBar
+
+Displays the shareable URL and a clipboard copy button.
+
+```typescript
+interface ShareBarProps {
+  credentialId: bigint;
+}
+// shareUrl = `${window.location.origin}/verify?credentialId=${credentialId}`
+```
 
 ---
 
 ## Data Models
 
-### `VerifyResult`
+### Credential (from quorumProof.ts)
 
-```ts
-interface VerifyResult {
-  credential: Credential;   // from quorumProof.ts
-  attestors: string[];
-  expired: boolean;
-  attested: boolean | null; // null = is_attested call failed (treated as unconfirmed)
+```typescript
+interface Credential {
+  id: bigint;
+  subject: string;          // Stellar address (G...)
+  issuer: string;           // Stellar address (G...)
+  credential_type: number;  // 1–5
+  metadata_hash: Uint8Array;
+  revoked: boolean;
+  expires_at: bigint | null; // Unix timestamp in seconds, or null
 }
 ```
 
-### `ZkResult`
+### ClaimType (from zkVerifier.ts)
 
-```ts
-type ZkResult =
-  | { kind: 'verified'; value: boolean }
-  | { kind: 'error'; message: string };
-```
-
-### `ClaimType` (re-exported from `zkVerifier.ts`)
-
-```ts
+```typescript
 type ClaimType = 'HasDegree' | 'HasLicense' | 'HasEmploymentHistory';
 ```
 
-The dropdown maps these to display labels:
-- `HasDegree` → "🎓 Degree"
-- `HasLicense` → "🏛️ License"
-- `HasEmploymentHistory` → "💼 Employment History"
+### UI label mapping
+
+| ClaimType              | Dropdown label              |
+|------------------------|-----------------------------|
+| `HasDegree`            | 🎓 Degree                   |
+| `HasLicense`           | 🏛️ License                  |
+| `HasEmploymentHistory` | 💼 Employment History       |
+
+### Credential type label mapping (from credentialUtils.ts)
+
+| credential_type | Label              |
+|-----------------|--------------------|
+| 1               | 🎓 Degree          |
+| 2               | 🏛️ License         |
+| 3               | 💼 Employment      |
+| 4               | 📜 Certification   |
+| 5               | 🔬 Research        |
+
+### Attestation status derivation
+
+Priority order (highest wins):
+
+```
+revoked=true                          → 'revoked'  ("Credential Revoked")
+expired=true (and not revoked)        → 'expired'  ("Credential Expired")
+attestors.length > 0 (and not above)  → 'valid'    ("Credential Verified")
+otherwise                             → 'pending'  ("Awaiting Attestation")
+```
+
+This logic lives in `credentialUtils.ts` as `deriveStatus(revoked, expired, attested)` where `attested = attestors.length > 0`.
 
 ---
 
-## Key Design Decisions
+## Data Flow
 
-### `is_attested` sliceId strategy
-
-The `is_attested(credential_id, slice_id)` contract method requires a `sliceId`. The Verify page
-has no prior knowledge of which slice was used to attest a given credential.
-
-**Decision: use `sliceId = 1n` as the default convention.**
-
-Rationale:
-- The QuorumProof contract auto-increments slice IDs starting at 1. In the typical deployment
-  workflow a single canonical slice (ID 1) is created and used for all credential attestations.
-- Calling `get_attestors(credentialId)` already gives the raw attestor list for display purposes.
-  `is_attested` adds the quorum-threshold check on top of that.
-- If `is_attested(id, 1n)` throws (e.g. slice 1 does not exist), the page catches the error,
-  sets `attested = null`, and shows an "Attestation status unconfirmed" warning — it does not crash.
-- This is a pragmatic default for v1. A future enhancement could expose a `?sliceId=` query param
-  or derive the slice from an off-chain index.
-
-```ts
-const DEFAULT_SLICE_ID = 1n;
-```
-
-### Import migration
-
-`Verify.tsx` currently imports everything from `../stellar`. After this change:
-
-- `getCredential`, `getAttestors`, `isExpired`, `getCredentialsBySubject` → imported from `../lib/contracts/quorumProof`
-- `isAttested` (new) → imported from `../lib/contracts/quorumProof`
-- `verifyClaim` → imported from `../lib/contracts/zkVerifier`
-- `decodeMetadataHash`, `CONTRACT_ID`, `RPC_URL`, `NETWORK` → still imported from `../stellar` (these are utilities/constants not yet in the typed clients)
-
-This is a targeted migration: only the functions with correctness implications are moved. The
-display-only utilities stay in `stellar.ts` to minimise diff scope.
-
-### ZK privacy tooltip UX
-
-When a ZK result is shown (either verified or not verified), a ℹ️ icon appears inline next to
-the result banner. The icon has a `title` attribute containing the explanation text, and an
-`aria-label` for screen readers. On hover/focus the browser native tooltip appears.
+### Credential ID lookup
 
 ```
-✅ Claim Verified  ℹ️
+User types ID → handleVerifyId()
+  → validate: parseInt(credInput) > 0
+  → if invalid: setError("Please enter a valid credential ID (positive integer)")
+  → if valid:
+      setLoading(true)
+      setSearchParams({ credentialId: id.toString() })
+      Promise.all([
+        getCredential(id),                    // quorumProof.ts
+        getAttestors(id).catch(e => null),    // quorumProof.ts — graceful degrade
+        isExpired(id).catch(() => false),     // quorumProof.ts — graceful degrade
+      ])
+      → on success: setResult({ credential, attestors, expired, attestorsError })
+      → on getCredential failure: setError(err.message), no Result_Panel
+      setLoading(false)
 ```
 
-Tooltip text:
-> "Zero-knowledge proofs confirm a property of a credential (e.g. holds a degree) without
-> revealing the credential data itself. The proof is verified entirely on-chain."
+### Stellar address lookup
 
-This is the simplest approach that requires no additional CSS and works across all browsers.
-A collapsible panel would be richer but is out of scope for this change.
+```
+User types address → handleVerifyAddr()
+  → validate: addr.startsWith('G') && addr.length === 56
+  → if invalid: setError("Please enter a valid Stellar address.")
+  → if valid:
+      setLoading(true)
+      getCredentialsBySubject(addr)           // quorumProof.ts
+      → on success: setAddrResults(ids)
+      → on failure: setError(err.message)
+      setLoading(false)
+```
+
+### Auto-trigger from query param
+
+```
+useEffect (on mount only):
+  const preId = searchParams.get('credentialId')
+  if (preId && parseInt(preId) > 0):
+    fetchCred(BigInt(preId))
+```
+
+### ZK claim verification
+
+```
+User selects ClaimType, pastes proof hex → handleZkVerify()
+  → validate: zkProof.trim() !== ''
+  → if empty: setZkResult({ type: 'error', message: '⚠️ Please paste proof bytes.' })
+  → if valid:
+      setZkLoading(true)
+      verifyClaim(credential.id, zkClaimType, zkProof)   // zkVerifier.ts
+      → true:  setZkResult({ type: 'success' })
+      → false: setZkResult({ type: 'fail' })
+      → throws: setZkResult({ type: 'error', message: err.message })
+      setZkLoading(false)
+```
+
+---
+
+## Contract Integration
+
+### QuorumProof contract (`frontend/src/lib/contracts/quorumProof.ts`)
+
+| Method | Called when | Args | Returns |
+|---|---|---|---|
+| `getCredential(id)` | ID lookup | `bigint` | `Credential` |
+| `getAttestors(id)` | ID lookup (parallel) | `bigint` | `string[]` |
+| `isExpired(id)` | ID lookup (parallel) | `bigint` | `boolean` |
+| `getCredentialsBySubject(addr)` | Address lookup | `string` | `bigint[]` |
+
+`isAttested` is **not called directly** — the proxy `getAttestors(id).length > 0` is used instead, because `isAttested` requires a `sliceId` that is not publicly discoverable from the credential alone.
+
+### ZK Verifier contract (`frontend/src/lib/contracts/zkVerifier.ts`)
+
+| Method | Called when | Args | Returns |
+|---|---|---|---|
+| `verifyClaim(credId, claimType, proof)` | ZK form submit | `bigint`, `ClaimType`, `string` | `boolean` |
+
+`zkVerifier.ts` handles hex decoding internally via its `hexToBytes` helper, so `Verify.tsx` can pass the raw hex string directly.
+
+### Migration from stellar.ts
+
+`Verify.tsx` currently imports from `../stellar` (legacy untyped JS). The required migration:
+
+| Current import (stellar.ts) | Replace with |
+|---|---|
+| `getCredential` | `quorumProof.getCredential` from `../lib/contracts/quorumProof` |
+| `getAttestors` | `quorumProof.getAttestors` |
+| `isExpired` | `quorumProof.isExpired` |
+| `getCredentialsBySubject` | `quorumProof.getCredentialsBySubject` |
+| `verifyClaim` | `zkVerifier.verifyClaim` from `../lib/contracts/zkVerifier` |
+| `decodeMetadataHash` | inline or move to `credentialUtils.ts` |
+| `CONTRACT_ID`, `RPC_URL`, `NETWORK` | read from `import.meta.env` directly |
+
+The critical fix is `verifyClaim`: `stellar.ts` encodes `claimType` as a plain string (`nativeToScVal(claimType, { type: 'string' })`), but the on-chain contract expects a `scvVec([scvSymbol(claimType)])`. `zkVerifier.ts` already encodes this correctly via `claimTypeToScVal()`.
+
+---
+
+## Shareable URL Pattern
+
+Uses React Router's `useSearchParams`:
+
+```typescript
+const [searchParams, setSearchParams] = useSearchParams();
+
+// Read on mount
+const preId = searchParams.get('credentialId');
+
+// Write after successful lookup
+setSearchParams({ credentialId: id.toString() });
+
+// Display in ShareBar
+const shareUrl = `${window.location.origin}/verify?credentialId=${credential.id}`;
+```
+
+---
+
+## Validation Rules
+
+| Input | Valid condition | Error message |
+|---|---|---|
+| Credential ID | `parseInt(value) > 0` (positive integer) | "Please enter a valid credential ID (positive integer)." |
+| Stellar Address | `value.startsWith('G') && value.length === 56` | "Please enter a valid Stellar address." |
+| ZK Proof | `value.trim().length > 0` | "⚠️ Please paste proof bytes." |
+
+Note: the current implementation uses `addr.length < 56` which is incorrect per R3.5. The fix is `addr.length !== 56`.
+
+---
+
+## CSS Class Inventory
+
+All classes used in `Verify.tsx` must be defined in `frontend/src/styles.css` or `frontend/src/index.css`:
+
+**Layout**: `verify-hero`, `verify-hero__eyebrow`, `verify-hero__title`, `verify-hero__subtitle`, `search-card`, `search-card__label`, `search-card__tabs`, `result-section`
+
+**Inputs**: `tab-btn`, `tab-btn.active`, `input-wrap`, `input-icon`, `input-group`
+
+**Buttons**: `btn`, `btn--primary`, `btn--ghost`, `btn--sm`
+
+**Status**: `status-banner`, `status-banner--valid`, `status-banner--revoked`, `status-banner--expired`, `status-banner--pending`, `status-banner__icon`, `status-banner__title`, `status-banner__sub`
+
+**Cards**: `detail-card`, `detail-card__header`, `detail-card__title`, `detail-card__body`, `meta-grid`, `meta-item`, `meta-item__label`, `meta-item__value`, `meta-item__value--mono`
+
+**Attestors**: `attestor-list`, `attestor-item`, `attestor-item__avatar`, `attestor-item__addr`, `attestor-item__badge`
+
+**ZK**: `zk-card`, `zk-card__header`, `zk-card__icon`, `zk-card__title`, `zk-card__sub`, `zk-card__body`, `zk-result`, `zk-result--success`, `zk-result--fail`, `zk-result--error`
+
+**Badges**: `badge`, `badge--green`, `badge--red`, `badge--gray`, `badge--blue`
+
+**States**: `loading-state`, `spinner`, `error-card`, `error-card__icon`, `error-card__title`, `error-card__msg`, `empty-state`, `empty-state__icon`, `empty-state__title`
+
+**Lists**: `cred-list`, `cred-list-item`, `cred-list-item__id`
+
+**Share**: `share-bar`, `share-bar__url`
+
+**Forms**: `form-row`, `form-label`
+
+---
+
+## Error Handling Strategy
+
+| Failure | Behavior |
+|---|---|
+| `getCredential` throws | `setError(err.message)`, no Result_Panel rendered |
+| `getAttestors` throws | `attestorsError = true`, show "Attestor data unavailable" in attestor section; rest of panel renders normally |
+| `isExpired` throws | Default `expired = false` (`.catch(() => false)`), log to console |
+| `getCredentialsBySubject` throws | `setError(err.message)`, no list rendered |
+| `verifyClaim` throws | `setZkResult({ type: 'error', message: err.message })` |
+| Contract not configured | `getContractId()` throws "VITE_CONTRACT_* is not set" — surfaces as error card |
+
+All contract calls are wrapped in try/catch. `getAttestors` and `isExpired` use `.catch()` in the `Promise.all` to allow graceful degradation without blocking the credential display.
 
 ---
 
 ## Correctness Properties
 
-*A property is a characteristic or behavior that should hold true across all valid executions of
-a system — essentially, a formal statement about what the system should do. Properties serve as
-the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-### Property 1: Share URL round-trip
+### Property 1: Valid credential ID triggers all contract calls
 
-*For any* valid positive-integer credential ID `n`, the Share_URL generated when credential `n`
-is displayed SHALL be `/verify?id=n`, and loading that URL SHALL produce the same displayed
-credential as manually entering `n` in the ID input and submitting.
+*For any* positive integer credential ID, submitting it should trigger `getCredential`, `getAttestors`, and `isExpired` calls and render the Result_Panel when all succeed.
 
-**Validates: Requirements 6.1, 6.3, 6.4**
+**Validates: Requirements 2.2, 2.3, 2.4**
 
-### Property 2: ClaimType dropdown exhaustiveness
+### Property 2: Invalid credential ID is rejected without contract calls
 
-*For any* render of the ZK claim dropdown, the set of `<option>` values SHALL be exactly
-`{ "HasDegree", "HasLicense", "HasEmploymentHistory" }` — no more, no fewer.
+*For any* input that is not a positive integer (zero, negative, non-numeric, empty string), submitting it should display a validation error and make no contract calls.
 
-**Validates: Requirements 7.2, 7.3, 8.3**
+**Validates: Requirements 2.5**
 
-### Property 3: ClaimType encoding invariant
+### Property 3: Valid Stellar address triggers subject lookup and displays results
 
-*For any* ClaimType value `c` in `{ "HasDegree", "HasLicense", "HasEmploymentHistory" }`,
-the ScVal produced by `claimTypeToScVal(c)` in `zkVerifier.ts` SHALL equal
-`scvVec([scvSymbol(c)])`. Calling `verifyClaim` with `c` SHALL use this encoding and not a
-plain string ScVal.
+*For any* string starting with `G` and exactly 56 characters long, submitting it should call `getCredentialsBySubject` and display one selectable item per returned credential ID.
 
-**Validates: Requirements 8.1, 8.4**
+**Validates: Requirements 3.2, 3.3**
 
-### Property 4: ZK result banner determinism
+### Property 4: Invalid Stellar address is rejected without contract calls
 
-*For any* call to `verifyClaim` that returns `true`, the page SHALL display "✅ Claim Verified".
-*For any* call that returns `false`, the page SHALL display "❌ Claim Not Verified".
-The displayed text SHALL be a pure function of the boolean return value.
+*For any* string that does not start with `G` or is not exactly 56 characters long, submitting it should display a validation error and make no contract calls.
 
-**Validates: Requirements 7.6, 7.7**
+**Validates: Requirements 3.5**
 
-### Property 5: Empty proof rejection
+### Property 5: Result_Panel displays all required credential metadata fields
 
-*For any* string composed entirely of whitespace or the empty string, submitting it as the ZK
-proof SHALL be rejected client-side with a validation error, and `verifyClaim` SHALL NOT be
-called.
+*For any* credential object, the rendered Result_Panel should contain the credential ID, credential type label, full subject address, full issuer address, and expiration date (or "Never").
 
-**Validates: Requirements 7.9**
+**Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.6**
 
-### Property 6: Status banner determinism
+### Property 6: Attestation status derivation is correct for all input combinations
 
-*For any* `VerifyResult`, the status banner class and title SHALL be a pure function of
-`(credential.revoked, expired, attested, attestors.length)` according to the priority order:
-revoked > expired > attested=true > attestors>0 > awaiting.
+*For any* combination of `(revoked: boolean, expired: boolean, attestorCount: number)`, the status banner should display exactly the correct status: revoked → "Credential Revoked", expired (not revoked) → "Credential Expired", attestorCount > 0 (not revoked, not expired) → "Credential Verified", otherwise → "Awaiting Attestation".
 
-**Validates: Requirements 5.2, 5.3, 5.4, 5.5, 4.2, 4.3**
+**Validates: Requirements 5.2, 5.3, 5.4, 5.5**
 
-### Property 7: Input validation — no on-chain call on bad input
+### Property 7: Status banner always has aria-label matching the status title
 
-*For any* credential ID input that is zero, negative, non-numeric, or empty, submitting the
-form SHALL display a validation error and SHALL NOT invoke `getCredential` or any other
-on-chain simulation.
+*For any* credential state, the rendered status banner element should have an `aria-label` attribute whose value equals the displayed status title string.
 
-*For any* address input that does not start with `G` or is shorter than 56 characters,
-submitting the form SHALL display a validation error and SHALL NOT invoke
-`getCredentialsBySubject`.
+**Validates: Requirements 5.6**
 
-**Validates: Requirements 2.3, 3.5**
+### Property 8: Attestor list renders all addresses with correct count and badges
 
----
+*For any* non-empty list of attestor addresses, the rendered attestor section should display each address in full, show a "✓ Signed" badge per address, and show a count equal to the list length.
 
-## Error Handling
+**Validates: Requirements 6.1, 6.2, 6.3**
 
-| Scenario | Behaviour |
-|---|---|
-| `get_credential` throws | Show error card; do not crash |
-| `is_attested` throws | Set `attested = null`; show "Attestation status unconfirmed" warning in status banner |
-| `get_attestors` throws | Treat as empty list; show warning |
-| `is_expired` throws | Treat as `false` (not expired) |
-| `verifyClaim` throws | Show error message in ZK result area |
-| `VITE_CONTRACT_QUORUM_PROOF` not set | Show red badge "⚠ Contract not configured"; do not crash |
-| `VITE_CONTRACT_ZK_VERIFIER` not set | `verifyClaim` throws; caught and shown as ZK error |
-| Invalid `?id=` query param | Show validation error; do not make on-chain call |
+### Property 9: Shareable URL always encodes the current credential ID
 
-All async calls are wrapped in `try/catch`. Loading state is always cleared in `finally`.
-A new search always clears the previous error before initiating the lookup.
+*For any* credential ID, the shareable URL displayed in the ShareBar should be of the form `<origin>/verify?credentialId=<id>` where `<id>` matches the credential's ID exactly.
+
+**Validates: Requirements 7.3**
+
+### Property 10: Query param auto-triggers lookup for any valid credential ID
+
+*For any* positive integer `credentialId` in the URL query string on mount, the page should automatically call `getCredential` without user interaction.
+
+**Validates: Requirements 7.2**
+
+### Property 11: ZK form calls verifyClaim with correct typed arguments
+
+*For any* `(ClaimType, non-empty hex proof string)` pair, submitting the ZK form should call `zkVerifier.verifyClaim` with the current credential ID, the exact `ClaimType` value, and the proof string.
+
+**Validates: Requirements 8.4**
+
+### Property 12: Empty ZK proof is rejected without calling verifyClaim
+
+*For any* string composed entirely of whitespace (including empty string), submitting the ZK form should display a validation error and not call `verifyClaim`.
+
+**Validates: Requirements 8.5**
+
+### Property 13: ZK result shows exactly one state at a time
+
+*For any* `verifyClaim` outcome (true, false, or error), exactly one of the three result states (success, fail, error) should be visible and the other two should be absent.
+
+**Validates: Requirements 9.3, 9.5**
+
+### Property 14: get_credential failure shows error card and suppresses Result_Panel
+
+*For any* error thrown by `getCredential`, the page should render an error card containing the error message and should not render the Result_Panel.
+
+**Validates: Requirements 10.1, 10.2**
+
+### Property 15: get_attestors failure degrades gracefully without blocking credential display
+
+*For any* error thrown by `getAttestors`, the credential metadata and status banner should still render, and the attestor section should display "Attestor data unavailable".
+
+**Validates: Requirements 10.4**
 
 ---
 
 ## Testing Strategy
 
-### Unit tests (Vitest)
+### Unit tests
 
-Focus on pure functions and specific examples:
+Focus on specific examples, edge cases, and integration points:
 
-- `credTypeLabel` maps known numbers to expected strings
-- `formatTimestamp` formats known timestamps correctly
-- `formatAddress` truncates addresses correctly
-- Status banner logic: given specific `(revoked, expired, attested, attestors)` tuples, assert
-  the correct `statusClass` and `statusTitle`
-- Validation: `credInput = "0"` → error, `credInput = "-1"` → error, `credInput = "abc"` → error
-- Address validation: `"GABC"` (too short) → error, `"Xabc..."` (wrong prefix) → error
-- ZK result rendering: `verifyClaim` mock returns `true` → "✅ Claim Verified" in DOM;
-  returns `false` → "❌ Claim Not Verified" in DOM
-- Share URL: after `fetchCred(42n)`, `window.location.search` contains `?id=42`
+- Render `Verify` and assert no WalletGate is present (R1.2)
+- Render `Verify` and assert search card is immediately visible (R1.3)
+- Assert the ZK dropdown has exactly 3 options with values `HasDegree`, `HasLicense`, `HasEmploymentHistory` (R8.2)
+- Assert `formatTimestamp(null)` returns `"Never"` (R4.6)
+- Assert empty attestor list shows the "no attestors" message (R6.4)
+- Assert address lookup returning `[]` shows the empty state (R3.4)
+- Assert `verify_claim` returning `true` shows "✅ Claim Verified" (R9.1)
+- Assert `verify_claim` returning `false` shows "❌ Claim Not Verified" (R9.2)
+- Assert loading state disables submit button (R10.6)
+- Assert clipboard copy writes the correct URL (R7.4)
 
-### Property-based tests (fast-check, minimum 100 iterations each)
+### Property-based tests
 
-Use `fast-check` for TypeScript property-based testing.
+Use a property-based testing library (e.g., `fast-check` for TypeScript/Jest). Each test runs a minimum of 100 iterations.
 
-Each test is tagged with a comment referencing the design property it validates.
+Tag format: `Feature: public-verify-page, Property {N}: {property_text}`
 
-**Property 1 — Share URL round-trip**
-```
-// Feature: public-verify-page, Property 1: Share URL round-trip
-fc.property(fc.bigInt({ min: 1n, max: 9_999_999n }), (id) => {
-  const url = buildShareUrl(id);
-  const parsed = parseIdFromUrl(url);
-  return parsed === id;
-})
-```
+| Property | Generator | Assertion |
+|---|---|---|
+| P1 | `fc.bigInt({ min: 1n })` | Result_Panel rendered, 3 contract calls made |
+| P2 | `fc.oneof(fc.constant(0), fc.integer({ max: 0 }), fc.string())` | Error shown, no contract calls |
+| P3 | `fc.string({ minLength: 55, maxLength: 55 }).map(s => 'G' + s)` | `getCredentialsBySubject` called, N items rendered |
+| P4 | invalid address generators | Error shown, no contract calls |
+| P5 | `fc.record({ id, subject, issuer, credential_type, expires_at })` | All fields present in rendered output |
+| P6 | `fc.record({ revoked: fc.boolean(), expired: fc.boolean(), attestorCount: fc.nat() })` | Correct status banner text |
+| P7 | same as P6 | `aria-label` equals status title |
+| P8 | `fc.array(fc.string({ minLength: 56, maxLength: 56 }), { minLength: 1 })` | Count correct, all addresses shown, all badges present |
+| P9 | `fc.bigInt({ min: 1n })` | ShareBar URL contains `credentialId=<id>` |
+| P10 | `fc.bigInt({ min: 1n })` | `getCredential` called on mount |
+| P11 | `fc.tuple(fc.constantFrom('HasDegree','HasLicense','HasEmploymentHistory'), fc.hexaString({ minLength: 2 }))` | `verifyClaim` called with correct args |
+| P12 | `fc.stringOf(fc.constant(' '))` | Error shown, `verifyClaim` not called |
+| P13 | `fc.oneof(fc.constant(true), fc.constant(false), fc.constant(new Error('x')))` | Exactly one result state visible |
+| P14 | `fc.string()` (error message) | Error card shown, no Result_Panel |
+| P15 | `fc.string()` (error message) | Metadata renders, attestor section shows fallback |
 
-**Property 2 — ClaimType dropdown exhaustiveness**
+Each property test must include a comment:
+```typescript
+// Feature: public-verify-page, Property N: <property_text>
 ```
-// Feature: public-verify-page, Property 2: ClaimType dropdown exhaustiveness
-// Example-based (fixed set): render ZkClaimPanel, collect all option values,
-// assert deep-equal to ['HasDegree', 'HasLicense', 'HasEmploymentHistory']
-```
-
-**Property 3 — ClaimType encoding invariant**
-```
-// Feature: public-verify-page, Property 3: ClaimType encoding invariant
-fc.property(fc.constantFrom('HasDegree', 'HasLicense', 'HasEmploymentHistory'), (c) => {
-  const scval = claimTypeToScVal(c);
-  // scval must be scvVec containing exactly one scvSymbol equal to c
-  return scval.switch() === xdr.ScValType.scvVec() &&
-         scval.vec()[0].switch() === xdr.ScValType.scvSymbol() &&
-         scval.vec()[0].sym().toString() === c;
-})
-```
-
-**Property 4 — ZK result banner determinism**
-```
-// Feature: public-verify-page, Property 4: ZK result banner determinism
-fc.property(fc.boolean(), (verified) => {
-  // render ZkClaimPanel with mocked verifyClaim returning `verified`
-  // assert banner text === (verified ? '✅ Claim Verified' : '❌ Claim Not Verified')
-})
-```
-
-**Property 5 — Empty proof rejection**
-```
-// Feature: public-verify-page, Property 5: Empty proof rejection
-fc.property(fc.stringOf(fc.constantFrom(' ', '\t', '\n')), (whitespace) => {
-  // submit ZK form with whitespace-only proof
-  // assert verifyClaim was NOT called and error message is shown
-})
-```
-
-**Property 6 — Status banner determinism**
-```
-// Feature: public-verify-page, Property 6: Status banner determinism
-fc.property(
-  fc.record({
-    revoked: fc.boolean(),
-    expired: fc.boolean(),
-    attested: fc.option(fc.boolean()),
-    attestorCount: fc.nat(),
-  }),
-  ({ revoked, expired, attested, attestorCount }) => {
-    const { statusClass } = deriveStatus(revoked, expired, attested, attestorCount);
-    if (revoked) return statusClass === 'revoked';
-    if (expired) return statusClass === 'expired';
-    if (attested === true) return statusClass === 'valid';
-    if (attestorCount > 0) return statusClass === 'valid';
-    return statusClass === 'pending';
-  }
-)
-```
-
-**Property 7 — Input validation guards**
-```
-// Feature: public-verify-page, Property 7: Input validation — no on-chain call on bad input
-fc.property(
-  fc.oneof(
-    fc.constant('0'), fc.constant('-1'), fc.constant('abc'),
-    fc.integer({ max: 0 }).map(String)
-  ),
-  (badId) => {
-    // submit credential ID form with badId
-    // assert getCredential mock was NOT called
-  }
-)
-```
-
-Both unit and property tests live in `frontend/src/pages/__tests__/Verify.test.tsx`.
-Property tests use `@fast-check/vitest` integration for clean `test.prop(...)` syntax.
-Each property test runs a minimum of 100 iterations (fast-check default is 100).

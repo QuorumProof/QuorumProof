@@ -2,168 +2,171 @@
 
 ## Introduction
 
-The public verification page (`/verify`) allows employers, institutions, and any third party to
-instantly verify an engineer's on-chain credentials without connecting a Stellar wallet.
-A visitor can look up a credential by its numeric ID or by the engineer's Stellar address,
-inspect full credential metadata and the list of attesting institutions, and optionally run a
-Zero-Knowledge (ZK) claim check to confirm a specific property (degree, license, or employment
-history) without exposing the underlying credential data.
+The Public Credential Verification Page is a public-facing route at `/verify` that allows anyone — employers, institutions, or the general public — to verify engineering credentials on the Stellar blockchain without connecting a wallet. Users can look up credentials by credential ID or by an engineer's Stellar address, view full credential metadata and attestor lists, and run Zero-Knowledge (ZK) claim verification for specific claim types (Degree, License, Employment). The page supports shareable URLs with a credential ID query parameter so verification links can be embedded in resumes, emails, or job applications.
 
-The existing `Verify.tsx` implementation covers the broad structure but has several gaps that
-must be closed: the shareable URL query-param key must change from `?credentialId=` to `?id=`,
-the `is_attested` on-chain call must be wired in, the ZK claim-type dropdown must be aligned
-with the on-chain `ClaimType` enum, the `verifyClaim` call must use the properly-encoded ScVal
-from `zkVerifier.ts`, and the ZK result must include a tooltip explaining ZK privacy.
-
----
+The feature is built inside the existing `frontend/` React + TypeScript application. It reuses the existing `Verify.tsx` page stub, the `quorumProof` and `zkVerifier` contract clients in `frontend/src/lib/contracts/`, and the existing routing in `App.tsx`. No wallet connection is required at any point on this page.
 
 ## Glossary
 
-- **Verify_Page**: The React component rendered at the `/verify` route (`frontend/src/pages/Verify.tsx`).
-- **QuorumProof_Contract**: The Soroban smart contract that stores credentials, quorum slices, and attestations; accessed via `frontend/src/lib/contracts/quorumProof.ts`.
-- **ZK_Verifier_Contract**: The Soroban smart contract that verifies zero-knowledge proofs; accessed via `frontend/src/lib/contracts/zkVerifier.ts`.
-- **Credential**: An on-chain record with fields `id`, `subject`, `issuer`, `credential_type`, `metadata_hash`, `revoked`, and `expires_at`.
-- **QuorumSlice**: An on-chain record grouping a set of attestor addresses with a threshold; identified by a `sliceId`.
-- **Attestor**: A trusted institution address that has signed a credential within a QuorumSlice.
-- **ClaimType**: The on-chain enum with exactly three variants: `HasDegree`, `HasLicense`, `HasEmploymentHistory`.
-- **ZK_Proof**: A hex-encoded byte string representing a zero-knowledge proof submitted by the verifier.
-- **Share_URL**: A URL of the form `/verify?id={credentialId}` that encodes a specific credential for direct linking.
-- **Stellar_Address**: A 56-character public key beginning with `G`, identifying an account on the Stellar network.
+- **Verify_Page**: The React component rendered at the `/verify` route; the primary subject of this document.
+- **Credential_ID**: A positive integer (`u64`) that uniquely identifies a credential on-chain in the QuorumProof contract.
+- **Stellar_Address**: A Stellar public key string beginning with `G`, exactly 56 characters long, used as the subject address for credential lookup.
+- **Credential**: An on-chain record in the QuorumProof contract representing a verifiable credential issued to an engineer's Stellar address.
+- **Attestor**: A Stellar address that has signed a credential as part of a quorum, confirming its authenticity.
+- **Attestation_Status**: The computed validity state of a credential — one of `Verified`, `Pending`, `Revoked`, or `Expired` — derived from on-chain data.
+- **ZK_Claim**: A Zero-Knowledge proof assertion about a specific property of a credential (e.g., "has a degree") that can be verified without revealing the full credential contents.
+- **Claim_Type**: The category of a ZK_Claim; one of `HasDegree`, `HasLicense`, or `HasEmploymentHistory`, corresponding to the on-chain `ClaimType` enum in the ZK Verifier contract.
+- **ZK_Verifier**: The Soroban smart contract that exposes the `verify_claim` method for ZK proof verification.
+- **QuorumProof**: The Soroban smart contract that exposes `get_credential`, `is_attested`, and `get_attestors` methods.
+- **Shareable_URL**: A URL of the form `/verify?credentialId=<id>` that encodes a Credential_ID as a query parameter, enabling direct deep-linking to a verification result.
+- **Result_Panel**: The UI section rendered after a successful lookup, displaying credential metadata, attestor list, and the ZK claim form.
+- **Contract_Client**: The typed TypeScript wrappers in `frontend/src/lib/contracts/` that call Soroban RPC simulation endpoints without requiring a wallet.
 
 ---
 
 ## Requirements
 
-### Requirement 1: Public Access Without Wallet
+### Requirement 1: Public Route — No Wallet Required
 
-**User Story:** As an employer, I want to open the verification page without connecting a wallet,
-so that I can verify credentials quickly without any account setup.
-
-#### Acceptance Criteria
-
-1. THE Verify_Page SHALL be accessible at the `/verify` route without requiring wallet connection or authentication.
-2. THE Verify_Page SHALL NOT render any wallet-connect prompt or wallet-dependent UI element.
-3. THE Verify_Page SHALL perform all on-chain reads via simulation (no transaction signing required).
-
----
-
-### Requirement 2: Search by Credential ID
-
-**User Story:** As an employer, I want to enter a credential ID and retrieve the matching credential,
-so that I can confirm a specific credential shared by an engineer.
+**User Story:** As an employer, I want to access the verification page without connecting a wallet, so that I can verify an engineer's credentials instantly without any blockchain setup.
 
 #### Acceptance Criteria
 
-1. THE Verify_Page SHALL provide a numeric input field for entering a credential ID.
-2. WHEN a user submits a valid positive-integer credential ID, THE Verify_Page SHALL call `get_credential` on the QuorumProof_Contract and display the returned Credential.
-3. WHEN a user submits a credential ID that is zero, negative, or non-numeric, THE Verify_Page SHALL display a descriptive validation error without making any on-chain call.
-4. IF the `get_credential` simulation returns an error, THEN THE Verify_Page SHALL display a human-readable error message and SHALL NOT crash.
+1. THE Verify_Page SHALL be accessible at the `/verify` route without requiring a connected Freighter wallet.
+2. THE Verify_Page SHALL NOT render the WalletGate component or any wallet connection prompt.
+3. THE Verify_Page SHALL display a search interface immediately upon navigation, without any authentication step.
+4. WHEN a user navigates to `/verify`, THE Verify_Page SHALL display a page title and subtitle describing the public verification purpose.
 
 ---
 
-### Requirement 3: Search by Stellar Address
+### Requirement 2: Credential ID Lookup
 
-**User Story:** As an employer, I want to enter an engineer's Stellar address and see all their
-credentials, so that I can browse the full credential history for that person.
+**User Story:** As an employer, I want to enter a credential ID and instantly see the credential details, so that I can confirm an engineer's specific credential is authentic.
+
+#### Acceptance Criteria
+
+1. THE Verify_Page SHALL provide a numeric input field for entering a Credential_ID.
+2. WHEN a user submits a valid Credential_ID (a positive integer), THE Verify_Page SHALL call `get_credential` on the QuorumProof contract with that ID and display the Result_Panel.
+3. WHEN a user submits a valid Credential_ID, THE Verify_Page SHALL call `is_attested` on the QuorumProof contract with that ID and display the Attestation_Status.
+4. WHEN a user submits a valid Credential_ID, THE Verify_Page SHALL call `get_attestors` on the QuorumProof contract with that ID and display the full list of Attestor addresses.
+5. IF a user submits a non-positive integer or non-numeric value as a Credential_ID, THEN THE Verify_Page SHALL display a validation error message and SHALL NOT call any contract method.
+6. WHEN the user presses the Enter key while the Credential_ID input is focused, THE Verify_Page SHALL trigger the same lookup as clicking the verify button.
+
+---
+
+### Requirement 3: Stellar Address Lookup
+
+**User Story:** As an employer, I want to enter an engineer's Stellar address and see all their credentials, so that I can get a complete picture of their verified qualifications.
 
 #### Acceptance Criteria
 
 1. THE Verify_Page SHALL provide a text input field for entering a Stellar_Address.
-2. WHEN a user submits a valid Stellar_Address, THE Verify_Page SHALL call `get_credentials_by_subject` on the QuorumProof_Contract and display the list of returned credential IDs.
-3. WHEN a user selects a credential ID from the address-lookup results, THE Verify_Page SHALL fetch and display the full Credential details for that ID.
-4. WHEN a valid Stellar_Address has no associated credentials, THE Verify_Page SHALL display an empty-state message indicating no credentials were found.
-5. WHEN a user submits a string that does not begin with `G` or is shorter than 56 characters, THE Verify_Page SHALL display a descriptive validation error without making any on-chain call.
-6. IF the `get_credentials_by_subject` simulation returns an error, THEN THE Verify_Page SHALL display a human-readable error message and SHALL NOT crash.
+2. WHEN a user submits a valid Stellar_Address (starts with `G`, exactly 56 characters), THE Verify_Page SHALL call `get_credentials_by_subject` on the QuorumProof contract and display a list of all returned Credential_IDs.
+3. WHEN the address lookup returns one or more Credential_IDs, THE Verify_Page SHALL display each ID as a selectable item that, when activated, fetches and displays the full Result_Panel for that credential.
+4. WHEN the address lookup returns zero Credential_IDs, THE Verify_Page SHALL display an empty state message indicating no credentials are associated with that address.
+5. IF a user submits a string that does not start with `G` or is not 56 characters long, THEN THE Verify_Page SHALL display a validation error and SHALL NOT call any contract method.
+6. WHEN the user presses the Enter key while the Stellar_Address input is focused, THE Verify_Page SHALL trigger the same lookup as clicking the look-up button.
 
 ---
 
-### Requirement 4: On-Chain Attestation Status via `is_attested`
+### Requirement 4: Credential Metadata Display
 
-**User Story:** As an employer, I want to see whether a credential has met its quorum threshold,
-so that I know the credential has been formally attested by the required number of institutions.
+**User Story:** As an employer, I want to see the full details of a credential, so that I can confirm the credential type, issuer, subject, and validity period.
 
 #### Acceptance Criteria
 
-1. WHEN a Credential is loaded, THE Verify_Page SHALL call `is_attested` on the QuorumProof_Contract with the credential's `id` and the associated `sliceId`.
-2. WHEN `is_attested` returns `true`, THE Verify_Page SHALL display a "Credential Verified" status indicating quorum has been reached.
-3. WHEN `is_attested` returns `false`, THE Verify_Page SHALL display a status indicating the credential has not yet reached quorum.
-4. THE Verify_Page SHALL also call `get_attestors` on the QuorumProof_Contract and display the full list of Attestor addresses that have signed the Credential.
-5. IF the `is_attested` simulation returns an error, THEN THE Verify_Page SHALL treat the attestation status as unconfirmed and display an appropriate warning rather than crashing.
+1. THE Result_Panel SHALL display the Credential_ID.
+2. THE Result_Panel SHALL display the credential type label corresponding to the on-chain `credential_type` integer (1 = Degree, 2 = License, 3 = Employment, 4 = Certification, 5 = Research).
+3. THE Result_Panel SHALL display the full subject Stellar_Address.
+4. THE Result_Panel SHALL display the full issuer Stellar_Address.
+5. WHEN a credential has a non-null `expires_at` value, THE Result_Panel SHALL display the expiration date formatted as a human-readable date string.
+6. WHEN a credential has a null `expires_at` value, THE Result_Panel SHALL display "Never" for the expiration field.
+7. THE Result_Panel SHALL display the network name (testnet or mainnet) on which the credential was verified.
 
 ---
 
-### Requirement 5: Credential Metadata Display
+### Requirement 5: Attestation Status Banner
 
-**User Story:** As an employer, I want to see all metadata for a credential in a readable format,
-so that I can confirm the credential details match what the engineer claimed.
+**User Story:** As an employer, I want a clear visual indicator of whether a credential is valid, so that I can make a quick trust decision at a glance.
 
 #### Acceptance Criteria
 
-1. WHEN a Credential is loaded, THE Verify_Page SHALL display the credential `id`, `credential_type` label, `subject` address, `issuer` address, decoded `metadata_hash`, and `expires_at` date.
-2. WHEN a Credential has `revoked` set to `true`, THE Verify_Page SHALL display a "Revoked" status banner prominently.
-3. WHEN a Credential is expired (as determined by `is_expired`), THE Verify_Page SHALL display an "Expired" status banner with the expiry date.
-4. WHEN a Credential is active, not revoked, and has at least one Attestor, THE Verify_Page SHALL display a "Credential Verified" status banner.
-5. WHEN a Credential is active but has zero Attestors, THE Verify_Page SHALL display an "Awaiting Attestation" status banner.
+1. THE Result_Panel SHALL display an Attestation_Status banner as the first visible element of the result.
+2. WHEN a credential's `revoked` field is `true`, THE Result_Panel SHALL display the status as "Credential Revoked" with a visually distinct error indicator.
+3. WHEN a credential is not revoked and its `expires_at` timestamp is in the past, THE Result_Panel SHALL display the status as "Credential Expired" with a neutral indicator.
+4. WHEN a credential is not revoked, not expired, and has one or more Attestors, THE Result_Panel SHALL display the status as "Credential Verified" with a success indicator and the count of attesting nodes.
+5. WHEN a credential is not revoked, not expired, and has zero Attestors, THE Result_Panel SHALL display the status as "Awaiting Attestation" with a pending indicator.
+6. THE Attestation_Status banner SHALL include an `aria-label` attribute containing the status text so screen readers can announce the credential status.
 
 ---
 
-### Requirement 6: Shareable URL with `?id=` Query Parameter
+### Requirement 6: Attestor List Display
 
-**User Story:** As an employer, I want to copy a direct link to a specific credential,
-so that I can share it with colleagues or store it for audit purposes.
+**User Story:** As an employer, I want to see which institutions have attested a credential, so that I can assess the trustworthiness of the verification.
 
 #### Acceptance Criteria
 
-1. WHEN a Credential is displayed, THE Verify_Page SHALL generate a Share_URL using the query parameter key `id` (i.e. `/verify?id={credentialId}`).
-2. THE Verify_Page SHALL display the Share_URL and provide a one-click copy button.
-3. WHEN the Verify_Page is loaded with a `?id=` query parameter containing a valid credential ID, THE Verify_Page SHALL automatically trigger credential lookup for that ID without requiring user interaction.
-4. FOR ALL valid credential IDs `n`, navigating to `/verify?id=n` SHALL produce the same displayed result as manually entering `n` in the credential ID input and submitting (round-trip property).
-5. WHEN the Verify_Page is loaded with a `?id=` query parameter containing an invalid value, THE Verify_Page SHALL display a validation error rather than making an on-chain call.
+1. THE Result_Panel SHALL display a dedicated attestor section showing all Attestor addresses returned by `get_attestors`.
+2. THE Result_Panel SHALL display the total count of Attestors in the attestor section header.
+3. WHEN the attestor list is non-empty, THE Result_Panel SHALL display each Attestor address in full (not truncated) with a "✓ Signed" badge.
+4. WHEN the attestor list is empty, THE Result_Panel SHALL display a message indicating no attestors have signed the credential.
 
 ---
 
-### Requirement 7: ZK Claim Verification Form
+### Requirement 7: Shareable URL
 
-**User Story:** As an employer, I want to verify a specific ZK claim about a credential,
-so that I can confirm a property (e.g. holds a degree) without seeing the full credential data.
+**User Story:** As an engineer, I want to share a direct link to my credential verification, so that employers can verify my credentials by clicking a single URL.
 
 #### Acceptance Criteria
 
-1. THE Verify_Page SHALL display a ZK claim verification form when a Credential is loaded.
-2. THE Verify_Page SHALL provide a claim-type dropdown containing exactly the three options that correspond to the on-chain ClaimType enum: `HasDegree` (displayed as "🎓 Degree"), `HasLicense` (displayed as "🏛️ License"), and `HasEmploymentHistory` (displayed as "💼 Employment").
-3. THE Verify_Page SHALL NOT include claim-type options that do not correspond to a variant of the on-chain ClaimType enum.
-4. THE Verify_Page SHALL provide a text area for pasting hex-encoded ZK_Proof bytes.
-5. WHEN a user submits the ZK form with a selected ClaimType and a non-empty proof, THE Verify_Page SHALL call `verifyClaim` from `zkVerifier.ts` (not from `stellar.ts`) with the credential ID, the ClaimType encoded as `scvVec([scvSymbol(claimType)])`, and the proof bytes.
-6. WHEN `verifyClaim` returns `true`, THE Verify_Page SHALL display "✅ Claim Verified".
-7. WHEN `verifyClaim` returns `false`, THE Verify_Page SHALL display "❌ Claim Not Verified".
-8. WHEN the ZK result is displayed (either verified or not verified), THE Verify_Page SHALL show a tooltip or inline explanation stating that ZK proofs confirm a property without revealing the underlying credential data.
-9. WHEN the proof field is empty and the user submits the ZK form, THE Verify_Page SHALL display a validation error without making any on-chain call.
-10. IF the `verifyClaim` simulation returns an error, THEN THE Verify_Page SHALL display a human-readable error message and SHALL NOT crash.
+1. THE Verify_Page SHALL accept a `credentialId` query parameter in the URL (e.g., `/verify?credentialId=42`).
+2. WHEN the page loads with a valid `credentialId` query parameter, THE Verify_Page SHALL automatically trigger the credential lookup without requiring any user interaction.
+3. WHEN a credential is displayed, THE Result_Panel SHALL show a shareable URL of the form `/verify?credentialId=<id>` that the user can copy.
+4. WHEN the user clicks the copy button next to the shareable URL, THE Verify_Page SHALL write the full shareable URL to the system clipboard.
+5. WHEN the page loads with a `credentialId` query parameter and the lookup succeeds, THE Verify_Page SHALL update the browser URL to include the `credentialId` parameter so the URL remains bookmarkable.
 
 ---
 
-### Requirement 8: ClaimType Encoding Alignment
+### Requirement 8: ZK Claim Verification Form
 
-**User Story:** As a developer, I want the ZK claim type to be encoded correctly for the on-chain
-contract, so that `verifyClaim` calls do not silently fail due to type mismatches.
+**User Story:** As an employer, I want to verify a specific ZK claim about a credential without seeing the full credential contents, so that I can confirm a property (e.g., "has a degree") while respecting the engineer's privacy.
 
 #### Acceptance Criteria
 
-1. THE Verify_Page SHALL import and call `verifyClaim` from `frontend/src/lib/contracts/zkVerifier.ts`, which encodes ClaimType as `xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(claimType)])`.
-2. THE Verify_Page SHALL NOT call `verifyClaim` from `frontend/src/stellar.ts`, which encodes ClaimType as a plain string ScVal and is therefore incompatible with the on-chain enum.
-3. THE Verify_Page SHALL pass one of the three valid ClaimType string literals (`"HasDegree"`, `"HasLicense"`, `"HasEmploymentHistory"`) to `zkVerifier.ts`'s `verifyClaim` function.
-4. FOR ALL valid ClaimType values `c`, calling `verifyClaim` with `c` SHALL produce the same on-chain ScVal encoding as the `claimTypeToScVal` function defined in `zkVerifier.ts` (invariant: encoding is consistent).
+1. THE Result_Panel SHALL display a ZK claim verification form below the credential metadata section.
+2. THE ZK_Claim form SHALL include a dropdown for selecting the Claim_Type with exactly three options: "Degree" (maps to `HasDegree`), "License" (maps to `HasLicense`), and "Employment" (maps to `HasEmploymentHistory`).
+3. THE ZK_Claim form SHALL include a text area for pasting hex-encoded ZK proof bytes.
+4. WHEN a user submits the ZK_Claim form with a selected Claim_Type and non-empty proof bytes, THE Verify_Page SHALL call `verify_claim` on the ZK_Verifier contract with the current Credential_ID, the selected Claim_Type, and the decoded proof bytes.
+5. IF the proof bytes field is empty when the user submits the ZK_Claim form, THEN THE Verify_Page SHALL display a validation error and SHALL NOT call `verify_claim`.
+6. THE ZK_Claim form SHALL display a privacy explanation tooltip or note stating that ZK verification confirms a claim without revealing the underlying credential data.
+7. THE ZK_Claim form SHALL display a "No wallet required" indicator to reassure users that verification is fully public.
 
 ---
 
-### Requirement 9: Error Handling and Loading States
+### Requirement 9: ZK Claim Result Display
 
-**User Story:** As a user, I want clear feedback during loading and on errors,
-so that I understand what is happening and can take corrective action.
+**User Story:** As an employer, I want a clear binary result from ZK claim verification, so that I know definitively whether the claim is valid.
 
 #### Acceptance Criteria
 
-1. WHILE an on-chain simulation is in progress, THE Verify_Page SHALL display a loading indicator and SHALL disable the submit button.
-2. IF any on-chain simulation call fails with a network or contract error, THEN THE Verify_Page SHALL display an error card with the error message and SHALL NOT leave the UI in a broken state.
-3. WHEN an error is displayed and the user submits a new search, THE Verify_Page SHALL clear the previous error before initiating the new lookup.
-4. IF the `VITE_CONTRACT_QUORUM_PROOF` environment variable is not set, THEN THE Verify_Page SHALL display a configuration warning badge rather than crashing on load.
+1. WHEN `verify_claim` returns `true`, THE Verify_Page SHALL display "✅ Claim Verified" as the ZK result.
+2. WHEN `verify_claim` returns `false`, THE Verify_Page SHALL display "❌ Claim Not Verified" as the ZK result.
+3. THE ZK result display SHALL show exactly one of the two states at a time and SHALL NOT display both simultaneously.
+4. WHILE `verify_claim` is executing, THE Verify_Page SHALL display a loading indicator in place of the ZK result and SHALL disable the submit button.
+5. IF `verify_claim` throws an error, THEN THE Verify_Page SHALL display a warning message containing the error description and SHALL NOT display either the verified or not-verified state.
+6. THE ZK result SHALL include a tooltip or inline note explaining that ZK proofs confirm a property of the credential without revealing the credential's private contents.
+
+---
+
+### Requirement 10: Error Handling
+
+**User Story:** As an employer, I want clear error messages when verification fails, so that I understand what went wrong and can take corrective action.
+
+#### Acceptance Criteria
+
+1. IF the `get_credential` call fails for a given Credential_ID, THEN THE Verify_Page SHALL display an error card with a human-readable description of the failure.
+2. IF the `get_credential` call fails, THEN THE Verify_Page SHALL NOT render the Result_Panel.
+3. IF the `is_attested` call fails, THEN THE Verify_Page SHALL default the Attestation_Status to "Awaiting Attestation" and SHALL log the error to the browser console.
+4. IF the `get_attestors` call fails, THEN THE Verify_Page SHALL display "Attestor data unavailable" in the attestor section and SHALL NOT block rendering of other credential data.
+5. IF the `get_credentials_by_subject` call fails, THEN THE Verify_Page SHALL display an error card with a human-readable description of the failure.
+6. WHILE any contract call is in progress, THE Verify_Page SHALL display a loading indicator and SHALL disable the relevant submit button to prevent duplicate requests.
