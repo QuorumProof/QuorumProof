@@ -48,6 +48,7 @@ pub struct IssueEventData {
 /// TTL is automatically extended on subsequent reads/bumps if needed.
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
+const MAX_ATTESTORS_PER_SLICE: u32 = 20;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -249,6 +250,7 @@ impl QuorumProofContract {
     pub fn create_slice(env: Env, creator: Address, attestors: Vec<Address>, threshold: u32) -> u64 {
         creator.require_auth();
         assert!(!attestors.is_empty(), "attestors cannot be empty");
+        assert!(attestors.len() as u32 <= MAX_ATTESTORS_PER_SLICE, "attestors exceed maximum allowed per slice");
         assert!(threshold > 0, "threshold must be greater than 0");
         assert!(threshold <= attestors.len() as u32, "threshold cannot exceed attestors count");
         let id: u64 = env
@@ -288,6 +290,7 @@ impl QuorumProofContract {
             .get(&DataKey::Slice(slice_id))
             .expect("slice not found");
         assert!(slice.creator == creator, "only the slice creator can add attestors");
+        assert!(slice.attestors.len() as u32 < MAX_ATTESTORS_PER_SLICE, "attestors exceed maximum allowed per slice");
         for a in slice.attestors.iter() {
             assert!(a != attestor, "attestor already in slice");
         }
@@ -679,6 +682,40 @@ mod tests {
         attestors.push_back(attestor2);
         // threshold=5 with only 2 attestors - impossible to reach quorum
         let _slice_id = client.create_slice(&creator, &attestors, &5u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
+    fn test_create_slice_exceeds_max_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        for _ in 0..=MAX_ATTESTORS_PER_SLICE {
+            attestors.push_back(Address::generate(&env));
+        }
+        let _slice_id = client.create_slice(&creator, &attestors, &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
+    fn test_add_attestor_exceeds_max_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        for _ in 0..MAX_ATTESTORS_PER_SLICE {
+            attestors.push_back(Address::generate(&env));
+        }
+        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+        // This push should exceed the cap
+        client.add_attestor(&creator, &slice_id, &Address::generate(&env));
     }
 
     #[test]
