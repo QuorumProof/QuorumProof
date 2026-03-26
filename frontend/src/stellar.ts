@@ -137,6 +137,16 @@ export async function isExpired(credentialId) {
 }
 
 /**
+ * Retrieve a quorum slice by ID.
+ * Returns the QuorumSlice struct: { id, creator, attestors, threshold }
+ * @returns {Promise<{id: bigint, creator: string, attestors: string[], threshold: number}>}
+ */
+export async function getSlice(sliceId) {
+  const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
+  return simulate(CONTRACT_ID, 'get_slice', [sliceVal]);
+}
+
+/**
  * Verify a ZK claim against the ZK verifier contract.
  * @param {number|string} credentialId
  * @param {string} claimType  e.g. "has_degree"
