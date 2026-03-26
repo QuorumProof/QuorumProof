@@ -1,14 +1,22 @@
-# Issue #19: Fix TTL Management in QuorumProofContract
+# SBT Duplicate Mint Bug Fix - ISSUE
 
-## Plan Breakdown & Progress
+Current Status: Code logic exists but lib.rs has syntax errors/duplicates preventing compilation/tests. No snapshot for duplicate test.
 
-### 1. [x] Checkout new branch `blackboxai/issue-19-ttl-fix`
-### 2. [x] Add TTL constants and documentation to `contracts/quorum_proof/src/lib.rs`
-### 3. [x] Insert `extend_ttl` calls after all 7 storage writes
-### 4. [x] Add new test `test_storage_persists_across_ledgers`
-### 5. [x] Run `cargo test` to verify (passes)
-### 6. [] Create PR
-### 6. [] Create PR
+## Plan Steps:
+1. Fix contracts/sbt_registry/src/lib.rs:
+   - Remove duplicate DataKey, imports, constants.
+   - Clean mint function: simple version with duplicate check (matching tests).
+   - Add QP validation optionally if needed.
+   - Fix test_duplicate_sbt_minting_rejection and others.
+   - Clean transfer test, persistence test.
 
-Estimated Time: 2 hours  
-Priority: High
+2. cd contracts/sbt_registry && cargo test  # Generate snapshots including duplicate rejection.
+
+3. Verify: cd contracts/sbt_registry && cargo build
+
+4. [ ] Update this TODO with completion.
+
+5. Create PR if needed.
+
+**Next Action:** Implement lib.rs fixes.
+
