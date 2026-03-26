@@ -1218,57 +1218,98 @@ textarea {
 /* ---- Badge variants ---- */
 .badge--yellow { background: var(--yellow-subtle); color: var(--yellow); border: 1px solid rgba(245,158,11,0.25); }
 
-/* ---- Issue Credential Form ---- */
-.issue-form {
+/* ---- Quorum Slice Builder ---- */
+.qsb {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.issue-form .form-row {
-  margin-bottom: 20px;
+.qsb__section {
+  padding: 4px 0;
 }
 
-.issue-form__hint {
-  font-size: 12px;
+.qsb__empty {
+  font-size: 13px;
   color: var(--text-muted);
-  margin-top: 6px;
-  line-height: 1.5;
+  font-style: italic;
+  padding: 8px 0;
 }
 
-.issue-form__field-error {
-  font-size: 12px;
-  color: var(--red);
-  margin-top: 6px;
+.qsb__attestor-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qsb__attestor-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-}
-
-.issue-form__field-error::before {
-  content: '⚠';
-  font-size: 11px;
-}
-
-.issue-form__submit {
-  width: 100%;
-  margin-top: 8px;
-}
-
-.issue-form__success {
-  animation: slideUp 0.35s ease;
-}
-
-.issue-form__success-actions {
-  display: flex;
   gap: 12px;
-  margin-top: 20px;
-  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition);
 }
 
-/* highlight invalid inputs */
-input[aria-invalid="true"],
-select[aria-invalid="true"] {
-  border-color: var(--red);
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+.qsb__attestor-item:hover {
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.qsb__attestor-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.qsb__attestor-addr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.qsb__attestor-role {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.qsb__remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition), background var(--transition);
+  flex-shrink: 0;
+}
+
+.qsb__remove-btn:hover {
+  color: var(--red);
+  background: var(--red-subtle);
+}
+
+.qsb__preview-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qsb__threshold-pct {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.qsb-success__actions {
+  margin-top: 20px;
 }

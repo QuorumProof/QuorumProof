@@ -34,10 +34,10 @@ export function Navbar() {
             Verify
           </Link>
           <Link
-            to="/issue"
-            className={`nav-link${location.pathname === '/issue' ? ' active' : ''}`}
+            to="/slice"
+            className={`nav-link${location.pathname === '/slice' ? ' active' : ''}`}
           >
-            Issue
+            Slice Builder
           </Link>
         </div>
 
