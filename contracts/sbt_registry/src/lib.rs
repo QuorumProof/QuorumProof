@@ -167,6 +167,34 @@ impl SbtRegistryContract {
     pub fn transfer(_env: Env, _from: Address, _to: Address, _token_id: u64) {
         panic_with_error!(&Env::default(), ContractError::SoulboundNonTransferable);
     }
+
+    /// Burn (destroy) a soulbound token. Only the owner may call this.
+    /// Removes Token, Owner, and OwnerTokens records from storage.
+    pub fn burn(env: Env, owner: Address, token_id: u64) {
+        owner.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "only the token owner can burn");
+
+        env.storage().persistent().remove(&DataKey::Token(token_id));
+        env.storage().persistent().remove(&DataKey::Owner(token_id));
+
+        let mut owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = owner_tokens.iter().position(|id| id == token_id) {
+            owner_tokens.remove(pos as u32);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(owner), &owner_tokens);
+    }
 }
 
 #[cfg(test)]
@@ -373,5 +401,55 @@ mod tests {
         let tokens = client.get_tokens_by_owner(&owner);
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens.get(0).unwrap(), token_id);
+    }
+
+    #[test]
+    fn test_burn_removes_token_and_owner_records() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &1u64, &uri);
+
+        client.burn(&owner, &token_id);
+
+        // OwnerTokens list should be empty after burn
+        let tokens = client.get_tokens_by_owner(&owner);
+        assert_eq!(tokens.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "token not found")]
+    fn test_burn_get_token_panics_after_burn() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &1u64, &uri);
+
+        client.burn(&owner, &token_id);
+        client.get_token(&token_id); // must panic
+    }
+
+    #[test]
+    #[should_panic(expected = "only the token owner can burn")]
+    fn test_burn_rejects_non_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &1u64, &uri);
+
+        client.burn(&attacker, &token_id); // must panic
     }
 }
