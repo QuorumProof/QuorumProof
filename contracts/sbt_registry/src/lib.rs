@@ -1,14 +1,14 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, Address, Bytes, Env, Vec};
 
+const STANDARD_TTL: u32 = 16_384;
+const EXTENDED_TTL: u32 = 524_288;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
     SoulboundNonTransferable = 1,
-    CredentialRevoked = 2,
-    CredentialNotFound = 3,
 }
 
 #[contracttype]
@@ -36,44 +36,24 @@ pub struct SbtRegistryContract;
 #[contractimpl]
 impl SbtRegistryContract {
     /// Mint a soulbound token linked to a credential_id.
-    /// Panics if SBT already exists for this (owner, credential_id).
-    pub fn mint(
-        env: Env,
-        owner: Address,
-        credential_id: u64,
-        metadata_uri: Bytes,
-    ) -> u64 {
+    /// Panics if an SBT already exists for this (owner, credential_id).
+    pub fn mint(env: Env, owner: Address, credential_id: u64, metadata_uri: Bytes) -> u64 {
         owner.require_auth();
-
-        // Check uniqueness: no existing SBT for this owner+credential
         if env.storage().instance().has(&DataKey::OwnerCredential(owner.clone(), credential_id)) {
             panic_with_error!(&env, ContractError::SoulboundNonTransferable);
         }
-
         let mut token_count: u64 = env.storage().instance().get(&DataKey::TokenCount).unwrap_or(0);
         token_count += 1;
         let token_id = token_count;
-
-        let token = SoulboundToken {
-            id: token_id,
-            owner: owner.clone(),
-            credential_id,
-            metadata_uri: metadata_uri.clone(),
-        };
-
-        // Persistent storage for token
+        let token = SoulboundToken { id: token_id, owner: owner.clone(), credential_id, metadata_uri };
         env.storage().persistent().set(&DataKey::Token(token_id), &token);
-        env.storage().persistent().extend_ttl(&DataKey::Token(token_id), 16_384, 524_288);
-
+        env.storage().persistent().extend_ttl(&DataKey::Token(token_id), STANDARD_TTL, EXTENDED_TTL);
         env.storage().persistent().set(&DataKey::Owner(token_id), &owner.clone());
-        env.storage().persistent().extend_ttl(&DataKey::Owner(token_id), 16_384, 524_288);
-
+        env.storage().persistent().extend_ttl(&DataKey::Owner(token_id), STANDARD_TTL, EXTENDED_TTL);
         env.storage().instance().set(&DataKey::TokenCount, &token_count);
-
-        // Owner tokens list
         let mut owner_tokens: Vec<u64> = env.storage().persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
+            .unwrap_or(Vec::new(&env));
         owner_tokens.push_back(token_id);
         env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
         env.storage().persistent().extend_ttl(&DataKey::OwnerTokens(owner.clone()), 16_384, 524_288);
@@ -94,39 +74,29 @@ impl SbtRegistryContract {
     }
 
     pub fn get_tokens_by_owner(env: Env, owner: Address) -> Vec<u64> {
-        env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or_else(|| Vec::new(&env))
+        env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
     }
 
     pub fn transfer(env: Env, _from: Address, _to: Address, _token_id: u64) {
         panic_with_error!(&env, ContractError::SoulboundNonTransferable);
     }
 
-    /// Burn (destroy) a soulbound token. Only the owner may call this.
-    /// Removes Token, Owner, and OwnerTokens records from storage.
+    /// Burn a soulbound token. Only the owner may call this.
     pub fn burn(env: Env, owner: Address, token_id: u64) {
         owner.require_auth();
-
-        let token: SoulboundToken = env
-            .storage()
-            .persistent()
+        let token: SoulboundToken = env.storage().persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "only the token owner can burn");
-
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
-
-        let mut owner_tokens: Vec<u64> = env
-            .storage()
-            .persistent()
+        let mut owner_tokens: Vec<u64> = env.storage().persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
             .unwrap_or(Vec::new(&env));
         if let Some(pos) = owner_tokens.iter().position(|id| id == token_id) {
             owner_tokens.remove(pos as u32);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::OwnerTokens(owner), &owner_tokens);
+        env.storage().persistent().set(&DataKey::OwnerTokens(owner), &owner_tokens);
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
@@ -148,11 +118,9 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, SbtRegistryContract);
         let client = SbtRegistryContractClient::new(&env, &contract_id);
-
         let owner = Address::generate(&env);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &1u64, &uri);
-
         assert_eq!(token_id, 1);
         assert_eq!(client.owner_of(&token_id), owner);
     }
@@ -164,16 +132,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, SbtRegistryContract);
         let client = SbtRegistryContractClient::new(&env, &contract_id);
-
         let owner = Address::generate(&env);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let credential_id = 1u64;
-
-        // First mint succeeds
-        let _ = client.mint(&owner, &credential_id, &uri);
-
-        // Second mint same owner+credential panics
-        client.mint(&owner, &credential_id, &uri);
+        client.mint(&owner, &1u64, &uri);
+        client.mint(&owner, &1u64, &uri);
     }
 
     // Other tests for ownership, get_tokens_by_owner etc. unchanged as per existing
@@ -214,6 +176,4 @@ fn test_upgrade_unauthorized_panics() {
             client.upgrade(&unpriv, &wasm_hash);
         });
     }
-
 }
-
