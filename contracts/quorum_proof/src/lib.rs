@@ -311,12 +311,19 @@ impl QuorumProofContract {
     }
 
     /// Revoke a credential. Only the original issuer can revoke.
+    /// Panics with "credential has expired" if the credential is expired.
     pub fn revoke_credential(env: Env, issuer: Address, credential_id: u64) {
         issuer.require_auth();
         Self::require_not_paused(&env);
         let mut credential: Credential = env.storage().instance().get(&DataKey::Credential(credential_id)).expect("credential not found");
         assert!(issuer == credential.issuer, "only the original issuer can revoke");
         assert!(!credential.revoked, "credential already revoked");
+        if let Some(expires_at) = credential.expires_at {
+            assert!(
+                env.ledger().timestamp() < expires_at,
+                "credential has expired"
+            );
+        }
         credential.revoked = true;
         env.storage()
             .instance()
