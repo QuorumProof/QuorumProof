@@ -24,12 +24,13 @@ pub struct ZkVerifierContract;
 #[contractimpl]
 impl ZkVerifierContract {
     /// Generate a proof request for a given credential and claim type.
-    pub fn generate_proof_request(env: Env, credential_id: u64, claim_type: ClaimType) -> ProofRequest {
-        ProofRequest {
-            credential_id,
-            claim_type,
-            nonce: env.ledger().sequence() as u64,
-        }
+    pub fn generate_proof_request(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+    ) -> ProofRequest {
+        let nonce = env.ledger().sequence() as u64;
+        ProofRequest { credential_id, claim_type, nonce }
     }
 
     /// Verify a ZK proof for a claim.
@@ -54,28 +55,55 @@ impl ZkVerifierContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Bytes, Env};
+    use soroban_sdk::{Bytes, Env};
+    use soroban_sdk::testutils::Address as _;
 
     #[test]
-    fn test_verify_claim_nonempty_proof_returns_true() {
+    fn test_verify_claim_degree_success() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &zk_id);
         let qp_id = Address::generate(&env);
+
         let proof = Bytes::from_slice(&env, b"valid-proof");
         assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
     }
 
     #[test]
-    fn test_verify_claim_empty_proof_returns_false() {
+    fn test_verify_claim_revoked_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &zk_id);
+        let qp_id = Address::generate(&env);
+
+        let proof = Bytes::new(&env);
+        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+    }
+
+    #[test]
+    fn test_verify_claim_wrong_type_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &zk_id);
+        let qp_id = Address::generate(&env);
+
+        let proof = Bytes::new(&env);
+        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasLicense, &proof));
+    }
+
+    #[test]
+    fn test_upgrade_success() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, ZkVerifierContract);
         let client = ZkVerifierContractClient::new(&env, &contract_id);
-        let qp_id = Address::generate(&env);
-        let proof = Bytes::new(&env);
-        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasLicense, &proof));
+
+        let admin = Address::generate(&env);
+        let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        client.upgrade(&admin, &wasm_hash);
     }
 
     #[test]
