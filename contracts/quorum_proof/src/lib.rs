@@ -610,6 +610,42 @@ mod tests {
     }
 
     #[test]
+    fn test_issuer_field_stored_on_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let cred = client.get_credential(&id);
+        assert_eq!(cred.issuer, issuer, "issuer field must match the caller of issue_credential");
+    }
+
+    #[test]
+    fn test_different_issuers_produce_distinct_provenance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer_a = Address::generate(&env);
+        let issuer_b = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let id_a = client.issue_credential(&issuer_a, &subject, &1u32, &metadata, &None);
+        let id_b = client.issue_credential(&issuer_b, &subject, &1u32, &metadata, &None);
+
+        assert_eq!(client.get_credential(&id_a).issuer, issuer_a);
+        assert_eq!(client.get_credential(&id_b).issuer, issuer_b);
+        assert_ne!(client.get_credential(&id_a).issuer, client.get_credential(&id_b).issuer);
+    }
+
+    #[test]
     fn test_issue_credential_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
