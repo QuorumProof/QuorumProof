@@ -1,5 +1,5 @@
 #! [no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Vec, panic_with_error, testutils::Address as _, testutils::Ledger};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Vec, panic_with_error, testutils::{Address as _, Ledger as _, Events as _}};&#10;use quorum_proof::QuorumProofContractClient;
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +127,12 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::OwnerTokens(owner), &owner_tokens);
     }
+
+    /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: Bytes) {
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
 }
 
 #[cfg(test)]
@@ -169,9 +175,42 @@ mod tests {
     }
 
     // Other tests for ownership, get_tokens_by_owner etc. unchanged as per existing
-    #[test]
+#[test]
     fn test_get_tokens_by_owner_single() { /* impl from previous */ }
 
+#[test]
+    fn test_upgrade_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let wasm_hash = Bytes::from_slice(&env, b"new_wasm_hash");
+
+        // Should succeed without panic
+        client.upgrade(&admin, &wasm_hash);
+    }
+
+#[test]
+#[should_panic(expected = "HostError")]
+fn test_upgrade_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let unpriv = Address::generate(&env);
+        let wasm_hash = Bytes::from_slice(&env, b"new_wasm_hash");
+
+        client.upgrade(&admin, &wasm_hash);  // Authorize admin first
+
+        // Unauthorized should panic on require_auth
+        env.as_contract(&contract_id, || {
+            client.upgrade(&unpriv, &wasm_hash);
+        });
+    }
 
 }
 
