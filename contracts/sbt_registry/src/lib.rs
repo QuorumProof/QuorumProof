@@ -1,5 +1,5 @@
 #! [no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Vec, panic_with_error, testutils::{Address as _, Ledger as _, Events as _}};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Vec, panic_with_error, testutils::{Address as _, Ledger as _, Events as _}};&#10;use quorum_proof::QuorumProofContractClient;
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
