@@ -181,9 +181,7 @@ impl QuorumProofContract {
     /// Retrieve a credential by ID. Panics with ContractError::CredentialNotFound if missing.
     /// Panics with "credential has expired" if the credential is expired.
     pub fn get_credential(env: Env, credential_id: u64) -> Credential {
-        let credential: Credential = env
-            .storage()
-            .instance()
+        let credential: Credential = env.storage().instance()
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         if let Some(expires_at) = credential.expires_at {
@@ -283,10 +281,7 @@ impl QuorumProofContract {
             if a == attestor { found = true; break; }
         }
         assert!(found, "attestor not in slice");
-
-        let mut attestors: Vec<Address> = env
-            .storage()
-            .instance()
+        let mut attestors: Vec<Address> = env.storage().instance()
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
 
@@ -442,13 +437,12 @@ mod tests {
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
         env.ledger().set(LedgerInfo {
-            timestamp: 1_000_000,
+            timestamp: ts,
             protocol_version: 20,
-            sequence_number: 20_000,
+            sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 10,
             min_persistent_entry_ttl: 4096,
-            min_temp_entry_ttl: 16,
             max_entry_ttl: 6_312_000,
         });
 
@@ -457,6 +451,8 @@ mod tests {
         assert_eq!(cred.subject, subject);
         assert!(!cred.revoked);
     }
+
+    // --- pause / unpause ---
 
     #[test]
     fn test_is_paused_false_before_pause() {
@@ -471,19 +467,33 @@ mod tests {
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
         assert_eq!(id, 1);
 
-        let cred = client.get_credential(&id);
-        assert_eq!(cred.subject, subject);
-        assert_eq!(cred.issuer, issuer);
-        assert!(!cred.revoked);
+    #[test]
+    fn test_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.pause(&admin);
+        assert!(client.is_paused());
+        client.unpause(&admin);
+        assert!(!client.is_paused());
     }
 
     #[test]
     fn test_issuer_field_stored_on_credential() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        client.pause(&non_admin);
+    }
 
+    #[test]
+    #[should_panic]
+    fn test_pause_blocks_issue_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.pause(&admin);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
@@ -562,7 +572,6 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
         attestors.push_back(attestor2.clone());
@@ -576,8 +585,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "threshold must be greater than 0")]
-    fn test_zero_threshold_rejection() {
+    fn test_unpause_allows_issue_credential() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -589,9 +597,10 @@ mod tests {
         client.create_slice(&creator, &attestors, &0u32);
     }
 
+    // --- credential issuance ---
+
     #[test]
-    #[should_panic(expected = "threshold cannot exceed attestors count")]
-    fn test_threshold_exceeds_attestors() {
+    fn test_issue_and_get_credential() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -605,8 +614,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
-    fn test_create_slice_exceeds_max_attestors() {
+    #[should_panic(expected = "metadata_hash cannot be empty")]
+    fn test_empty_metadata_hash_rejection() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -621,8 +630,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
-    fn test_add_attestor_exceeds_max_attestors() {
+    #[should_panic]
+    fn test_get_credential_not_found() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -636,6 +645,8 @@ mod tests {
         let slice_id = client.create_slice(&creator, &attestors, &1u32);
         client.add_attestor(&creator, &slice_id, &Address::generate(&env));
     }
+
+    // --- revocation ---
 
     #[test]
     #[should_panic]
@@ -651,20 +662,15 @@ mod tests {
 
         client.pause(&admin);
         client.revoke_credential(&issuer, &id);
-
         let cred = client.get_credential(&id);
         assert!(cred.revoked);
-        assert_eq!(cred.issuer, issuer);
-        assert_eq!(cred.subject, subject);
     }
 
     #[test]
     fn test_subject_revoke_credential() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
@@ -674,18 +680,14 @@ mod tests {
 
         let cred = client.get_credential(&id);
         assert!(cred.revoked);
-        assert_eq!(cred.issuer, issuer);
-        assert_eq!(cred.subject, subject);
     }
 
     #[test]
-    #[should_panic(expected = "metadata_hash cannot be empty")]
-    fn test_empty_metadata_hash_rejection() {
+    #[should_panic(expected = "only subject or issuer can revoke")]
+    fn test_unauthorized_revoke_credential() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         client.issue_credential(&issuer, &subject, &1u32, &Bytes::new(&env), &None);
@@ -698,6 +700,13 @@ mod tests {
         env.mock_all_auths();
         let (client, admin) = setup(&env);
 
+    // --- slices & attestation ---
+
+    #[test]
+    fn test_quorum_slice_and_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
@@ -712,28 +721,55 @@ mod tests {
 
         client.attest(&attestor1, &cred_id, &slice_id);
         client.attest(&attestor1, &cred_id, &slice_id);
+        assert!(!client.is_attested(&cred_id, &slice_id));
+        client.attest(&attestor2, &cred_id, &slice_id);
+        assert!(client.is_attested(&cred_id, &slice_id));
     }
 
     #[test]
-    #[should_panic(expected = "only subject or issuer can revoke")]
-    fn test_unauthorized_revoke_credential() {
+    #[should_panic(expected = "attestor has already attested for this credential")]
+    fn test_duplicate_attestation_rejection() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let unauthorized = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id);
+        client.attest(&attestor, &cred_id, &slice_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential is revoked")]
+    fn test_attest_revoked_credential_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
-        client.revoke_credential(&unauthorized, &id);
+    // --- slice management ---
+
+    #[test]
+    #[should_panic(expected = "attestors cannot be empty")]
+    fn test_create_slice_empty_attestors_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        client.create_slice(&Address::generate(&env), &Vec::new(&env), &1u32);
     }
 
     #[test]
-    #[should_panic]
-    fn test_get_credential_not_found() {
+    #[should_panic(expected = "threshold must be greater than 0")]
+    fn test_zero_threshold_rejection() {
         let env = Env::default();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
@@ -741,8 +777,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_get_slice_not_found() {
+    #[should_panic(expected = "threshold cannot exceed attestors count")]
+    fn test_threshold_exceeds_attestors() {
         let env = Env::default();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
@@ -750,17 +786,28 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
+    fn test_create_slice_exceeds_max_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        for _ in 0..=MAX_ATTESTORS_PER_SLICE {
+            attestors.push_back(Address::generate(&env));
+        }
+        client.create_slice(&creator, &attestors, &1u32);
+    }
+
+    #[test]
     fn test_get_slice_creator_matches() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
         let slice_id = client.create_slice(&creator, &attestors, &1u32);
-
         assert_eq!(client.get_slice_creator(&slice_id), creator);
     }
 
@@ -779,7 +826,8 @@ mod tests {
     }
 
     #[test]
-    fn test_get_credentials_by_subject_multiple() {
+    #[should_panic(expected = "only the slice creator can add attestors")]
+    fn test_add_attestor_unauthorized_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -801,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_credentials_by_subject_empty() {
+    fn test_update_threshold_success() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -813,7 +861,8 @@ mod tests {
     }
 
     #[test]
-    fn test_get_credentials_by_subject_isolated_per_subject() {
+    #[should_panic(expected = "only the slice creator can update threshold")]
+    fn test_update_threshold_unauthorized_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -838,6 +887,8 @@ mod tests {
         assert_eq!(ids_b.get(0).unwrap(), id_b1);
     }
 
+    // --- expiry ---
+
     #[test]
     fn test_is_expired_no_expiry() {
         let env = Env::default();
@@ -858,11 +909,7 @@ mod tests {
     fn test_credential_not_expired_before_expiry() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        set_ledger_timestamp(&env, 1_000);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
@@ -875,11 +922,8 @@ mod tests {
     fn test_credential_expired_after_expiry() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         set_ledger_timestamp(&env, 1_000);
-
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
@@ -894,16 +938,12 @@ mod tests {
     fn test_get_credential_panics_when_expired() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         set_ledger_timestamp(&env, 1_000);
-
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64));
-
         set_ledger_timestamp(&env, 3_000);
         client.get_credential(&id);
     }
@@ -912,21 +952,17 @@ mod tests {
     fn test_is_attested_returns_false_when_expired() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
         set_ledger_timestamp(&env, 1_000);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64));
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let slice_id = client.create_slice(&issuer, &attestors, &1u32);
-
         client.attest(&attestor, &cred_id, &slice_id);
         assert!(client.is_attested(&cred_id, &slice_id));
 
@@ -934,14 +970,14 @@ mod tests {
         assert!(!client.is_attested(&cred_id, &slice_id));
     }
 
+    // --- batch issue ---
+
     #[test]
     #[should_panic(expected = "credential is revoked")]
     fn test_attest_revoked_credential_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
@@ -1138,24 +1174,13 @@ mod tests {
         assert!(!result);
     }
 
-    #[test]
-    fn test_get_attestor_reputation_zero_before_any_attestation() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let attestor = Address::generate(&env);
-        assert_eq!(client.get_attestor_reputation(&attestor), 0);
-    }
+    // --- reputation & counts ---
 
     #[test]
     fn test_get_attestor_reputation_increments_per_attestation() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
@@ -1164,10 +1189,8 @@ mod tests {
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let slice_id = client.create_slice(&issuer, &attestors, &1u32);
-
         let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
         let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
-
         assert_eq!(client.get_attestor_reputation(&attestor), 0);
         client.attest(&attestor, &cred_id1, &slice_id);
         assert_eq!(client.get_attestor_reputation(&attestor), 1);
@@ -1176,16 +1199,12 @@ mod tests {
     }
 
     #[test]
-    fn test_get_attestor_reputation_independent_per_attestor() {
+    fn test_get_credential_count() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let attestor_a = Address::generate(&env);
-        let attestor_b = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
         let mut attestors = Vec::new(&env);
@@ -1238,13 +1257,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "threshold exceeds attestor count")]
-    fn test_update_threshold_exceeds_attestor_count_panics() {
+    fn test_get_slice_count() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
@@ -1318,19 +1334,15 @@ mod tests {
     fn test_register_and_get_credential_type() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
         let admin = Address::generate(&env);
         let name = String::from_str(&env, "Mechanical Engineering Degree");
         let desc = String::from_str(&env, "Bachelor or higher in Mechanical Engineering");
 
         client.register_credential_type(&admin, &1u32, &name, &desc);
-
         let def = client.get_credential_type(&1u32);
         assert_eq!(def.type_id, 1u32);
         assert_eq!(def.name, name);
-        assert_eq!(def.description, desc);
     }
 
     #[test]

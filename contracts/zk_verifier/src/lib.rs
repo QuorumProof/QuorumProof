@@ -111,8 +111,7 @@ mod tests {
         let env = Env::default();
         let contract_id = env.register_contract(None, ZkVerifierContract);
         let client = ZkVerifierContractClient::new(&env, &contract_id);
-
-        let req = client.generate_proof_request(&1u64, &ClaimType::HasLicense);
-        assert_eq!(req.credential_id, 1);
+        let req = client.generate_proof_request(&42u64, &ClaimType::HasEmploymentHistory);
+        assert_eq!(req.credential_id, 42u64);
     }
 }
