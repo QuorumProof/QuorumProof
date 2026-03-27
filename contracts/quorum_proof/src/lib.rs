@@ -1087,9 +1087,17 @@ mod tests {
     #[should_panic(expected = "threshold cannot exceed attestors count")]
     fn test_threshold_exceeds_attestors() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
-        client.get_slice(&999u64);
+
+        let creator = Address::generate(&env);
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        attestors.push_back(Address::generate(&env));
+
+        // 2 attestors but threshold of 3 — must panic
+        client.create_slice(&creator, &attestors, &3u32);
     }
 
     #[test]
