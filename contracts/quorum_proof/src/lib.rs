@@ -346,6 +346,12 @@ impl QuorumProofContract {
         env.storage().instance().get(&DataKey::Attestors(credential_id)).unwrap_or(Vec::new(&env))
     }
 
+    /// Returns the number of attestations for a credential without loading the full list.
+    pub fn get_attestation_count(env: Env, credential_id: u64) -> u32 {
+        let attestors: Vec<Address> = env.storage().instance().get(&DataKey::Attestors(credential_id)).unwrap_or(Vec::new(&env));
+        attestors.len()
+    }
+
     /// Returns the total number of credentials an attestor has signed.
     pub fn get_attestor_reputation(env: Env, attestor: Address) -> u64 {
         env.storage().instance().get(&DataKey::AttestorCount(attestor)).unwrap_or(0u64)
@@ -528,5 +534,30 @@ mod tests {
         assert!(!client.is_revoked(&id));
         client.revoke_credential(&issuer, &id);
         assert!(client.is_revoked(&id));
+    }
+
+    #[test]
+    fn test_get_attestation_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+
+        assert_eq!(client.get_attestation_count(&cred_id), 0);
+        client.attest(&attestor1, &cred_id, &slice_id);
+        assert_eq!(client.get_attestation_count(&cred_id), 1);
+        client.attest(&attestor2, &cred_id, &slice_id);
+        assert_eq!(client.get_attestation_count(&cred_id), 2);
     }
 }
