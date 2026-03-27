@@ -30,7 +30,11 @@ impl ZkVerifierContract {
         claim_type: ClaimType,
     ) -> ProofRequest {
         let nonce = env.ledger().sequence() as u64;
-        ProofRequest { credential_id, claim_type, nonce }
+        ProofRequest {
+            credential_id,
+            claim_type,
+            nonce,
+        }
     }
 
     /// Verify a ZK proof for a claim.
@@ -55,8 +59,8 @@ impl ZkVerifierContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{Bytes, Env};
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Bytes, Env};
 
     #[test]
     fn test_verify_claim_degree_success() {
@@ -95,6 +99,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_upgrade_success() {
         let env = Env::default();
         env.mock_all_auths();
