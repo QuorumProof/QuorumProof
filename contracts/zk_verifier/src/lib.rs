@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Bytes, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env};
 
 /// Supported claim types for ZK verification.
 #[contracttype]
@@ -48,6 +48,12 @@ impl ZkVerifierContract {
     ) -> bool {
         !proof.is_empty()
     }
+
+    /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: Bytes) {
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
 }
 
 #[cfg(test)]
@@ -68,7 +74,41 @@ mod tests {
         assert!(!client.verify_claim(&1u64, &ClaimType::HasDegree, &empty));
     }
 
-    #[test]
+#[test]
+    fn test_upgrade_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let wasm_hash = Bytes::from_slice(&env, b"new_wasm_hash");
+
+        // Should succeed without panic
+        client.upgrade(&admin, &wasm_hash);
+    }
+
+#[test]
+#[should_panic(expected = "HostError")]
+fn test_upgrade_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let unpriv = Address::generate(&env);
+        let wasm_hash = Bytes::from_slice(&env, b"new_wasm_hash");
+
+        client.upgrade(&admin, &wasm_hash);  // Authorize admin first
+
+        // Unauthorized should panic on require_auth
+        env.as_contract(&contract_id, || {
+            client.upgrade(&unpriv, &wasm_hash);
+        });
+    }
+
+#[test]
     fn test_generate_proof_request() {
         let env = Env::default();
         let contract_id = env.register_contract(None, ZkVerifierContract);

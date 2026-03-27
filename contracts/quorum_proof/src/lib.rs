@@ -515,6 +515,12 @@ impl QuorumProofContract {
             .get(&DataKey::CredentialType(type_id))
             .expect("credential type not registered")
     }
+
+    /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::Bytes) {
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
 }
 
 #[cfg(test)]
@@ -1577,7 +1583,41 @@ mod tests {
         client.get_credential_type(&99u32);
     }
 
-    #[test]
+#[test]
+    fn test_upgrade_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let wasm_hash = Bytes::from_slice(&env, b"new_wasm_hash");
+
+        // Should succeed without panic
+        client.upgrade(&admin, &wasm_hash);
+    }
+
+#[test]
+#[should_panic(expected = "HostError")]
+fn test_upgrade_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let unpriv = Address::generate(&env);
+        let wasm_hash = Bytes::from_slice(&env, b"new_wasm_hash");
+
+        client.upgrade(&admin, &wasm_hash);  // Authorize admin first
+
+        // Unauthorized should panic on require_auth
+        env.as_contract(&contract_id, || {
+            client.upgrade(&unpriv, &wasm_hash);
+        });
+    }
+
+#[test]
     fn test_register_credential_type_overwrites() {
         let env = Env::default();
         env.mock_all_auths();
