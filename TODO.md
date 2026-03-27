@@ -1,13 +1,13 @@
-# SBT Duplicate Mint Bug Fix - ISSUE
+# Issue 37: Contract Upgrade Function Implementation
 
-**FIX COMPLETE ✅**
+## Steps:
+- [ ] Create TODO.md ✅
+- [x] Edit contracts/quorum_proof/src/lib.rs: Add upgrade() fn + tests ✅
+- [x] Edit contracts/sbt_registry/src/lib.rs: Add upgrade() fn + tests ✅
+- [x] Edit contracts/zk_verifier/src/lib.rs: Add upgrade() fn + tests ✅
+- [ ] Run cargo test in each contract dir
+- [ ] Update TODO.md as complete
+- [ ] Task complete ✅
 
-All steps done:
-- lib.rs fixed and clean.
-- cargo test passed, snapshots generated (incl duplicate rejection).
-- cargo build success.
-
-**Next:** Create PR on branch `blackboxai/sbt-duplicate-mint-fix` for ISSUE #22.
-
-See `ISSUE_22_FIX_SUMMARY.md`.
+Current progress: Starting edits...
 
