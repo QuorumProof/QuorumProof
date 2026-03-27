@@ -1486,3 +1486,86 @@ mod tests {
         assert_eq!(client.get_attestation_count(&cred_id), 2);
     }
 }
+
+    // Issue #48: Full Credential Lifecycle End-to-End
+    #[test]
+    fn test_full_credential_lifecycle_e2e() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Step 1: Set up all three contracts
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmLifecycleTest");
+
+        // Step 2: Issue credential
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // Assert credential state after issuance
+        let cred = qp.get_credential(&cred_id);
+        assert_eq!(cred.issuer, issuer);
+        assert_eq!(cred.subject, subject);
+        assert!(!cred.revoked);
+        assert_eq!(qp.get_credential_count(), 1);
+
+        // Step 3: Create quorum slice with two attestors, threshold of 2
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let slice_id = qp.create_slice(&issuer, &attestors, &2u32);
+
+        // Assert slice state
+        let slice = qp.get_slice(&slice_id);
+        assert_eq!(slice.threshold, 2);
+        assert_eq!(slice.attestors.len(), 2);
+
+        // Step 4: Attest — quorum not yet met after first attestor
+        qp.attest(&attestor1, &cred_id, &slice_id);
+        assert!(!qp.is_attested(&cred_id, &slice_id));
+
+        // Attest — quorum met after second attestor
+        qp.attest(&attestor2, &cred_id, &slice_id);
+        assert!(qp.is_attested(&cred_id, &slice_id));
+
+        // Assert attestor reputations incremented
+        assert_eq!(qp.get_attestor_reputation(&attestor1), 1);
+        assert_eq!(qp.get_attestor_reputation(&attestor2), 1);
+
+        // Step 5: Mint SBT for subject linked to the credential
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbtLifecycle");
+        let token_id = sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        // Assert SBT ownership
+        assert_eq!(sbt.owner_of(&token_id), subject);
+        let owned_tokens = sbt.get_tokens_by_owner(&subject);
+        assert_eq!(owned_tokens.len(), 1);
+        assert_eq!(owned_tokens.get(0).unwrap(), token_id);
+
+        // Assert SBT is linked to the correct credential
+        let token = sbt.get_token(&token_id);
+        assert_eq!(token.credential_id, cred_id);
+        assert_eq!(token.owner, subject);
+
+        // Step 6: Verify ZK claim via verify_engineer
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let verified = qp.verify_engineer(&qp_id, &sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        assert!(verified);
+
+        // Assert empty proof fails verification
+        let empty_proof = Bytes::new(&env);
+        let not_verified = qp.verify_engineer(&qp_id, &sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &empty_proof);
+        assert!(!not_verified);
+    }
+}
