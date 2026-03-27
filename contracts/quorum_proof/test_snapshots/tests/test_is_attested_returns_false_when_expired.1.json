@@ -94,7 +94,7 @@
   ],
   "ledger": {
     "protocol_version": 20,
-    "sequence_number": 100,
+    "sequence_number": 1,
     "timestamp": 3000,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 10,
@@ -125,6 +125,21 @@
                       "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     },
                     "storage": [
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AttestorCount"
+                            },
+                            {
+                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 1
+                        }
+                      },
                       {
                         "key": {
                           "vec": [
@@ -318,7 +333,7 @@
             },
             "ext": "v0"
           },
-          524388
+          524289
         ]
       ],
       [
@@ -351,7 +366,7 @@
             },
             "ext": "v0"
           },
-          6312099
+          6312000
         ]
       ],
       [
@@ -384,7 +399,7 @@
             },
             "ext": "v0"
           },
-          6312099
+          6312000
         ]
       ],
       [
@@ -417,7 +432,7 @@
             },
             "ext": "v0"
           },
-          6312099
+          6312000
         ]
       ],
       [
@@ -438,7 +453,7 @@
             },
             "ext": "v0"
           },
-          524388
+          524289
         ]
       ]
     ]
@@ -645,6 +660,51 @@
                 },
                 {
                   "u64": 1
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "string": "attestation"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "attestor"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "credential_id"
+                  },
+                  "val": {
+                    "u64": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "slice_id"
+                  },
+                  "val": {
+                    "u64": 1
+                  }
                 }
               ]
             }
