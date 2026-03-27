@@ -464,12 +464,29 @@ impl QuorumProofContract {
             .unwrap_or(0u64)
     }
 
+    /// Returns the total number of credentials issued.
+    pub fn get_credential_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64)
+    }
+
+    /// Returns the total number of slices created.
+    pub fn get_slice_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SliceCount)
+            .unwrap_or(0u64)
+    }
+
     /// Unified engineer verification entry point.
     /// 1. Confirms the subject owns at least one SBT linked to the credential.
     /// 2. Verifies the ZK claim proof.
     /// Returns true only when both checks pass.
     pub fn verify_engineer(
         env: Env,
+        quorum_proof_id: Address,
         sbt_registry_id: Address,
         zk_verifier_id: Address,
         subject: Address,
@@ -490,7 +507,7 @@ impl QuorumProofContract {
 
         // 2. Verify the ZK claim proof
         let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
-        zk_client.verify_claim(&credential_id, &claim_type, &proof)
+        zk_client.verify_claim(&quorum_proof_id, &credential_id, &claim_type, &proof)
     }
 
     /// Register a human-readable label for a credential type. Admin-only by convention
@@ -1634,6 +1651,53 @@ fn test_upgrade_unauthorized_panics() {
 
         let def = client.get_credential_type(&1u32);
         assert_eq!(def.name, name_v2);
+    }
+
+    #[test]
+    fn test_get_credential_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        // Zero credentials
+        assert_eq!(client.get_credential_count(), 0);
+
+        // Issue 3 credentials
+        let _id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata.clone(), &None);
+        let _id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata.clone(), &None);
+        let _id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None);
+
+        assert_eq!(client.get_credential_count(), 3);
+
+        // Revoke does not decrease count
+        client.revoke_credential(&issuer, &_id1);
+        assert_eq!(client.get_credential_count(), 3);
+    }
+
+    #[test]
+    fn test_get_slice_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+
+        // Zero slices
+        assert_eq!(client.get_slice_count(), 0);
+
+        // Create 2 slices
+        let _slice_id1 = client.create_slice(&creator, &attestors.clone(), &1u32);
+        let _slice_id2 = client.create_slice(&creator, &attestors, &1u32);
+
+        assert_eq!(client.get_slice_count(), 2);
     }
 }
 
