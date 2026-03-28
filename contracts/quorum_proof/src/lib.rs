@@ -1127,6 +1127,16 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "SliceNotFound")]
+    fn test_get_slice_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        // Try to get a slice that doesn't exist
+        client.get_slice(&999u64);
+    }
+
+    #[test]
     #[should_panic(expected = "unauthorized")]
     fn test_pause_unauthorized_panics() {
         let env = Env::default();
