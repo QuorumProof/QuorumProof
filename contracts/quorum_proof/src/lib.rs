@@ -9,6 +9,8 @@ use zk_verifier::{ClaimType, ZkVerifierContractClient};
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
 const TOPIC_ATTESTATION: &str = "attestation";
+const TOPIC_RENEWAL: &str = "CredentialRenewed";
+const TOPIC_SBT_TRANSFER: &str = "SbtTransferred";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -34,6 +36,14 @@ pub struct AttestationEventData {
     pub attestor: Address,
     pub credential_id: u64,
     pub slice_id: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RenewalEventData {
+    pub credential_id: u64,
+    pub issuer: Address,
+    pub new_expires_at: u64,
 }
 
 #[contracterror]
@@ -356,6 +366,27 @@ impl QuorumProofContract {
         env.events().publish(topics, event_data);
     }
 
+    /// Renew a credential by extending its expiry. Only the original issuer may call this.
+    /// Emits a renewal event.
+    pub fn renew_credential(env: Env, issuer: Address, credential_id: u64, new_expires_at: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let mut credential: Credential = env.storage().instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "only the original issuer can renew");
+        assert!(!credential.revoked, "cannot renew a revoked credential");
+        assert!(new_expires_at > env.ledger().timestamp(), "new_expires_at must be in the future");
+        credential.expires_at = Some(new_expires_at);
+        env.storage().instance().set(&DataKey::Credential(credential_id), &credential);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        let event_data = RenewalEventData { credential_id, issuer, new_expires_at };
+        let topic = String::from_str(&env, TOPIC_RENEWAL);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
     /// Create a quorum slice with weighted attestors. Returns the slice ID.
     ///
     /// # Threshold Semantics
@@ -572,6 +603,52 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Batch attest multiple credentials in a single transaction.
+    /// Each credential_id in the list is attested by the caller using the given slice.
+    /// Caller must be a member of the slice for each credential.
+    pub fn batch_attest(env: Env, attestor: Address, credential_ids: Vec<u64>, slice_id: u64) {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+        let slice: QuorumSlice = env.storage().instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        let mut in_slice = false;
+        for a in slice.attestors.iter() {
+            if a == attestor {
+                in_slice = true;
+                break;
+            }
+        }
+        assert!(in_slice, "attestor not in slice");
+        for credential_id in credential_ids.iter() {
+            let credential: Credential = env.storage().instance()
+                .get(&DataKey::Credential(credential_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+            assert!(!credential.revoked, "credential is revoked");
+            let mut attestors: Vec<Address> = env.storage().instance()
+                .get(&DataKey::Attestors(credential_id))
+                .unwrap_or(Vec::new(&env));
+            for existing in attestors.iter() {
+                if existing == attestor {
+                    panic!("attestor has already attested for this credential");
+                }
+            }
+            attestors.push_back(attestor.clone());
+            env.storage().instance().set(&DataKey::Attestors(credential_id), &attestors);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            let event_data = AttestationEventData { attestor: attestor.clone(), credential_id, slice_id };
+            let topic = String::from_str(&env, TOPIC_ATTESTATION);
+            let mut topics: Vec<String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+        }
+        let count: u64 = env.storage().instance()
+            .get(&DataKey::AttestorCount(attestor.clone()))
+            .unwrap_or(0u64);
+        env.storage().instance().set(&DataKey::AttestorCount(attestor), &(count + credential_ids.len() as u64));
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Check if a credential has met its quorum threshold using weighted trust.
@@ -2206,5 +2283,159 @@ mod tests {
 
         // attestor2 is not in the slice — must panic
         client.attest(&attestor2, &cred_id, &slice_id);
+    }
+
+    // --- Issue #193: batch_attest ---
+
+    #[test]
+    fn test_batch_attest_attests_multiple_credentials() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred_id1);
+        cred_ids.push_back(cred_id2);
+        client.batch_attest(&attestor, &cred_ids, &slice_id);
+
+        assert!(client.is_attested(&cred_id1, &slice_id));
+        assert!(client.is_attested(&cred_id2, &slice_id));
+        assert_eq!(client.get_attestor_reputation(&attestor), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestor not in slice")]
+    fn test_batch_attest_non_member_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let non_member = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred_id);
+        client.batch_attest(&non_member, &cred_ids, &slice_id);
+    }
+
+    // --- Issue #194: is_expired (dedicated tests) ---
+
+    #[test]
+    fn test_is_expired_returns_false_for_no_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        assert!(!client.is_expired(&id));
+    }
+
+    #[test]
+    fn test_is_expired_returns_true_after_expiry_timestamp() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        set_ledger_timestamp(&env, 500);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
+        set_ledger_timestamp(&env, 2_000);
+        assert!(client.is_expired(&id));
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_is_expired_panics_for_missing_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        client.is_expired(&999u64);
+    }
+
+    // --- Issue #195: renew_credential ---
+
+    #[test]
+    fn test_renew_credential_extends_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        set_ledger_timestamp(&env, 500);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
+
+        client.renew_credential(&issuer, &id, &5_000u64);
+
+        set_ledger_timestamp(&env, 2_000);
+        assert!(!client.is_expired(&id));
+    }
+
+    #[test]
+    #[should_panic(expected = "only the original issuer can renew")]
+    fn test_renew_credential_non_issuer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        set_ledger_timestamp(&env, 500);
+        let issuer = Address::generate(&env);
+        let non_issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
+        client.renew_credential(&non_issuer, &id, &5_000u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot renew a revoked credential")]
+    fn test_renew_revoked_credential_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        set_ledger_timestamp(&env, 500);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
+        client.revoke_credential(&issuer, &id);
+        client.renew_credential(&issuer, &id, &5_000u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "new_expires_at must be in the future")]
+    fn test_renew_credential_past_expiry_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        set_ledger_timestamp(&env, 5_000);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(10_000u64));
+        client.renew_credential(&issuer, &id, &1_000u64);
     }
 }
