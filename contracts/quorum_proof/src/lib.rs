@@ -82,12 +82,24 @@ pub struct Credential {
     pub expires_at: Option<u64>,
 }
 
+/// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
+/// Each attestor has an associated weight that contributes to the threshold check.
+/// The threshold represents the minimum total weight of attestors required
+/// for a credential to be considered attested, not just the count of attestors.
+///
+/// This implements a weighted FBA model where trust is proportional to the
+/// stake/weight assigned to each attestor, as described in the Stellar whitepaper.
 #[contracttype]
 #[derive(Clone)]
 pub struct QuorumSlice {
     pub id: u64,
     pub creator: Address,
     pub attestors: Vec<Address>,
+    /// Weights corresponding to each attestor. Each weight represents the
+    /// attestor's stake/contribution to the quorum. Higher weight = more trust.
+    pub weights: Vec<u32>,
+    /// Threshold is measured in weight units, not attestor count.
+    /// The sum of weights from attesting parties must meet or exceed this value.
     pub threshold: u32,
 }
 
@@ -341,11 +353,22 @@ impl QuorumProofContract {
         env.events().publish(topics, event_data);
     }
 
-    /// Create a quorum slice. Returns the slice ID.
+    /// Create a quorum slice with weighted attestors. Returns the slice ID.
+    ///
+    /// # Threshold Semantics
+    /// The threshold is measured in weight units, not attestor count.
+    /// Each attestor's weight represents their stake/contribution to the quorum.
+    /// The sum of weights from attesting parties must meet or exceed this value.
+    ///
+    /// For example, with attestors having weights [50, 30, 20] and threshold 50:
+    /// - One attestor with weight 50 would satisfy the threshold
+    /// - Two attestors with weights 30 and 20 would also satisfy (50 >= 50)
+    /// - Only one attestor with weight 30 would NOT satisfy (30 < 50)
     pub fn create_slice(
         env: Env,
         creator: Address,
         attestors: Vec<Address>,
+        weights: Vec<u32>,
         threshold: u32,
     ) -> u64 {
         creator.require_auth();
@@ -354,10 +377,23 @@ impl QuorumProofContract {
             attestors.len() as u32 <= MAX_ATTESTORS_PER_SLICE,
             "attestors exceed maximum allowed per slice"
         );
-        assert!(threshold > 0, "threshold must be greater than 0");
         assert!(
-            threshold <= attestors.len() as u32,
-            "threshold cannot exceed attestors count"
+            weights.len() == attestors.len(),
+            "weights length must match attestors length"
+        );
+        assert!(threshold > 0, "threshold must be greater than 0");
+        // Calculate total weight sum
+        let mut total_weight: u32 = 0;
+        for w in weights.iter() {
+            total_weight = total_weight.saturating_add(*w);
+        }
+        assert!(
+            threshold <= total_weight,
+            "threshold cannot exceed total weight sum"
+        );
+        assert!(
+            total_weight > 0,
+            "total weight must be greater than 0"
         );
         let id: u64 = env
             .storage()
@@ -369,6 +405,7 @@ impl QuorumProofContract {
             id,
             creator,
             attestors,
+            weights,
             threshold,
         };
         env.storage().instance().set(&DataKey::Slice(id), &slice);
@@ -400,8 +437,13 @@ impl QuorumProofContract {
         slice.creator
     }
 
-    /// Add a new attestor to an existing quorum slice.
-    pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
+    /// Add a new attestor with a given weight to an existing quorum slice.
+    ///
+    /// # Weight Semantics
+    /// The weight represents the attestor's stake/contribution to the quorum.
+    /// When updating threshold, ensure the new threshold doesn't exceed
+    /// the total weight sum (existing + new attestor).
+    pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address, weight: u32) {
         creator.require_auth();
         let mut slice: QuorumSlice = env
             .storage()
@@ -416,10 +458,12 @@ impl QuorumProofContract {
             (slice.attestors.len() as u32) < MAX_ATTESTORS_PER_SLICE,
             "attestors exceed maximum allowed per slice"
         );
+        assert!(weight > 0, "weight must be greater than 0");
         for a in slice.attestors.iter() {
             assert!(a != attestor, "attestor already in slice");
         }
         slice.attestors.push_back(attestor);
+        slice.weights.push_back(weight);
         env.storage()
             .instance()
             .set(&DataKey::Slice(slice_id), &slice);
@@ -429,6 +473,10 @@ impl QuorumProofContract {
     }
 
     /// Update the threshold of an existing quorum slice.
+    ///
+    /// # Threshold Semantics
+    /// The threshold is measured in weight units, not attestor count.
+    /// Must be greater than 0 and cannot exceed the total weight sum of all attestors.
     pub fn update_threshold(env: Env, creator: Address, slice_id: u64, new_threshold: u32) {
         creator.require_auth();
         let mut slice: QuorumSlice = env
@@ -440,9 +488,15 @@ impl QuorumProofContract {
             slice.creator == creator,
             "only the slice creator can update threshold"
         );
+        assert!(new_threshold > 0, "threshold must be greater than 0");
+        // Calculate total weight sum
+        let mut total_weight: u32 = 0;
+        for w in slice.weights.iter() {
+            total_weight = total_weight.saturating_add(*w);
+        }
         assert!(
-            new_threshold <= slice.attestors.len(),
-            "threshold exceeds attestor count"
+            new_threshold <= total_weight,
+            "threshold cannot exceed total weight sum"
         );
         slice.threshold = new_threshold;
         env.storage()
@@ -516,8 +570,18 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
-    /// Check if a credential has met its quorum threshold.
-    /// Returns false if revoked or expired.
+    /// Check if a credential has met its quorum threshold using weighted trust.
+    ///
+    /// # FBA Weighted Trust Model
+    /// This function implements the federated Byzantine agreement (FBA) weighted trust model.
+    /// Instead of simply counting attestors, this sums the weights of attesting parties.
+    ///
+    /// The threshold represents the minimum total weight required, not the count.
+    /// For example, with threshold 50 and two attestors with weights 30 and 20:
+    /// - If only one attestor with weight 30 has signed: NOT attested (30 < 50)
+    /// - If both attestors have signed: attested (30 + 20 = 50 >= 50)
+    ///
+    /// Returns false if the credential is revoked or expired.
     pub fn is_attested(env: Env, credential_id: u64, slice_id: u64) -> bool {
         let credential: Credential = env
             .storage()
@@ -537,12 +601,25 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .expect("slice not found");
-        let attestors: Vec<Address> = env
+        let attested_addresses: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
-        attestors.len() >= slice.threshold
+        
+        // Calculate total weight of attesting parties
+        let mut total_attested_weight: u32 = 0;
+        for attested in attested_addresses.iter() {
+            // Find the index of this attestor in the slice and sum their weight
+            for (i, attestor) in slice.attestors.iter().enumerate() {
+                if *attestor == attested {
+                    total_attested_weight = total_attested_weight.saturating_add(slice.weights.get(i).unwrap_or(&0));
+                    break;
+                }
+            }
+        }
+        
+        total_attested_weight >= slice.threshold
     }
 
     /// Returns true if the credential has been revoked.
@@ -874,7 +951,10 @@ mod tests {
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
         attestors.push_back(attestor2.clone());
-        let slice_id = client.create_slice(&creator, &attestors, &2u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &2u32);
 
         assert!(!client.is_attested(&cred_id, &slice_id));
         client.attest(&attestor1, &cred_id, &slice_id);
@@ -893,7 +973,9 @@ mod tests {
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
-        client.create_slice(&creator, &attestors, &0u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        client.create_slice(&creator, &attestors, &weights, &0u32);
     }
 
     // --- credential issuance ---
@@ -909,7 +991,10 @@ mod tests {
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
         attestors.push_back(Address::generate(&env));
-        client.create_slice(&creator, &attestors, &5u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        client.create_slice(&creator, &attestors, &weights, &2u32);
     }
 
     #[test]
@@ -925,7 +1010,11 @@ mod tests {
         for _ in 0..=MAX_ATTESTORS_PER_SLICE {
             attestors.push_back(Address::generate(&env));
         }
-        client.create_slice(&creator, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        for _ in 0..=MAX_ATTESTORS_PER_SLICE {
+            weights.push_back(1u32);
+        }
+        client.create_slice(&creator, &attestors, &weights, &1u32);
     }
 
     #[test]
@@ -941,8 +1030,12 @@ mod tests {
         for _ in 0..MAX_ATTESTORS_PER_SLICE {
             attestors.push_back(Address::generate(&env));
         }
-        let slice_id = client.create_slice(&creator, &attestors, &1u32);
-        client.add_attestor(&creator, &slice_id, &Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        for _ in 0..MAX_ATTESTORS_PER_SLICE {
+            weights.push_back(1u32);
+        }
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+        client.add_attestor(&creator, &slice_id, &Address::generate(&env), &1u32);
     }
 
     // --- revocation ---
@@ -1007,7 +1100,9 @@ mod tests {
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
         client.pause(&admin);
         client.attest(&attestor, &cred_id, &slice_id);
@@ -1028,8 +1123,10 @@ mod tests {
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
         let creator = Address::generate(&env);
-        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
         client.pause(&admin);
         client.attest(&attestor, &cred_id, &slice_id);
@@ -1053,7 +1150,9 @@ mod tests {
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
         client.attest(&attestor, &cred_id, &slice_id);
         client.attest(&attestor, &cred_id, &slice_id);
     }
@@ -1078,7 +1177,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
-        client.create_slice(&Address::generate(&env), &Vec::new(&env), &1u32);
+        client.create_slice(&Address::generate(&env), &Vec::new(&env), &Vec::new(&env), &1u32);
     }
 
     #[test]
@@ -1091,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "threshold cannot exceed attestors count")]
+    #[should_panic(expected = "threshold cannot exceed total weight sum")]
     fn test_threshold_exceeds_attestors() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1102,9 +1201,12 @@ mod tests {
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(Address::generate(&env));
         attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
 
-        // 2 attestors but threshold of 3 — must panic
-        client.create_slice(&creator, &attestors, &3u32);
+        // 2 attestors with total weight 2 but threshold of 3 — must panic
+        client.create_slice(&creator, &attestors, &weights, &3u32);
     }
 
     #[test]
@@ -1115,10 +1217,12 @@ mod tests {
         let (client, _) = setup(&env);
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
+        let mut weights = Vec::new(&env);
         for _ in 0..=MAX_ATTESTORS_PER_SLICE {
             attestors.push_back(Address::generate(&env));
+            weights.push_back(1u32);
         }
-        client.create_slice(&creator, &attestors, &1u32);
+        client.create_slice(&creator, &attestors, &weights, &1u32);
     }
 
     #[test]
@@ -1129,7 +1233,9 @@ mod tests {
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
-        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
         assert_eq!(client.get_slice_creator(&slice_id), creator);
     }
 
@@ -1290,7 +1396,9 @@ mod tests {
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
         client.attest(&attestor, &cred_id, &slice_id);
         assert!(client.is_attested(&cred_id, &slice_id));
 
@@ -1314,7 +1422,9 @@ mod tests {
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
         client.revoke_credential(&issuer, &cred_id);
         client.attest(&attestor, &cred_id, &slice_id);
@@ -1333,9 +1443,11 @@ mod tests {
 
         let mut initial = Vec::new(&env);
         initial.push_back(attestor1.clone());
-        let slice_id = client.create_slice(&creator, &initial, &1u32);
+        let mut initial_weights = Vec::new(&env);
+        initial_weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &initial, &initial_weights, &1u32);
 
-        client.add_attestor(&creator, &slice_id, &attestor2);
+        client.add_attestor(&creator, &slice_id, &attestor2, &1u32);
 
         let slice = client.get_slice(&slice_id);
         assert_eq!(slice.attestors.len(), 2);
@@ -1355,9 +1467,11 @@ mod tests {
 
         let mut initial = Vec::new(&env);
         initial.push_back(attestor.clone());
-        let slice_id = client.create_slice(&creator, &initial, &1u32);
+        let mut initial_weights = Vec::new(&env);
+        initial_weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &initial, &initial_weights, &1u32);
 
-        client.add_attestor(&creator, &slice_id, &attestor);
+        client.add_attestor(&creator, &slice_id, &attestor, &1u32);
     }
 
     #[test]
@@ -1374,9 +1488,11 @@ mod tests {
 
         let mut initial = Vec::new(&env);
         initial.push_back(Address::generate(&env));
-        let slice_id = client.create_slice(&creator, &initial, &1u32);
+        let mut initial_weights = Vec::new(&env);
+        initial_weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &initial, &initial_weights, &1u32);
 
-        client.add_attestor(&non_creator, &slice_id, &attestor);
+        client.add_attestor(&non_creator, &slice_id, &attestor, &1u32);
     }
 
     #[test]
@@ -1395,14 +1511,16 @@ mod tests {
 
         let mut initial = Vec::new(&env);
         initial.push_back(attestor1.clone());
-        let slice_id = client.create_slice(&creator, &initial, &1u32);
+        let mut initial_weights = Vec::new(&env);
+        initial_weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &initial, &initial_weights, &1u32);
 
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
         client.attest(&attestor1, &cred_id, &slice_id);
         assert!(client.is_attested(&cred_id, &slice_id)); // threshold=1, met after attestor1
 
-        client.add_attestor(&creator, &slice_id, &attestor2);
+        client.add_attestor(&creator, &slice_id, &attestor2, &1u32);
         client.update_threshold(&creator, &slice_id, &2u32);
         assert!(!client.is_attested(&cred_id, &slice_id)); // threshold raised to 2, not met yet
         client.attest(&attestor2, &cred_id, &slice_id);
@@ -1419,7 +1537,8 @@ mod tests {
 
         let creator = Address::generate(&env);
         let attestors = Vec::new(&env);
-        client.create_slice(&creator, &attestors, &1u32);
+        let weights = Vec::new(&env);
+        client.create_slice(&creator, &attestors, &weights, &1u32);
     }
 
     #[test]
@@ -1540,7 +1659,9 @@ mod tests {
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
         let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
         let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
         assert_eq!(client.get_attestor_reputation(&attestor), 0);
@@ -1562,7 +1683,10 @@ mod tests {
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor_a.clone());
         attestors.push_back(attestor_b.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
@@ -1583,7 +1707,10 @@ mod tests {
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
         attestors.push_back(Address::generate(&env));
-        let slice_id = client.create_slice(&creator, &attestors, &2u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &2u32);
 
         client.update_threshold(&creator, &slice_id, &1u32);
 
@@ -1603,7 +1730,9 @@ mod tests {
         let non_creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
-        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
         client.update_threshold(&non_creator, &slice_id, &1u32);
     }
@@ -1616,9 +1745,11 @@ mod tests {
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
-        let slice_id = client.create_slice(&creator, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
-        client.update_threshold(&creator, &slice_id, &2u32);
+        client.update_threshold(&creator, &slice_id, &1u32);
     }
 
     #[test]
@@ -1771,11 +1902,13 @@ mod tests {
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
         attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
 
         assert_eq!(client.get_slice_count(), 0);
 
-        client.create_slice(&creator, &attestors.clone(), &1u32);
-        client.create_slice(&creator, &attestors, &1u32);
+        client.create_slice(&creator, &attestors.clone(), &weights.clone(), &1u32);
+        client.create_slice(&creator, &attestors, &weights, &1u32);
 
         assert_eq!(client.get_slice_count(), 2);
     }
@@ -1800,7 +1933,9 @@ mod tests {
         // Set up a quorum slice with the attestor
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
         // Revoke the credential
         client.revoke_credential(&issuer, &cred_id);
@@ -1826,7 +1961,10 @@ mod tests {
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor1.clone());
         attestors.push_back(attestor2.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
         assert_eq!(client.get_attestation_count(&cred_id), 0);
         client.attest(&attestor1, &cred_id, &slice_id);
@@ -1995,7 +2133,10 @@ mod tests {
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor1.clone());
         attestors.push_back(attestor2.clone());
-        let slice_id = qp.create_slice(&issuer, &attestors, &2u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = qp.create_slice(&issuer, &attestors, &weights, &2u32);
 
         // Assert slice state
         let slice = qp.get_slice(&slice_id);
@@ -2060,7 +2201,9 @@ mod tests {
         // Create slice with only attestor1
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor1.clone());
-        let slice_id = client.create_slice(&issuer, &attestors, &1u32);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
         // attestor2 is not in the slice — must panic
         client.attest(&attestor2, &cred_id, &slice_id);
