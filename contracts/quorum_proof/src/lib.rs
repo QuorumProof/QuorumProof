@@ -11,6 +11,7 @@ const TOPIC_REVOKE: &str = "RevokeCredential";
 const TOPIC_ATTESTATION: &str = "attestation";
 const TOPIC_RENEWAL: &str = "CredentialRenewed";
 const TOPIC_SBT_TRANSFER: &str = "SbtTransferred";
+const TOPIC_PROOF_REQUEST: &str = "ProofRequested";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -70,6 +71,10 @@ pub enum DataKey {
     Admin,
     Paused,
     SubjectIssuerType(Address, Address, u32),
+    /// Stores the Vec<ProofRequest> history for a credential
+    ProofRequests(u64),
+    /// Global monotonic counter for proof request IDs
+    ProofRequestCount,
 }
 
 #[contracttype]
@@ -90,6 +95,22 @@ pub struct Credential {
     pub metadata_hash: soroban_sdk::Bytes,
     pub revoked: bool,
     pub expires_at: Option<u64>,
+}
+
+/// A single proof request record, capturing who requested proof of a credential and when.
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofRequest {
+    /// Unique monotonic ID across all proof requests on this contract.
+    pub id: u64,
+    /// The credential for which proof was requested.
+    pub credential_id: u64,
+    /// The address of the verifier that initiated this request.
+    pub verifier: Address,
+    /// Ledger timestamp at the time this request was created.
+    pub requested_at: u64,
+    /// The ZK claim types the verifier wants proven.
+    pub claim_types: Vec<zk_verifier::ClaimType>,
 }
 
 /// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
@@ -1058,6 +1079,111 @@ impl QuorumProofContract {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    // ── Proof Request History (Issue #38) ────────────────────────────────────
+
+    /// Record a new proof request for a credential and return its unique request ID.
+    ///
+    /// Verifiers call this to create an auditable trail every time they request
+    /// proof of a credential. The request is appended to the per-credential history
+    /// retrievable via [`get_proof_requests`].
+    ///
+    /// # Parameters
+    /// - `verifier`: The address initiating the proof request; must authorize this call.
+    /// - `credential_id`: The credential for which proof is being requested.
+    /// - `claim_types`: The ZK claim types the verifier wants proven.
+    ///
+    /// # Returns
+    /// The unique ID assigned to this proof request.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    pub fn generate_proof_request(
+        env: Env,
+        verifier: Address,
+        credential_id: u64,
+        claim_types: Vec<zk_verifier::ClaimType>,
+    ) -> u64 {
+        verifier.require_auth();
+        Self::require_not_paused(&env);
+
+        // Verify that the credential exists.
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Credential(credential_id))
+        {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        // Assign a globally unique ID.
+        let request_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProofRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let request = ProofRequest {
+            id: request_id,
+            credential_id,
+            verifier: verifier.clone(),
+            requested_at: env.ledger().timestamp(),
+            claim_types,
+        };
+
+        // Append to the per-credential history.
+        let mut history: Vec<ProofRequest> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProofRequests(credential_id))
+            .unwrap_or(Vec::new(&env));
+        history.push_back(request.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::ProofRequests(credential_id), &history);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Update global counter.
+        env.storage()
+            .instance()
+            .set(&DataKey::ProofRequestCount, &request_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event so off-chain indexers can track requests without polling storage.
+        let topic = String::from_str(&env, TOPIC_PROOF_REQUEST);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, request);
+
+        request_id
+    }
+
+    /// Return all proof requests ever generated for a credential, in insertion order.
+    ///
+    /// Verifiers and auditors use this to inspect the full verification history of
+    /// a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential whose proof-request history to retrieve.
+    ///
+    /// # Returns
+    /// A `Vec<ProofRequest>` in the order requests were recorded. Returns an empty
+    /// `Vec` if no requests have been made yet (does not panic).
+    ///
+    /// # Panics
+    /// Does not panic even if the credential does not exist; returns empty in that case.
+    pub fn get_proof_requests(env: Env, credential_id: u64) -> Vec<ProofRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProofRequests(credential_id))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
