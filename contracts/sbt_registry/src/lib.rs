@@ -9,6 +9,7 @@ const EXTENDED_TTL: u32 = 524_288;
 #[repr(u32)]
 pub enum ContractError {
     SoulboundNonTransferable = 1,
+    TokenNotFound = 2,
 }
 
 #[contracttype]
@@ -19,6 +20,7 @@ pub enum DataKey {
     Owner(u64),
     OwnerTokens(Address),
     OwnerCredential(Address, u64),
+    Admin,
 }
 
 #[contracttype]
@@ -75,6 +77,53 @@ impl SbtRegistryContract {
 
     pub fn get_tokens_by_owner(env: Env, owner: Address) -> Vec<u64> {
         env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
+    }
+
+    /// Set the admin address once after deployment.
+    pub fn initialize(env: Env, admin: Address) {
+        assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
+        env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    /// Admin-gated ownership transfer for legal name change or wallet recovery.
+    /// Only the admin may call this. Updates OwnerTokens mapping and emits a transfer event.
+    pub fn admin_transfer_sbt(env: Env, admin: Address, token_id: u64, new_owner: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let mut token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        let old_owner = token.owner.clone();
+
+        // Remove token from old owner's list
+        let mut old_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(old_owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = old_tokens.iter().position(|id| id == token_id) {
+            old_tokens.remove(pos as u32);
+        }
+        env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+
+        // Add token to new owner's list
+        let mut new_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(new_owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        new_tokens.push_back(token_id);
+        env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
+        env.storage().persistent().extend_ttl(&DataKey::OwnerTokens(new_owner.clone()), STANDARD_TTL, EXTENDED_TTL);
+
+        // Update token owner and Owner index
+        token.owner = new_owner.clone();
+        env.storage().persistent().set(&DataKey::Token(token_id), &token);
+        env.storage().persistent().extend_ttl(&DataKey::Token(token_id), STANDARD_TTL, EXTENDED_TTL);
+        env.storage().persistent().set(&DataKey::Owner(token_id), &new_owner);
+        env.storage().persistent().extend_ttl(&DataKey::Owner(token_id), STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(("admin_transfer", old_owner, new_owner), token_id);
     }
 
     pub fn transfer(env: Env, _from: Address, _to: Address, _token_id: u64) {
@@ -175,5 +224,50 @@ fn test_upgrade_unauthorized_panics() {
         env.as_contract(&contract_id, || {
             client.upgrade(&unpriv, &wasm_hash);
         });
+    }
+
+    // --- Issue #191: admin_transfer_sbt ---
+
+    #[test]
+    fn test_admin_transfer_sbt_updates_ownership() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let old_owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.initialize(&admin);
+        let token_id = client.mint(&old_owner, &1u64, &uri);
+
+        client.admin_transfer_sbt(&admin, &token_id, &new_owner);
+
+        assert_eq!(client.owner_of(&token_id), new_owner);
+        assert_eq!(client.get_token(&token_id).owner, new_owner);
+        assert!(client.get_tokens_by_owner(&old_owner).is_empty());
+        assert_eq!(client.get_tokens_by_owner(&new_owner).get(0).unwrap(), token_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_admin_transfer_sbt_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.initialize(&admin);
+        let token_id = client.mint(&owner, &1u64, &uri);
+
+        client.admin_transfer_sbt(&non_admin, &token_id, &new_owner);
     }
 }
