@@ -167,6 +167,75 @@ impl SbtRegistryContract {
         env.storage().instance().remove(&DataKey::OwnerCredential(owner, token.credential_id));
     }
 
+    /// Initialize the contract with an admin and the quorum_proof contract address.
+    pub fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::QuorumProofId, &quorum_proof_id);
+    }
+
+    /// Burn a soulbound token. Callable by the token owner or the contract admin.
+    ///
+    /// Removes Token, Owner, and OwnerTokens storage entries and emits a `burn` event.
+    pub fn burn_sbt(env: Env, caller: Address, token_id: u64) {
+        caller.require_auth();
+        let token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(caller == token.owner || caller == admin, "unauthorized");
+
+        let owner = token.owner.clone();
+        env.storage().persistent().remove(&DataKey::Token(token_id));
+        env.storage().persistent().remove(&DataKey::Owner(token_id));
+        let mut owner_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = owner_tokens.iter().position(|id| id == token_id) {
+            owner_tokens.remove(pos as u32);
+        }
+        env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
+        env.storage().instance().remove(&DataKey::OwnerCredential(owner, token.credential_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("burn").into());
+        env.events().publish(topics, token_id);
+    }
+
+    /// Admin-only: transfer an SBT to a new owner (e.g. after credential re-issuance).
+    pub fn admin_transfer_sbt(env: Env, admin: Address, token_id: u64, new_owner: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+
+        let mut token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        let old_owner = token.owner.clone();
+
+        // Remove from old owner's list
+        let mut old_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(old_owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = old_tokens.iter().position(|id| id == token_id) {
+            old_tokens.remove(pos as u32);
+        }
+        env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
+
+        // Add to new owner
+        token.owner = new_owner.clone();
+        env.storage().persistent().set(&DataKey::Token(token_id), &token);
+        env.storage().persistent().set(&DataKey::Owner(token_id), &new_owner);
+        let mut new_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(new_owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        new_tokens.push_back(token_id);
+        env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
+        env.storage().instance().set(&DataKey::OwnerCredential(new_owner, token.credential_id), &token_id);
+    }
+
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
@@ -351,9 +420,119 @@ mod tests {
         assert_eq!(client.sbt_count(), 2);
     }
 
-#[test]
+    // --- Issue #37: burn_sbt ---
+
     #[test]
-    #[should_panic] // upgrade requires the WASM to exist in host storage; this verifies auth passes
+    fn test_burn_sbt_by_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt(&owner, &token_id);
+
+        assert!(client.get_tokens_by_owner(&owner).is_empty());
+    }
+
+    #[test]
+    fn test_burn_sbt_by_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        // Admin burns the SBT for a revoked credential
+        qp_client.revoke_credential(&issuer, &cred_id);
+        client.burn_sbt(&admin, &token_id);
+
+        assert!(client.get_tokens_by_owner(&owner).is_empty());
+    }
+
+    #[test]
+    fn test_burn_sbt_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt(&owner, &token_id);
+
+        let events = env.events().all();
+        let burn_event = events.iter().find(|(_, topics, _)| {
+            if let Some(first) = topics.get(0) {
+                soroban_sdk::Symbol::try_from_val(&env, &first)
+                    .map(|s| s == symbol_short!("burn"))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        });
+        assert!(burn_event.is_some(), "burn event not emitted");
+        let (_, _, data) = burn_event.unwrap();
+        let emitted_id = u64::try_from_val(&env, &data).expect("data should be token_id");
+        assert_eq!(emitted_id, token_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_burn_sbt_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt(&stranger, &token_id);
+    }
+
+    #[test]
+    fn test_burn_sbt_allows_remint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt(&owner, &token_id);
+
+        // Re-mint must succeed after burn
+        let new_id = client.mint(&owner, &cred_id, &uri);
+        assert_eq!(client.owner_of(&new_id), owner);
+    }
+
+    #[test]
+    #[should_panic]
+    #[allow(unused)]
+    // upgrade requires the WASM to exist in host storage; this verifies auth passes
     fn test_upgrade_success() {
         let env = Env::default();
         env.mock_all_auths();
