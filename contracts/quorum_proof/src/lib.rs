@@ -9,6 +9,9 @@ use zk_verifier::{ClaimType, ZkVerifierContractClient};
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
 const TOPIC_ATTESTATION: &str = "attestation";
+const TOPIC_RENEWAL: &str = "CredentialRenewed";
+const TOPIC_SBT_TRANSFER: &str = "SbtTransferred";
+const TOPIC_PROOF_REQUEST: &str = "ProofRequested";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -36,6 +39,14 @@ pub struct AttestationEventData {
     pub slice_id: u64,
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct RenewalEventData {
+    pub credential_id: u64,
+    pub issuer: Address,
+    pub new_expires_at: u64,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -60,6 +71,10 @@ pub enum DataKey {
     Admin,
     Paused,
     SubjectIssuerType(Address, Address, u32),
+    /// Stores the Vec<ProofRequest> history for a credential
+    ProofRequests(u64),
+    /// Global monotonic counter for proof request IDs
+    ProofRequestCount,
 }
 
 #[contracttype]
@@ -80,6 +95,22 @@ pub struct Credential {
     pub metadata_hash: soroban_sdk::Bytes,
     pub revoked: bool,
     pub expires_at: Option<u64>,
+}
+
+/// A single proof request record, capturing who requested proof of a credential and when.
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofRequest {
+    /// Unique monotonic ID across all proof requests on this contract.
+    pub id: u64,
+    /// The credential for which proof was requested.
+    pub credential_id: u64,
+    /// The address of the verifier that initiated this request.
+    pub verifier: Address,
+    /// Ledger timestamp at the time this request was created.
+    pub requested_at: u64,
+    /// The ZK claim types the verifier wants proven.
+    pub claim_types: Vec<zk_verifier::ClaimType>,
 }
 
 /// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
@@ -169,7 +200,20 @@ impl QuorumProofContract {
         }
     }
 
-    /// Issue a new credential. Returns the credential ID.
+    /// Issue a new credential to a subject. Returns the new credential ID.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing the credential; must authorize this call.
+    /// - `subject`: The address receiving the credential.
+    /// - `credential_type`: Numeric type identifier for the credential.
+    /// - `metadata_hash`: Non-empty IPFS or content-addressed hash of credential metadata.
+    /// - `expires_at`: Optional Unix timestamp after which the credential is considered expired.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics if `metadata_hash` is empty.
+    /// Panics with `ContractError::DuplicateCredential` if the same issuer has already issued
+    /// a credential of the same type to the same subject.
     pub fn issue_credential(
         env: Env,
         issuer: Address,
@@ -209,7 +253,7 @@ impl QuorumProofContract {
         env.storage().instance().set(&duplicate_key, &id);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         
-        let event_data = IssueEventData { id, subject: credential.subject.clone(), credential_type };
+        let event_data = CredentialIssuedEventData { id, subject: credential.subject.clone(), credential_type };
         let topic = String::from_str(&env, TOPIC_ISSUE);
         let mut topics: Vec<String> = Vec::new(&env);
         topics.push_back(topic);
@@ -217,7 +261,20 @@ impl QuorumProofContract {
         id
     }
 
-    /// Issue credentials to multiple subjects in one call.
+    /// Issue credentials to multiple subjects in one call. Returns a `Vec` of new credential IDs
+    /// in the same order as the input subjects.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing all credentials; must authorize this call.
+    /// - `subjects`: Ordered list of recipient addresses.
+    /// - `credential_types`: Ordered list of credential type IDs, one per subject.
+    /// - `metadata_hashes`: Ordered list of metadata hashes, one per subject.
+    /// - `expires_at`: Optional shared expiry timestamp applied to all issued credentials.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics if `subjects`, `credential_types`, and `metadata_hashes` have different lengths.
+    /// Panics for any individual credential that would violate duplicate or empty-hash rules.
     pub fn batch_issue_credentials(
         env: Env,
         issuer: Address,
@@ -299,8 +356,14 @@ impl QuorumProofContract {
         id
     }
 
-    /// Retrieve a credential by ID. Panics with ContractError::CredentialNotFound if missing.
-    /// Panics with "credential has expired" if the credential is expired.
+    /// Retrieve a credential by ID.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential to retrieve.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    /// Panics with "credential has expired" if the credential's `expires_at` has passed.
     pub fn get_credential(env: Env, credential_id: u64) -> Credential {
         let credential: Credential = env.storage().instance()
             .get(&DataKey::Credential(credential_id))
@@ -315,6 +378,12 @@ impl QuorumProofContract {
     }
 
     /// Return all credential IDs issued to a subject.
+    ///
+    /// # Parameters
+    /// - `subject`: The address whose credentials to look up.
+    ///
+    /// # Panics
+    /// Does not panic; returns an empty `Vec` if the subject has no credentials.
     pub fn get_credentials_by_subject(env: Env, subject: Address) -> Vec<u64> {
         env.storage()
             .instance()
@@ -323,8 +392,17 @@ impl QuorumProofContract {
     }
 
     /// Revoke a credential. Only the original issuer can revoke.
-    /// Panics with ContractError::CredentialNotFound if missing.
-    /// Panics with "credential has expired" if the credential is expired.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address that originally issued the credential; must authorize this call.
+    /// - `credential_id`: The ID of the credential to revoke.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    /// Panics if the caller is not the original issuer.
+    /// Panics if the credential is already revoked.
+    /// Panics with "credential has expired" if the credential's `expires_at` has passed.
     pub fn revoke_credential(env: Env, issuer: Address, credential_id: u64) {
         issuer.require_auth();
         Self::require_not_paused(&env);
@@ -351,6 +429,27 @@ impl QuorumProofContract {
             subject: credential.subject.clone(),
         };
         let topic = String::from_str(&env, TOPIC_REVOKE);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Renew a credential by extending its expiry. Only the original issuer may call this.
+    /// Emits a renewal event.
+    pub fn renew_credential(env: Env, issuer: Address, credential_id: u64, new_expires_at: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let mut credential: Credential = env.storage().instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "only the original issuer can renew");
+        assert!(!credential.revoked, "cannot renew a revoked credential");
+        assert!(new_expires_at > env.ledger().timestamp(), "new_expires_at must be in the future");
+        credential.expires_at = Some(new_expires_at);
+        env.storage().instance().set(&DataKey::Credential(credential_id), &credential);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        let event_data = RenewalEventData { credential_id, issuer, new_expires_at };
+        let topic = String::from_str(&env, TOPIC_RENEWAL);
         let mut topics: Vec<String> = Vec::new(&env);
         topics.push_back(topic);
         env.events().publish(topics, event_data);
@@ -423,6 +522,12 @@ impl QuorumProofContract {
     }
 
     /// Retrieve a quorum slice by ID.
+    ///
+    /// # Parameters
+    /// - `slice_id`: The ID of the slice to retrieve.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::SliceNotFound` if no slice exists with that ID.
     pub fn get_slice(env: Env, slice_id: u64) -> QuorumSlice {
         env.storage()
             .instance()
@@ -431,6 +536,12 @@ impl QuorumProofContract {
     }
 
     /// Return the creator address of a slice.
+    ///
+    /// # Parameters
+    /// - `slice_id`: The ID of the slice to inspect.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::SliceNotFound` if no slice exists with that ID.
     pub fn get_slice_creator(env: Env, slice_id: u64) -> Address {
         let slice: QuorumSlice = env
             .storage()
@@ -482,7 +593,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         assert!(
             slice.creator == creator,
             "only the slice creator can add attestors"
@@ -516,7 +627,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         assert!(
             slice.creator == creator,
             "only the slice creator can update threshold"
@@ -541,7 +652,21 @@ impl QuorumProofContract {
     }
 
     /// Attest a credential using a quorum slice.
-    /// Panics with ContractError::CredentialNotFound if missing.
+    ///
+    /// Records the attestor's signature for the given credential. Once the total weight
+    /// of all attestors meets or exceeds the slice threshold, `is_attested` returns `true`.
+    ///
+    /// # Parameters
+    /// - `attestor`: The address attesting; must be a member of the slice and must authorize.
+    /// - `credential_id`: The credential being attested.
+    /// - `slice_id`: The quorum slice the attestor belongs to.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the credential is revoked.
+    /// Panics if the attestor is not a member of the slice.
+    /// Panics if the attestor has already attested for this credential.
     pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64) {
         attestor.require_auth();
         Self::require_not_paused(&env);
@@ -555,7 +680,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         let mut found = false;
         for a in slice.attestors.iter() {
             if a == attestor {
@@ -604,6 +729,52 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
+    /// Batch attest multiple credentials in a single transaction.
+    /// Each credential_id in the list is attested by the caller using the given slice.
+    /// Caller must be a member of the slice for each credential.
+    pub fn batch_attest(env: Env, attestor: Address, credential_ids: Vec<u64>, slice_id: u64) {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+        let slice: QuorumSlice = env.storage().instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        let mut in_slice = false;
+        for a in slice.attestors.iter() {
+            if a == attestor {
+                in_slice = true;
+                break;
+            }
+        }
+        assert!(in_slice, "attestor not in slice");
+        for credential_id in credential_ids.iter() {
+            let credential: Credential = env.storage().instance()
+                .get(&DataKey::Credential(credential_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+            assert!(!credential.revoked, "credential is revoked");
+            let mut attestors: Vec<Address> = env.storage().instance()
+                .get(&DataKey::Attestors(credential_id))
+                .unwrap_or(Vec::new(&env));
+            for existing in attestors.iter() {
+                if existing == attestor {
+                    panic!("attestor has already attested for this credential");
+                }
+            }
+            attestors.push_back(attestor.clone());
+            env.storage().instance().set(&DataKey::Attestors(credential_id), &attestors);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            let event_data = AttestationEventData { attestor: attestor.clone(), credential_id, slice_id };
+            let topic = String::from_str(&env, TOPIC_ATTESTATION);
+            let mut topics: Vec<String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+        }
+        let count: u64 = env.storage().instance()
+            .get(&DataKey::AttestorCount(attestor.clone()))
+            .unwrap_or(0u64);
+        env.storage().instance().set(&DataKey::AttestorCount(attestor), &(count + credential_ids.len() as u64));
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
     /// Check if a credential has met its quorum threshold using weighted trust.
     ///
     /// # FBA Weighted Trust Model
@@ -636,7 +807,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         let attested_addresses: Vec<Address> = env
             .storage()
             .instance()
@@ -659,6 +830,12 @@ impl QuorumProofContract {
     }
 
     /// Returns true if the credential has been revoked.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to check.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
     pub fn is_revoked(env: Env, credential_id: u64) -> bool {
         let credential: Credential = env
             .storage()
@@ -669,7 +846,12 @@ impl QuorumProofContract {
     }
 
     /// Returns true if the credential exists and its expiry timestamp has passed.
-    /// Panics with ContractError::CredentialNotFound if missing.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to check.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
     pub fn is_expired(env: Env, credential_id: u64) -> bool {
         let credential: Credential = env
             .storage()
@@ -682,7 +864,13 @@ impl QuorumProofContract {
         }
     }
 
-    /// Get all attestors for a credential.
+    /// Get all attestors that have signed a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to query.
+    ///
+    /// # Panics
+    /// Does not panic; returns an empty `Vec` if no attestations exist.
     pub fn get_attestors(env: Env, credential_id: u64) -> Vec<Address> {
         env.storage()
             .instance()
@@ -690,7 +878,13 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
-    /// Returns the number of attestations for a credential without loading the full list.
+    /// Returns the number of attestations recorded for a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to count attestations for.
+    ///
+    /// # Panics
+    /// Does not panic; returns `0` if no attestations exist.
     pub fn get_attestation_count(env: Env, credential_id: u64) -> u32 {
         let attestors: Vec<Address> = env
             .storage()
@@ -700,7 +894,13 @@ impl QuorumProofContract {
         attestors.len()
     }
 
-    /// Returns the total number of credentials an attestor has signed.
+    /// Returns the total number of credentials an attestor has signed across all credentials.
+    ///
+    /// # Parameters
+    /// - `attestor`: The attestor address to query.
+    ///
+    /// # Panics
+    /// Does not panic; returns `0` if the attestor has never attested.
     pub fn get_attestor_reputation(env: Env, attestor: Address) -> u64 {
         env.storage()
             .instance()
@@ -708,7 +908,10 @@ impl QuorumProofContract {
             .unwrap_or(0u64)
     }
 
-    /// Returns the total number of credentials issued.
+    /// Returns the total number of credentials issued on this contract.
+    ///
+    /// # Panics
+    /// Does not panic; returns `0` if no credentials have been issued.
     pub fn get_credential_count(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -716,7 +919,10 @@ impl QuorumProofContract {
             .unwrap_or(0u64)
     }
 
-    /// Returns the total number of slices created.
+    /// Returns the total number of quorum slices created on this contract.
+    ///
+    /// # Panics
+    /// Does not panic; returns `0` if no slices have been created.
     pub fn get_slice_count(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -724,12 +930,114 @@ impl QuorumProofContract {
             .unwrap_or(0u64)
     }
 
+    /// Verify multiple ZK claims for a credential in a single call.
+    ///
+    /// Iterates over `claim_types` and `proofs` in parallel, calling the ZK verifier
+    /// for each pair. Returns a `Vec<bool>` where each element corresponds to whether
+    /// the claim at that index was verified successfully.
+    ///
+    /// # Parameters
+    /// - `zk_verifier_id`: Address of the deployed ZK verifier contract.
+    /// - `quorum_proof_id`: Address of this quorum proof contract (passed to ZK verifier).
+    /// - `credential_id`: The credential to verify claims against.
+    /// - `claim_types`: Ordered list of claim types to verify.
+    /// - `proofs`: Ordered list of ZK proofs corresponding to each claim type.
+    ///
+    /// # Panics
+    /// Panics if `claim_types` and `proofs` have different lengths.
+    pub fn verify_claim_batch(
+        env: Env,
+        zk_verifier_id: Address,
+        zk_admin: Address,
+        quorum_proof_id: Address,
+        credential_id: u64,
+        claim_types: Vec<zk_verifier::ClaimType>,
+        proofs: Vec<soroban_sdk::Bytes>,
+    ) -> Vec<bool> {
+        assert!(
+            claim_types.len() == proofs.len(),
+            "claim_types and proofs lengths must match"
+        );
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
+        let mut results: Vec<bool> = Vec::new(&env);
+        for i in 0..claim_types.len() {
+            let result = zk_client.verify_claim(
+                &zk_admin,
+                &quorum_proof_id,
+                &credential_id,
+                &claim_types.get(i).unwrap(),
+                &proofs.get(i).unwrap(),
+            );
+            results.push_back(result);
+        }
+        results
+    }
+
+    /// Returns the attestation status of each attestor in a slice for a given credential.
+    ///
+    /// For each attestor in the slice, returns a tuple of `(Address, bool)` where the
+    /// boolean indicates whether that attestor has signed the credential. Useful for
+    /// UX progress tracking (e.g. "2 of 3 attestors have signed").
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to check attestation status for.
+    /// - `slice_id`: The quorum slice whose attestors to inspect.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics with `ContractError::SliceNotFound` if the slice does not exist.
+    pub fn get_slice_attestation_status(
+        env: Env,
+        credential_id: u64,
+        slice_id: u64,
+    ) -> Vec<(Address, bool)> {
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Credential(credential_id))
+        {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        let attested: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(&env));
+        let mut status: Vec<(Address, bool)> = Vec::new(&env);
+        for attestor in slice.attestors.iter() {
+            let signed = attested.iter().any(|a| a == attestor);
+            status.push_back((attestor, signed));
+        }
+        status
+    }
+
     /// Unified engineer verification entry point.
+    ///
+    /// Checks that the subject holds an SBT linked to the credential, then delegates
+    /// ZK claim verification to the `zk_verifier` contract.
+    ///
+    /// # Parameters
+    /// - `quorum_proof_id`: Address of this contract (forwarded to the ZK verifier).
+    /// - `sbt_registry_id`: Address of the deployed SBT registry contract.
+    /// - `zk_verifier_id`: Address of the deployed ZK verifier contract.
+    /// - `subject`: The engineer whose credential is being verified.
+    /// - `credential_id`: The credential to verify.
+    /// - `claim_type`: The specific claim to verify (degree, license, employment).
+    /// - `proof`: The ZK proof bytes for the claim.
+    ///
+    /// # Panics
+    /// Does not panic; returns `false` if the subject has no matching SBT or the proof fails.
     pub fn verify_engineer(
         env: Env,
         quorum_proof_id: Address,
         sbt_registry_id: Address,
         zk_verifier_id: Address,
+        zk_admin: Address,
         subject: Address,
         credential_id: u64,
         claim_type: ClaimType,
@@ -745,10 +1053,19 @@ impl QuorumProofContract {
             return false;
         }
         let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
-        zk_client.verify_claim(&quorum_proof_id, &credential_id, &claim_type, &proof)
+        zk_client.verify_claim(&zk_admin, &quorum_proof_id, &credential_id, &claim_type, &proof)
     }
 
     /// Register a human-readable label for a credential type.
+    ///
+    /// # Parameters
+    /// - `admin`: The admin address; must authorize this call.
+    /// - `type_id`: Numeric identifier for the credential type.
+    /// - `name`: Human-readable name (e.g. "Mechanical Engineering Degree").
+    /// - `description`: Longer description of what the credential type represents.
+    ///
+    /// # Panics
+    /// Does not panic on duplicate registration; overwrites the existing entry.
     pub fn register_credential_type(
         env: Env,
         admin: Address,
@@ -771,6 +1088,12 @@ impl QuorumProofContract {
     }
 
     /// Look up the registered name and description for a credential type.
+    ///
+    /// # Parameters
+    /// - `type_id`: The numeric credential type ID to look up.
+    ///
+    /// # Panics
+    /// Panics with "credential type not registered" if the type has not been registered.
     pub fn get_credential_type(env: Env, type_id: u32) -> CredentialTypeDef {
         env.storage()
             .instance()
@@ -779,9 +1102,121 @@ impl QuorumProofContract {
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
+    ///
+    /// # Parameters
+    /// - `admin`: The admin address; must authorize this call.
+    /// - `new_wasm_hash`: The 32-byte hash of the new WASM to upgrade to.
+    ///
+    /// # Panics
+    /// Panics if `admin` does not authorize the call.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    // ── Proof Request History (Issue #38) ────────────────────────────────────
+
+    /// Record a new proof request for a credential and return its unique request ID.
+    ///
+    /// Verifiers call this to create an auditable trail every time they request
+    /// proof of a credential. The request is appended to the per-credential history
+    /// retrievable via [`get_proof_requests`].
+    ///
+    /// # Parameters
+    /// - `verifier`: The address initiating the proof request; must authorize this call.
+    /// - `credential_id`: The credential for which proof is being requested.
+    /// - `claim_types`: The ZK claim types the verifier wants proven.
+    ///
+    /// # Returns
+    /// The unique ID assigned to this proof request.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    pub fn generate_proof_request(
+        env: Env,
+        verifier: Address,
+        credential_id: u64,
+        claim_types: Vec<zk_verifier::ClaimType>,
+    ) -> u64 {
+        verifier.require_auth();
+        Self::require_not_paused(&env);
+
+        // Verify that the credential exists.
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Credential(credential_id))
+        {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        // Assign a globally unique ID.
+        let request_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProofRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let request = ProofRequest {
+            id: request_id,
+            credential_id,
+            verifier: verifier.clone(),
+            requested_at: env.ledger().timestamp(),
+            claim_types,
+        };
+
+        // Append to the per-credential history.
+        let mut history: Vec<ProofRequest> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProofRequests(credential_id))
+            .unwrap_or(Vec::new(&env));
+        history.push_back(request.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::ProofRequests(credential_id), &history);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Update global counter.
+        env.storage()
+            .instance()
+            .set(&DataKey::ProofRequestCount, &request_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event so off-chain indexers can track requests without polling storage.
+        let topic = String::from_str(&env, TOPIC_PROOF_REQUEST);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, request);
+
+        request_id
+    }
+
+    /// Return all proof requests ever generated for a credential, in insertion order.
+    ///
+    /// Verifiers and auditors use this to inspect the full verification history of
+    /// a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential whose proof-request history to retrieve.
+    ///
+    /// # Returns
+    /// A `Vec<ProofRequest>` in the order requests were recorded. Returns an empty
+    /// `Vec` if no requests have been made yet (does not panic).
+    ///
+    /// # Panics
+    /// Does not panic even if the credential does not exist; returns empty in that case.
+    pub fn get_proof_requests(env: Env, credential_id: u64) -> Vec<ProofRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProofRequests(credential_id))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
@@ -791,13 +1226,12 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{Bytes, Env, FromVal, IntoVal};
 
-    fn setup(env: &Env) -> (QuorumProofContractClient, Address) {
+    fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        env.as_contract(&contract_id, || {
-            env.storage().instance().set(&DataKey::Admin, &admin);
-        });
+        client.initialize(&admin);
         (client, admin)
     }
 
@@ -814,15 +1248,6 @@ mod tests {
         });
     }
 
-    fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(env, &contract_id);
-        let admin = Address::generate(env);
-        client.initialize(&admin);
-        (client, admin)
-    }
-
     #[test]
     fn test_storage_persists_across_ledgers() {
         let env = Env::default();
@@ -836,12 +1261,13 @@ mod tests {
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
         env.ledger().set(LedgerInfo {
-            timestamp: ts,
+            timestamp: 1_000,
             protocol_version: 20,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 10,
             min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
             max_entry_ttl: 6_312_000,
         });
 
@@ -885,25 +1311,6 @@ mod tests {
         let (client, _) = setup(&env);
         let non_admin = Address::generate(&env);
         client.pause(&non_admin);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_pause_blocks_issue_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin) = setup(&env);
-        client.pause(&admin);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        let cred = client.get_credential(&id);
-        assert_eq!(
-            cred.issuer, issuer,
-            "issuer field must match the caller of issue_credential"
-        );
     }
 
     #[test]
@@ -984,35 +1391,6 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor1.clone());
-        attestors.push_back(attestor2.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&creator, &attestors, &weights, &2u32);
-
-        assert!(!client.is_attested(&cred_id, &slice_id));
-        client.attest(&attestor1, &cred_id, &slice_id);
-        assert!(!client.is_attested(&cred_id, &slice_id));
-        client.attest(&attestor2, &cred_id, &slice_id);
-        assert!(client.is_attested(&cred_id, &slice_id));
-    }
-
-    #[test]
-    fn test_unpause_allows_issue_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let creator = Address::generate(&env);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(Address::generate(&env));
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        client.create_slice(&creator, &attestors, &weights, &0u32);
     }
 
     // --- credential issuance ---
@@ -1102,17 +1480,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "only subject or issuer can revoke")]
-    fn test_unauthorized_revoke_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.issue_credential(&issuer, &subject, &1u32, &Bytes::new(&env), &None);
-    }
-
-    #[test]
     #[should_panic]
     fn test_pause_blocks_attest() {
         let env = Env::default();
@@ -1155,12 +1522,8 @@ mod tests {
         let creator = Address::generate(&env);
         let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
-        client.pause(&admin);
-        client.attest(&attestor, &cred_id, &slice_id);
-        client.attest(&attestor1, &cred_id, &slice_id);
-        client.attest(&attestor1, &cred_id, &slice_id);
         assert!(!client.is_attested(&cred_id, &slice_id));
-        client.attest(&attestor2, &cred_id, &slice_id);
+        client.attest(&attestor, &cred_id, &slice_id);
         assert!(client.is_attested(&cred_id, &slice_id));
     }
 
@@ -1195,6 +1558,14 @@ mod tests {
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.revoke_credential(&issuer, &id);
+        client.attest(&attestor, &id, &slice_id);
+    }
 
     // --- slice management ---
 
@@ -1353,6 +1724,47 @@ mod tests {
     // --- expiry ---
 
     #[test]
+    #[should_panic(expected = "SliceNotFound")]
+    fn test_add_attestor_slice_not_found_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        client.add_attestor(&creator, &999u64, &Address::generate(&env), &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "SliceNotFound")]
+    fn test_update_threshold_slice_not_found_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        client.update_threshold(&creator, &999u64, &1u32);
+    }
+
+    #[test]
+    fn test_single_attestation_produces_exactly_one_entry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id);
+        assert_eq!(client.get_attestors(&cred_id).len(), 1);
+    }
+
+    // --- expiry ---
+
+    #[test]
     fn test_is_expired_no_expiry() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1436,28 +1848,6 @@ mod tests {
     }
 
     // --- batch issue ---
-
-    #[test]
-    #[should_panic(expected = "credential is revoked")]
-    fn test_attest_revoked_credential_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        client.revoke_credential(&issuer, &cred_id);
-        client.attest(&attestor, &cred_id, &slice_id);
-    }
 
     #[test]
     fn test_add_attestor_success() {
@@ -1572,8 +1962,8 @@ mod tests {
 
     #[test]
     fn test_verify_engineer_success() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::{ClaimType, ZkVerifierContract};
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths();
@@ -1583,7 +1973,10 @@ mod tests {
         let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -1599,6 +1992,7 @@ mod tests {
             &qp_id,
             &sbt_id,
             &zk_id,
+            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
@@ -1609,16 +2003,20 @@ mod tests {
 
     #[test]
     fn test_verify_engineer_fails_without_sbt() {
-        use zk_verifier::ClaimType;
+        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, sbt_registry::SbtRegistryContract);
-        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id).initialize(&zk_admin, &qp_id);
+
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
@@ -1630,6 +2028,7 @@ mod tests {
             &qp_id,
             &sbt_id,
             &zk_id,
+            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
@@ -1640,18 +2039,21 @@ mod tests {
 
     #[test]
     fn test_verify_engineer_fails_with_empty_proof() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::ClaimType;
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, SbtRegistryContract);
-        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -1666,6 +2068,7 @@ mod tests {
             &qp_id,
             &sbt_id,
             &zk_id,
+            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasLicense,
@@ -1673,12 +2076,6 @@ mod tests {
         );
         assert!(!result);
     }
-
-    // --- reputation & counts ---
-
-    #[test]
-    fn test_get_attestor_reputation_increments_per_attestation() {
-        let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
@@ -1972,7 +2369,6 @@ mod tests {
         // Attempting to attest a revoked credential must panic
         client.attest(&attestor, &cred_id, &slice_id);
     }
-}
 
     #[test]
     fn test_get_attestation_count() {
@@ -2123,13 +2519,12 @@ mod tests {
         // Unauthorized address should not be able to revoke
         client.revoke_credential(&unauthorized, &id);
     }
-}
 
     // Issue #48: Full Credential Lifecycle End-to-End
     #[test]
     fn test_full_credential_lifecycle_e2e() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::{ClaimType, ZkVerifierContract};
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths();
@@ -2140,7 +2535,10 @@ mod tests {
         let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -2201,12 +2599,12 @@ mod tests {
 
         // Step 6: Verify ZK claim via verify_engineer
         let proof = Bytes::from_slice(&env, b"valid-proof");
-        let verified = qp.verify_engineer(&qp_id, &sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        let verified = qp.verify_engineer(&qp_id, &sbt_id, &zk_id, &zk_admin, &subject, &cred_id, &ClaimType::HasDegree, &proof);
         assert!(verified);
 
         // Assert empty proof fails verification
         let empty_proof = Bytes::new(&env);
-        let not_verified = qp.verify_engineer(&qp_id, &sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &empty_proof);
+        let not_verified = qp.verify_engineer(&qp_id, &sbt_id, &zk_id, &zk_admin, &subject, &cred_id, &ClaimType::HasDegree, &empty_proof);
         assert!(!not_verified);
     }
 
