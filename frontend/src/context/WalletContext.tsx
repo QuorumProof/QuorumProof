@@ -13,6 +13,7 @@ interface WalletState {
   hasFreighter: boolean;
   isInitializing: boolean;
   network: string;
+  error: string | null;
   connect: () => Promise<void>;
   disconnect: () => void;
 }
@@ -29,10 +30,12 @@ export function WalletProvider({ children }: WalletProviderProps) {
   const [address, setAddress] = useState<string | null>(null);
   const [hasFreighter, setHasFreighter] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const init = async () => {
       try {
+        setError(null);
         const connected = await isConnected();
         setHasFreighter(connected);
         if (connected) {
@@ -40,16 +43,16 @@ export function WalletProvider({ children }: WalletProviderProps) {
           if (allowed) {
             const pubKey = await getPublicKey();
             setAddress(pubKey);
-            // Persist the address
             localStorage.setItem(STORAGE_KEY, pubKey);
           } else {
-            // If not allowed, but we have stored address, clear it
             localStorage.removeItem(STORAGE_KEY);
           }
         } else {
           localStorage.removeItem(STORAGE_KEY);
         }
       } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : 'Failed to initialize wallet';
+        setError(errorMsg);
         console.error('Error checking Freighter connection:', err);
         localStorage.removeItem(STORAGE_KEY);
       } finally {
@@ -65,17 +68,21 @@ export function WalletProvider({ children }: WalletProviderProps) {
       return;
     }
     try {
+      setError(null);
       await setAllowed();
       const pubKey = await getPublicKey();
       setAddress(pubKey);
       localStorage.setItem(STORAGE_KEY, pubKey);
     } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to connect wallet';
+      setError(errorMsg);
       console.error('User rejected connection or error occurred:', err);
     }
   }, [hasFreighter]);
 
   const disconnect = useCallback(() => {
     setAddress(null);
+    setError(null);
     localStorage.removeItem(STORAGE_KEY);
   }, []);
 
@@ -85,6 +92,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     hasFreighter,
     isInitializing,
     network: STELLAR_NETWORK,
+    error,
     connect,
     disconnect,
   };
