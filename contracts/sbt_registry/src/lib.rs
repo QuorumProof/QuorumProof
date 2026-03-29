@@ -7,6 +7,8 @@ const EXTENDED_TTL: u32 = 524_288;
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
+// #[contracterror] is required for panic_with_error! to work correctly with Soroban.
+// Copy + Clone are the only derives compatible with #[contracterror].
 pub enum ContractError {
     SoulboundNonTransferable = 1,
     TokenNotFound = 2,
