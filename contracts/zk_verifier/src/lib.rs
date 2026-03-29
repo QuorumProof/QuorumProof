@@ -8,6 +8,8 @@ pub enum ClaimType {
     HasDegree,
     HasLicense,
     HasEmploymentHistory,
+    HasCertification,
+    HasResearchPublication,
 }
 
 #[contracttype]
@@ -187,5 +189,27 @@ mod tests {
         let client = ZkVerifierContractClient::new(&env, &contract_id);
         let req = client.generate_proof_request(&42u64, &ClaimType::HasEmploymentHistory);
         assert_eq!(req.credential_id, 42u64);
+    }
+
+    #[test]
+    fn test_verify_claim_certification_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasCertification, &proof));
+    }
+
+    #[test]
+    fn test_verify_claim_research_publication_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasResearchPublication, &proof));
     }
 }
