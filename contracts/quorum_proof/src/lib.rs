@@ -924,6 +924,8 @@ impl QuorumProofContract {
     /// # Panics
     /// Does not panic; returns `0` if no slices have been created.
     pub fn get_slice_count(env: Env) -> u64 {
+        assert!(env.storage().instance().has(&DataKey::Admin), "not initialized");
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         env.storage()
             .instance()
             .get(&DataKey::SliceCount)
@@ -2164,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_slice_count() {
+    fn test_update_threshold_success() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
@@ -2322,8 +2324,7 @@ mod tests {
     fn test_get_slice_count() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let (client, _admin) = setup(&env);
 
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
