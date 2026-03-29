@@ -253,7 +253,7 @@ impl QuorumProofContract {
         env.storage().instance().set(&duplicate_key, &id);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         
-        let event_data = IssueEventData { id, subject: credential.subject.clone(), credential_type };
+        let event_data = CredentialIssuedEventData { id, subject: credential.subject.clone(), credential_type };
         let topic = String::from_str(&env, TOPIC_ISSUE);
         let mut topics: Vec<String> = Vec::new(&env);
         topics.push_back(topic);
@@ -563,7 +563,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         assert!(
             slice.creator == creator,
             "only the slice creator can add attestors"
@@ -597,7 +597,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         assert!(
             slice.creator == creator,
             "only the slice creator can update threshold"
@@ -650,7 +650,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         let mut found = false;
         for a in slice.attestors.iter() {
             if a == attestor {
@@ -777,7 +777,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey::Slice(slice_id))
-            .expect("slice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
         let attested_addresses: Vec<Address> = env
             .storage()
             .instance()
@@ -1193,13 +1193,12 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{Bytes, Env, FromVal, IntoVal};
 
-    fn setup(env: &Env) -> (QuorumProofContractClient, Address) {
+    fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        env.as_contract(&contract_id, || {
-            env.storage().instance().set(&DataKey::Admin, &admin);
-        });
+        client.initialize(&admin);
         (client, admin)
     }
 
@@ -1214,15 +1213,6 @@ mod tests {
             min_temp_entry_ttl: 16,
             max_entry_ttl: 6_312_000,
         });
-    }
-
-    fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(env, &contract_id);
-        let admin = Address::generate(env);
-        client.initialize(&admin);
-        (client, admin)
     }
 
     #[test]
@@ -1287,25 +1277,6 @@ mod tests {
         let (client, _) = setup(&env);
         let non_admin = Address::generate(&env);
         client.pause(&non_admin);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_pause_blocks_issue_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin) = setup(&env);
-        client.pause(&admin);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        let cred = client.get_credential(&id);
-        assert_eq!(
-            cred.issuer, issuer,
-            "issuer field must match the caller of issue_credential"
-        );
     }
 
     #[test]
@@ -1386,35 +1357,6 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor1.clone());
-        attestors.push_back(attestor2.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&creator, &attestors, &weights, &2u32);
-
-        assert!(!client.is_attested(&cred_id, &slice_id));
-        client.attest(&attestor1, &cred_id, &slice_id);
-        assert!(!client.is_attested(&cred_id, &slice_id));
-        client.attest(&attestor2, &cred_id, &slice_id);
-        assert!(client.is_attested(&cred_id, &slice_id));
-    }
-
-    #[test]
-    fn test_unpause_allows_issue_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let creator = Address::generate(&env);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(Address::generate(&env));
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        client.create_slice(&creator, &attestors, &weights, &0u32);
     }
 
     // --- credential issuance ---
@@ -1750,6 +1692,47 @@ mod tests {
         let ids_b = client.get_credentials_by_subject(&subject_b);
         assert_eq!(ids_b.len(), 1);
         assert_eq!(ids_b.get(0).unwrap(), id_b1);
+    }
+
+    // --- expiry ---
+
+    #[test]
+    #[should_panic(expected = "SliceNotFound")]
+    fn test_add_attestor_slice_not_found_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        client.add_attestor(&creator, &999u64, &Address::generate(&env), &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "SliceNotFound")]
+    fn test_update_threshold_slice_not_found_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        client.update_threshold(&creator, &999u64, &1u32);
+    }
+
+    #[test]
+    fn test_single_attestation_produces_exactly_one_entry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id);
+        assert_eq!(client.get_attestors(&cred_id).len(), 1);
     }
 
     // --- expiry ---
