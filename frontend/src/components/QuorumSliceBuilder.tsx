@@ -147,6 +147,7 @@ export function QuorumSliceBuilder({ creatorAddress }: { creatorAddress: string 
                 onChange={(e: ChangeEvent<HTMLInputElement>) => { setAddrInput(e.target.value); setAddrError(''); }}
                 aria-invalid={!!addrError}
                 aria-describedby={addrError ? 'qsb-addr-err' : undefined}
+                aria-label="Attestor Stellar address"
                 autoComplete="off"
                 spellCheck={false}
               />
@@ -161,6 +162,7 @@ export function QuorumSliceBuilder({ creatorAddress }: { creatorAddress: string 
                 id="qsb-role"
                 value={roleInput}
                 onChange={(e: ChangeEvent<HTMLSelectElement>) => setRoleInput(e.target.value as Role)}
+                aria-label="Attestor role"
               >
                 {ROLES.map((r) => (
                   <option key={r} value={r}>{ROLE_ICONS[r]} {r}</option>
@@ -233,6 +235,7 @@ export function QuorumSliceBuilder({ creatorAddress }: { creatorAddress: string 
               onChange={handleThresholdChange}
               aria-invalid={!!thresholdError}
               aria-describedby={thresholdError ? 'qsb-threshold-err' : 'qsb-threshold-hint'}
+              aria-label="Attestation threshold"
             />
           </div>
           {thresholdError
