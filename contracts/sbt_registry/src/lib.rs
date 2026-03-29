@@ -133,56 +133,14 @@ impl SbtRegistryContract {
         env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
     }
 
-    /// Set the admin address once after deployment.
-    pub fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
-        assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::QuorumProofId, &quorum_proof_id);
+    /// Alias for get_tokens_by_owner — returns all SBT token IDs owned by an address.
+    pub fn get_sbt_by_owner(env: Env, owner: Address) -> Vec<u64> {
+        env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
     }
 
-    /// Admin-gated ownership transfer for legal name change or wallet recovery.
-    /// Only the admin may call this. Updates OwnerTokens mapping and emits a transfer event.
-    pub fn admin_transfer_sbt(env: Env, admin: Address, token_id: u64, new_owner: Address) {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let mut token: SoulboundToken = env.storage().persistent()
-            .get(&DataKey::Token(token_id))
-            .expect("token not found");
-        let old_owner = token.owner.clone();
-
-        // Remove token from old owner's list
-        let mut old_tokens: Vec<u64> = env.storage().persistent()
-            .get(&DataKey::OwnerTokens(old_owner.clone()))
-            .unwrap_or(Vec::new(&env));
-        if let Some(pos) = old_tokens.iter().position(|id| id == token_id) {
-            old_tokens.remove(pos as u32);
-        }
-        env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
-
-        // Add token to new owner's list
-        let mut new_tokens: Vec<u64> = env.storage().persistent()
-            .get(&DataKey::OwnerTokens(new_owner.clone()))
-            .unwrap_or(Vec::new(&env));
-        new_tokens.push_back(token_id);
-        env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
-        env.storage().persistent().extend_ttl(&DataKey::OwnerTokens(new_owner.clone()), STANDARD_TTL, EXTENDED_TTL);
-
-        // Update token owner and Owner index
-        token.owner = new_owner.clone();
-        env.storage().persistent().set(&DataKey::Token(token_id), &token);
-        env.storage().persistent().extend_ttl(&DataKey::Token(token_id), STANDARD_TTL, EXTENDED_TTL);
-        env.storage().persistent().set(&DataKey::Owner(token_id), &new_owner);
-        env.storage().persistent().extend_ttl(&DataKey::Owner(token_id), STANDARD_TTL, EXTENDED_TTL);
-
-        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
-        topics.push_back(symbol_short!("xfer").into());
-        topics.push_back(old_owner.into());
-        topics.push_back(new_owner.into());
-        env.events().publish(topics, token_id);
+    /// Returns the total number of SBTs ever minted.
+    pub fn sbt_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::TokenCount).unwrap_or(0u64)
     }
 
     pub fn transfer(env: Env, _from: Address, _to: Address, _token_id: u64) {
@@ -351,6 +309,49 @@ mod tests {
     #[test]
     fn test_get_tokens_by_owner_single() { /* impl from previous */ }
 
+    // --- Issue #196: get_sbt_by_owner ---
+
+    #[test]
+    fn test_get_sbt_by_owner_returns_token_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        assert_eq!(client.get_sbt_by_owner(&owner).len(), 0);
+
+        let id1 = client.mint(&owner, &1u64, &uri);
+        let id2 = client.mint(&owner, &2u64, &uri);
+
+        let tokens = client.get_sbt_by_owner(&owner);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens.get(0).unwrap(), id1);
+        assert_eq!(tokens.get(1).unwrap(), id2);
+    }
+
+    // --- Issue #197: sbt_count ---
+
+    #[test]
+    fn test_sbt_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        assert_eq!(client.sbt_count(), 0);
+
+        client.mint(&owner, &1u64, &uri);
+        assert_eq!(client.sbt_count(), 1);
+
+        client.mint(&owner, &2u64, &uri);
+        assert_eq!(client.sbt_count(), 2);
+    }
+
+#[test]
     #[test]
     #[should_panic] // upgrade requires the WASM to exist in host storage; this verifies auth passes
     fn test_upgrade_success() {

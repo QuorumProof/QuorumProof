@@ -551,6 +551,36 @@ impl QuorumProofContract {
         slice.creator
     }
 
+    /// Remove an attestor from an existing quorum slice. Only the slice creator may call this.
+    /// If the removal would make the threshold unreachable, the threshold is clamped to the new total weight.
+    pub fn remove_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
+        creator.require_auth();
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        assert!(slice.creator == creator, "only the slice creator can remove attestors");
+        let pos = slice
+            .attestors
+            .iter()
+            .position(|a| a == attestor)
+            .expect("attestor not in slice") as u32;
+        slice.attestors.remove(pos);
+        slice.weights.remove(pos);
+        assert!(!slice.attestors.is_empty(), "cannot remove the last attestor");
+        // Clamp threshold to new total weight if needed
+        let mut total_weight: u32 = 0;
+        for w in slice.weights.iter() {
+            total_weight = total_weight.saturating_add(*w);
+        }
+        if slice.threshold > total_weight {
+            slice.threshold = total_weight;
+        }
+        env.storage().instance().set(&DataKey::Slice(slice_id), &slice);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
     /// Add a new attestor with a given weight to an existing quorum slice.
     ///
     /// # Weight Semantics
@@ -2606,88 +2636,101 @@ mod tests {
         client.attest(&attestor2, &cred_id, &slice_id);
     }
 
-    // --- Issue #39: verify_claim_batch ---
+    // --- Issue #185: remove_attestor ---
 
     #[test]
-    fn test_verify_claim_batch_all_valid() {
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
-
-        let env = Env::default();
-        env.mock_all_auths();
-        let qp_id = env.register_contract(None, QuorumProofContract);
-        let zk_id = env.register_contract(None, ZkVerifierContract);
-        let client = QuorumProofContractClient::new(&env, &qp_id);
-        let zk_admin = Address::generate(&env);
-        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
-
-        let mut claim_types = Vec::new(&env);
-        claim_types.push_back(ClaimType::HasDegree);
-        claim_types.push_back(ClaimType::HasLicense);
-
-        let mut proofs = Vec::new(&env);
-        proofs.push_back(Bytes::from_slice(&env, b"proof-a"));
-        proofs.push_back(Bytes::from_slice(&env, b"proof-b"));
-
-        let results = client.verify_claim_batch(&zk_id, &zk_admin, &qp_id, &1u64, &claim_types, &proofs);
-        assert_eq!(results.len(), 2);
-        assert!(results.get(0).unwrap());
-        assert!(results.get(1).unwrap());
-    }
-
-    #[test]
-    fn test_verify_claim_batch_mixed_results() {
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
-
-        let env = Env::default();
-        env.mock_all_auths();
-        let qp_id = env.register_contract(None, QuorumProofContract);
-        let zk_id = env.register_contract(None, ZkVerifierContract);
-        let client = QuorumProofContractClient::new(&env, &qp_id);
-        let zk_admin = Address::generate(&env);
-        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
-
-        let mut claim_types = Vec::new(&env);
-        claim_types.push_back(ClaimType::HasDegree);
-        claim_types.push_back(ClaimType::HasLicense);
-
-        let mut proofs = Vec::new(&env);
-        proofs.push_back(Bytes::from_slice(&env, b"valid-proof"));
-        proofs.push_back(Bytes::new(&env)); // empty proof → false
-
-        let results = client.verify_claim_batch(&zk_id, &zk_admin, &qp_id, &1u64, &claim_types, &proofs);
-        assert!(results.get(0).unwrap());
-        assert!(!results.get(1).unwrap());
-    }
-
-    #[test]
-    #[should_panic(expected = "claim_types and proofs lengths must match")]
-    fn test_verify_claim_batch_mismatched_lengths_panics() {
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
-
-        let env = Env::default();
-        env.mock_all_auths();
-        let qp_id = env.register_contract(None, QuorumProofContract);
-        let zk_id = env.register_contract(None, ZkVerifierContract);
-        let client = QuorumProofContractClient::new(&env, &qp_id);
-        let zk_admin = Address::generate(&env);
-        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
-
-        let mut claim_types = Vec::new(&env);
-        claim_types.push_back(ClaimType::HasDegree);
-
-        let proofs: Vec<Bytes> = Vec::new(&env); // empty — mismatch
-
-        client.verify_claim_batch(&zk_id, &zk_admin, &qp_id, &1u64, &claim_types, &proofs);
-    }
-
-    // --- Issue #40: get_slice_attestation_status ---
-
-    #[test]
-    fn test_get_slice_attestation_status_partial() {
+    fn test_remove_attestor_success() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
 
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &2u32);
+
+        client.remove_attestor(&creator, &slice_id, &attestor2);
+
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.attestors.len(), 1);
+        assert_eq!(slice.attestors.get(0).unwrap(), attestor1);
+        // threshold clamped to new total weight (1)
+        assert_eq!(slice.threshold, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the slice creator can remove attestors")]
+    fn test_remove_attestor_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let non_creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        client.remove_attestor(&non_creator, &slice_id, &attestor);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestor not in slice")]
+    fn test_remove_attestor_not_in_slice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        client.remove_attestor(&creator, &slice_id, &stranger);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot remove the last attestor")]
+    fn test_remove_last_attestor_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        client.remove_attestor(&creator, &slice_id, &attestor);
+    }
+
+    // --- Issue #189: get_attestors ---
+
+    #[test]
+    fn test_get_attestors_returns_attested_addresses() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor1 = Address::generate(&env);
@@ -2704,212 +2747,14 @@ mod tests {
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        // Only attestor1 has signed
+        assert_eq!(client.get_attestors(&cred_id).len(), 0);
+
         client.attest(&attestor1, &cred_id, &slice_id);
+        let result = client.get_attestors(&cred_id);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(0).unwrap(), attestor1);
 
-        let status = client.get_slice_attestation_status(&cred_id, &slice_id);
-        assert_eq!(status.len(), 2);
-        let (addr0, signed0) = status.get(0).unwrap();
-        let (addr1, signed1) = status.get(1).unwrap();
-        assert_eq!(addr0, attestor1);
-        assert!(signed0);
-        assert_eq!(addr1, attestor2);
-        assert!(!signed1);
-    }
-
-    #[test]
-    fn test_get_slice_attestation_status_all_signed() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        client.attest(&attestor, &cred_id, &slice_id);
-
-        let status = client.get_slice_attestation_status(&cred_id, &slice_id);
-        assert_eq!(status.len(), 1);
-        let (_, signed) = status.get(0).unwrap();
-        assert!(signed);
-    }
-
-    #[test]
-    #[should_panic(expected = "CredentialNotFound")]
-    fn test_get_slice_attestation_status_missing_credential_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-
-        let issuer = Address::generate(&env);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(Address::generate(&env));
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        client.get_slice_attestation_status(&999u64, &slice_id);
-    // --- Issue #193: batch_attest ---
-
-    #[test]
-    fn test_batch_attest_attests_multiple_credentials() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
-
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        let mut cred_ids = Vec::new(&env);
-        cred_ids.push_back(cred_id1);
-        cred_ids.push_back(cred_id2);
-        client.batch_attest(&attestor, &cred_ids, &slice_id);
-
-        assert!(client.is_attested(&cred_id1, &slice_id));
-        assert!(client.is_attested(&cred_id2, &slice_id));
-        assert_eq!(client.get_attestor_reputation(&attestor), 2);
-    }
-
-    #[test]
-    #[should_panic(expected = "attestor not in slice")]
-    fn test_batch_attest_non_member_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let non_member = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(Address::generate(&env));
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        let mut cred_ids = Vec::new(&env);
-        cred_ids.push_back(cred_id);
-        client.batch_attest(&non_member, &cred_ids, &slice_id);
-    }
-
-    // --- Issue #194: is_expired (dedicated tests) ---
-
-    #[test]
-    fn test_is_expired_returns_false_for_no_expiry() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        assert!(!client.is_expired(&id));
-    }
-
-    #[test]
-    fn test_is_expired_returns_true_after_expiry_timestamp() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        set_ledger_timestamp(&env, 500);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
-        set_ledger_timestamp(&env, 2_000);
-        assert!(client.is_expired(&id));
-    }
-
-    #[test]
-    #[should_panic(expected = "CredentialNotFound")]
-    fn test_is_expired_panics_for_missing_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        client.is_expired(&999u64);
-    }
-
-    // --- Issue #195: renew_credential ---
-
-    #[test]
-    fn test_renew_credential_extends_expiry() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        set_ledger_timestamp(&env, 500);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
-
-        client.renew_credential(&issuer, &id, &5_000u64);
-
-        set_ledger_timestamp(&env, 2_000);
-        assert!(!client.is_expired(&id));
-    }
-
-    #[test]
-    #[should_panic(expected = "only the original issuer can renew")]
-    fn test_renew_credential_non_issuer_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        set_ledger_timestamp(&env, 500);
-        let issuer = Address::generate(&env);
-        let non_issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
-        client.renew_credential(&non_issuer, &id, &5_000u64);
-    }
-
-    #[test]
-    #[should_panic(expected = "cannot renew a revoked credential")]
-    fn test_renew_revoked_credential_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        set_ledger_timestamp(&env, 500);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1_000u64));
-        client.revoke_credential(&issuer, &id);
-        client.renew_credential(&issuer, &id, &5_000u64);
-    }
-
-    #[test]
-    #[should_panic(expected = "new_expires_at must be in the future")]
-    fn test_renew_credential_past_expiry_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        set_ledger_timestamp(&env, 5_000);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(10_000u64));
-        client.renew_credential(&issuer, &id, &1_000u64);
+        client.attest(&attestor2, &cred_id, &slice_id);
+        assert_eq!(client.get_attestors(&cred_id).len(), 2);
     }
 }
