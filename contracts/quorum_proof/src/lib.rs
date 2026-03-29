@@ -911,8 +911,10 @@ impl QuorumProofContract {
     /// Returns the total number of credentials issued on this contract.
     ///
     /// # Panics
-    /// Does not panic; returns `0` if no credentials have been issued.
+    /// Panics with "not initialized" if the contract has not been initialized.
     pub fn get_credential_count(env: Env) -> u64 {
+        assert!(env.storage().instance().has(&DataKey::Admin), "not initialized");
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         env.storage()
             .instance()
             .get(&DataKey::CredentialCount)
@@ -922,8 +924,10 @@ impl QuorumProofContract {
     /// Returns the total number of quorum slices created on this contract.
     ///
     /// # Panics
-    /// Does not panic; returns `0` if no slices have been created.
+    /// Panics with "not initialized" if the contract has not been initialized.
     pub fn get_slice_count(env: Env) -> u64 {
+        assert!(env.storage().instance().has(&DataKey::Admin), "not initialized");
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         env.storage()
             .instance()
             .get(&DataKey::SliceCount)
@@ -2105,32 +2109,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_credential_count() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor_a.clone());
-        attestors.push_back(attestor_b.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        client.attest(&attestor_a, &cred_id, &slice_id);
-
-        assert_eq!(client.get_attestor_reputation(&attestor_a), 1);
-        assert_eq!(client.get_attestor_reputation(&attestor_b), 0);
-    }
-
-    #[test]
-    fn test_update_threshold_success() {
+    fn test_single_attestation_produces_exactly_one_entry() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -2171,7 +2150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_slice_count() {
+    fn test_update_threshold_success() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
@@ -2341,8 +2320,7 @@ mod tests {
     fn test_get_credential_count() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let (client, _admin) = setup(&env);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -2364,8 +2342,7 @@ mod tests {
     fn test_get_slice_count() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let (client, _admin) = setup(&env);
 
         let creator = Address::generate(&env);
         let mut attestors = Vec::new(&env);
