@@ -440,6 +440,36 @@ impl QuorumProofContract {
         slice.creator
     }
 
+    /// Remove an attestor from an existing quorum slice. Only the slice creator may call this.
+    /// If the removal would make the threshold unreachable, the threshold is clamped to the new total weight.
+    pub fn remove_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
+        creator.require_auth();
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        assert!(slice.creator == creator, "only the slice creator can remove attestors");
+        let pos = slice
+            .attestors
+            .iter()
+            .position(|a| a == attestor)
+            .expect("attestor not in slice") as u32;
+        slice.attestors.remove(pos);
+        slice.weights.remove(pos);
+        assert!(!slice.attestors.is_empty(), "cannot remove the last attestor");
+        // Clamp threshold to new total weight if needed
+        let mut total_weight: u32 = 0;
+        for w in slice.weights.iter() {
+            total_weight = total_weight.saturating_add(*w);
+        }
+        if slice.threshold > total_weight {
+            slice.threshold = total_weight;
+        }
+        env.storage().instance().set(&DataKey::Slice(slice_id), &slice);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
     /// Add a new attestor with a given weight to an existing quorum slice.
     ///
     /// # Weight Semantics
@@ -2206,5 +2236,127 @@ mod tests {
 
         // attestor2 is not in the slice — must panic
         client.attest(&attestor2, &cred_id, &slice_id);
+    }
+
+    // --- Issue #185: remove_attestor ---
+
+    #[test]
+    fn test_remove_attestor_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &2u32);
+
+        client.remove_attestor(&creator, &slice_id, &attestor2);
+
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.attestors.len(), 1);
+        assert_eq!(slice.attestors.get(0).unwrap(), attestor1);
+        // threshold clamped to new total weight (1)
+        assert_eq!(slice.threshold, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the slice creator can remove attestors")]
+    fn test_remove_attestor_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let non_creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        client.remove_attestor(&non_creator, &slice_id, &attestor);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestor not in slice")]
+    fn test_remove_attestor_not_in_slice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        client.remove_attestor(&creator, &slice_id, &stranger);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot remove the last attestor")]
+    fn test_remove_last_attestor_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        client.remove_attestor(&creator, &slice_id, &attestor);
+    }
+
+    // --- Issue #189: get_attestors ---
+
+    #[test]
+    fn test_get_attestors_returns_attested_addresses() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        assert_eq!(client.get_attestors(&cred_id).len(), 0);
+
+        client.attest(&attestor1, &cred_id, &slice_id);
+        let result = client.get_attestors(&cred_id);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(0).unwrap(), attestor1);
+
+        client.attest(&attestor2, &cred_id, &slice_id);
+        assert_eq!(client.get_attestors(&cred_id).len(), 2);
     }
 }
