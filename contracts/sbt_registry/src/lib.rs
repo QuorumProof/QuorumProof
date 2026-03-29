@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, Address, Bytes, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, symbol_short, Address, Bytes, Env, Vec};
 
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
@@ -75,7 +75,9 @@ impl SbtRegistryContract {
         // Uniqueness mapping
         env.storage().instance().set(&DataKey::OwnerCredential(owner.clone(), credential_id), &token_id);
 
-        env.events().publish(("mint",), token_id);
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("mint").into());
+        env.events().publish(topics, token_id);
         token_id
     }
 
@@ -156,7 +158,11 @@ impl SbtRegistryContract {
         env.storage().persistent().set(&DataKey::Owner(token_id), &new_owner);
         env.storage().persistent().extend_ttl(&DataKey::Owner(token_id), STANDARD_TTL, EXTENDED_TTL);
 
-        env.events().publish(("admin_transfer", old_owner, new_owner), token_id);
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("xfer").into());
+        topics.push_back(old_owner.into());
+        topics.push_back(new_owner.into());
+        env.events().publish(topics, token_id);
     }
 
     pub fn transfer(env: Env, _from: Address, _to: Address, _token_id: u64) {
@@ -192,7 +198,7 @@ impl SbtRegistryContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::BytesN;
+    use soroban_sdk::{symbol_short, BytesN, TryFromVal};
 
     #[test]
     fn test_mint_and_ownership() {
@@ -205,6 +211,34 @@ mod tests {
         let token_id = client.mint(&owner, &1u64, &uri);
         assert_eq!(token_id, 1);
         assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    fn test_mint_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let token_id = client.mint(&owner, &1u64, &uri);
+
+        let events = env.events().all();
+        // Find the mint event: topic[0] == symbol "mint", data == token_id
+        let mint_event = events.iter().find(|(_, topics, _)| {
+            if let Some(first) = topics.get(0) {
+                soroban_sdk::Symbol::try_from_val(&env, &first)
+                    .map(|s| s == symbol_short!("mint"))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        });
+        assert!(mint_event.is_some(), "mint event not emitted");
+        let (_, _, data) = mint_event.unwrap();
+        let emitted_id = u64::try_from_val(&env, &data).expect("data should be token_id");
+        assert_eq!(emitted_id, token_id);
     }
 
     #[test]
