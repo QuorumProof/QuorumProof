@@ -2776,4 +2776,255 @@ mod tests {
         client.attest(&attestor2, &cred_id, &slice_id);
         assert_eq!(client.get_attestors(&cred_id).len(), 2);
     }
+
+    // --- Issue #228: get_slice_attestation_status ---
+
+    #[test]
+    fn test_get_slice_attestation_status_all_unsigned() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        let status = client.get_slice_attestation_status(&cred_id, &slice_id);
+        assert_eq!(status.len(), 2);
+        assert_eq!(status.get(0).unwrap().1, false);
+        assert_eq!(status.get(1).unwrap().1, false);
+    }
+
+    #[test]
+    fn test_get_slice_attestation_status_partial_signed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor1, &cred_id, &slice_id);
+
+        let status = client.get_slice_attestation_status(&cred_id, &slice_id);
+        assert_eq!(status.len(), 2);
+        assert_eq!(status.get(0).unwrap().1, true);
+        assert_eq!(status.get(1).unwrap().1, false);
+    }
+
+    #[test]
+    fn test_get_slice_attestation_status_all_signed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor1, &cred_id, &slice_id);
+        client.attest(&attestor2, &cred_id, &slice_id);
+
+        let status = client.get_slice_attestation_status(&cred_id, &slice_id);
+        assert_eq!(status.len(), 2);
+        assert_eq!(status.get(0).unwrap().1, true);
+        assert_eq!(status.get(1).unwrap().1, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_get_slice_attestation_status_credential_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.get_slice_attestation_status(&999u64, &slice_id);
+    }
+
+    // --- Issue #230: verify_claim_batch ---
+
+    #[test]
+    fn test_verify_claim_batch_mixed_results() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let zk_contract_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+        let zk_client = zk_verifier::ZkVerifierContractClient::new(&env, &zk_contract_id);
+        zk_client.initialize(&admin);
+
+        let mut claim_types = Vec::new(&env);
+        claim_types.push_back(zk_verifier::ClaimType::HasDegree);
+        claim_types.push_back(zk_verifier::ClaimType::HasLicense);
+
+        let mut proofs = Vec::new(&env);
+        proofs.push_back(Bytes::from_slice(&env, b"valid-proof"));
+        proofs.push_back(Bytes::new(&env));
+
+        let results = client.verify_claim_batch(
+            &zk_contract_id,
+            &admin,
+            &contract_id,
+            &1u64,
+            &claim_types,
+            &proofs,
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results.get(0).unwrap(), true);
+        assert_eq!(results.get(1).unwrap(), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "claim_types and proofs lengths must match")]
+    fn test_verify_claim_batch_mismatched_lengths() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let mut claim_types = Vec::new(&env);
+        claim_types.push_back(zk_verifier::ClaimType::HasDegree);
+
+        let mut proofs = Vec::new(&env);
+        proofs.push_back(Bytes::from_slice(&env, b"proof1"));
+        proofs.push_back(Bytes::from_slice(&env, b"proof2"));
+
+        let zk_id = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let qp_id = Address::generate(&env);
+
+        client.verify_claim_batch(&zk_id, &admin, &qp_id, &1u64, &claim_types, &proofs);
+    }
+
+    // --- Issue #231: get_proof_requests ---
+
+    #[test]
+    fn test_get_proof_requests_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let requests = client.get_proof_requests(&999u64);
+        assert_eq!(requests.len(), 0);
+    }
+
+    #[test]
+    fn test_get_proof_requests_single() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut claim_types = Vec::new(&env);
+        claim_types.push_back(zk_verifier::ClaimType::HasDegree);
+
+        client.generate_proof_request(&verifier, &cred_id, &claim_types);
+
+        let requests = client.get_proof_requests(&cred_id);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.get(0).unwrap().credential_id, cred_id);
+        assert_eq!(requests.get(0).unwrap().verifier, verifier);
+    }
+
+    #[test]
+    fn test_get_proof_requests_multiple() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let verifier1 = Address::generate(&env);
+        let verifier2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut claim_types = Vec::new(&env);
+        claim_types.push_back(zk_verifier::ClaimType::HasDegree);
+
+        client.generate_proof_request(&verifier1, &cred_id, &claim_types);
+        client.generate_proof_request(&verifier2, &cred_id, &claim_types);
+
+        let requests = client.get_proof_requests(&cred_id);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.get(0).unwrap().verifier, verifier1);
+        assert_eq!(requests.get(1).unwrap().verifier, verifier2);
+    }
+
+    #[test]
+    fn test_get_proof_requests_preserves_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut claim_types1 = Vec::new(&env);
+        claim_types1.push_back(zk_verifier::ClaimType::HasDegree);
+
+        let mut claim_types2 = Vec::new(&env);
+        claim_types2.push_back(zk_verifier::ClaimType::HasLicense);
+
+        let req_id1 = client.generate_proof_request(&verifier, &cred_id, &claim_types1);
+        let req_id2 = client.generate_proof_request(&verifier, &cred_id, &claim_types2);
+
+        let requests = client.get_proof_requests(&cred_id);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.get(0).unwrap().id, req_id1);
+        assert_eq!(requests.get(1).unwrap().id, req_id2);
+    }
 }
