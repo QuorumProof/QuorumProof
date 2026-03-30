@@ -775,6 +775,14 @@ impl QuorumProofContract {
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
+    /// Retrieve the total number of attestations an address has made.
+    pub fn get_attestor_count(env: Env, address: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AttestorCount(address))
+            .unwrap_or(0u64)
+    }
+
     /// Check if a credential has met its quorum threshold using weighted trust.
     ///
     /// # FBA Weighted Trust Model
@@ -1287,6 +1295,35 @@ mod tests {
             min_temp_entry_ttl: 16,
             max_entry_ttl: 6_312_000,
         });
+    }
+
+    #[test]
+    fn test_get_attestor_count() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        assert_eq!(client.get_attestor_count(&attestor), 0);
+
+        env.mock_all_auths();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100);
+
+        client.attest(&attestor, &cid, &slice_id);
+        assert_eq!(client.get_attestor_count(&attestor), 1);
     }
 
     #[test]
