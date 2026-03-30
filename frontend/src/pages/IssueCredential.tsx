@@ -1,6 +1,6 @@
 import { Navbar } from '../components/Navbar';
 import { IssueCredentialForm } from '../components/IssueCredentialForm';
-import { useFreighter } from '../lib/hooks/useFreighter';
+import { useWallet } from '../hooks';
 
 function formatAddress(addr: string) {
   if (!addr || addr.length < 10) return addr;
@@ -8,7 +8,7 @@ function formatAddress(addr: string) {
 }
 
 export default function IssueCredential() {
-  const { address, isInitializing, connect, hasFreighter } = useFreighter();
+  const { address } = useWallet();
 
   return (
     <div id="app">
@@ -24,43 +24,20 @@ export default function IssueCredential() {
             </div>
           </div>
 
-          {isInitializing ? (
-            <div className="loading-state">
-              <div className="spinner" />
-              <span>Connecting wallet…</span>
+          <div className="search-card">
+            <div className="detail-card__header" style={{ marginBottom: 24, padding: 0, background: 'none', border: 'none' }}>
+              <span className="detail-card__title">Issuing as</span>
+              <span
+                className="wallet-pill"
+                title={address!}
+                aria-label={`Connected wallet: ${address}`}
+              >
+                <span className="wallet-pill__dot" aria-hidden="true" />
+                {formatAddress(address!)}
+              </span>
             </div>
-          ) : !address ? (
-            <div
-              className="wallet-guard-card"
-              style={{ margin: '0 auto' }}
-              role="region"
-              aria-label="Wallet connection required"
-            >
-              <div className="wallet-guard__icon">🔐</div>
-              <h2 className="wallet-guard__title">Connect Your Wallet</h2>
-              <p className="wallet-guard__sub">
-                You must connect a Freighter wallet to issue credentials as an attestor.
-              </p>
-              <button className="btn btn--primary" onClick={connect}>
-                {hasFreighter ? 'Connect Freighter' : 'Install Freighter'}
-              </button>
-            </div>
-          ) : (
-            <div className="search-card">
-              <div className="detail-card__header" style={{ marginBottom: 24, padding: 0, background: 'none', border: 'none' }}>
-                <span className="detail-card__title">Issuing as</span>
-                <span
-                  className="wallet-pill"
-                  title={address}
-                  aria-label={`Connected wallet: ${address}`}
-                >
-                  <span className="wallet-pill__dot" aria-hidden="true" />
-                  {formatAddress(address)}
-                </span>
-              </div>
-              <IssueCredentialForm issuerAddress={address} />
-            </div>
-          )}
+            <IssueCredentialForm issuerAddress={address!} />
+          </div>
         </div>
       </main>
     </div>
