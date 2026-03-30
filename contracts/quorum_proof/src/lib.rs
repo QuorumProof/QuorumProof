@@ -385,11 +385,25 @@ impl QuorumProofContract {
     ///
     /// # Panics
     /// Does not panic; returns an empty `Vec` if the subject has no credentials.
-    pub fn get_credentials_by_subject(env: Env, subject: Address) -> Vec<u64> {
-        env.storage()
+    pub fn get_credentials_by_subject(env: Env, subject: Address, page: u32, page_size: u32) -> Vec<u64> {
+        assert!(page > 0, "page must be greater than 0");
+        assert!(page_size > 0, "page_size must be greater than 0");
+        let all_creds: Vec<u64> = env.storage()
             .instance()
             .get(&DataKey::SubjectCredentials(subject))
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+        let total = all_creds.len();
+        let start = (page - 1).saturating_mul(page_size);
+        let mut result = Vec::new(&env);
+        for i in start..start.saturating_add(page_size) {
+            if i >= total {
+                break;
+            }
+            if let Some(cred) = all_creds.get(i) {
+                result.push_back(cred);
+            }
+        }
+        result
     }
 
     /// Revoke a credential. Only the original issuer can revoke.
@@ -1787,7 +1801,7 @@ mod tests {
         let id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
         let id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None);
 
-        let ids = client.get_credentials_by_subject(&subject);
+        let ids = client.get_credentials_by_subject(&subject, &1, &100);
         assert_eq!(ids.len(), 3);
         assert_eq!(ids.get(0).unwrap(), id1);
         assert_eq!(ids.get(1).unwrap(), id2);
@@ -1840,7 +1854,7 @@ mod tests {
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
-        let ids = client.get_credentials_by_subject(&subject);
+        let ids = client.get_credentials_by_subject(&subject, &1, &100);
         assert_eq!(ids.len(), 0);
     }
 
@@ -1861,12 +1875,12 @@ mod tests {
         let id_a2 = client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
         let id_b1 = client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
 
-        let ids_a = client.get_credentials_by_subject(&subject_a);
+        let ids_a = client.get_credentials_by_subject(&subject_a, &1, &100);
         assert_eq!(ids_a.len(), 2);
         assert_eq!(ids_a.get(0).unwrap(), id_a1);
         assert_eq!(ids_a.get(1).unwrap(), id_a2);
 
-        let ids_b = client.get_credentials_by_subject(&subject_b);
+        let ids_b = client.get_credentials_by_subject(&subject_b, &1, &100);
         assert_eq!(ids_b.len(), 1);
         assert_eq!(ids_b.get(0).unwrap(), id_b1);
     }
@@ -2296,9 +2310,9 @@ mod tests {
         let ids = client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &None);
 
         assert_eq!(ids.len(), 3);
-        assert_eq!(client.get_credentials_by_subject(&subject1).len(), 1);
-        assert_eq!(client.get_credentials_by_subject(&subject2).len(), 1);
-        assert_eq!(client.get_credentials_by_subject(&subject3).len(), 1);
+        assert_eq!(client.get_credentials_by_subject(&subject1, &1, &100).len(), 1);
+        assert_eq!(client.get_credentials_by_subject(&subject2, &1, &100).len(), 1);
+        assert_eq!(client.get_credentials_by_subject(&subject3, &1, &100).len(), 1);
         assert_eq!(ids.get(1).unwrap(), ids.get(0).unwrap() + 1);
         assert_eq!(ids.get(2).unwrap(), ids.get(0).unwrap() + 2);
     }
