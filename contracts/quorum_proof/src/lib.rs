@@ -422,6 +422,23 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey::Credential(credential_id), &credential);
+        let mut subject_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(credential.subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<u64> = Vec::new(&env);
+        for id in subject_creds.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        if retained.len() != subject_creds.len() {
+            subject_creds = retained;
+            env.storage()
+                .instance()
+                .set(&DataKey::SubjectCredentials(credential.subject.clone()), &subject_creds);
+        }
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -1733,6 +1750,44 @@ mod tests {
         assert_eq!(ids.get(0).unwrap(), id1);
         assert_eq!(ids.get(1).unwrap(), id2);
         assert_eq!(ids.get(2).unwrap(), id3);
+    }
+
+    #[test]
+    fn test_revoke_prunes_subject_credentials_only_for_target_subject() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject_a = Address::generate(&env);
+        let subject_b = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let id_a1 = client.issue_credential(&issuer, &subject_a, &1u32, &metadata, &None);
+        let id_a2 = client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
+        let id_b1 = client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
+
+        let before_a = client.get_credentials_by_subject(&subject_a);
+        assert_eq!(before_a.len(), 2);
+        assert_eq!(before_a.get(0).unwrap(), id_a1);
+        assert_eq!(before_a.get(1).unwrap(), id_a2);
+
+        let before_b = client.get_credentials_by_subject(&subject_b);
+        assert_eq!(before_b.len(), 1);
+        assert_eq!(before_b.get(0).unwrap(), id_b1);
+
+        client.revoke_credential(&issuer, &id_a1);
+
+        let after_a = client.get_credentials_by_subject(&subject_a);
+        assert_eq!(after_a.len(), 1);
+        assert_eq!(after_a.get(0).unwrap(), id_a2);
+
+        let after_b = client.get_credentials_by_subject(&subject_b);
+        assert_eq!(after_b.len(), 1);
+        assert_eq!(after_b.get(0).unwrap(), id_b1);
+
+        let revoked = client.get_credential(&id_a1);
+        assert!(revoked.revoked);
     }
 
     #[test]
