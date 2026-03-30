@@ -1890,6 +1890,36 @@ mod tests {
         assert!(!client.is_attested(&cred_id, &slice_id));
     }
 
+    #[test]
+    fn test_is_attested_returns_false_before_threshold_is_met() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let attestor3 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        attestors.push_back(attestor3.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let creator = Address::generate(&env);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &3u32);
+
+        client.attest(&attestor1, &cred_id, &slice_id);
+        client.attest(&attestor2, &cred_id, &slice_id);
+
+        assert!(!client.is_attested(&cred_id, &slice_id));
+    }
+
     // --- batch issue ---
 
     #[test]
