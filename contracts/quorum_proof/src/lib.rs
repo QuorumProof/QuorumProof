@@ -224,6 +224,10 @@ impl QuorumProofContract {
     ) -> u64 {
         issuer.require_auth();
         Self::require_not_paused(&env);
+        assert!(
+            credential_type > 0,
+            "credential_type must be greater than 0"
+        );
         assert!(!metadata_hash.is_empty(), "metadata_hash cannot be empty");
         
         // Check for duplicate credential of same type from same issuer to same subject
@@ -1471,6 +1475,21 @@ mod tests {
             weights.push_back(1u32);
         }
         client.create_slice(&creator, &attestors, &weights, &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential_type must be greater than 0")]
+    fn test_zero_credential_type_rejection() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        client.issue_credential(&issuer, &subject, &0u32, &metadata, &None);
     }
 
     #[test]
