@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Navbar } from '../components/Navbar';
-import { WalletGate } from '../components/WalletGate';
 import { CredentialCard } from '../components/CredentialCard';
 import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
@@ -16,7 +15,7 @@ import {
 import { type CredCardData } from '../lib/credentialUtils';
 
 export default function Dashboard() {
-  const { address, hasFreighter, isInitializing, connect, disconnect } = useWallet();
+  const { address, disconnect } = useWallet();
   const [cards, setCards] = useState<CredCardData[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,21 +132,8 @@ export default function Dashboard() {
         </header>
 
         <div className="dashboard-content">
-          {/* Wallet initializing */}
-          {isInitializing && (
-            <div className="loading-state">
-              <div className="spinner" />
-              <p>Checking wallet…</p>
-            </div>
-          )}
-
-          {/* No wallet connected */}
-          {!isInitializing && !address && (
-            <WalletGate hasFreighter={hasFreighter} connect={connect} />
-          )}
-
           {/* Loading credentials */}
-          {address && loading && (
+          {loading && (
             <div className="dashboard-grid">
               {[1, 2, 3].map((i) => (
                 <CredentialCardSkeleton key={`skeleton-${i}`} />
@@ -156,7 +142,7 @@ export default function Dashboard() {
           )}
 
           {/* Top-level fetch error */}
-          {address && !loading && error && (
+          {!loading && error && (
             <div className="error-card">
               <div className="error-card__icon">⚠️</div>
               <div>
@@ -174,12 +160,12 @@ export default function Dashboard() {
           )}
 
           {/* Empty state */}
-          {address && !loading && !error && cards.length === 0 && (
-            <EmptyState address={address} />
+          {!loading && !error && cards.length === 0 && (
+            <EmptyState address={address!} />
           )}
 
           {/* Credential grid */}
-          {address && !loading && !error && cards.length > 0 && (
+          {!loading && !error && cards.length > 0 && (
             <div className="dashboard-grid">
               {cards.map((card: CredCardData) => (
                 <CredentialCard
