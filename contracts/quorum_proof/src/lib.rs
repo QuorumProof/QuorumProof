@@ -535,6 +535,11 @@ impl QuorumProofContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound))
     }
 
+    /// Check if a quorum slice resides in state.
+    pub fn slice_exists(env: Env, slice_id: u64) -> bool {
+        env.storage().instance().has(&DataKey::Slice(slice_id))
+    }
+
     /// Return the creator address of a slice.
     ///
     /// # Parameters
@@ -1287,6 +1292,30 @@ mod tests {
             min_temp_entry_ttl: 16,
             max_entry_ttl: 6_312_000,
         });
+    }
+
+    #[test]
+    fn test_slice_exists() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        assert_eq!(client.slice_exists(&1), false);
+
+        env.mock_all_auths();
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100);
+
+        assert_eq!(client.slice_exists(&slice_id), true);
+        assert_eq!(client.slice_exists(&(slice_id + 1)), false);
     }
 
     #[test]
