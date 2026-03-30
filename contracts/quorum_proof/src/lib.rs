@@ -557,6 +557,11 @@ impl QuorumProofContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound))
     }
 
+    /// Check if a quorum slice resides in state.
+    pub fn slice_exists(env: Env, slice_id: u64) -> bool {
+        env.storage().instance().has(&DataKey::Slice(slice_id))
+    }
+
     /// Return the creator address of a slice.
     ///
     /// # Parameters
