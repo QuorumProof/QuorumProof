@@ -1,4 +1,4 @@
-export { WalletGate } from './WalletGate';
+export { WalletGate, WalletGuard } from './WalletGate';
 export { CredentialCard } from './CredentialCard';
 export { EmptyState } from './EmptyState';
 export { Navbar } from './Navbar';

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Navbar } from '../components/Navbar';
-import { WalletGate } from '../components/WalletGate';
+import { WalletGuard } from '../components/WalletGate';
 import { CredentialCard } from '../components/CredentialCard';
 import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
@@ -16,7 +16,7 @@ import {
 import { type CredCardData } from '../lib/credentialUtils';
 
 export default function Dashboard() {
-  const { address, hasFreighter, isInitializing, connect, disconnect } = useWallet();
+  const { address, disconnect } = useWallet();
   const [cards, setCards] = useState<CredCardData[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,63 +133,52 @@ export default function Dashboard() {
         </header>
 
         <div className="dashboard-content">
-          {/* Wallet initializing */}
-          {isInitializing && (
-            <div className="loading-state">
-              <div className="spinner" />
-              <p>Checking wallet…</p>
-            </div>
-          )}
-
-          {/* No wallet connected */}
-          {!isInitializing && !address && (
-            <WalletGate hasFreighter={hasFreighter} connect={connect} />
-          )}
-
-          {/* Loading credentials */}
-          {address && loading && (
-            <div className="dashboard-grid">
-              {[1, 2, 3].map((i) => (
-                <CredentialCardSkeleton key={`skeleton-${i}`} />
-              ))}
-            </div>
-          )}
-
-          {/* Top-level fetch error */}
-          {address && !loading && error && (
-            <div className="error-card">
-              <div className="error-card__icon">⚠️</div>
-              <div>
-                <div className="error-card__title">Could Not Load Credentials</div>
-                <div className="error-card__msg">{error}</div>
-                <button
-                  className="btn btn--ghost btn--sm"
-                  style={{ marginTop: '12px' }}
-                  onClick={() => setRetryKey((k: number) => k + 1)}
-                >
-                  Retry
-                </button>
+          <WalletGuard>
+            {/* Loading credentials */}
+            {loading && (
+              <div className="dashboard-grid">
+                {[1, 2, 3].map((i) => (
+                  <CredentialCardSkeleton key={`skeleton-${i}`} />
+                ))}
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Empty state */}
-          {address && !loading && !error && cards.length === 0 && (
-            <EmptyState address={address} />
-          )}
+            {/* Top-level fetch error */}
+            {!loading && error && (
+              <div className="error-card">
+                <div className="error-card__icon">⚠️</div>
+                <div>
+                  <div className="error-card__title">Could Not Load Credentials</div>
+                  <div className="error-card__msg">{error}</div>
+                  <button
+                    className="btn btn--ghost btn--sm"
+                    style={{ marginTop: '12px' }}
+                    onClick={() => setRetryKey((k: number) => k + 1)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            )}
 
-          {/* Credential grid */}
-          {address && !loading && !error && cards.length > 0 && (
-            <div className="dashboard-grid">
-              {cards.map((card: CredCardData) => (
-                <CredentialCard
-                  key={card.credential.id.toString()}
-                  data={card}
-                  sliceId={sliceId}
-                />
-              ))}
-            </div>
-          )}
+            {/* Empty state */}
+            {!loading && !error && cards.length === 0 && address && (
+              <EmptyState address={address} />
+            )}
+
+            {/* Credential grid */}
+            {!loading && !error && cards.length > 0 && (
+              <div className="dashboard-grid">
+                {cards.map((card: CredCardData) => (
+                  <CredentialCard
+                    key={card.credential.id.toString()}
+                    data={card}
+                    sliceId={sliceId}
+                  />
+                ))}
+              </div>
+            )}
+          </WalletGuard>
         </div>
       </main>
 
