@@ -38,8 +38,8 @@ export default function CredentialDetail() {
         const credId = BigInt(id);
         const [cred, expired, attestorList] = await Promise.all([
           getCredential(credId),
-          isExpired(credId),
-          getAttestors(credId),
+          isExpired(credId).catch(() => false),
+          getAttestors(credId).catch(() => [] as string[]),
         ]);
         setCredential(cred);
         setIsExpiredFlag(expired);
@@ -81,7 +81,7 @@ export default function CredentialDetail() {
     return (
       <>
         <Navbar />
-        <main className="container" style={{ paddingTop: '40px' }}>
+        <main className="container" style={{ paddingTop: 40 }}>
           <div className="error-card">
             <div className="error-card__icon">⚠️</div>
             <div>
@@ -264,6 +264,15 @@ export default function CredentialDetail() {
           </div>
         </div>
       </main>
+
+      <footer className="footer">
+        <div className="container">
+          Powered by{' '}
+          <a href="https://stellar.org" target="_blank" rel="noopener">Stellar Soroban</a>
+          {' · '}
+          <a href="https://github.com/Phantomcall/QuorumProof" target="_blank" rel="noopener">QuorumProof</a>
+        </div>
+      </footer>
     </>
   );
 }

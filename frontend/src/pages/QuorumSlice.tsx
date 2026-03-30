@@ -1,4 +1,5 @@
 import { Navbar } from '../components/Navbar';
+import { WalletGuard } from '../components/WalletGate';
 import { QuorumSliceBuilder } from '../components/QuorumSliceBuilder';
 import { useWallet } from '../hooks';
 
