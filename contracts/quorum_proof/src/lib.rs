@@ -1989,6 +1989,27 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
+    fn test_add_attestor_exceeds_max_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        let mut weights = Vec::new(&env);
+        for _ in 0..MAX_ATTESTORS_PER_SLICE {
+            attestors.push_back(Address::generate(&env));
+            weights.push_back(1u32);
+        }
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // This should panic — slice is already at the cap
+        client.add_attestor(&creator, &slice_id, &Address::generate(&env), &1u32);
+    }
+
+    #[test]
     #[should_panic(expected = "attestors cannot be empty")]
     fn test_create_slice_empty_attestors_panics() {
         let env = Env::default();
