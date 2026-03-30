@@ -492,7 +492,7 @@ impl QuorumProofContract {
         threshold: u32,
     ) -> u64 {
         creator.require_auth();
-        assert!(!attestors.is_empty(), "attestors cannot be empty");
+        assert!(attestors.len() > 0, "attestors cannot be empty");
         assert!(
             attestors.len() as u32 <= MAX_ATTESTORS_PER_SLICE,
             "attestors exceed maximum allowed per slice"
