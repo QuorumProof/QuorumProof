@@ -2,7 +2,7 @@
 use sbt_registry::SbtRegistryContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address, Env, String,
-    Vec, IntoVal, TryFromVal,
+    Vec, IntoVal,
 };
 use zk_verifier::{ClaimType, ZkVerifierContractClient};
 
@@ -1297,38 +1297,6 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::ProofRequests(credential_id))
             .unwrap_or(Vec::new(&env))
-    }
-
-    /// Check if a credential exists without panicking.
-    ///
-    /// # Parameters
-    /// - `credential_id`: The ID of the credential to check.
-    ///
-    /// # Returns
-    /// `true` if the credential exists in storage, `false` otherwise.
-    ///
-    /// # Panics
-    /// Does not panic.
-    pub fn credential_exists(env: Env, credential_id: u64) -> bool {
-        env.storage()
-            .instance()
-            .has(&DataKey::Credential(credential_id))
-    }
-
-    /// Check if a quorum slice exists without panicking.
-    ///
-    /// # Parameters
-    /// - `slice_id`: The ID of the slice to check.
-    ///
-    /// # Returns
-    /// `true` if the slice exists in storage, `false` otherwise.
-    ///
-    /// # Panics
-    /// Does not panic.
-    pub fn slice_exists(env: Env, slice_id: u64) -> bool {
-        env.storage()
-            .instance()
-            .has(&DataKey::Slice(slice_id))
     }
 }
 
