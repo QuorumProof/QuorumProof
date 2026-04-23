@@ -316,6 +316,12 @@ impl QuorumProofContract {
         }
     }
 
+    /// Validate an array input has between `min` and `max` elements (inclusive).
+    fn validate_array_bounds(len: u32, min: u32, max: u32, name: &'static str) {
+        assert!(len >= min, "{} must have at least {} element(s)", name, min);
+        assert!(len <= max, "{} must have at most {} element(s)", name, max);
+    }
+
     /// Issue a new credential to a subject. Returns the new credential ID.
     ///
     /// # Parameters
