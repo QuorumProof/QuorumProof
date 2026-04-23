@@ -22,6 +22,7 @@ pub enum DataKey {
     Owner(u64),
     OwnerTokens(Address),
     OwnerCredential(Address, u64),
+    Whitelist(Address),
     Admin,
     QuorumProofId,
 }
@@ -139,6 +140,20 @@ impl SbtRegistryContract {
     /// Alias for get_tokens_by_owner — returns all SBT token IDs owned by an address.
     pub fn get_sbt_by_owner(env: Env, owner: Address) -> Vec<u64> {
         env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
+    }
+
+    /// Add a holder to the contract whitelist.
+    /// Only the admin may call this function.
+    pub fn add_holder_to_whitelist(env: Env, admin: Address, holder: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Whitelist(holder), &true);
+    }
+
+    /// Returns true if the holder is whitelisted.
+    pub fn is_holder_whitelisted(env: Env, holder: Address) -> bool {
+        env.storage().instance().get(&DataKey::Whitelist(holder)).unwrap_or(false)
     }
 
     /// Returns the total number of SBTs ever minted.
@@ -286,6 +301,44 @@ mod tests {
         let token_id = client.mint(&owner, &cred_id, &uri);
         assert_eq!(token_id, 1);
         assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    fn test_add_holder_to_whitelist_and_check() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        assert!(!client.is_holder_whitelisted(&delegatee));
+        client.add_holder_to_whitelist(&admin, &delegatee);
+        assert!(client.is_holder_whitelisted(&delegatee));
+        assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_add_holder_to_whitelist_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        client.mint(&owner, &cred_id, &uri);
+
+        client.add_holder_to_whitelist(&unauthorized, &owner);
     }
 
     #[test]
