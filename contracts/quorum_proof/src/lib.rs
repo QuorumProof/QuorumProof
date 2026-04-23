@@ -1641,6 +1641,186 @@ impl QuorumProofContract {
             .get(&DataKey::ProofRequests(credential_id))
             .unwrap_or(Vec::new(&env))
     }
+
+    // ── Challenge / Dispute Resolution ───────────────────────────────────────
+
+    /// Open a challenge against an attestor's signature on a credential.
+    ///
+    /// Only a member of the quorum slice (other than the accused) may challenge.
+    /// Only one open challenge per (credential, accused) pair is allowed at a time.
+    ///
+    /// # Parameters
+    /// - `challenger`: Slice member raising the challenge; must authorize.
+    /// - `credential_id`: The credential whose attestation is being disputed.
+    /// - `slice_id`: The quorum slice both challenger and accused belong to.
+    /// - `accused`: The attestor whose signature is being challenged.
+    ///
+    /// # Returns
+    /// The new challenge ID.
+    pub fn challenge_attestation(
+        env: Env,
+        challenger: Address,
+        credential_id: u64,
+        slice_id: u64,
+        accused: Address,
+    ) -> u64 {
+        challenger.require_auth();
+        Self::require_not_paused(&env);
+
+        // Credential must exist
+        if !env.storage().instance().has(&DataKey::Credential(credential_id)) {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        let slice: QuorumSlice = env.storage().instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Both challenger and accused must be in the slice
+        let mut challenger_in = false;
+        let mut accused_in = false;
+        for a in slice.attestors.iter() {
+            if a == challenger { challenger_in = true; }
+            if a == accused    { accused_in   = true; }
+        }
+        if !challenger_in || !accused_in {
+            panic_with_error!(&env, ContractError::NotInSlice);
+        }
+
+        // Accused must have actually attested this credential
+        let attestors: Vec<Address> = env.storage().instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(&env));
+        if !attestors.iter().any(|a| a == accused) {
+            panic_with_error!(&env, ContractError::NotAttested);
+        }
+
+        // No duplicate open challenge for same (credential, accused)
+        if env.storage().instance().has(&DataKey::ActiveChallenge(credential_id, accused.clone())) {
+            panic_with_error!(&env, ContractError::AlreadyChallenged);
+        }
+
+        let id: u64 = env.storage().instance()
+            .get(&DataKey::ChallengeCount)
+            .unwrap_or(0u64) + 1;
+
+        let challenge = Challenge {
+            id,
+            credential_id,
+            slice_id,
+            accused: accused.clone(),
+            challenger,
+            status: ChallengeStatus::Open,
+            uphold_votes: Vec::new(&env),
+            dismiss_votes: Vec::new(&env),
+        };
+
+        env.storage().instance().set(&DataKey::Challenge(id), &challenge);
+        env.storage().instance().set(&DataKey::ChallengeCount, &id);
+        env.storage().instance().set(&DataKey::ActiveChallenge(credential_id, accused), &id);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        id
+    }
+
+    /// Cast a vote on an open challenge.
+    ///
+    /// Any slice member except the accused may vote once. When the total weight of
+    /// votes on either side meets or exceeds the slice threshold the challenge resolves:
+    /// - Upheld → accused's attestation is removed from the credential.
+    /// - Dismissed → challenge is closed, attestation stands.
+    ///
+    /// # Parameters
+    /// - `voter`: Slice member casting the vote; must authorize.
+    /// - `challenge_id`: The challenge to vote on.
+    /// - `uphold`: `true` to uphold (remove attestation), `false` to dismiss.
+    pub fn vote_on_challenge(env: Env, voter: Address, challenge_id: u64, uphold: bool) {
+        voter.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut challenge: Challenge = env.storage().instance()
+            .get(&DataKey::Challenge(challenge_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ChallengeNotFound));
+
+        if challenge.status != ChallengeStatus::Open {
+            panic_with_error!(&env, ContractError::ChallengeResolved);
+        }
+
+        // Accused cannot vote
+        if voter == challenge.accused {
+            panic_with_error!(&env, ContractError::AccusedCannotVote);
+        }
+
+        let slice: QuorumSlice = env.storage().instance()
+            .get(&DataKey::Slice(challenge.slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Voter must be in the slice
+        if !slice.attestors.iter().any(|a| a == voter) {
+            panic_with_error!(&env, ContractError::NotInSlice);
+        }
+
+        // No double-voting
+        let already_voted = challenge.uphold_votes.iter().any(|a| a == voter)
+            || challenge.dismiss_votes.iter().any(|a| a == voter);
+        if already_voted {
+            panic_with_error!(&env, ContractError::AlreadyVoted);
+        }
+
+        if uphold {
+            challenge.uphold_votes.push_back(voter);
+        } else {
+            challenge.dismiss_votes.push_back(voter);
+        }
+
+        // Helper: sum weights for a set of voters
+        let weighted_sum = |votes: &Vec<Address>| -> u32 {
+            let mut total: u32 = 0;
+            for v in votes.iter() {
+                for (i, a) in slice.attestors.iter().enumerate() {
+                    if a == v {
+                        total = total.saturating_add(slice.weights.get(i as u32).unwrap_or(0));
+                        break;
+                    }
+                }
+            }
+            total
+        };
+
+        let uphold_weight  = weighted_sum(&challenge.uphold_votes);
+        let dismiss_weight = weighted_sum(&challenge.dismiss_votes);
+
+        if uphold_weight >= slice.threshold {
+            challenge.status = ChallengeStatus::Upheld;
+            // Remove accused's attestation from the credential
+            let attestors: Vec<Address> = env.storage().instance()
+                .get(&DataKey::Attestors(challenge.credential_id))
+                .unwrap_or(Vec::new(&env));
+            let mut retained: Vec<Address> = Vec::new(&env);
+            for a in attestors.iter() {
+                if a != challenge.accused {
+                    retained.push_back(a);
+                }
+            }
+            env.storage().instance().set(&DataKey::Attestors(challenge.credential_id), &retained);
+            env.storage().instance().remove(&DataKey::ActiveChallenge(challenge.credential_id, challenge.accused.clone()));
+        } else if dismiss_weight >= slice.threshold {
+            challenge.status = ChallengeStatus::Dismissed;
+            env.storage().instance().remove(&DataKey::ActiveChallenge(challenge.credential_id, challenge.accused.clone()));
+        }
+
+        env.storage().instance().set(&DataKey::Challenge(challenge_id), &challenge);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Retrieve a challenge by ID.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::ChallengeNotFound` if no challenge exists with that ID.
+    pub fn get_challenge(env: Env, challenge_id: u64) -> Challenge {
+        env.storage().instance()
+            .get(&DataKey::Challenge(challenge_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ChallengeNotFound))
+    }
 }
 
 #[cfg(test)]
