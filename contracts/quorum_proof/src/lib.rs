@@ -297,7 +297,17 @@ impl QuorumProofContract {
         );
         let mut ids: Vec<u64> = Vec::new(&env);
         for i in 0..n {
-            let id = Self::issue_credential(env.clone(), issuer.clone(), subjects.get(i).unwrap(), credential_types.get(i).unwrap(), metadata_hashes.get(i).unwrap(), expires_at.clone());
+            let subject = subjects.get(i).unwrap();
+            let credential_type = credential_types.get(i).unwrap();
+            let metadata_hash = metadata_hashes.get(i).unwrap();
+            assert!(credential_type > 0, "credential_type must be greater than 0");
+            let duplicate_key = DataKey::SubjectIssuerType(subject.clone(), issuer.clone(), credential_type);
+            if env.storage().instance().has(&duplicate_key) {
+                panic_with_error!(&env, ContractError::DuplicateCredential);
+            }
+            let id = Self::issue_inner(&env, issuer.clone(), subject, credential_type, metadata_hash, expires_at.clone());
+            env.storage().instance().set(&duplicate_key, &id);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
             ids.push_back(id);
         }
         ids
@@ -1826,22 +1836,22 @@ mod tests {
         let id_a2 = client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
         let id_b1 = client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
 
-        let before_a = client.get_credentials_by_subject(&subject_a);
+        let before_a = client.get_credentials_by_subject(&subject_a, &1, &100);
         assert_eq!(before_a.len(), 2);
         assert_eq!(before_a.get(0).unwrap(), id_a1);
         assert_eq!(before_a.get(1).unwrap(), id_a2);
 
-        let before_b = client.get_credentials_by_subject(&subject_b);
+        let before_b = client.get_credentials_by_subject(&subject_b, &1, &100);
         assert_eq!(before_b.len(), 1);
         assert_eq!(before_b.get(0).unwrap(), id_b1);
 
         client.revoke_credential(&issuer, &id_a1);
 
-        let after_a = client.get_credentials_by_subject(&subject_a);
+        let after_a = client.get_credentials_by_subject(&subject_a, &1, &100);
         assert_eq!(after_a.len(), 1);
         assert_eq!(after_a.get(0).unwrap(), id_a2);
 
-        let after_b = client.get_credentials_by_subject(&subject_b);
+        let after_b = client.get_credentials_by_subject(&subject_b, &1, &100);
         assert_eq!(after_b.len(), 1);
         assert_eq!(after_b.get(0).unwrap(), id_b1);
 
@@ -2342,6 +2352,78 @@ mod tests {
         hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm2"));
 
         client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "DuplicateCredential")]
+    fn test_batch_issue_credentials_duplicate_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Pre-issue a credential so the batch hits a duplicate
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmExisting");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut subjects = Vec::new(&env);
+        subjects.push_back(subject.clone());
+        let mut cred_types = Vec::new(&env);
+        cred_types.push_back(1u32); // duplicate
+        let mut hashes = Vec::new(&env);
+        hashes.push_back(Bytes::from_slice(&env, b"ipfs://QmNew"));
+
+        client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &None);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_batch_issue_credentials_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.pause(&admin);
+
+        let issuer = Address::generate(&env);
+        let mut subjects = Vec::new(&env);
+        subjects.push_back(Address::generate(&env));
+        let mut cred_types = Vec::new(&env);
+        cred_types.push_back(1u32);
+        let mut hashes = Vec::new(&env);
+        hashes.push_back(Bytes::from_slice(&env, b"ipfs://QmTest"));
+
+        client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &None);
+    }
+
+    #[test]
+    fn test_batch_issue_credentials_with_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        let mut subjects = Vec::new(&env);
+        subjects.push_back(subject1.clone());
+        subjects.push_back(subject2.clone());
+        let mut cred_types = Vec::new(&env);
+        cred_types.push_back(1u32);
+        cred_types.push_back(2u32);
+        let mut hashes = Vec::new(&env);
+        hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm1"));
+        hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm2"));
+
+        let ids = client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &Some(9_999_999u64));
+
+        assert_eq!(ids.len(), 2);
+        assert_eq!(client.get_credential(&ids.get(0).unwrap()).expires_at, Some(9_999_999u64));
+        assert_eq!(client.get_credential(&ids.get(1).unwrap()).expires_at, Some(9_999_999u64));
     }
 
     #[test]
