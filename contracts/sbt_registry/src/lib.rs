@@ -22,6 +22,9 @@ pub enum DataKey {
     Owner(u64),
     OwnerTokens(Address),
     OwnerCredential(Address, u64),
+    Dispute(u64),
+    DisputeCount,
+    ActiveDispute(u64),
     Admin,
     QuorumProofId,
 }
@@ -33,6 +36,26 @@ pub struct SoulboundToken {
     pub owner: Address,
     pub credential_id: u64,
     pub metadata_uri: Bytes,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DisputeStatus {
+    Open,
+    Upheld,
+    Dismissed,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct Dispute {
+    pub id: u64,
+    pub token_id: u64,
+    pub initiator: Address,
+    pub accused: Address,
+    pub status: DisputeStatus,
+    pub uphold_votes: Vec<Address>,
+    pub dismiss_votes: Vec<Address>,
 }
 
 #[contract]
@@ -139,6 +162,83 @@ impl SbtRegistryContract {
     /// Alias for get_tokens_by_owner — returns all SBT token IDs owned by an address.
     pub fn get_sbt_by_owner(env: Env, owner: Address) -> Vec<u64> {
         env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
+    }
+
+    /// Open a dispute against an SBT holder or issuer.
+    /// Only an existing SBT holder may initiate a dispute about a token.
+    pub fn initiate_dispute(env: Env, initiator: Address, token_id: u64, accused: Address) -> u64 {
+        initiator.require_auth();
+        let token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+
+        let holder_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(initiator.clone()))
+            .unwrap_or(Vec::new(&env));
+        assert!(initiator == token.owner || !holder_tokens.is_empty(), "unauthorized");
+        assert!(initiator != accused, "cannot accuse self");
+        assert!(!env.storage().instance().has(&DataKey::ActiveDispute(token_id)), "dispute already open");
+
+        let id: u64 = env.storage().instance().get(&DataKey::DisputeCount).unwrap_or(0u64) + 1;
+        let dispute = Dispute {
+            id,
+            token_id,
+            initiator: initiator.clone(),
+            accused: accused.clone(),
+            status: DisputeStatus::Open,
+            uphold_votes: Vec::new(&env),
+            dismiss_votes: Vec::new(&env),
+        };
+
+        env.storage().instance().set(&DataKey::Dispute(id), &dispute);
+        env.storage().instance().set(&DataKey::ActiveDispute(token_id), &id);
+        env.storage().instance().set(&DataKey::DisputeCount, &id);
+        id
+    }
+
+    /// Vote on an open dispute. Holders may vote once per dispute.
+    pub fn vote_on_dispute(env: Env, voter: Address, dispute_id: u64, uphold: bool) {
+        voter.require_auth();
+
+        let mut dispute: Dispute = env.storage().instance()
+            .get(&DataKey::Dispute(dispute_id))
+            .expect("dispute not found");
+        assert!(dispute.status == DisputeStatus::Open, "dispute resolved");
+        assert!(voter != dispute.accused, "accused cannot vote");
+        assert!(voter != dispute.initiator, "initiator cannot vote");
+
+        let voter_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(voter.clone()))
+            .unwrap_or(Vec::new(&env));
+        assert!(!voter_tokens.is_empty(), "unauthorized");
+
+        let already_voted = dispute.uphold_votes.iter().any(|a| a == voter)
+            || dispute.dismiss_votes.iter().any(|a| a == voter);
+        assert!(!already_voted, "already voted");
+
+        if uphold {
+            dispute.uphold_votes.push_back(voter.clone());
+        } else {
+            dispute.dismiss_votes.push_back(voter.clone());
+        }
+
+        const VOTE_THRESHOLD: u32 = 2;
+        if dispute.uphold_votes.len() >= VOTE_THRESHOLD {
+            dispute.status = DisputeStatus::Upheld;
+            env.storage().instance().remove(&DataKey::ActiveDispute(dispute.token_id));
+        } else if dispute.dismiss_votes.len() >= VOTE_THRESHOLD {
+            dispute.status = DisputeStatus::Dismissed;
+            env.storage().instance().remove(&DataKey::ActiveDispute(dispute.token_id));
+        }
+
+        env.storage().instance().set(&DataKey::Dispute(dispute_id), &dispute);
+    }
+
+    /// Retrieve a dispute by ID.
+    pub fn get_dispute(env: Env, dispute_id: u64) -> Dispute {
+        env.storage().instance()
+            .get(&DataKey::Dispute(dispute_id))
+            .expect("dispute not found")
     }
 
     /// Returns the total number of SBTs ever minted.
@@ -286,6 +386,83 @@ mod tests {
         let token_id = client.mint(&owner, &cred_id, &uri);
         assert_eq!(token_id, 1);
         assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    fn test_initiate_dispute_and_vote_uphold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let accused = Address::generate(&env);
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id_owner = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id_voter1 = qp_client.issue_credential(&issuer, &voter1, &2u32, &meta, &None);
+        let cred_id_voter2 = qp_client.issue_credential(&issuer, &voter2, &3u32, &meta, &None);
+
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id_owner, &uri);
+        client.mint(&voter1, &cred_id_voter1, &uri);
+        client.mint(&voter2, &cred_id_voter2, &uri);
+
+        let dispute_id = client.initiate_dispute(&owner, &token_id, &accused);
+        client.vote_on_dispute(&voter1, &dispute_id, &true);
+        client.vote_on_dispute(&voter2, &dispute_id, &true);
+
+        let dispute = client.get_dispute(&dispute_id);
+        assert_eq!(dispute.status, DisputeStatus::Upheld);
+    }
+
+    #[test]
+    fn test_dispute_dismissed_after_votes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let accused = Address::generate(&env);
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id_owner = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id_voter1 = qp_client.issue_credential(&issuer, &voter1, &2u32, &meta, &None);
+        let cred_id_voter2 = qp_client.issue_credential(&issuer, &voter2, &3u32, &meta, &None);
+
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id_owner, &uri);
+        client.mint(&voter1, &cred_id_voter1, &uri);
+        client.mint(&voter2, &cred_id_voter2, &uri);
+
+        let dispute_id = client.initiate_dispute(&owner, &token_id, &accused);
+        client.vote_on_dispute(&voter1, &dispute_id, &false);
+        client.vote_on_dispute(&voter2, &dispute_id, &false);
+
+        let dispute = client.get_dispute(&dispute_id);
+        assert_eq!(dispute.status, DisputeStatus::Dismissed);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_initiate_dispute_requires_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let accused = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id_owner = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id_owner, &uri);
+
+        client.initiate_dispute(&stranger, &token_id, &accused);
     }
 
     #[test]
