@@ -15,6 +15,8 @@ const TOPIC_PROOF_REQUEST: &str = "ProofRequested";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
+const MAX_BATCH_SIZE: u32 = 50;
+const MAX_MULTISIG_SIGNERS: u32 = 10;
 
 #[contracttype]
 #[derive(Clone)]
@@ -62,6 +64,7 @@ pub enum ContractError {
     MultiSigSignerNotAuthorized = 48,
     MultiSigThresholdExceedsSigners = 49,
     MultiSigEmptySigners = 50,
+    MultiSigTooManySigners = 51,
 }
 
 #[contracttype]
@@ -238,6 +241,12 @@ impl QuorumProofContract {
         assert!(!all_zero, "metadata_hash must not be all-zero bytes");
     }
 
+    /// Validate an array input has between `min` and `max` elements (inclusive).
+    fn validate_array_bounds(len: u32, min: u32, max: u32, name: &'static str) {
+        assert!(len >= min, "{} must have at least {} element(s)", name, min);
+        assert!(len <= max, "{} must have at most {} element(s)", name, max);
+    }
+
     /// Issue a new credential to a subject. Returns the new credential ID.
     ///
     /// # Parameters
@@ -328,6 +337,7 @@ impl QuorumProofContract {
         issuer.require_auth();
         Self::require_not_paused(&env);
         let n = subjects.len();
+        Self::validate_array_bounds(n, 1, MAX_BATCH_SIZE, "subjects");
         assert!(
             credential_types.len() == n && metadata_hashes.len() == n,
             "input lengths must match"
@@ -845,6 +855,7 @@ impl QuorumProofContract {
     pub fn batch_attest(env: Env, attestor: Address, credential_ids: Vec<u64>, slice_id: u64) {
         attestor.require_auth();
         Self::require_not_paused(&env);
+        Self::validate_array_bounds(credential_ids.len(), 1, MAX_BATCH_SIZE, "credential_ids");
         let slice: QuorumSlice = env.storage().instance()
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
@@ -1076,6 +1087,7 @@ impl QuorumProofContract {
         claim_types: Vec<zk_verifier::ClaimType>,
         proofs: Vec<soroban_sdk::Bytes>,
     ) -> Vec<bool> {
+        Self::validate_array_bounds(claim_types.len(), 1, MAX_BATCH_SIZE, "claim_types");
         assert!(
             claim_types.len() == proofs.len(),
             "claim_types and proofs lengths must match"
@@ -1266,6 +1278,9 @@ impl QuorumProofContract {
         assert!(credential.issuer == issuer, "only the credential issuer can set multi-sig requirement");
         if required_signers.is_empty() {
             panic_with_error!(&env, ContractError::MultiSigEmptySigners);
+        }
+        if required_signers.len() as u32 > MAX_MULTISIG_SIGNERS {
+            panic_with_error!(&env, ContractError::MultiSigTooManySigners);
         }
         if threshold == 0 || threshold > required_signers.len() as u32 {
             panic_with_error!(&env, ContractError::MultiSigThresholdExceedsSigners);
@@ -3408,5 +3423,77 @@ mod tests {
         let subject = Address::generate(&env);
         let hash = Bytes::from_slice(&env, &[0u8; 32]); // all zeros
         client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+    }
+
+    // ── Array bounds validation tests ─────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "subjects must have at least 1 element(s)")]
+    fn test_batch_issue_empty_subjects_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        client.batch_issue_credentials(
+            &issuer,
+            &Vec::new(&env),
+            &Vec::new(&env),
+            &Vec::new(&env),
+            &None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "subjects must have at most 50 element(s)")]
+    fn test_batch_issue_too_many_subjects_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let hash = Bytes::from_slice(&env, &[1u8; 32]);
+        let mut subjects = Vec::new(&env);
+        let mut types = Vec::new(&env);
+        let mut hashes = Vec::new(&env);
+        for _ in 0..=MAX_BATCH_SIZE {
+            subjects.push_back(Address::generate(&env));
+            types.push_back(1u32);
+            hashes.push_back(hash.clone());
+        }
+        client.batch_issue_credentials(&issuer, &subjects, &types, &hashes, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential_ids must have at least 1 element(s)")]
+    fn test_batch_attest_empty_ids_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _cred_id, slice_id, _issuer, attestor) = setup_credential_with_slice(&env);
+        client.batch_attest(&attestor, &Vec::new(&env), &slice_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential_ids must have at most 50 element(s)")]
+    fn test_batch_attest_too_many_ids_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _cred_id, slice_id, _issuer, attestor) = setup_credential_with_slice(&env);
+        let mut ids = Vec::new(&env);
+        for _ in 0..=MAX_BATCH_SIZE {
+            ids.push_back(1u64);
+        }
+        client.batch_attest(&attestor, &ids, &slice_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #51)")]
+    fn test_set_multisig_too_many_signers_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, cred_id, _slice_id, issuer, _attestor) = setup_credential_with_slice(&env);
+        let mut signers = Vec::new(&env);
+        for _ in 0..=MAX_MULTISIG_SIGNERS {
+            signers.push_back(Address::generate(&env));
+        }
+        client.set_multisig_requirement(&issuer, &cred_id, &signers, &1u32);
     }
 }
