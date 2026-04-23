@@ -1007,6 +1007,42 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Return a page of attestor addresses for a credential, in attestation order.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential whose attestation history to page through.
+    /// - `page`: 1-based page number.
+    /// - `page_size`: Number of entries per page (must be > 0).
+    ///
+    /// # Panics
+    /// Panics if `page` or `page_size` is 0.
+    pub fn get_attestation_history_paginated(
+        env: Env,
+        credential_id: u64,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<Address> {
+        assert!(page > 0, "page must be greater than 0");
+        assert!(page_size > 0, "page_size must be greater than 0");
+        let all: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(&env));
+        let total = all.len();
+        let start = (page - 1).saturating_mul(page_size);
+        let mut result = Vec::new(&env);
+        for i in start..start.saturating_add(page_size) {
+            if i >= total {
+                break;
+            }
+            if let Some(addr) = all.get(i) {
+                result.push_back(addr);
+            }
+        }
+        result
+    }
+
     /// Returns the number of attestations recorded for a credential.
     ///
     /// # Parameters
@@ -3495,5 +3531,95 @@ mod tests {
             signers.push_back(Address::generate(&env));
         }
         client.set_multisig_requirement(&issuer, &cred_id, &signers, &1u32);
+    }
+
+    // ── Attestation history pagination tests ──────────────────────────────────
+
+    fn setup_attested_credential(env: &Env, n_attestors: u32) -> (QuorumProofContractClient<'_>, u64, u64) {
+        let (client, _admin) = setup(env);
+        let issuer = Address::generate(env);
+        let subject = Address::generate(env);
+        let hash = Bytes::from_slice(env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        let mut attestors_vec = Vec::new(env);
+        let mut weights_vec = Vec::new(env);
+        for _ in 0..n_attestors {
+            attestors_vec.push_back(Address::generate(env));
+            weights_vec.push_back(1u32);
+        }
+        let slice_id = client.create_slice(&issuer, &attestors_vec, &weights_vec, &1u32);
+        for i in 0..n_attestors {
+            client.attest(&attestors_vec.get(i).unwrap(), &cred_id, &slice_id);
+        }
+        (client, cred_id, slice_id)
+    }
+
+    #[test]
+    fn test_pagination_first_page() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, cred_id, _) = setup_attested_credential(&env, 5);
+        let page = client.get_attestation_history_paginated(&cred_id, &1, &3);
+        assert_eq!(page.len(), 3);
+    }
+
+    #[test]
+    fn test_pagination_second_page() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, cred_id, _) = setup_attested_credential(&env, 5);
+        let page = client.get_attestation_history_paginated(&cred_id, &2, &3);
+        assert_eq!(page.len(), 2); // 5 total, 3 on page 1, 2 on page 2
+    }
+
+    #[test]
+    fn test_pagination_beyond_last_page_returns_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, cred_id, _) = setup_attested_credential(&env, 3);
+        let page = client.get_attestation_history_paginated(&cred_id, &2, &3);
+        assert_eq!(page.len(), 0);
+    }
+
+    #[test]
+    fn test_pagination_no_attestations_returns_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let hash = Bytes::from_slice(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        let page = client.get_attestation_history_paginated(&cred_id, &1, &10);
+        assert_eq!(page.len(), 0);
+    }
+
+    #[test]
+    fn test_pagination_page_size_one() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, cred_id, _) = setup_attested_credential(&env, 3);
+        assert_eq!(client.get_attestation_history_paginated(&cred_id, &1, &1).len(), 1);
+        assert_eq!(client.get_attestation_history_paginated(&cred_id, &2, &1).len(), 1);
+        assert_eq!(client.get_attestation_history_paginated(&cred_id, &3, &1).len(), 1);
+        assert_eq!(client.get_attestation_history_paginated(&cred_id, &4, &1).len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "page must be greater than 0")]
+    fn test_pagination_zero_page_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, cred_id, _) = setup_attested_credential(&env, 1);
+        client.get_attestation_history_paginated(&cred_id, &0, &10);
+    }
+
+    #[test]
+    #[should_panic(expected = "page_size must be greater than 0")]
+    fn test_pagination_zero_page_size_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, cred_id, _) = setup_attested_credential(&env, 1);
+        client.get_attestation_history_paginated(&cred_id, &1, &0);
     }
 }
