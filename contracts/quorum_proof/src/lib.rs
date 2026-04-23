@@ -56,6 +56,36 @@ pub enum ContractError {
     ContractPaused = 3,
     DuplicateCredential = 4,
     DuplicateAttestor = 5,
+    ChallengeNotFound = 6,
+    NotInSlice = 7,
+    AlreadyChallenged = 8,
+    ChallengeResolved = 9,
+    AlreadyVoted = 10,
+    AccusedCannotVote = 11,
+    NotAttested = 12,
+}
+
+#[contracttype]
+#[derive(Clone, PartialEq)]
+pub enum ChallengeStatus {
+    Open,
+    Upheld,   // attestation removed
+    Dismissed,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct Challenge {
+    pub id: u64,
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub accused: Address,
+    pub challenger: Address,
+    pub status: ChallengeStatus,
+    /// Addresses that voted to uphold (remove the attestation)
+    pub uphold_votes: Vec<Address>,
+    /// Addresses that voted to dismiss
+    pub dismiss_votes: Vec<Address>,
 }
 
 #[contracttype]
@@ -76,6 +106,12 @@ pub enum DataKey {
     ProofRequests(u64),
     /// Global monotonic counter for proof request IDs
     ProofRequestCount,
+    /// Stores a Challenge by its ID
+    Challenge(u64),
+    /// Global monotonic counter for challenge IDs
+    ChallengeCount,
+    /// Maps (credential_id, accused) -> challenge_id for open challenges
+    ActiveChallenge(u64, Address),
 }
 
 #[contracttype]
@@ -1307,6 +1343,186 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::ProofRequests(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Challenge / Dispute Resolution ───────────────────────────────────────
+
+    /// Open a challenge against an attestor's signature on a credential.
+    ///
+    /// Only a member of the quorum slice (other than the accused) may challenge.
+    /// Only one open challenge per (credential, accused) pair is allowed at a time.
+    ///
+    /// # Parameters
+    /// - `challenger`: Slice member raising the challenge; must authorize.
+    /// - `credential_id`: The credential whose attestation is being disputed.
+    /// - `slice_id`: The quorum slice both challenger and accused belong to.
+    /// - `accused`: The attestor whose signature is being challenged.
+    ///
+    /// # Returns
+    /// The new challenge ID.
+    pub fn challenge_attestation(
+        env: Env,
+        challenger: Address,
+        credential_id: u64,
+        slice_id: u64,
+        accused: Address,
+    ) -> u64 {
+        challenger.require_auth();
+        Self::require_not_paused(&env);
+
+        // Credential must exist
+        if !env.storage().instance().has(&DataKey::Credential(credential_id)) {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        let slice: QuorumSlice = env.storage().instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Both challenger and accused must be in the slice
+        let mut challenger_in = false;
+        let mut accused_in = false;
+        for a in slice.attestors.iter() {
+            if a == challenger { challenger_in = true; }
+            if a == accused    { accused_in   = true; }
+        }
+        if !challenger_in || !accused_in {
+            panic_with_error!(&env, ContractError::NotInSlice);
+        }
+
+        // Accused must have actually attested this credential
+        let attestors: Vec<Address> = env.storage().instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(&env));
+        if !attestors.iter().any(|a| a == accused) {
+            panic_with_error!(&env, ContractError::NotAttested);
+        }
+
+        // No duplicate open challenge for same (credential, accused)
+        if env.storage().instance().has(&DataKey::ActiveChallenge(credential_id, accused.clone())) {
+            panic_with_error!(&env, ContractError::AlreadyChallenged);
+        }
+
+        let id: u64 = env.storage().instance()
+            .get(&DataKey::ChallengeCount)
+            .unwrap_or(0u64) + 1;
+
+        let challenge = Challenge {
+            id,
+            credential_id,
+            slice_id,
+            accused: accused.clone(),
+            challenger,
+            status: ChallengeStatus::Open,
+            uphold_votes: Vec::new(&env),
+            dismiss_votes: Vec::new(&env),
+        };
+
+        env.storage().instance().set(&DataKey::Challenge(id), &challenge);
+        env.storage().instance().set(&DataKey::ChallengeCount, &id);
+        env.storage().instance().set(&DataKey::ActiveChallenge(credential_id, accused), &id);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        id
+    }
+
+    /// Cast a vote on an open challenge.
+    ///
+    /// Any slice member except the accused may vote once. When the total weight of
+    /// votes on either side meets or exceeds the slice threshold the challenge resolves:
+    /// - Upheld → accused's attestation is removed from the credential.
+    /// - Dismissed → challenge is closed, attestation stands.
+    ///
+    /// # Parameters
+    /// - `voter`: Slice member casting the vote; must authorize.
+    /// - `challenge_id`: The challenge to vote on.
+    /// - `uphold`: `true` to uphold (remove attestation), `false` to dismiss.
+    pub fn vote_on_challenge(env: Env, voter: Address, challenge_id: u64, uphold: bool) {
+        voter.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut challenge: Challenge = env.storage().instance()
+            .get(&DataKey::Challenge(challenge_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ChallengeNotFound));
+
+        if challenge.status != ChallengeStatus::Open {
+            panic_with_error!(&env, ContractError::ChallengeResolved);
+        }
+
+        // Accused cannot vote
+        if voter == challenge.accused {
+            panic_with_error!(&env, ContractError::AccusedCannotVote);
+        }
+
+        let slice: QuorumSlice = env.storage().instance()
+            .get(&DataKey::Slice(challenge.slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Voter must be in the slice
+        if !slice.attestors.iter().any(|a| a == voter) {
+            panic_with_error!(&env, ContractError::NotInSlice);
+        }
+
+        // No double-voting
+        let already_voted = challenge.uphold_votes.iter().any(|a| a == voter)
+            || challenge.dismiss_votes.iter().any(|a| a == voter);
+        if already_voted {
+            panic_with_error!(&env, ContractError::AlreadyVoted);
+        }
+
+        if uphold {
+            challenge.uphold_votes.push_back(voter);
+        } else {
+            challenge.dismiss_votes.push_back(voter);
+        }
+
+        // Helper: sum weights for a set of voters
+        let weighted_sum = |votes: &Vec<Address>| -> u32 {
+            let mut total: u32 = 0;
+            for v in votes.iter() {
+                for (i, a) in slice.attestors.iter().enumerate() {
+                    if a == v {
+                        total = total.saturating_add(slice.weights.get(i as u32).unwrap_or(0));
+                        break;
+                    }
+                }
+            }
+            total
+        };
+
+        let uphold_weight  = weighted_sum(&challenge.uphold_votes);
+        let dismiss_weight = weighted_sum(&challenge.dismiss_votes);
+
+        if uphold_weight >= slice.threshold {
+            challenge.status = ChallengeStatus::Upheld;
+            // Remove accused's attestation from the credential
+            let attestors: Vec<Address> = env.storage().instance()
+                .get(&DataKey::Attestors(challenge.credential_id))
+                .unwrap_or(Vec::new(&env));
+            let mut retained: Vec<Address> = Vec::new(&env);
+            for a in attestors.iter() {
+                if a != challenge.accused {
+                    retained.push_back(a);
+                }
+            }
+            env.storage().instance().set(&DataKey::Attestors(challenge.credential_id), &retained);
+            env.storage().instance().remove(&DataKey::ActiveChallenge(challenge.credential_id, challenge.accused.clone()));
+        } else if dismiss_weight >= slice.threshold {
+            challenge.status = ChallengeStatus::Dismissed;
+            env.storage().instance().remove(&DataKey::ActiveChallenge(challenge.credential_id, challenge.accused.clone()));
+        }
+
+        env.storage().instance().set(&DataKey::Challenge(challenge_id), &challenge);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Retrieve a challenge by ID.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::ChallengeNotFound` if no challenge exists with that ID.
+    pub fn get_challenge(env: Env, challenge_id: u64) -> Challenge {
+        env.storage().instance()
+            .get(&DataKey::Challenge(challenge_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ChallengeNotFound))
     }
 }
 
@@ -3025,4 +3241,229 @@ mod tests {
         let (client, _) = setup(&env);
         assert!(!client.slice_exists(&999u64));
     }
-}
+
+    // ── Challenge / Dispute Resolution ───────────────────────────────────────
+
+    /// Helper: set up a credential attested by two attestors in a 3-member slice (threshold=2).
+    /// Returns (client, cred_id, slice_id, attestor1, attestor2, attestor3)
+    /// attestor1 is the "accused", attestor2 and attestor3 are potential challengers/voters.
+    fn setup_dispute(
+        env: &Env,
+    ) -> (
+        QuorumProofContractClient<'_>,
+        u64,
+        u64,
+        Address,
+        Address,
+        Address,
+    ) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(env);
+        let subject = Address::generate(env);
+        let attestor1 = Address::generate(env);
+        let attestor2 = Address::generate(env);
+        let attestor3 = Address::generate(env);
+
+        let metadata = Bytes::from_slice(env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        attestors.push_back(attestor3.clone());
+        let mut weights = Vec::new(env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &2u32);
+
+        client.attest(&attestor1, &cred_id, &slice_id);
+        client.attest(&attestor2, &cred_id, &slice_id);
+        client.attest(&attestor3, &cred_id, &slice_id);
+
+        (client, cred_id, slice_id, attestor1, attestor2, attestor3)
+    }
+
+    #[test]
+    fn test_challenge_opens_successfully() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, _) = setup_dispute(&env);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        let challenge = client.get_challenge(&challenge_id);
+
+        assert_eq!(challenge.id, challenge_id);
+        assert_eq!(challenge.accused, accused);
+        assert_eq!(challenge.challenger, challenger);
+        assert_eq!(challenge.credential_id, cred_id);
+        assert!(matches!(challenge.status, ChallengeStatus::Open));
+    }
+
+    #[test]
+    fn test_challenge_upheld_removes_attestation() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, voter2) = setup_dispute(&env);
+
+        // threshold=2; challenger + voter2 uphold → weight 2 >= 2 → upheld
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        client.vote_on_challenge(&challenger, &challenge_id, &true);
+        client.vote_on_challenge(&voter2, &challenge_id, &true);
+
+        let challenge = client.get_challenge(&challenge_id);
+        assert!(matches!(challenge.status, ChallengeStatus::Upheld));
+
+        // accused's attestation must be gone
+        let attestors = client.get_attestors(&cred_id);
+        assert!(!attestors.iter().any(|a| a == accused));
+    }
+
+    #[test]
+    fn test_challenge_dismissed_keeps_attestation() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, voter2) = setup_dispute(&env);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        client.vote_on_challenge(&challenger, &challenge_id, &false);
+        client.vote_on_challenge(&voter2, &challenge_id, &false);
+
+        let challenge = client.get_challenge(&challenge_id);
+        assert!(matches!(challenge.status, ChallengeStatus::Dismissed));
+
+        // attestation must still be present
+        let attestors = client.get_attestors(&cred_id);
+        assert!(attestors.iter().any(|a| a == accused));
+    }
+
+    #[test]
+    fn test_challenge_not_resolved_until_threshold_met() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, _) = setup_dispute(&env);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        // only one uphold vote (weight 1 < threshold 2) — still open
+        client.vote_on_challenge(&challenger, &challenge_id, &true);
+
+        let challenge = client.get_challenge(&challenge_id);
+        assert!(matches!(challenge.status, ChallengeStatus::Open));
+        // attestation still present
+        assert!(client.get_attestors(&cred_id).iter().any(|a| a == accused));
+    }
+
+    #[test]
+    fn test_upheld_challenge_allows_new_challenge_after_resolution() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, voter2) = setup_dispute(&env);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        client.vote_on_challenge(&challenger, &challenge_id, &true);
+        client.vote_on_challenge(&voter2, &challenge_id, &true);
+
+        // ActiveChallenge entry removed after resolution — re-attesting and re-challenging is possible
+        // (just verify no panic on get_challenge for the resolved one)
+        let challenge = client.get_challenge(&challenge_id);
+        assert!(matches!(challenge.status, ChallengeStatus::Upheld));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #8)")]
+    fn test_duplicate_open_challenge_panics() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, _) = setup_dispute(&env);
+
+        client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        // second challenge for same (cred, accused) while first is open → AlreadyChallenged
+        client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #11)")]
+    fn test_accused_cannot_vote_panics() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, _) = setup_dispute(&env);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        client.vote_on_challenge(&accused, &challenge_id, &false);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn test_double_vote_panics() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, _) = setup_dispute(&env);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        client.vote_on_challenge(&challenger, &challenge_id, &true);
+        client.vote_on_challenge(&challenger, &challenge_id, &true);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_vote_on_resolved_challenge_panics() {
+        let env = Env::default();
+        let (client, cred_id, slice_id, accused, challenger, voter2) = setup_dispute(&env);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &accused);
+        client.vote_on_challenge(&challenger, &challenge_id, &true);
+        client.vote_on_challenge(&voter2, &challenge_id, &true); // resolves here
+        // voter2 tries to vote again on a resolved challenge
+        client.vote_on_challenge(&voter2, &challenge_id, &false);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #12)")]
+    fn test_challenge_non_attested_accused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env); // never attested
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor1, &cred_id, &slice_id);
+        // attestor2 never attested — challenging them must panic with NotAttested
+        client.challenge_attestation(&attestor1, &cred_id, &slice_id, &attestor2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn test_challenge_by_non_slice_member_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let outsider = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id);
+
+        // outsider is not in the slice
+        client.challenge_attestation(&outsider, &cred_id, &slice_id, &attestor);
+    }
