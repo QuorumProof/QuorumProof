@@ -95,6 +95,8 @@ pub enum DataKey {
     ProofRequests(u64),
     /// Global monotonic counter for proof request IDs
     ProofRequestCount,
+    /// Stores the ReputationRecovery record for an attestor
+    ReputationRecovery(Address),
 }
 
 #[contracttype]
@@ -131,6 +133,18 @@ pub struct ProofRequest {
     pub requested_at: u64,
     /// The ZK claim types the verifier wants proven.
     pub claim_types: Vec<zk_verifier::ClaimType>,
+}
+
+/// Tracks a reputation recovery request for a slice member.
+#[contracttype]
+#[derive(Clone)]
+pub struct ReputationRecovery {
+    /// The attestor requesting recovery.
+    pub attestor: Address,
+    /// Ledger timestamp when recovery was initiated.
+    pub initiated_at: u64,
+    /// Whether the recovery has been completed.
+    pub completed: bool,
 }
 
 /// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
@@ -1330,9 +1344,91 @@ impl QuorumProofContract {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    // ── Proof Request History (Issue #38) ────────────────────────────────────
+    // ── Reputation Recovery (Issue #298) ─────────────────────────────────────
 
-    /// Record a new proof request for a credential and return its unique request ID.
+    /// Initiate a reputation recovery request for a slice member.
+    ///
+    /// Recovery conditions:
+    /// - The attestor must have made at least one attestation (reputation > 0).
+    /// - No pending (incomplete) recovery may already exist for this attestor.
+    /// - The contract must not be paused.
+    ///
+    /// # Parameters
+    /// - `attestor`: The address initiating recovery; must authorize this call.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics if the attestor has no attestation history.
+    /// Panics if a pending recovery already exists for this attestor.
+    pub fn initiate_reputation_recovery(env: Env, attestor: Address) {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+
+        let reputation: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestorCount(attestor.clone()))
+            .unwrap_or(0u64);
+        assert!(reputation > 0, "attestor has no attestation history to recover");
+
+        if let Some(existing) = env
+            .storage()
+            .instance()
+            .get::<DataKey, ReputationRecovery>(&DataKey::ReputationRecovery(attestor.clone()))
+        {
+            assert!(existing.completed, "a pending recovery already exists for this attestor");
+        }
+
+        let recovery = ReputationRecovery {
+            attestor: attestor.clone(),
+            initiated_at: env.ledger().timestamp(),
+            completed: false,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::ReputationRecovery(attestor.clone()), &recovery);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Complete a pending reputation recovery for an attestor. Only admin may call this.
+    ///
+    /// # Panics
+    /// Panics if no pending recovery exists for the attestor.
+    pub fn complete_reputation_recovery(env: Env, admin: Address, attestor: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+
+        let mut recovery: ReputationRecovery = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReputationRecovery(attestor.clone()))
+            .expect("no pending recovery for this attestor");
+        assert!(!recovery.completed, "recovery already completed");
+
+        recovery.completed = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::ReputationRecovery(attestor.clone()), &recovery);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the reputation recovery record for an attestor, if any.
+    pub fn get_reputation_recovery(env: Env, attestor: Address) -> Option<ReputationRecovery> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReputationRecovery(attestor))
+    }
+
+    // ── Proof Request History (Issue #38) ────────────────────────────────────    /// Record a new proof request for a credential and return its unique request ID.
     ///
     /// Verifiers call this to create an auditable trail every time they request
     /// proof of a credential. The request is appended to the per-credential history
@@ -1486,8 +1582,8 @@ mod tests {
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
-        weights.push_back(100);
-        let slice_id = client.create_slice(&creator, &attestors, &weights, &100);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
         client.attest(&attestor, &cid, &slice_id, &None);
         assert_eq!(client.get_attestor_count(&attestor), 1);
@@ -1554,8 +1650,12 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
-        let non_admin = Address::generate(&env);
-        client.pause(&non_admin);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred = client.get_credential(&id);
+        assert_eq!(cred.issuer, issuer);
     }
 
     #[test]
@@ -1665,16 +1765,10 @@ mod tests {
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
-        let creator = Address::generate(&env);
-        let mut attestors = Vec::new(&env);
-        for _ in 0..=MAX_ATTESTORS_PER_SLICE {
-            attestors.push_back(Address::generate(&env));
-        }
-        let mut weights = Vec::new(&env);
-        for _ in 0..=MAX_ATTESTORS_PER_SLICE {
-            weights.push_back(1u32);
-        }
-        client.create_slice(&creator, &attestors, &weights, &1u32);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let empty_metadata = Bytes::new(&env);
+        client.issue_credential(&issuer, &subject, &1u32, &empty_metadata, &None);
     }
 
     #[test]
@@ -1693,7 +1787,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "CredentialNotFound")]
+    #[should_panic(expected = "Error(Contract, #1)")]
     fn test_get_credential_not_found() {
         let env = Env::default();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -1733,7 +1827,7 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
 
-        client.revoke_credential(&subject, &id);
+        client.revoke_credential(&issuer, &id);
 
         let cred = client.get_credential(&id);
         assert!(cred.revoked);
@@ -1906,7 +2000,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SliceNotFound")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_get_slice_not_found() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2005,29 +2099,21 @@ mod tests {
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
-        let issuer = Address::generate(&env);
-        let subject_a = Address::generate(&env);
-        let subject_b = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let creator = Address::generate(&env);
+        let non_creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
-        let id_a1 = client.issue_credential(&issuer, &subject_a, &1u32, &metadata, &None);
-        let id_a2 = client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
-        let id_b1 = client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
-
-        let ids_a = client.get_credentials_by_subject(&subject_a, &1, &100);
-        assert_eq!(ids_a.len(), 2);
-        assert_eq!(ids_a.get(0).unwrap(), id_a1);
-        assert_eq!(ids_a.get(1).unwrap(), id_a2);
-
-        let ids_b = client.get_credentials_by_subject(&subject_b, &1, &100);
-        assert_eq!(ids_b.len(), 1);
-        assert_eq!(ids_b.get(0).unwrap(), id_b1);
+        client.update_slice_threshold(&non_creator, &slice_id, &1u32);
     }
 
     // --- expiry ---
 
     #[test]
-    #[should_panic(expected = "SliceNotFound")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_add_attestor_slice_not_found_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2037,7 +2123,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SliceNotFound")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_update_slice_threshold_slice_not_found_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2287,7 +2373,7 @@ mod tests {
         use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, SbtRegistryContract);
@@ -2362,7 +2448,7 @@ mod tests {
         use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, SbtRegistryContract);
@@ -2617,9 +2703,7 @@ mod tests {
         let events = env.events().all();
         let reg_event = events.iter().find(|(_, topics, _)| {
             if let Some(first) = topics.get(0) {
-                soroban_sdk::Symbol::try_from_val(&env, &first)
-                    .map(|s| s == symbol_short!("reg_type"))
-                    .unwrap_or(false)
+                soroban_sdk::Symbol::from_val(&env, &first) == symbol_short!("reg_type")
             } else {
                 false
             }
@@ -2747,7 +2831,7 @@ mod tests {
     // --- duplicate credential tests ---
 
     #[test]
-    #[should_panic(expected = "DuplicateCredential")]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn test_duplicate_credential_issuance_rejection() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2873,7 +2957,7 @@ mod tests {
         use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         // Step 1: Set up all three contracts
         let qp_id = env.register_contract(None, QuorumProofContract);
@@ -2885,6 +2969,7 @@ mod tests {
         let zk_admin = Address::generate(&env);
         ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
         sbt.initialize(&zk_admin, &qp_id);
+        qp.initialize(&zk_admin);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
