@@ -5,7 +5,7 @@
  */
 
 import { invokeContract } from './rpc'
-import type { SoulboundToken } from './types'
+import type { SoulboundToken, Dispute, DisputeStatus } from './types'
 
 const CONTRACT_ID = import.meta.env.VITE_CONTRACT_SBT_REGISTRY as string
 
@@ -55,5 +55,42 @@ export async function getTokensByOwner(owner: string): Promise<bigint[]> {
     contractId: CONTRACT_ID,
     method: 'get_tokens_by_owner',
     args: [owner],
+  })
+}
+
+/** Open a dispute against an SBT holder or issuer. */
+export async function initiateDispute(
+  initiator: string,
+  tokenId: bigint,
+  accused: string,
+): Promise<bigint> {
+  return invokeContract<bigint>({
+    contractId: CONTRACT_ID,
+    method: 'initiate_dispute',
+    args: [initiator, tokenId, accused],
+    source: initiator,
+  })
+}
+
+/** Vote on an open dispute. Holders may vote once per dispute. */
+export async function voteOnDispute(
+  voter: string,
+  disputeId: bigint,
+  uphold: boolean,
+): Promise<void> {
+  return invokeContract<void>({
+    contractId: CONTRACT_ID,
+    method: 'vote_on_dispute',
+    args: [voter, disputeId, uphold],
+    source: voter,
+  })
+}
+
+/** Retrieve a dispute by ID. */
+export async function getDispute(disputeId: bigint): Promise<Dispute> {
+  return invokeContract<Dispute>({
+    contractId: CONTRACT_ID,
+    method: 'get_dispute',
+    args: [disputeId],
   })
 }

@@ -49,3 +49,19 @@ export interface SoulboundToken {
   credential_id: bigint
   metadata_uri: string
 }
+
+export enum DisputeStatus {
+  Open = 0,
+  Upheld = 1,
+  Dismissed = 2,
+}
+
+export interface Dispute {
+  id: bigint
+  token_id: bigint
+  initiator: string
+  accused: string
+  status: DisputeStatus
+  uphold_votes: string[]
+  dismiss_votes: string[]
+}
