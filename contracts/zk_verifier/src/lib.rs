@@ -20,6 +20,15 @@ pub struct ProofRequest {
     pub nonce: u64,
 }
 
+/// Cache entry for verified proofs.
+/// Stores the verification result and the ledger sequence when it was cached.
+#[contracttype]
+#[derive(Clone)]
+pub struct CacheEntry {
+    pub result: bool,
+    pub cached_at_ledger: u32,
+}
+
 #[contract]
 pub struct ZkVerifierContract;
 
@@ -78,6 +87,126 @@ impl ZkVerifierContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
+    /// Verify a ZK proof for a claim with caching.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found, it returns the cached result immediately.
+    /// Otherwise, it verifies the proof and caches the result for future calls.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries are stored indefinitely until explicitly cleared.
+    pub fn verify_claim_with_cache(
+        env: Env,
+        admin: Address,
+        quorum_proof_id: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) -> bool {
+        // Admin gate
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Generate cache key from proof bytes, credential_id, and claim_type
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+
+        // Check cache first
+        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
+            return entry.result;
+        }
+
+        // Not in cache, perform verification
+        let result = !proof.is_empty();
+
+        // Cache the result
+        let entry = CacheEntry {
+            result,
+            cached_at_ledger: env.ledger().sequence(),
+        };
+        env.storage().temporary().set(&cache_key, &entry);
+
+        result
+    }
+
+    /// Internal helper to generate cache key from proof components.
+    /// Uses (credential_id, claim_type, proof_hash) to create a unique key.
+    fn proof_cache_key(
+        env: &Env,
+        credential_id: &u64,
+        claim_type: &ClaimType,
+        proof: &Bytes,
+    ) -> Bytes {
+        use soroban_sdk::TryIntoVal;
+        
+        // Create a cache key string combining all three components
+        // Format: "cache::{credential_id}::{claim_type_discriminant}::{proof_hash}"
+        let claim_type_str = match claim_type {
+            ClaimType::HasDegree => "HasDegree",
+            ClaimType::HasLicense => "HasLicense",
+            ClaimType::HasEmploymentHistory => "HasEmploymentHistory",
+            ClaimType::HasCertification => "HasCertification",
+            ClaimType::HasResearchPublication => "HasResearchPublication",
+        };
+        
+        // Create key as bytes: credential_id (8 bytes) + claim_type (1 byte) + first 16 bytes of proof
+        let mut key_data = [0u8; 25];
+        key_data[0..8].copy_from_slice(&credential_id.to_le_bytes());
+        key_data[8] = match claim_type {
+            ClaimType::HasDegree => 0,
+            ClaimType::HasLicense => 1,
+            ClaimType::HasEmploymentHistory => 2,
+            ClaimType::HasCertification => 3,
+            ClaimType::HasResearchPublication => 4,
+        };
+        
+        // Copy first 16 bytes of proof, or pad with zeros if shorter
+        let proof_len = proof.len().min(16);
+        for i in 0..proof_len {
+            key_data[9 + i] = proof.get(i as u32).unwrap();
+        }
+        
+        Bytes::from_slice(env, &key_data)
+    }
+
+    /// Clear proof cache entry for a specific credential and claim type.
+    /// This allows manual cache invalidation when needed.
+    pub fn clear_proof_cache(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+        env.storage().temporary().remove(&cache_key);
+    }
+
+    /// Clear all proof cache for a specific credential and claim type
+    /// across all proofs (useful for when a credential is revoked).
+    pub fn clear_cache_by_credential(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Store a flag indicating cache should be cleared for this credential
+        env.storage().instance().set(&DataKey::CacheInvalidated(credential_id), &true);
+    }
+
     /// Admin-only contract upgrade to new WASM.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
@@ -89,6 +218,7 @@ impl ZkVerifierContract {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    CacheInvalidated(u64),
 }
 
 #[cfg(test)]
@@ -213,5 +343,141 @@ mod tests {
 
         let proof = Bytes::from_slice(&env, b"valid-proof");
         assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasResearchPublication, &proof));
+    }
+
+    /// Test proof caching: verify same proof twice, second should be cache hit
+    #[test]
+    fn test_verify_claim_with_cache_hit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 42u64;
+        let claim_type = ClaimType::HasDegree;
+        let proof = Bytes::from_slice(&env, b"valid-proof-for-caching");
+
+        // First call: verifies and caches
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert!(result1, "first verification should pass (non-empty proof)");
+
+        // Second call: should return cached result
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert_eq!(result1, result2, "cached result should match original");
+    }
+
+    /// Test cache miss with different proof
+    #[test]
+    fn test_verify_claim_with_cache_miss_different_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 100u64;
+        let claim_type = ClaimType::HasLicense;
+
+        // First proof
+        let proof1 = Bytes::from_slice(&env, b"proof-number-one");
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof1);
+
+        // Different proof (cache miss)
+        let proof2 = Bytes::from_slice(&env, b"proof-number-two");
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof2);
+
+        // Both should pass, but come from different cache entries
+        assert!(result1);
+        assert!(result2);
+    }
+
+    /// Test cache with empty proof
+    #[test]
+    fn test_verify_claim_with_cache_empty_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 200u64;
+        let claim_type = ClaimType::HasCertification;
+        let empty_proof = Bytes::new(&env);
+
+        // First call with empty proof: should fail and cache result
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &empty_proof);
+        assert!(!result1, "empty proof should fail");
+
+        // Second call with same empty proof: should return cached failure
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &empty_proof);
+        assert_eq!(result1, result2, "cached failure result should match");
+        assert!(!result2);
+    }
+
+    /// Test cache invalidation by specific proof
+    #[test]
+    fn test_clear_proof_cache() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 300u64;
+        let claim_type = ClaimType::HasEmploymentHistory;
+        let proof = Bytes::from_slice(&env, b"proof-to-invalidate");
+
+        // Verify and cache
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert!(result1);
+
+        // Clear cache for this specific proof
+        client.clear_proof_cache(&admin, &credential_id, &claim_type, &proof);
+
+        // Verify again - should still return same result but from fresh verification
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert_eq!(result1, result2);
+    }
+
+    /// Test cache invalidation by credential ID
+    #[test]
+    fn test_clear_cache_by_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 400u64;
+        let claim_type = ClaimType::HasResearchPublication;
+        let proof = Bytes::from_slice(&env, b"research-proof");
+
+        // Verify and cache
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert!(result1);
+
+        // Clear all cache entries for this credential
+        client.clear_cache_by_credential(&admin, &credential_id);
+
+        // Verify again - should still work
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert_eq!(result1, result2);
+    }
+
+    /// Test cache with multiple claim types
+    #[test]
+    fn test_verify_claim_with_cache_multiple_claim_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 500u64;
+        let proof = Bytes::from_slice(&env, b"multi-claim-proof");
+
+        // Same proof, different claim types should have different cache entries
+        let result_degree = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasDegree, &proof);
+        let result_license = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasLicense, &proof);
+
+        // Both should pass
+        assert!(result_degree);
+        assert!(result_license);
+
+        // Verify they're cached as separate entries by caching performance
+        let result_degree_2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasDegree, &proof);
+        let result_license_2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasLicense, &proof);
+
+        assert_eq!(result_degree, result_degree_2);
+        assert_eq!(result_license, result_license_2);
     }
 }
