@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Navbar } from '../components/Navbar';
+import { ShareCredentialDialog } from '../components/ShareCredentialDialog';
 import {
   getCredential,
   getAttestors,
@@ -29,6 +30,7 @@ export default function CredentialDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showShare, setShowShare] = useState(false);
 
   useEffect(() => {
     if (!id) { setError('No credential ID provided'); setLoading(false); return; }
@@ -140,7 +142,14 @@ export default function CredentialDetail() {
             onClick={copyShareLink}
             aria-label="Copy verification link to clipboard"
           >
-            {copied ? '✅ Copied' : '📋 Share'}
+            {copied ? '✅ Copied' : '📋 Copy'}
+          </button>
+          <button
+            className="btn btn--sm btn--primary"
+            onClick={() => setShowShare(true)}
+            aria-label="Open share dialog"
+          >
+            🔗 Share
           </button>
         </div>
 
@@ -273,6 +282,13 @@ export default function CredentialDetail() {
           <a href="https://github.com/Phantomcall/QuorumProof" target="_blank" rel="noopener">QuorumProof</a>
         </div>
       </footer>
+
+      {showShare && id && (
+        <ShareCredentialDialog
+          credentialId={id}
+          onClose={() => setShowShare(false)}
+        />
+      )}
     </>
   );
 }
