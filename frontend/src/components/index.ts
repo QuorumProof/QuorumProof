@@ -1,3 +1,5 @@
+export { ShareCredentialDialog } from './ShareCredentialDialog';
+export type { ShareEntry, SharePermission } from './ShareCredentialDialog';
 export { WalletGate } from './WalletGate';
 export { WalletGuard } from './WalletGuard';
 export { CredentialCard } from './CredentialCard';
