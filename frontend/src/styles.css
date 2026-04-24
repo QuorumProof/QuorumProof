@@ -1571,3 +1571,131 @@ textarea {
   color: var(--text-primary);
   margin: 0 0 16px;
 }
+
+/* ── Credential Compare ──────────────────────────────────────────────────────── */
+.compare-title {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+
+.compare-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 0 0 28px;
+}
+
+.compare-inputs {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.compare-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 120px;
+}
+
+.compare-input-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.compare-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  padding: 10px 14px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+.compare-input:focus { border-color: var(--border-active); }
+.compare-input::placeholder { color: var(--text-muted); }
+
+.compare-vs {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.compare-error {
+  color: var(--red);
+  font-size: 13px;
+  margin: 0 0 16px;
+}
+
+.compare-table {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.compare-row {
+  display: grid;
+  grid-template-columns: 160px 1fr 1fr;
+  border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+}
+.compare-row:last-child { border-bottom: none; }
+
+.compare-row--header {
+  background: var(--bg-surface);
+}
+
+.compare-row--diff {
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.compare-cell {
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--text-primary);
+  border-right: 1px solid var(--border);
+  word-break: break-all;
+}
+.compare-cell:last-child { border-right: none; }
+
+.compare-cell--label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+}
+
+.compare-row--header .compare-cell {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.compare-diff-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--red-subtle);
+  color: var(--red);
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 700;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}

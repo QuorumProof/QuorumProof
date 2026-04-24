@@ -13,6 +13,7 @@ const QuorumSlice = lazy(() => import('./pages/QuorumSlice').then(module => ({ d
 const CredentialDetail = lazy(() => import('./pages/CredentialDetail').then(module => ({ default: module.default })));
 const IssueCredential = lazy(() => import('./pages/IssueCredential').then(module => ({ default: module.default })));
 const Profile = lazy(() => import('./pages/Profile').then(module => ({ default: module.default })));
+const CredentialCompare = lazy(() => import('./pages/CredentialCompare').then(module => ({ default: module.default })));
 
 // Loading fallback
 const LoadingFallback = () => (
@@ -50,6 +51,7 @@ function AppContent() {
           <Route path="/credential/issue" element={<WalletGuard><IssueCredential /></WalletGuard>} />
           <Route path="/credential/:id" element={<CredentialDetail />} />
           <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
+          <Route path="/compare" element={<CredentialCompare />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>
