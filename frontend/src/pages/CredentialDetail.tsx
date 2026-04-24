@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Navbar } from '../components/Navbar';
 import { ShareCredentialDialog } from '../components/ShareCredentialDialog';
+import { AuditTrail } from '../components/AuditTrail';
 import {
   getCredential,
   getAttestors,
@@ -205,8 +206,7 @@ export default function CredentialDetail() {
         {/* Quorum Slice & Attestation */}
         <div className="detail-card">
           <div className="detail-card__header">
-            <span className="detail-card__title">Attestation History</span>
-            <span
+            <span className="detail-card__title">Attestation History</span>            <span
               className={`badge ${fullyAttested ? 'badge--green' : 'badge--blue'}`}
               role="status"
               aria-label={`Threshold progress: ${thresholdLabel}`}
@@ -272,6 +272,20 @@ export default function CredentialDetail() {
             )}
           </div>
         </div>
+
+        {/* Audit Trail */}
+        <div className="detail-card" style={{ marginTop: '20px' }}>
+          <div className="detail-card__header">
+            <span className="detail-card__title">Audit Trail</span>
+          </div>
+          <div className="detail-card__body">
+            <AuditTrail
+              credential={credential}
+              attestors={attestors}
+              expired={isExpiredFlag}
+            />
+          </div>
+        </div>
       </main>
 
       <footer className="footer">
@@ -283,8 +297,7 @@ export default function CredentialDetail() {
         </div>
       </footer>
 
-      {showShare && id && (
-        <ShareCredentialDialog
+      {showShare && id && (        <ShareCredentialDialog
           credentialId={id}
           onClose={() => setShowShare(false)}
         />
