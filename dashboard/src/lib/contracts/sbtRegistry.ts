@@ -5,7 +5,7 @@
  */
 
 import { invokeContract } from './rpc'
-import type { SoulboundToken } from './types'
+import type { SoulboundToken, Delegation } from './types'
 
 const CONTRACT_ID = import.meta.env.VITE_CONTRACT_SBT_REGISTRY as string
 
@@ -55,5 +55,41 @@ export async function getTokensByOwner(owner: string): Promise<bigint[]> {
     contractId: CONTRACT_ID,
     method: 'get_tokens_by_owner',
     args: [owner],
+  })
+}
+
+/** Delegate rights for a specific SBT to another address until a timestamp expires. */
+export async function delegateSbtRights(
+  owner: string,
+  tokenId: bigint,
+  delegatee: string,
+  expiresAt: bigint,
+): Promise<void> {
+  return invokeContract<void>({
+    contractId: CONTRACT_ID,
+    method: 'delegate_sbt_rights',
+    args: [owner, tokenId, delegatee, expiresAt],
+    source: owner,
+  })
+}
+
+/** Retrieve delegation details for a token. */
+export async function getDelegation(tokenId: bigint): Promise<Delegation> {
+  return invokeContract<Delegation>({
+    contractId: CONTRACT_ID,
+    method: 'get_delegation',
+    args: [tokenId],
+  })
+}
+
+/** Check whether a delegatee currently holds active rights for the token. */
+export async function isDelegateActive(
+  tokenId: bigint,
+  delegatee: string,
+): Promise<boolean> {
+  return invokeContract<boolean>({
+    contractId: CONTRACT_ID,
+    method: 'is_delegate_active',
+    args: [tokenId, delegatee],
   })
 }
