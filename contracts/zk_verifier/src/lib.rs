@@ -278,4 +278,61 @@ mod tests {
         assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
         assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
     }
+
+    // ── Property-based fuzz tests ─────────────────────────────────────────────
+
+    /// Property: empty proof must ALWAYS return false (vulnerability detection).
+    #[test]
+    fn fuzz_verify_claim_empty_proof_always_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+        let empty = Bytes::new(&env);
+
+        // All claim types must reject empty proof
+        for claim in [
+            ClaimType::HasDegree,
+            ClaimType::HasLicense,
+            ClaimType::HasEmploymentHistory,
+            ClaimType::HasCertification,
+            ClaimType::HasResearchPublication,
+        ] {
+            assert!(
+                !client.verify_claim(&admin, &qp_id, &1u64, &claim, &empty),
+                "empty proof must never pass: {:?}", claim
+            );
+        }
+    }
+
+    /// Property: any non-empty proof must return true for all claim types (stub).
+    #[test]
+    fn fuzz_verify_claim_nonempty_proof_always_true() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+
+        // Vary proof content — all non-empty must pass (stub behavior)
+        for proof_bytes in [b"a".as_ref(), b"x".repeat(32).as_ref(), b"\x00\x01\xff".as_ref()] {
+            let proof = Bytes::from_slice(&env, proof_bytes);
+            assert!(
+                client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof),
+                "non-empty proof must pass stub verifier"
+            );
+        }
+    }
+
+    /// Property: non-admin caller must always be rejected.
+    #[test]
+    #[should_panic]
+    fn fuzz_verify_claim_non_admin_always_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, _admin) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let qp_id = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"proof");
+        client.verify_claim(&non_admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof);
+    }
 }

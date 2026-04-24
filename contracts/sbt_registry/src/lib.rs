@@ -697,4 +697,64 @@ mod tests {
         assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
         assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
     }
+
+    // ── Property-based fuzz tests ─────────────────────────────────────────────
+
+    /// Property: minting N SBTs for distinct credentials always increments
+    /// the token count and assigns sequential IDs.
+    #[test]
+    fn fuzz_mint_sequential_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        for i in 1u32..=4 {
+            let cred_id = qp_client.issue_credential(&issuer, &owner, &i, &meta, &None);
+            let token_id = client.mint(&owner, &cred_id, &uri);
+            assert_eq!(token_id, i as u64);
+            assert_eq!(client.sbt_count(), i as u64);
+        }
+    }
+
+    /// Property: minting the same (owner, credential_id) pair twice must
+    /// always be rejected (soulbound non-transferable invariant).
+    #[test]
+    #[should_panic]
+    fn fuzz_mint_duplicate_always_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        client.mint(&owner, &cred_id, &uri);
+        // Second mint for same (owner, cred_id) — must panic
+        client.mint(&owner, &cred_id, &uri);
+    }
+
+    /// Property: burning an SBT must decrement the count and allow re-mint.
+    #[test]
+    fn fuzz_burn_decrements_count_and_allows_remint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let token_id = client.mint(&owner, &cred_id, &uri);
+        assert_eq!(client.sbt_count(), 1);
+        client.burn(&owner, &token_id);
+        assert_eq!(client.sbt_count(), 0);
+        // Re-mint must succeed after burn
+        let new_id = client.mint(&owner, &cred_id, &uri);
+        assert_eq!(client.owner_of(&new_id), owner);
+    }
 }
