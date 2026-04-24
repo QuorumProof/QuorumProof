@@ -159,6 +159,7 @@ pub struct Credential {
     pub metadata_hash: soroban_sdk::Bytes,
     pub revoked: bool,
     pub expires_at: Option<u64>,
+    pub version: u32,
 }
 
 /// A single proof request record, capturing who requested proof of a credential and when.
@@ -187,6 +188,18 @@ pub struct ReputationRecovery {
     pub initiated_at: u64,
     /// Whether the recovery has been completed.
     pub completed: bool,
+}
+
+/// A pending consent-based credential transfer request.
+#[contracttype]
+#[derive(Clone)]
+pub struct TransferRequest {
+    /// The credential being transferred.
+    pub credential_id: u64,
+    /// The current subject initiating the transfer.
+    pub from: Address,
+    /// The intended recipient who must accept.
+    pub to: Address,
 }
 
 /// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
@@ -550,7 +563,7 @@ impl QuorumProofContract {
         }
         
         let id: u64 = env.storage().instance().get(&DataKey::CredentialCount).unwrap_or(0u64) + 1;
-        let credential = Credential { id, subject: subject.clone(), issuer: issuer.clone(), credential_type, metadata_hash, revoked: false, expires_at };
+        let credential = Credential { id, subject: subject.clone(), issuer: issuer.clone(), credential_type, metadata_hash, revoked: false, expires_at, version: 1 };
         env.storage().instance().set(&DataKey::Credential(id), &credential);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         env.storage().instance().set(&DataKey::CredentialCount, &id);
@@ -652,6 +665,7 @@ impl QuorumProofContract {
             metadata_hash,
             revoked: false,
             expires_at,
+            version: 1,
         };
         env.storage()
             .instance()
@@ -710,6 +724,132 @@ impl QuorumProofContract {
             );
         }
         credential
+    }
+
+    /// Update the metadata hash of a credential and increment its version.
+    ///
+    /// Only the original issuer may call this function.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address that originally issued the credential; must authorize.
+    /// - `credential_id`: The ID of the credential to update.
+    /// - `new_metadata_hash`: The new metadata hash to store.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the caller is not the original issuer.
+    pub fn update_metadata(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        new_metadata_hash: soroban_sdk::Bytes,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        assert!(!new_metadata_hash.is_empty(), "metadata_hash cannot be empty");
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "only the issuer may update metadata");
+        credential.metadata_hash = new_metadata_hash;
+        credential.version += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Initiate a consent-based transfer of a credential to a new subject.
+    ///
+    /// The current credential subject calls this to propose a transfer to `to`.
+    /// The transfer is not final until `accept_transfer` is called by `to`.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics with `ContractError::UnauthorizedTransfer` if the caller is not the current subject.
+    pub fn initiate_transfer(env: Env, from: Address, credential_id: u64, to: Address) {
+        from.require_auth();
+        Self::require_not_paused(&env);
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.subject != from {
+            panic_with_error!(&env, ContractError::UnauthorizedTransfer);
+        }
+        let request = TransferRequest { credential_id, from, to };
+        env.storage()
+            .instance()
+            .set(&DataKey::TransferRequest(credential_id), &request);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Accept a pending transfer request, reassigning the credential to the caller.
+    ///
+    /// Only the address named as `to` in the pending `TransferRequest` may call this.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics with `ContractError::UnauthorizedTransfer` if no pending request exists or
+    /// the caller is not the intended recipient.
+    pub fn accept_transfer(env: Env, to: Address, credential_id: u64) {
+        to.require_auth();
+        Self::require_not_paused(&env);
+        let request: TransferRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::TransferRequest(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedTransfer));
+        if request.to != to {
+            panic_with_error!(&env, ContractError::UnauthorizedTransfer);
+        }
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        // Remove credential from old subject's list
+        let mut old_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(credential.subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<u64> = Vec::new(&env);
+        for id in old_creds.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SubjectCredentials(credential.subject.clone()), &retained);
+
+        // Add to new subject's list
+        let mut new_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(to.clone()))
+            .unwrap_or(Vec::new(&env));
+        new_creds.push_back(credential_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::SubjectCredentials(to.clone()), &new_creds);
+
+        // Update credential subject
+        credential.subject = to;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+
+        // Clear the pending request
+        env.storage()
+            .instance()
+            .remove(&DataKey::TransferRequest(credential_id));
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Return all credential IDs issued to a subject.
@@ -3023,6 +3163,103 @@ mod tests {
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64));
         set_ledger_timestamp(&env, 3_000);
         client.get_credential(&id);
+    }
+
+    #[test]
+    fn test_version_increments_on_update_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let cred_v1 = client.get_credential(&id);
+        assert_eq!(cred_v1.version, 1);
+
+        let new_metadata = Bytes::from_slice(&env, b"QmUpdatedHash0000000000000000000000");
+        client.update_metadata(&issuer, &id, &new_metadata);
+        let cred_v2 = client.get_credential(&id);
+        assert_eq!(cred_v2.version, 2);
+        assert_eq!(cred_v2.metadata_hash, new_metadata);
+
+        client.update_metadata(&issuer, &id, &metadata);
+        let cred_v3 = client.get_credential(&id);
+        assert_eq!(cred_v3.version, 3);
+    }
+
+    #[test]
+    fn test_transfer_full_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        client.initiate_transfer(&subject, &id, &recipient);
+        client.accept_transfer(&recipient, &id);
+
+        let cred = client.get_credential(&id);
+        assert_eq!(cred.subject, recipient);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_initiate_transfer_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // attacker is not the subject — should panic with UnauthorizedTransfer
+        client.initiate_transfer(&attacker, &id, &recipient);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_accept_transfer_wrong_recipient() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let other = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        client.initiate_transfer(&subject, &id, &recipient);
+        // `other` is not the intended recipient — should panic
+        client.accept_transfer(&other, &id);
+    }
+
+    #[test]
+    fn test_transfer_updates_subject_credential_lists() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        client.initiate_transfer(&subject, &id, &recipient);
+        client.accept_transfer(&recipient, &id);
+
+        let old_list = client.get_credentials_by_subject(&subject, &1u32, &50u32);
+        let new_list = client.get_credentials_by_subject(&recipient, &1u32, &50u32);
+        assert!(!old_list.contains(&id));
+        assert!(new_list.contains(&id));
     }
 
     #[test]
