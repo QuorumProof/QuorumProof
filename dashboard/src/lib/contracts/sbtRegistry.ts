@@ -5,7 +5,7 @@
  */
 
 import { invokeContract } from './rpc'
-import type { SoulboundToken, Dispute, DisputeStatus } from './types'
+import type { SoulboundToken, Delegation } from './types'
 
 const CONTRACT_ID = import.meta.env.VITE_CONTRACT_SBT_REGISTRY as string
 
@@ -58,39 +58,38 @@ export async function getTokensByOwner(owner: string): Promise<bigint[]> {
   })
 }
 
-/** Open a dispute against an SBT holder or issuer. */
-export async function initiateDispute(
-  initiator: string,
+/** Delegate rights for a specific SBT to another address until a timestamp expires. */
+export async function delegateSbtRights(
+  owner: string,
   tokenId: bigint,
-  accused: string,
-): Promise<bigint> {
-  return invokeContract<bigint>({
-    contractId: CONTRACT_ID,
-    method: 'initiate_dispute',
-    args: [initiator, tokenId, accused],
-    source: initiator,
-  })
-}
-
-/** Vote on an open dispute. Holders may vote once per dispute. */
-export async function voteOnDispute(
-  voter: string,
-  disputeId: bigint,
-  uphold: boolean,
+  delegatee: string,
+  expiresAt: bigint,
 ): Promise<void> {
   return invokeContract<void>({
     contractId: CONTRACT_ID,
-    method: 'vote_on_dispute',
-    args: [voter, disputeId, uphold],
-    source: voter,
+    method: 'delegate_sbt_rights',
+    args: [owner, tokenId, delegatee, expiresAt],
+    source: owner,
   })
 }
 
-/** Retrieve a dispute by ID. */
-export async function getDispute(disputeId: bigint): Promise<Dispute> {
-  return invokeContract<Dispute>({
+/** Retrieve delegation details for a token. */
+export async function getDelegation(tokenId: bigint): Promise<Delegation> {
+  return invokeContract<Delegation>({
     contractId: CONTRACT_ID,
-    method: 'get_dispute',
-    args: [disputeId],
+    method: 'get_delegation',
+    args: [tokenId],
+  })
+}
+
+/** Check whether a delegatee currently holds active rights for the token. */
+export async function isDelegateActive(
+  tokenId: bigint,
+  delegatee: string,
+): Promise<boolean> {
+  return invokeContract<boolean>({
+    contractId: CONTRACT_ID,
+    method: 'is_delegate_active',
+    args: [tokenId, delegatee],
   })
 }
