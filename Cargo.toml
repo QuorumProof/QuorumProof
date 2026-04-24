@@ -4,6 +4,7 @@ members = [
     "contracts/sbt_registry",
     "contracts/zk_verifier",
     "fuzz",
+    "benches",
 ]
 resolver = "2"
 
