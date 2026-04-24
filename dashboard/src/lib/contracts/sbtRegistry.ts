@@ -57,3 +57,25 @@ export async function getTokensByOwner(owner: string): Promise<bigint[]> {
     args: [owner],
   })
 }
+
+/** Add a holder to the contract whitelist. Only the admin may call this. */
+export async function addHolderToWhitelist(
+  admin: string,
+  holder: string,
+): Promise<void> {
+  return invokeContract<void>({
+    contractId: CONTRACT_ID,
+    method: 'add_holder_to_whitelist',
+    args: [admin, holder],
+    source: admin,
+  })
+}
+
+/** Returns true if the holder is whitelisted. */
+export async function isHolderWhitelisted(holder: string): Promise<boolean> {
+  return invokeContract<boolean>({
+    contractId: CONTRACT_ID,
+    method: 'is_holder_whitelisted',
+    args: [holder],
+  })
+}
