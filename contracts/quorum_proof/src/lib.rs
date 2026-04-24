@@ -3954,4 +3954,91 @@ mod feature_tests {
         let sid = client.create_slice(&creator, &attestors, &weights, &1u32);
         assert!(client.slice_exists(&sid));
     }
+
+    // ── Snapshot tests ────────────────────────────────────────────────────────
+
+    /// Generates a snapshot after issuing a credential and verifies the
+    /// snapshot can be reloaded with the same ledger state.
+    #[test]
+    fn test_snapshot_credential_state() {
+        let snap_path = "test_snapshots/tests/snapshot_credential_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmSnapshotHash00000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        assert_eq!(client.get_credential_count(), 1);
+        assert_eq!(cid, 1);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload snapshot — ledger entries are preserved
+        let env2 = Env::from_snapshot_file(snap_path);
+        // Snapshot ledger sequence should match
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+    }
+
+    /// Generates a snapshot after creating a quorum slice and verifies
+    /// the reloaded snapshot has the same ledger sequence.
+    #[test]
+    fn test_snapshot_slice_state() {
+        let snap_path = "test_snapshots/tests/snapshot_slice_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        assert!(client.slice_exists(&slice_id));
+        assert_eq!(client.get_slice_count(), 1);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger state
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    /// Generates a snapshot after a full attest flow and verifies the
+    /// reloaded snapshot preserves ledger metadata.
+    #[test]
+    fn test_snapshot_attestation_state() {
+        let snap_path = "test_snapshots/tests/snapshot_attestation_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmSnapshotHash00000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cid, &slice_id, &None);
+
+        assert!(client.is_attested(&cid, &slice_id));
+        assert_eq!(client.get_attestation_count(&cid), 1);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger metadata
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
 }

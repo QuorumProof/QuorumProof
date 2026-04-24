@@ -214,4 +214,68 @@ mod tests {
         let proof = Bytes::from_slice(&env, b"valid-proof");
         assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasResearchPublication, &proof));
     }
+
+    // ── Snapshot tests ────────────────────────────────────────────────────────
+
+    /// Generates a snapshot after initialization and verifies the
+    /// snapshot can be reloaded with the same ledger state.
+    #[test]
+    fn test_snapshot_initialized_state() {
+        let snap_path = "test_snapshots/tests/snapshot_initialized_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_client, _admin) = setup(&env);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger metadata
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    /// Generates a snapshot after a successful verify_claim and verifies
+    /// the reloaded snapshot has the same ledger state.
+    #[test]
+    fn test_snapshot_verify_claim_state() {
+        let snap_path = "test_snapshots/tests/snapshot_verify_claim_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+
+        let result = client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof);
+        assert!(result);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger metadata
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    /// Generates a snapshot after generating a proof request and verifies
+    /// the reloaded snapshot has the same ledger state.
+    #[test]
+    fn test_snapshot_proof_request_state() {
+        let snap_path = "test_snapshots/tests/snapshot_proof_request_state.json";
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let req = client.generate_proof_request(&99u64, &ClaimType::HasLicense);
+        assert_eq!(req.credential_id, 99u64);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger metadata
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
 }

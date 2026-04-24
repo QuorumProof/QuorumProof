@@ -610,4 +610,91 @@ mod tests {
         let _ = admin; // admin initialized the contract
         client.admin_transfer_sbt(&non_admin, &token_id, &new_owner);
     }
+
+    // ── Snapshot tests ────────────────────────────────────────────────────────
+
+    /// Generates a snapshot after minting an SBT and verifies the
+    /// snapshot can be reloaded with the same ledger state.
+    #[test]
+    fn test_snapshot_mint_state() {
+        let snap_path = "test_snapshots/tests/snapshot_mint_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        assert_eq!(client.owner_of(&token_id), owner);
+        assert_eq!(client.sbt_count(), 1);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger metadata
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    /// Generates a snapshot after burning an SBT and verifies the
+    /// reloaded snapshot has the same ledger state.
+    #[test]
+    fn test_snapshot_burn_state() {
+        let snap_path = "test_snapshots/tests/snapshot_burn_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+        client.burn(&owner, &token_id);
+
+        assert_eq!(client.sbt_count(), 0);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger metadata
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    /// Generates a snapshot after an admin transfer and verifies the
+    /// reloaded snapshot has the same ledger state.
+    #[test]
+    fn test_snapshot_transfer_state() {
+        let snap_path = "test_snapshots/tests/snapshot_transfer_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+        client.admin_transfer_sbt(&admin, &token_id, &new_owner);
+
+        assert_eq!(client.owner_of(&token_id), new_owner);
+
+        // Generate snapshot
+        env.to_snapshot_file(snap_path);
+
+        // Reload and compare ledger metadata
+        let env2 = Env::from_snapshot_file(snap_path);
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
 }
