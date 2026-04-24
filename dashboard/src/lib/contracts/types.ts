@@ -50,6 +50,18 @@ export interface SoulboundToken {
   metadata_uri: string
 }
 
+export interface Delegation {
+  token_id: bigint
+  delegatee: string
+  expires_at: bigint
+}
+
+export interface Delegation {
+  token_id: bigint
+  delegatee: string
+  expires_at: bigint
+}
+
 export enum DisputeStatus {
   Open = 0,
   Upheld = 1,

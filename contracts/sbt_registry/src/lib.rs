@@ -22,9 +22,7 @@ pub enum DataKey {
     Owner(u64),
     OwnerTokens(Address),
     OwnerCredential(Address, u64),
-    Dispute(u64),
-    DisputeCount,
-    ActiveDispute(u64),
+    Delegation(u64),
     Admin,
     QuorumProofId,
 }
@@ -39,23 +37,11 @@ pub struct SoulboundToken {
 }
 
 #[contracttype]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum DisputeStatus {
-    Open,
-    Upheld,
-    Dismissed,
-}
-
-#[contracttype]
 #[derive(Clone)]
-pub struct Dispute {
-    pub id: u64,
+pub struct Delegation {
     pub token_id: u64,
-    pub initiator: Address,
-    pub accused: Address,
-    pub status: DisputeStatus,
-    pub uphold_votes: Vec<Address>,
-    pub dismiss_votes: Vec<Address>,
+    pub delegatee: Address,
+    pub expires_at: u64,
 }
 
 #[contract]
@@ -164,81 +150,42 @@ impl SbtRegistryContract {
         env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
     }
 
-    /// Open a dispute against an SBT holder or issuer.
-    /// Only an existing SBT holder may initiate a dispute about a token.
-    pub fn initiate_dispute(env: Env, initiator: Address, token_id: u64, accused: Address) -> u64 {
-        initiator.require_auth();
-        let token: SoulboundToken = env.storage().persistent()
+    /// Delegate rights for a specific SBT to another address until a timestamp expires.
+    pub fn delegate_sbt_rights(
+        env: Env,
+        owner: Address,
+        token_id: u64,
+        delegatee: Address,
+        expires_at: u64,
+    ) {
+        owner.require_auth();
+        let mut token: SoulboundToken = env.storage().persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
 
-        let holder_tokens: Vec<u64> = env.storage().persistent()
-            .get(&DataKey::OwnerTokens(initiator.clone()))
-            .unwrap_or(Vec::new(&env));
-        assert!(initiator == token.owner || !holder_tokens.is_empty(), "unauthorized");
-        assert!(initiator != accused, "cannot accuse self");
-        assert!(!env.storage().instance().has(&DataKey::ActiveDispute(token_id)), "dispute already open");
+        let current_ts: u64 = env.ledger().timestamp();
+        assert!(expires_at > current_ts, "expiry must be in the future");
 
-        let id: u64 = env.storage().instance().get(&DataKey::DisputeCount).unwrap_or(0u64) + 1;
-        let dispute = Dispute {
-            id,
-            token_id,
-            initiator: initiator.clone(),
-            accused: accused.clone(),
-            status: DisputeStatus::Open,
-            uphold_votes: Vec::new(&env),
-            dismiss_votes: Vec::new(&env),
-        };
-
-        env.storage().instance().set(&DataKey::Dispute(id), &dispute);
-        env.storage().instance().set(&DataKey::ActiveDispute(token_id), &id);
-        env.storage().instance().set(&DataKey::DisputeCount, &id);
-        id
+        let delegation = Delegation { token_id, delegatee, expires_at };
+        env.storage().instance().set(&DataKey::Delegation(token_id), &delegation);
     }
 
-    /// Vote on an open dispute. Holders may vote once per dispute.
-    pub fn vote_on_dispute(env: Env, voter: Address, dispute_id: u64, uphold: bool) {
-        voter.require_auth();
-
-        let mut dispute: Dispute = env.storage().instance()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found");
-        assert!(dispute.status == DisputeStatus::Open, "dispute resolved");
-        assert!(voter != dispute.accused, "accused cannot vote");
-        assert!(voter != dispute.initiator, "initiator cannot vote");
-
-        let voter_tokens: Vec<u64> = env.storage().persistent()
-            .get(&DataKey::OwnerTokens(voter.clone()))
-            .unwrap_or(Vec::new(&env));
-        assert!(!voter_tokens.is_empty(), "unauthorized");
-
-        let already_voted = dispute.uphold_votes.iter().any(|a| a == voter)
-            || dispute.dismiss_votes.iter().any(|a| a == voter);
-        assert!(!already_voted, "already voted");
-
-        if uphold {
-            dispute.uphold_votes.push_back(voter.clone());
-        } else {
-            dispute.dismiss_votes.push_back(voter.clone());
-        }
-
-        const VOTE_THRESHOLD: u32 = 2;
-        if dispute.uphold_votes.len() >= VOTE_THRESHOLD {
-            dispute.status = DisputeStatus::Upheld;
-            env.storage().instance().remove(&DataKey::ActiveDispute(dispute.token_id));
-        } else if dispute.dismiss_votes.len() >= VOTE_THRESHOLD {
-            dispute.status = DisputeStatus::Dismissed;
-            env.storage().instance().remove(&DataKey::ActiveDispute(dispute.token_id));
-        }
-
-        env.storage().instance().set(&DataKey::Dispute(dispute_id), &dispute);
-    }
-
-    /// Retrieve a dispute by ID.
-    pub fn get_dispute(env: Env, dispute_id: u64) -> Dispute {
+    /// Retrieve delegation details for a token.
+    pub fn get_delegation(env: Env, token_id: u64) -> Delegation {
         env.storage().instance()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found")
+            .get(&DataKey::Delegation(token_id))
+            .expect("delegation not found")
+    }
+
+    /// Check whether a delegatee currently holds active rights for the token.
+    pub fn is_delegate_active(env: Env, token_id: u64, delegatee: Address) -> bool {
+        let current_ts: u64 = env.ledger().timestamp();
+        env.storage().instance()
+            .get(&DataKey::Delegation(token_id))
+            .map_or(false, |delegation: Delegation| {
+                delegation.delegatee == delegatee && delegation.expires_at > current_ts
+            })
     }
 
     /// Returns the total number of SBTs ever minted.
@@ -260,6 +207,7 @@ impl SbtRegistryContract {
         assert!(token.owner == owner, "not the owner");
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
+        env.storage().instance().remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(owner.clone(), token.credential_id));
         let mut owner_tokens: Vec<u64> = env.storage().persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
@@ -297,6 +245,7 @@ impl SbtRegistryContract {
         let owner = token.owner.clone();
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
+        env.storage().instance().remove(&DataKey::Delegation(token_id));
         let mut owner_tokens: Vec<u64> = env.storage().persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
             .unwrap_or(Vec::new(&env));
@@ -330,6 +279,7 @@ impl SbtRegistryContract {
             old_tokens.remove(pos as u32);
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+        env.storage().instance().remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
 
         // Add to new owner
@@ -389,80 +339,45 @@ mod tests {
     }
 
     #[test]
-    fn test_initiate_dispute_and_vote_uphold() {
+    fn test_delegate_sbt_rights_and_active_status() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
 
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
-        let accused = Address::generate(&env);
-        let voter1 = Address::generate(&env);
-        let voter2 = Address::generate(&env);
+        let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id_owner = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let cred_id_voter1 = qp_client.issue_credential(&issuer, &voter1, &2u32, &meta, &None);
-        let cred_id_voter2 = qp_client.issue_credential(&issuer, &voter2, &3u32, &meta, &None);
-
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&owner, &cred_id_owner, &uri);
-        client.mint(&voter1, &cred_id_voter1, &uri);
-        client.mint(&voter2, &cred_id_voter2, &uri);
+        let token_id = client.mint(&owner, &cred_id, &uri);
 
-        let dispute_id = client.initiate_dispute(&owner, &token_id, &accused);
-        client.vote_on_dispute(&voter1, &dispute_id, &true);
-        client.vote_on_dispute(&voter2, &dispute_id, &true);
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
 
-        let dispute = client.get_dispute(&dispute_id);
-        assert_eq!(dispute.status, DisputeStatus::Upheld);
+        assert!(client.is_delegate_active(&token_id, &delegatee));
+        let delegation = client.get_delegation(&token_id);
+        assert_eq!(delegation.delegatee, delegatee);
+        assert_eq!(delegation.expires_at, expires_at);
     }
 
     #[test]
-    fn test_dispute_dismissed_after_votes() {
+    #[should_panic(expected = "expiry must be in the future")]
+    fn test_delegate_sbt_rights_rejects_past_expiry() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
 
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
-        let accused = Address::generate(&env);
-        let voter1 = Address::generate(&env);
-        let voter2 = Address::generate(&env);
+        let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id_owner = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let cred_id_voter1 = qp_client.issue_credential(&issuer, &voter1, &2u32, &meta, &None);
-        let cred_id_voter2 = qp_client.issue_credential(&issuer, &voter2, &3u32, &meta, &None);
-
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&owner, &cred_id_owner, &uri);
-        client.mint(&voter1, &cred_id_voter1, &uri);
-        client.mint(&voter2, &cred_id_voter2, &uri);
+        let token_id = client.mint(&owner, &cred_id, &uri);
 
-        let dispute_id = client.initiate_dispute(&owner, &token_id, &accused);
-        client.vote_on_dispute(&voter1, &dispute_id, &false);
-        client.vote_on_dispute(&voter2, &dispute_id, &false);
-
-        let dispute = client.get_dispute(&dispute_id);
-        assert_eq!(dispute.status, DisputeStatus::Dismissed);
-    }
-
-    #[test]
-    #[should_panic(expected = "unauthorized")]
-    fn test_initiate_dispute_requires_holder() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let stranger = Address::generate(&env);
-        let accused = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id_owner = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&owner, &cred_id_owner, &uri);
-
-        client.initiate_dispute(&stranger, &token_id, &accused);
+        let expires_at = env.ledger().timestamp();
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
     }
 
     #[test]

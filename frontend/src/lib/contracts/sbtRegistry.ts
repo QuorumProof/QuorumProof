@@ -28,20 +28,10 @@ export interface SoulboundToken {
   metadata_uri: Uint8Array;
 }
 
-export enum DisputeStatus {
-  Open = 0,
-  Upheld = 1,
-  Dismissed = 2,
-}
-
-export interface Dispute {
-  id: bigint;
+export interface Delegation {
   token_id: bigint;
-  initiator: string;
-  accused: string;
-  status: DisputeStatus;
-  uphold_votes: string[];
-  dismiss_votes: string[];
+  delegatee: string;
+  expires_at: bigint;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,33 +132,30 @@ export async function getTokensByOwner(owner: string): Promise<bigint[]> {
   return simulate<bigint[]>('get_tokens_by_owner', [addr(owner)]);
 }
 
-/** Open a dispute against an SBT holder or issuer. */
-export async function initiateDispute(
-  initiator: string,
+/** Delegate rights for a specific SBT to another address until a timestamp expires. */
+export async function delegateSbtRights(
+  owner: string,
   tokenId: bigint | number,
-  accused: string,
-): Promise<bigint> {
-  return simulate<bigint>('initiate_dispute', [
-    addr(initiator),
-    u64(tokenId),
-    addr(accused),
-  ]);
-}
-
-/** Vote on an open dispute. Holders may vote once per dispute. */
-export async function voteOnDispute(
-  voter: string,
-  disputeId: bigint | number,
-  uphold: boolean,
+  delegatee: string,
+  expiresAt: bigint | number,
 ): Promise<void> {
-  return simulate<void>('vote_on_dispute', [
-    addr(voter),
-    u64(disputeId),
-    nativeToScVal(uphold),
+  return simulate<void>('delegate_sbt_rights', [
+    addr(owner),
+    u64(tokenId),
+    addr(delegatee),
+    u64(expiresAt),
   ]);
 }
 
-/** Retrieve a dispute by ID. */
-export async function getDispute(disputeId: bigint | number): Promise<Dispute> {
-  return simulate<Dispute>('get_dispute', [u64(disputeId)]);
+/** Retrieve delegation details for a token. */
+export async function getDelegation(tokenId: bigint | number): Promise<Delegation> {
+  return simulate<Delegation>('get_delegation', [u64(tokenId)]);
+}
+
+/** Check whether a delegatee currently holds active rights for the token. */
+export async function isDelegateActive(
+  tokenId: bigint | number,
+  delegatee: string,
+): Promise<boolean> {
+  return simulate<boolean>('is_delegate_active', [u64(tokenId), addr(delegatee)]);
 }
