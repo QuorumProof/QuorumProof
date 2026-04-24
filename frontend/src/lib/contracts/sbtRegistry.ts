@@ -125,3 +125,13 @@ export async function ownerOf(tokenId: bigint | number): Promise<string> {
 export async function getTokensByOwner(owner: string): Promise<bigint[]> {
   return simulate<bigint[]>('get_tokens_by_owner', [addr(owner)]);
 }
+
+/** Add a holder to the contract whitelist. Only the admin may call this. */
+export async function addHolderToWhitelist(admin: string, holder: string): Promise<void> {
+  return simulate<void>('add_holder_to_whitelist', [addr(admin), addr(holder)]);
+}
+
+/** Returns true if the holder is whitelisted. */
+export async function isHolderWhitelisted(holder: string): Promise<boolean> {
+  return simulate<boolean>('is_holder_whitelisted', [addr(holder)]);
+}
