@@ -22,7 +22,7 @@ pub enum DataKey {
     Owner(u64),
     OwnerTokens(Address),
     OwnerCredential(Address, u64),
-    Whitelist(Address),
+    Delegation(u64),
     Admin,
     QuorumProofId,
 }
@@ -34,6 +34,14 @@ pub struct SoulboundToken {
     pub owner: Address,
     pub credential_id: u64,
     pub metadata_uri: Bytes,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct Delegation {
+    pub token_id: u64,
+    pub delegatee: Address,
+    pub expires_at: u64,
 }
 
 #[contract]
@@ -142,18 +150,42 @@ impl SbtRegistryContract {
         env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
     }
 
-    /// Add a holder to the contract whitelist.
-    /// Only the admin may call this function.
-    pub fn add_holder_to_whitelist(env: Env, admin: Address, holder: Address) {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        assert!(admin == stored_admin, "unauthorized");
-        env.storage().instance().set(&DataKey::Whitelist(holder), &true);
+    /// Delegate rights for a specific SBT to another address until a timestamp expires.
+    pub fn delegate_sbt_rights(
+        env: Env,
+        owner: Address,
+        token_id: u64,
+        delegatee: Address,
+        expires_at: u64,
+    ) {
+        owner.require_auth();
+        let mut token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
+
+        let current_ts: u64 = env.ledger().timestamp();
+        assert!(expires_at > current_ts, "expiry must be in the future");
+
+        let delegation = Delegation { token_id, delegatee, expires_at };
+        env.storage().instance().set(&DataKey::Delegation(token_id), &delegation);
     }
 
-    /// Returns true if the holder is whitelisted.
-    pub fn is_holder_whitelisted(env: Env, holder: Address) -> bool {
-        env.storage().instance().get(&DataKey::Whitelist(holder)).unwrap_or(false)
+    /// Retrieve delegation details for a token.
+    pub fn get_delegation(env: Env, token_id: u64) -> Delegation {
+        env.storage().instance()
+            .get(&DataKey::Delegation(token_id))
+            .expect("delegation not found")
+    }
+
+    /// Check whether a delegatee currently holds active rights for the token.
+    pub fn is_delegate_active(env: Env, token_id: u64, delegatee: Address) -> bool {
+        let current_ts: u64 = env.ledger().timestamp();
+        env.storage().instance()
+            .get(&DataKey::Delegation(token_id))
+            .map_or(false, |delegation: Delegation| {
+                delegation.delegatee == delegatee && delegation.expires_at > current_ts
+            })
     }
 
     /// Returns the total number of SBTs ever minted.
@@ -175,6 +207,7 @@ impl SbtRegistryContract {
         assert!(token.owner == owner, "not the owner");
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
+        env.storage().instance().remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(owner.clone(), token.credential_id));
         let mut owner_tokens: Vec<u64> = env.storage().persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
@@ -212,6 +245,7 @@ impl SbtRegistryContract {
         let owner = token.owner.clone();
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
+        env.storage().instance().remove(&DataKey::Delegation(token_id));
         let mut owner_tokens: Vec<u64> = env.storage().persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
             .unwrap_or(Vec::new(&env));
@@ -245,6 +279,7 @@ impl SbtRegistryContract {
             old_tokens.remove(pos as u32);
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+        env.storage().instance().remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
 
         // Add to new owner
@@ -304,10 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn test_add_holder_to_whitelist_and_check() {
+    fn test_delegate_sbt_rights_and_active_status() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
 
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
@@ -317,28 +352,32 @@ mod tests {
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
-        assert!(!client.is_holder_whitelisted(&delegatee));
-        client.add_holder_to_whitelist(&admin, &delegatee);
-        assert!(client.is_holder_whitelisted(&delegatee));
-        assert_eq!(client.owner_of(&token_id), owner);
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+
+        assert!(client.is_delegate_active(&token_id, &delegatee));
+        let delegation = client.get_delegation(&token_id);
+        assert_eq!(delegation.delegatee, delegatee);
+        assert_eq!(delegation.expires_at, expires_at);
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
-    fn test_add_holder_to_whitelist_requires_admin() {
+    #[should_panic(expected = "expiry must be in the future")]
+    fn test_delegate_sbt_rights_rejects_past_expiry() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
 
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
-        let unauthorized = Address::generate(&env);
+        let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        client.mint(&owner, &cred_id, &uri);
+        let token_id = client.mint(&owner, &cred_id, &uri);
 
-        client.add_holder_to_whitelist(&unauthorized, &owner);
+        let expires_at = env.ledger().timestamp();
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
     }
 
     #[test]

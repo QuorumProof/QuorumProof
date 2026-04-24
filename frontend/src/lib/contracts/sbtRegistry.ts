@@ -28,6 +28,12 @@ export interface SoulboundToken {
   metadata_uri: Uint8Array;
 }
 
+export interface Delegation {
+  token_id: bigint;
+  delegatee: string;
+  expires_at: bigint;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -126,12 +132,30 @@ export async function getTokensByOwner(owner: string): Promise<bigint[]> {
   return simulate<bigint[]>('get_tokens_by_owner', [addr(owner)]);
 }
 
-/** Add a holder to the contract whitelist. Only the admin may call this. */
-export async function addHolderToWhitelist(admin: string, holder: string): Promise<void> {
-  return simulate<void>('add_holder_to_whitelist', [addr(admin), addr(holder)]);
+/** Delegate rights for a specific SBT to another address until a timestamp expires. */
+export async function delegateSbtRights(
+  owner: string,
+  tokenId: bigint | number,
+  delegatee: string,
+  expiresAt: bigint | number,
+): Promise<void> {
+  return simulate<void>('delegate_sbt_rights', [
+    addr(owner),
+    u64(tokenId),
+    addr(delegatee),
+    u64(expiresAt),
+  ]);
 }
 
-/** Returns true if the holder is whitelisted. */
-export async function isHolderWhitelisted(holder: string): Promise<boolean> {
-  return simulate<boolean>('is_holder_whitelisted', [addr(holder)]);
+/** Retrieve delegation details for a token. */
+export async function getDelegation(tokenId: bigint | number): Promise<Delegation> {
+  return simulate<Delegation>('get_delegation', [u64(tokenId)]);
+}
+
+/** Check whether a delegatee currently holds active rights for the token. */
+export async function isDelegateActive(
+  tokenId: bigint | number,
+  delegatee: string,
+): Promise<boolean> {
+  return simulate<boolean>('is_delegate_active', [u64(tokenId), addr(delegatee)]);
 }
