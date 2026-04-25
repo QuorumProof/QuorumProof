@@ -16,6 +16,8 @@ const TOPIC_PROOF_REQUEST: &str = "ProofRequested";
 const TOPIC_RECOVERY_INITIATED: &str = "RecoveryInitiated";
 const TOPIC_RECOVERY_APPROVED: &str = "RecoveryApproved";
 const TOPIC_RECOVERY_EXECUTED: &str = "RecoveryExecuted";
+const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
+const TOPIC_BLACKLIST_REMOVED: &str = "HolderUnblacklisted";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -96,6 +98,35 @@ pub struct RecoveryExecutedEventData {
     pub recovery_id: u64,
     pub credential_id: u64,
     pub new_subject: Address,
+}
+
+/// Event data emitted when a holder is added to blacklist.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderBlacklistedEventData {
+    pub issuer: Address,
+    pub holder: Address,
+    pub reason: soroban_sdk::String,
+    pub blacklisted_at: u64,
+}
+
+/// Event data emitted when a holder is removed from blacklist.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderUnblacklistedEventData {
+    pub issuer: Address,
+    pub holder: Address,
+    pub removed_at: u64,
+}
+
+/// Record of a holder being blacklisted by an issuer.
+#[contracttype]
+#[derive(Clone)]
+pub struct BlacklistEntry {
+    pub issuer: Address,
+    pub holder: Address,
+    pub reason: soroban_sdk::String,
+    pub blacklisted_at: u64,
 }
 
 /// Represents the status of a credential recovery request.
@@ -179,6 +210,12 @@ pub enum ContractError {
     CircularHierarchy = 29,
     /// Credential type is not registered
     CredentialTypeNotFound = 30,
+    /// Holder is blacklisted by this issuer
+    HolderBlacklisted = 31,
+    /// Holder already on this issuer's blacklist
+    AlreadyBlacklisted = 32,
+    /// Holder not on this issuer's blacklist
+    NotBlacklisted = 33,
 }
 
 #[contracttype]
@@ -241,6 +278,12 @@ pub enum DataKey {
     CredentialTypeParent(u32),
     /// Stores all child type IDs for a parent credential type
     CredentialTypeChildren(u32),
+    /// Stores a blacklist entry for (issuer, holder) pair
+    BlacklistEntry(Address, Address),
+    /// Stores all holders blacklisted by an issuer
+    IssuerBlacklist(Address),
+    /// Stores all issuers who have blacklisted a holder
+    HolderBlacklists(Address),
 }
 
 #[contracttype]
@@ -747,6 +790,11 @@ impl QuorumProofContract {
             panic_with_error!(&env, ContractError::DuplicateCredential);
         }
         
+        // Check if subject is blacklisted by issuer
+        if env.storage().instance().has(&DataKey::BlacklistEntry(issuer.clone(), subject.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+        
         let id: u64 = env.storage().instance().get(&DataKey::CredentialCount).unwrap_or(0u64) + 1;
         let credential = Credential { id, subject: subject.clone(), issuer: issuer.clone(), credential_type, metadata_hash, revoked: false, expires_at, version: 1 };
         env.storage().instance().set(&DataKey::Credential(id), &credential);
@@ -818,6 +866,10 @@ impl QuorumProofContract {
             let duplicate_key = DataKey::SubjectIssuerType(subject.clone(), issuer.clone(), credential_type);
             if env.storage().instance().has(&duplicate_key) {
                 panic_with_error!(&env, ContractError::DuplicateCredential);
+            }
+            // Check if subject is blacklisted by issuer
+            if env.storage().instance().has(&DataKey::BlacklistEntry(issuer.clone(), subject.clone())) {
+                panic_with_error!(&env, ContractError::HolderBlacklisted);
             }
             let id = Self::issue_inner(&env, issuer.clone(), subject, credential_type, metadata_hash, expires_at.clone());
             env.storage().instance().set(&duplicate_key, &id);
@@ -1402,6 +1454,228 @@ impl QuorumProofContract {
     /// Panics if the credential is revoked.
     /// Panics if the attestor is not a member of the slice.
     /// Panics if the attestor has already attested for this credential.
+    
+    // ── Credential Holder Blacklist (Issue #293) ──────────────────────────────
+
+    /// Add a holder to an issuer's blacklist.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer adding to blacklist; must authorize this call.
+    /// - `holder`: The holder address to blacklist.
+    /// - `reason`: Reason for blacklisting (stored in record).
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::AlreadyBlacklisted` if holder is already blacklisted by issuer.
+    /// Panics if issuer does not authorize the call.
+    pub fn add_holder_to_blacklist(
+        env: Env,
+        issuer: Address,
+        holder: Address,
+        reason: soroban_sdk::String,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_valid_address(&env, &issuer);
+        Self::require_valid_address(&env, &holder);
+
+        let entry_key = DataKey::BlacklistEntry(issuer.clone(), holder.clone());
+        if env.storage().instance().has(&entry_key) {
+            panic_with_error!(&env, ContractError::AlreadyBlacklisted);
+        }
+
+        let blacklist_entry = BlacklistEntry {
+            issuer: issuer.clone(),
+            holder: holder.clone(),
+            reason: reason.clone(),
+            blacklisted_at: env.ledger().timestamp(),
+        };
+
+        // Store the entry
+        env.storage().instance().set(&entry_key, &blacklist_entry);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Add to issuer's blacklist
+        let mut issuer_blacklist: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::IssuerBlacklist(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        if !issuer_blacklist.iter().any(|&addr| addr == holder) {
+            issuer_blacklist.push_back(holder.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::IssuerBlacklist(issuer.clone()), &issuer_blacklist);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Add to holder's recorded blacklists
+        let mut holder_blacklists: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::HolderBlacklists(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        if !holder_blacklists.iter().any(|&addr| addr == issuer) {
+            holder_blacklists.push_back(issuer.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::HolderBlacklists(holder.clone()), &holder_blacklists);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Emit event
+        let event_data = HolderBlacklistedEventData {
+            issuer,
+            holder,
+            reason,
+            blacklisted_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_BLACKLIST_ADDED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Check if a holder is blacklisted by an issuer.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer to check blacklist for.
+    /// - `holder`: The holder address to check.
+    ///
+    /// # Returns
+    /// true if holder is blacklisted by issuer, false otherwise.
+    pub fn is_holder_blacklisted(env: Env, issuer: Address, holder: Address) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey::BlacklistEntry(issuer, holder))
+    }
+
+    /// Remove a holder from an issuer's blacklist.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer removing from blacklist; must authorize this call.
+    /// - `holder`: The holder address to remove from blacklist.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::NotBlacklisted` if holder is not on issuer's blacklist.
+    /// Panics if issuer does not authorize the call.
+    pub fn remove_holder_from_blacklist(env: Env, issuer: Address, holder: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_valid_address(&env, &issuer);
+        Self::require_valid_address(&env, &holder);
+
+        let entry_key = DataKey::BlacklistEntry(issuer.clone(), holder.clone());
+        if !env.storage().instance().has(&entry_key) {
+            panic_with_error!(&env, ContractError::NotBlacklisted);
+        }
+
+        // Remove the entry
+        env.storage().instance().remove(&entry_key);
+
+        // Remove from issuer's blacklist
+        let mut issuer_blacklist: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::IssuerBlacklist(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<Address> = Vec::new(&env);
+        for addr in issuer_blacklist.iter() {
+            if addr != holder {
+                retained.push_back(addr);
+            }
+        }
+        if retained.len() < issuer_blacklist.len() {
+            env.storage()
+                .instance()
+                .set(&DataKey::IssuerBlacklist(issuer.clone()), &retained);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Remove from holder's recorded blacklists
+        let mut holder_blacklists: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::HolderBlacklists(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<Address> = Vec::new(&env);
+        for addr in holder_blacklists.iter() {
+            if addr != issuer {
+                retained.push_back(addr);
+            }
+        }
+        if retained.len() < holder_blacklists.len() {
+            env.storage()
+                .instance()
+                .set(&DataKey::HolderBlacklists(holder.clone()), &retained);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Emit event
+        let event_data = HolderUnblacklistedEventData {
+            issuer,
+            holder,
+            removed_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_BLACKLIST_REMOVED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get all holders blacklisted by an issuer.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer to query.
+    ///
+    /// # Returns
+    /// Vec of holder addresses blacklisted by this issuer.
+    pub fn get_blacklisted_by_issuer(env: Env, issuer: Address) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::IssuerBlacklist(issuer))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get all issuers who have blacklisted a holder.
+    ///
+    /// # Parameters
+    /// - `holder`: The holder to query.
+    ///
+    /// # Returns
+    /// Vec of issuer addresses that have blacklisted this holder.
+    pub fn get_blacklist_entries_for_holder(env: Env, holder: Address) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::HolderBlacklists(holder))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get the blacklist entry for a specific issuer-holder pair.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer.
+    /// - `holder`: The holder.
+    ///
+    /// # Returns
+    /// Some(BlacklistEntry) if holder is blacklisted by issuer, None otherwise.
+    pub fn get_blacklist_entry(env: Env, issuer: Address, holder: Address) -> Option<BlacklistEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::BlacklistEntry(issuer, holder))
+    }
+
     pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64, expires_at: Option<u64>) {
         attestor.require_auth();
         Self::require_not_paused(&env);
