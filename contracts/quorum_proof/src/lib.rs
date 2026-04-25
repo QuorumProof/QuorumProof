@@ -59,6 +59,19 @@ pub enum DataKey {
     Attestors(u64),
     SubjectCredentials(Address),
     AttestorCount(Address),
+    HolderReputation(Address),
+}
+
+/// Reputation score for a proof holder, based on their on-chain activity.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderReputation {
+    /// Total number of successful verifications the holder has passed.
+    pub successful_verifications: u64,
+    /// Total number of credentials held (issued to this address).
+    pub credentials_held: u64,
+    /// Composite score: successful_verifications + credentials_held.
+    pub score: u64,
 }
 
 #[contracttype]
@@ -162,6 +175,18 @@ impl QuorumProofContract {
         let mut topics: Vec<String> = Vec::new(&env);
         topics.push_back(topic);
         env.events().publish(topics, event_data);
+
+        // Update holder reputation: increment credentials_held and score.
+        let subject_addr = credential.subject.clone();
+        let mut rep: HolderReputation = env
+            .storage()
+            .instance()
+            .get(&DataKey::HolderReputation(subject_addr.clone()))
+            .unwrap_or(HolderReputation { successful_verifications: 0, credentials_held: 0, score: 0 });
+        rep.credentials_held += 1;
+        rep.score = rep.successful_verifications + rep.credentials_held;
+        env.storage().instance().set(&DataKey::HolderReputation(subject_addr), &rep);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
         id
     }
@@ -460,7 +485,31 @@ impl QuorumProofContract {
 
         // 2. Verify the ZK claim proof
         let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
-        zk_client.verify_claim(&credential_id, &claim_type, &proof)
+        let result = zk_client.verify_claim(&credential_id, &claim_type, &proof);
+
+        // 3. On success, increment the holder's reputation score.
+        if result {
+            let mut rep: HolderReputation = env
+                .storage()
+                .instance()
+                .get(&DataKey::HolderReputation(subject.clone()))
+                .unwrap_or(HolderReputation { successful_verifications: 0, credentials_held: 0, score: 0 });
+            rep.successful_verifications += 1;
+            rep.score = rep.successful_verifications + rep.credentials_held;
+            env.storage().instance().set(&DataKey::HolderReputation(subject), &rep);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        result
+    }
+
+    /// Returns the reputation of a proof holder based on their on-chain activity:
+    /// credentials held and successful verifications passed.
+    pub fn get_holder_reputation(env: Env, holder: Address) -> HolderReputation {
+        env.storage()
+            .instance()
+            .get(&DataKey::HolderReputation(holder))
+            .unwrap_or(HolderReputation { successful_verifications: 0, credentials_held: 0, score: 0 })
     }
 }
 
@@ -1425,6 +1474,122 @@ mod tests {
         hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm2"));
 
         client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &None);
+    }
+
+    #[test]
+    fn test_holder_reputation_zero_before_any_activity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let holder = Address::generate(&env);
+        let rep = client.get_holder_reputation(&holder);
+        assert_eq!(rep.credentials_held, 0);
+        assert_eq!(rep.successful_verifications, 0);
+        assert_eq!(rep.score, 0);
+    }
+
+    #[test]
+    fn test_holder_reputation_increments_on_credential_issue() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let rep = client.get_holder_reputation(&subject);
+        assert_eq!(rep.credentials_held, 1);
+        assert_eq!(rep.score, 1);
+
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
+        let rep = client.get_holder_reputation(&subject);
+        assert_eq!(rep.credentials_held, 2);
+        assert_eq!(rep.score, 2);
+    }
+
+    #[test]
+    fn test_holder_reputation_increments_on_successful_verification() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+
+        let rep = qp.get_holder_reputation(&subject);
+        assert_eq!(rep.successful_verifications, 1);
+        assert_eq!(rep.credentials_held, 1);
+        assert_eq!(rep.score, 2); // 1 credential + 1 verification
+    }
+
+    #[test]
+    fn test_holder_reputation_not_incremented_on_failed_verification() {
+        use zk_verifier::ClaimType;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, sbt_registry::SbtRegistryContract);
+        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // No SBT minted — verification fails, reputation should not increment.
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+
+        let rep = qp.get_holder_reputation(&subject);
+        assert_eq!(rep.successful_verifications, 0);
+        assert_eq!(rep.credentials_held, 1);
+        assert_eq!(rep.score, 1);
+    }
+
+    #[test]
+    fn test_holder_reputation_independent_per_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject_a = Address::generate(&env);
+        let subject_b = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        client.issue_credential(&issuer, &subject_a, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
+
+        assert_eq!(client.get_holder_reputation(&subject_a).credentials_held, 2);
+        assert_eq!(client.get_holder_reputation(&subject_b).credentials_held, 1);
     }
 }
 
