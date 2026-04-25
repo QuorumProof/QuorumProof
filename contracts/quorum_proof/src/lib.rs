@@ -68,14 +68,14 @@ pub struct AttestationRenewalEventData {
     pub new_expires_at: u64,
 }
 
-/// On-chain record of a revoked attestation, including the documented reason.
+/// Time window during which attestations are allowed for a credential.
 #[contracttype]
 #[derive(Clone)]
-pub struct RevokedAttestation {
-    pub attestor: Address,
-    pub credential_id: u64,
-    pub revoked_at: u64,
-    pub reason: soroban_sdk::String,
+pub struct AttestationTimeWindow {
+    /// Unix timestamp when the attestation window opens.
+    pub start: u64,
+    /// Unix timestamp when the attestation window closes.
+    pub end: u64,
 }
 
 #[contracterror]
@@ -101,7 +101,7 @@ pub enum ContractError {
     NotInSlice = 17,
     AccusedCannotVote = 18,
     AlreadyVoted = 19,
-    AttestationNotFound = 20,
+    AttestationWindowOutside = 20,
 }
 
 #[contracttype]
@@ -150,8 +150,8 @@ pub enum DataKey {
     ActiveChallenge(u64, Address),
     /// Stores expiry timestamp for specific attestations
     AttestationExpiry(u64),
-    /// Stores a revoked attestation record keyed by (credential_id, attestor)
-    RevokedAttestation(u64, Address),
+    /// Stores the time window configuration for attestations on a credential
+    AttestationWindow(u64),
 }
 
 #[contracttype]
@@ -529,83 +529,37 @@ impl QuorumProofContract {
         }
     }
 
-    /// Revoke an attestation with a documented reason stored on-chain.
-    /// Only the original attestor may revoke their own attestation.
-    /// The revocation record is stored for audit trail purposes.
+    /// Configure a time window during which attestations are allowed for a credential.
+    /// Only the credential issuer may set this.
     ///
     /// # Panics
-    /// - `ContractError::CredentialNotFound` if credential does not exist.
-    /// - `ContractError::AttestationNotFound` if the attestor has not attested this credential.
-    /// - `ContractError::InvalidInput` if reason is empty.
-    pub fn revoke_attestation_with_reason(
-        env: Env,
-        attestor: Address,
-        credential_id: u64,
-        reason: soroban_sdk::String,
-    ) {
-        attestor.require_auth();
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the caller is not the issuer.
+    /// Panics with `ContractError::InvalidInput` if `start >= end`.
+    pub fn set_attestation_window(env: Env, issuer: Address, credential_id: u64, start: u64, end: u64) {
+        issuer.require_auth();
         Self::require_not_paused(&env);
-        Self::precondition(&env, !reason.is_empty());
-
-        // Ensure credential exists
-        if !env.storage().instance().has(&DataKey::Credential(credential_id)) {
-            panic_with_error!(&env, ContractError::CredentialNotFound);
-        }
-
-        // Find and remove the attestor's record
-        let mut records: Vec<AttestationRecord> = env
+        let credential: Credential = env
             .storage()
             .instance()
-            .get(&DataKey::Attestors(credential_id))
-            .unwrap_or(Vec::new(&env));
-
-        let mut found = false;
-        let mut updated: Vec<AttestationRecord> = Vec::new(&env);
-        for rec in records.iter() {
-            if rec.attestor == attestor {
-                found = true;
-            } else {
-                updated.push_back(rec);
-            }
-        }
-        if !found {
-            panic_with_error!(&env, ContractError::AttestationNotFound);
-        }
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "only the credential issuer can set attestation window");
+        Self::precondition(&env, start < end);
+        let window = AttestationTimeWindow { start, end };
         env.storage()
             .instance()
-            .set(&DataKey::Attestors(credential_id), &updated);
-
-        // Store revocation record for audit trail
-        let revocation = RevokedAttestation {
-            attestor: attestor.clone(),
-            credential_id,
-            revoked_at: env.ledger().timestamp(),
-            reason: reason.clone(),
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::RevokedAttestation(credential_id, attestor.clone()), &revocation);
+            .set(&DataKey::AttestationWindow(credential_id), &window);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        // Emit event
-        let topic = String::from_str(&env, "AttestRevoked");
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, (attestor, credential_id, reason));
     }
 
-    /// Retrieve the revocation record for a specific attestor on a credential.
-    /// Returns `None` if the attestation was never revoked.
-    pub fn get_revoked_attestation(
-        env: Env,
-        credential_id: u64,
-        attestor: Address,
-    ) -> Option<RevokedAttestation> {
+    /// Returns the attestation time window for a credential, if one has been configured.
+    pub fn get_attestation_window(env: Env, credential_id: u64) -> Option<AttestationTimeWindow> {
         env.storage()
             .instance()
-            .get(&DataKey::RevokedAttestation(credential_id, attestor))
+            .get(&DataKey::AttestationWindow(credential_id))
     }
 
     /// Validate an array input has between `min` and `max` elements (inclusive).
@@ -1322,6 +1276,13 @@ impl QuorumProofContract {
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         assert!(!credential.revoked, "credential is revoked");
+        // Enforce attestation time window if configured
+        if let Some(window) = env.storage().instance().get::<DataKey, AttestationTimeWindow>(&DataKey::AttestationWindow(credential_id)) {
+            let now = env.ledger().timestamp();
+            if now < window.start || now >= window.end {
+                panic_with_error!(&env, ContractError::AttestationWindowOutside);
+            }
+        }
         let slice: QuorumSlice = env
             .storage()
             .instance()
@@ -1411,6 +1372,13 @@ impl QuorumProofContract {
                 .get(&DataKey::Credential(credential_id))
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
             assert!(!credential.revoked, "credential is revoked");
+            // Enforce attestation time window if configured
+            if let Some(window) = env.storage().instance().get::<DataKey, AttestationTimeWindow>(&DataKey::AttestationWindow(credential_id)) {
+                let now = env.ledger().timestamp();
+                if now < window.start || now >= window.end {
+                    panic_with_error!(&env, ContractError::AttestationWindowOutside);
+                }
+            }
             let mut records: Vec<AttestationRecord> = env.storage().instance()
                 .get(&DataKey::Attestors(credential_id))
                 .unwrap_or(Vec::new(&env));
@@ -4976,37 +4944,27 @@ mod feature_tests {
         client.attest(&attestor, &cid, &slice_id, &None);
     }
 
-    // --- Issue #340: Attestation revocation with reason ---
+    // --- Issue #339: Time-window attestation tests ---
 
     #[test]
-    fn test_revoke_attestation_with_reason_stores_record() {
+    fn test_set_and_get_attestation_window() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
 
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.attest(&attestor, &cid, &slice_id, &None);
+        client.set_attestation_window(&issuer, &cid, &1000u64, &2000u64);
 
-        let reason = soroban_sdk::String::from_str(&env, "Conflict of interest");
-        client.revoke_attestation_with_reason(&attestor, &cid, &reason);
-
-        let record = client.get_revoked_attestation(&cid, &attestor).unwrap();
-        assert_eq!(record.attestor, attestor);
-        assert_eq!(record.credential_id, cid);
-        assert_eq!(record.reason, reason);
+        let window = client.get_attestation_window(&cid).unwrap();
+        assert_eq!(window.start, 1000);
+        assert_eq!(window.end, 2000);
     }
 
     #[test]
-    fn test_revoke_attestation_removes_from_active_attestors() {
+    fn test_attest_within_window_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
@@ -5021,18 +4979,17 @@ mod feature_tests {
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.set_attestation_window(&issuer, &cid, &500u64, &2000u64);
+        set_ledger_timestamp(&env, 1000);
+
+        // Should succeed — timestamp 1000 is within [500, 2000)
         client.attest(&attestor, &cid, &slice_id, &None);
         assert!(client.is_attested(&cid, &slice_id));
-
-        let reason = soroban_sdk::String::from_str(&env, "Revoked");
-        client.revoke_attestation_with_reason(&attestor, &cid, &reason);
-
-        // Attestation should no longer count toward quorum
-        assert!(!client.is_attested(&cid, &slice_id));
     }
 
     #[test]
-    fn test_revoke_attestation_emits_event() {
+    fn test_attest_before_window_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
@@ -5047,41 +5004,21 @@ mod feature_tests {
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.attest(&attestor, &cid, &slice_id, &None);
 
-        let reason = soroban_sdk::String::from_str(&env, "Audit finding");
-        client.revoke_attestation_with_reason(&attestor, &cid, &reason);
+        client.set_attestation_window(&issuer, &cid, &1000u64, &2000u64);
+        set_ledger_timestamp(&env, 500); // before window
 
-        let events = env.events().all();
-        let (_, topics, _) = events.last().unwrap();
-        use soroban_sdk::TryIntoVal;
-        let t0: soroban_sdk::String = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(t0, soroban_sdk::String::from_str(&env, "AttestRevoked"));
-    }
-
-    #[test]
-    fn test_revoke_attestation_not_found_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
-
-        let reason = soroban_sdk::String::from_str(&env, "Never attested");
-        let result = client.try_revoke_attestation_with_reason(&attestor, &cid, &reason);
+        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::AttestationNotFound as u32
+                ContractError::AttestationWindowOutside as u32
             )))
         );
     }
 
     #[test]
-    fn test_revoke_attestation_empty_reason_rejected() {
+    fn test_attest_after_window_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
@@ -5096,20 +5033,21 @@ mod feature_tests {
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.attest(&attestor, &cid, &slice_id, &None);
 
-        let empty = soroban_sdk::String::from_str(&env, "");
-        let result = client.try_revoke_attestation_with_reason(&attestor, &cid, &empty);
+        client.set_attestation_window(&issuer, &cid, &500u64, &1000u64);
+        set_ledger_timestamp(&env, 1500); // after window
+
+        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::InvalidInput as u32
+                ContractError::AttestationWindowOutside as u32
             )))
         );
     }
 
     #[test]
-    fn test_get_revoked_attestation_none_when_not_revoked() {
+    fn test_attest_no_window_always_allowed() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
@@ -5119,6 +5057,43 @@ mod feature_tests {
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
 
-        assert!(client.get_revoked_attestation(&cid, &attestor).is_none());
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        // No window set — attest at any time should succeed
+        set_ledger_timestamp(&env, 99999);
+        client.attest(&attestor, &cid, &slice_id, &None);
+        assert!(client.is_attested(&cid, &slice_id));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_attestation_window_invalid_range_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        // start >= end must be rejected
+        client.set_attestation_window(&issuer, &cid, &2000u64, &1000u64);
+    }
+
+    #[test]
+    fn test_get_attestation_window_none_when_not_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        assert!(client.get_attestation_window(&cid).is_none());
     }
 }
