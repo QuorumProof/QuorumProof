@@ -78,6 +78,16 @@ pub struct AttestationTimeWindow {
     pub end: u64,
 }
 
+/// Records a veto applied to an attestation by a designated veto member.
+#[contracttype]
+#[derive(Clone)]
+pub struct VetoRecord {
+    pub vetoer: Address,
+    pub credential_id: u64,
+    pub justification: String,
+    pub vetoed_at: u64,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -102,6 +112,9 @@ pub enum ContractError {
     AccusedCannotVote = 18,
     AlreadyVoted = 19,
     AttestationWindowOutside = 20,
+    VetoedAttestation = 21,
+    NotVetoMember = 22,
+    DuplicateVeto = 23,
 }
 
 #[contracttype]
@@ -152,6 +165,10 @@ pub enum DataKey {
     AttestationExpiry(u64),
     /// Stores the time window configuration for attestations on a credential
     AttestationWindow(u64),
+    /// Marks an address as a designated veto member
+    VetoMember(Address),
+    /// Stores Vec<VetoRecord> for a credential
+    VetoRecords(u64),
 }
 
 #[contracttype]
@@ -2542,6 +2559,80 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         
         dispute_id
+    }
+
+    /// Designate an address as a veto member. Only admin may call this.
+    pub fn designate_veto_member(env: Env, admin: Address, member: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey::VetoMember(member), &true);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Veto all attestations on a credential. Caller must be a designated veto member.
+    /// Requires a non-empty justification string. Each member may only veto once per credential.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::NotVetoMember` if the caller is not a designated veto member.
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics with `ContractError::InvalidInput` if justification is empty.
+    /// Panics with `ContractError::DuplicateVeto` if this member has already vetoed this credential.
+    pub fn veto_attestation(env: Env, vetoer: Address, credential_id: u64, justification: String) {
+        vetoer.require_auth();
+        Self::require_not_paused(&env);
+        if !env.storage().instance().get::<DataKey, bool>(&DataKey::VetoMember(vetoer.clone())).unwrap_or(false) {
+            panic_with_error!(&env, ContractError::NotVetoMember);
+        }
+        if !env.storage().instance().has(&DataKey::Credential(credential_id)) {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+        Self::precondition(&env, !justification.is_empty());
+        let mut records: Vec<VetoRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VetoRecords(credential_id))
+            .unwrap_or(Vec::new(&env));
+        for rec in records.iter() {
+            if rec.vetoer == vetoer {
+                panic_with_error!(&env, ContractError::DuplicateVeto);
+            }
+        }
+        records.push_back(VetoRecord {
+            vetoer,
+            credential_id,
+            justification,
+            vetoed_at: env.ledger().timestamp(),
+        });
+        env.storage()
+            .instance()
+            .set(&DataKey::VetoRecords(credential_id), &records);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Remove all attestation records for this credential
+        env.storage()
+            .instance()
+            .set(&DataKey::Attestors(credential_id), &Vec::<AttestationRecord>::new(&env));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Returns all veto records for a credential.
+    pub fn get_veto_records(env: Env, credential_id: u64) -> Vec<VetoRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey::VetoRecords(credential_id))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
@@ -5095,5 +5186,105 @@ mod feature_tests {
         let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
 
         assert!(client.get_attestation_window(&cid).is_none());
+    }
+
+    // ── Veto attestation ──────────────────────────────────────────────────────
+
+    fn setup_attested_credential(
+        env: &Env,
+        client: &QuorumProofContractClient,
+    ) -> (Address, Address, u64, u64) {
+        let issuer = Address::generate(env);
+        let subject = Address::generate(env);
+        let attestor = Address::generate(env);
+        let meta = Bytes::from_slice(env, b"QmVetoTest");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let mut attestors = Vec::new(env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(env);
+        weights.push_back(1u32);
+        let sid = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cid, &sid, &None);
+        (issuer, attestor, cid, sid)
+    }
+
+    #[test]
+    fn test_veto_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let (_, _, cid, sid) = setup_attested_credential(&env, &client);
+        let vetoer = Address::generate(&env);
+        client.designate_veto_member(&admin, &vetoer);
+
+        assert!(client.is_attested(&cid, &sid));
+        client.veto_attestation(&vetoer, &cid, &String::from_str(&env, "fraudulent credential"));
+        assert!(!client.is_attested(&cid, &sid));
+
+        let records = client.get_veto_records(&cid);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records.get(0).unwrap().vetoer, vetoer);
+    }
+
+    #[test]
+    fn test_veto_non_member_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let (_, _, cid, _) = setup_attested_credential(&env, &client);
+        let non_member = Address::generate(&env);
+
+        let result = client.try_veto_attestation(
+            &non_member,
+            &cid,
+            &String::from_str(&env, "justification"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::NotVetoMember as u32
+            )))
+        );
+    }
+
+    #[test]
+    fn test_veto_duplicate_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let (_, _, cid, _) = setup_attested_credential(&env, &client);
+        let vetoer = Address::generate(&env);
+        client.designate_veto_member(&admin, &vetoer);
+
+        client.veto_attestation(&vetoer, &cid, &String::from_str(&env, "first veto"));
+        let result = client.try_veto_attestation(
+            &vetoer,
+            &cid,
+            &String::from_str(&env, "second veto"),
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::DuplicateVeto as u32
+            )))
+        );
+    }
+
+    #[test]
+    fn test_veto_empty_justification_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let (_, _, cid, _) = setup_attested_credential(&env, &client);
+        let vetoer = Address::generate(&env);
+        client.designate_veto_member(&admin, &vetoer);
+
+        let result = client.try_veto_attestation(&vetoer, &cid, &String::from_str(&env, ""));
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidInput as u32
+            )))
+        );
     }
 }
