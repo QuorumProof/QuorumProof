@@ -218,6 +218,16 @@ pub struct AttestationTimeWindow {
     pub end: u64,
 }
 
+/// Records a veto applied to an attestation by a designated veto member.
+#[contracttype]
+#[derive(Clone)]
+pub struct VetoRecord {
+    pub vetoer: Address,
+    pub credential_id: u64,
+    pub justification: String,
+    pub vetoed_at: u64,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
