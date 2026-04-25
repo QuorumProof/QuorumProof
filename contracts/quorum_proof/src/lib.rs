@@ -18,6 +18,8 @@ const TOPIC_RECOVERY_APPROVED: &str = "RecoveryApproved";
 const TOPIC_RECOVERY_EXECUTED: &str = "RecoveryExecuted";
 const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
 const TOPIC_BLACKLIST_REMOVED: &str = "HolderUnblacklisted";
+const TOPIC_FORK_DETECTED: &str = "ForkDetected";
+const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -55,7 +57,7 @@ pub struct RenewalEventData {
     pub new_expires_at: u64,
 }
 
-/// A single attestation record, capturing who attested and when, with optional expiry.
+/// A single attestation record, capturing who attested, when, and the attestation value.
 #[contracttype]
 #[derive(Clone)]
 pub struct AttestationRecord {
@@ -63,6 +65,8 @@ pub struct AttestationRecord {
     pub attested_at: u64,
     /// Optional Unix timestamp after which this attestation is considered expired.
     pub expires_at: Option<u64>,
+    /// The attestation value: true for valid, false for invalid.
+    pub attestation_value: bool,
 }
 
 #[contracttype]
@@ -127,6 +131,47 @@ pub struct BlacklistEntry {
     pub holder: Address,
     pub reason: soroban_sdk::String,
     pub blacklisted_at: u64,
+}
+
+/// Event data emitted when a fork is detected.
+#[contracttype]
+#[derive(Clone)]
+pub struct ForkDetectedEventData {
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub conflicting_attestors: Vec<Address>,
+    pub detected_at: u64,
+}
+
+/// Event data emitted when a fork is resolved.
+#[contracttype]
+#[derive(Clone)]
+pub struct ForkResolvedEventData {
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub resolution: soroban_sdk::String,
+    pub resolved_at: u64,
+}
+
+/// Information about a detected fork.
+#[contracttype]
+#[derive(Clone)]
+pub struct ForkInfo {
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub conflicting_attestors: Vec<Address>,
+    pub attested_values: Vec<bool>,
+    pub detected_at: u64,
+}
+
+/// Status of fork detection for a credential.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ForkStatus {
+    NoFork = 1,
+    ForkDetected = 2,
+    ForkResolved = 3,
 }
 
 /// Represents the status of a credential recovery request.
@@ -216,6 +261,12 @@ pub enum ContractError {
     AlreadyBlacklisted = 32,
     /// Holder not on this issuer's blacklist
     NotBlacklisted = 33,
+    /// Fork detected: conflicting attestations for the same slice
+    ForkDetected = 34,
+    /// Fork already resolved for this slice
+    ForkAlreadyResolved = 35,
+    /// No fork exists for this slice
+    NoForkExists = 36,
 }
 
 #[contracttype]
@@ -284,6 +335,10 @@ pub enum DataKey {
     IssuerBlacklist(Address),
     /// Stores all issuers who have blacklisted a holder
     HolderBlacklists(Address),
+    /// Stores fork information for a (credential_id, slice_id) pair
+    ForkInfo(u64, u64),
+    /// Stores the fork status for a (credential_id, slice_id) pair
+    ForkStatus(u64, u64),
 }
 
 #[contracttype]
@@ -1676,7 +1731,63 @@ impl QuorumProofContract {
             .get(&DataKey::BlacklistEntry(issuer, holder))
     }
 
-    pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64, expires_at: Option<u64>) {
+    /// Detects if a fork would occur or exists for a credential in a slice.
+    /// A fork occurs when attestors in the same slice attest different values.
+    /// Returns true if a fork is detected, false otherwise.
+    pub fn detect_fork(env: &Env, credential_id: u64, slice_id: u64, new_attestor: &Address, new_value: bool) -> bool {
+        // Get the slice to know which attestors are relevant
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
+
+        // Get all attestation records for the credential
+        let records: Vec<AttestationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(env));
+
+        // Collect values attested by attestors in this slice
+        let mut slice_values: Vec<bool> = Vec::new(env);
+        for record in records.iter() {
+            // Check if this attestor is in the slice
+            let mut in_slice = false;
+            for attestor in slice.attestors.iter() {
+                if attestor == record.attestor {
+                    in_slice = true;
+                    break;
+                }
+            }
+            if in_slice {
+                slice_values.push_back(record.attestation_value);
+            }
+        }
+
+        // Check if new attestor is in slice (should be validated elsewhere)
+        let mut new_in_slice = false;
+        for attestor in slice.attestors.iter() {
+            if attestor == *new_attestor {
+                new_in_slice = true;
+                break;
+            }
+        }
+        if !new_in_slice {
+            return false; // Not in slice, no fork concern
+        }
+
+        // Check for conflicts: if any existing value differs from new_value, or if existing values differ
+        for &existing_value in slice_values.iter() {
+            if existing_value != new_value {
+                return true; // Fork detected
+            }
+        }
+
+        false // No fork
+    }
+
+    pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64, attestation_value: bool, expires_at: Option<u64>) {
         attestor.require_auth();
         Self::require_not_paused(&env);
         Self::require_valid_address(&env, &attestor);
@@ -1709,6 +1820,56 @@ impl QuorumProofContract {
             }
         }
         assert!(found, "attestor not in slice");
+
+        // Check for fork before allowing attestation
+        if Self::detect_fork(&env, credential_id, slice_id, &attestor, attestation_value) {
+            // Store fork information
+            let records: Vec<AttestationRecord> = env.storage().instance()
+                .get(&DataKey::Attestors(credential_id))
+                .unwrap_or(Vec::new(&env));
+            let mut conflicting_attestors: Vec<Address> = Vec::new(&env);
+            let mut attested_values: Vec<bool> = Vec::new(&env);
+            for record in records.iter() {
+                let mut in_slice = false;
+                for a in slice.attestors.iter() {
+                    if a == record.attestor {
+                        in_slice = true;
+                        break;
+                    }
+                }
+                if in_slice {
+                    conflicting_attestors.push_back(record.attestor.clone());
+                    attested_values.push_back(record.attestation_value);
+                }
+            }
+            conflicting_attestors.push_back(attestor.clone());
+            attested_values.push_back(attestation_value);
+
+            let fork_info = ForkInfo {
+                credential_id,
+                slice_id,
+                conflicting_attestors: conflicting_attestors.clone(),
+                attested_values,
+                detected_at: env.ledger().timestamp(),
+            };
+            env.storage().instance().set(&DataKey::ForkInfo(credential_id, slice_id), &fork_info);
+            env.storage().instance().set(&DataKey::ForkStatus(credential_id, slice_id), &ForkStatus::ForkDetected);
+
+            // Emit fork detected event
+            let event_data = ForkDetectedEventData {
+                credential_id,
+                slice_id,
+                conflicting_attestors,
+                detected_at: env.ledger().timestamp(),
+            };
+            let topic = String::from_str(&env, TOPIC_FORK_DETECTED);
+            let mut topics: Vec<String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+
+            panic_with_error!(&env, ContractError::ForkDetected);
+        }
+
         let mut records: Vec<AttestationRecord> = env.storage().instance()
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
@@ -1724,6 +1885,7 @@ impl QuorumProofContract {
             attestor: attestor.clone(),
             attested_at: env.ledger().timestamp(),
             expires_at,
+            attestation_value,
         };
         records.push_back(record);
         env.storage()
@@ -1765,68 +1927,13 @@ impl QuorumProofContract {
     /// Batch attest multiple credentials in a single transaction.
     /// Each credential_id in the list is attested by the caller using the given slice.
     /// Caller must be a member of the slice for each credential.
-    pub fn batch_attest(env: Env, attestor: Address, credential_ids: Vec<u64>, slice_id: u64, expires_at: Option<u64>) {
+    pub fn batch_attest(env: Env, attestor: Address, credential_ids: Vec<u64>, slice_id: u64, attestation_value: bool, expires_at: Option<u64>) {
         attestor.require_auth();
         Self::require_not_paused(&env);
         Self::validate_array_bounds(credential_ids.len(), 1, MAX_BATCH_SIZE, "credential_ids");
-        let slice: QuorumSlice = env.storage().instance()
-            .get(&DataKey::Slice(slice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
-        let mut in_slice = false;
-        for a in slice.attestors.iter() {
-            if a == attestor {
-                in_slice = true;
-                break;
-            }
-        }
-        assert!(in_slice, "attestor not in slice");
         for credential_id in credential_ids.iter() {
-            let credential: Credential = env.storage().instance()
-                .get(&DataKey::Credential(credential_id))
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-            assert!(!credential.revoked, "credential is revoked");
-            // Enforce attestation time window if configured
-            if let Some(window) = env.storage().instance().get::<DataKey, AttestationTimeWindow>(&DataKey::AttestationWindow(credential_id)) {
-                let now = env.ledger().timestamp();
-                if now < window.start || now >= window.end {
-                    panic_with_error!(&env, ContractError::AttestationWindowOutside);
-                }
-            }
-            let mut records: Vec<AttestationRecord> = env.storage().instance()
-                .get(&DataKey::Attestors(credential_id))
-                .unwrap_or(Vec::new(&env));
-            for rec in records.iter() {
-                if rec.attestor == attestor {
-                    panic!("attestor has already attested for this credential");
-                }
-            }
-            let record = AttestationRecord {
-                attestor: attestor.clone(),
-                attested_at: env.ledger().timestamp(),
-                expires_at: expires_at.clone(),
-            };
-            records.push_back(record);
-            env.storage().instance().set(&DataKey::Attestors(credential_id), &records);
-            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-            let event_data = AttestationEventData { attestor: attestor.clone(), credential_id, slice_id };
-            let topic = String::from_str(&env, TOPIC_ATTESTATION);
-            let mut topics: Vec<String> = Vec::new(&env);
-            topics.push_back(topic);
-            env.events().publish(topics, event_data);
-            
-            // Record activity for the holder
-            let credential: Credential = env
-                .storage()
-                .instance()
-                .get(&DataKey::Credential(credential_id))
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-            Self::record_holder_activity(&env, credential.subject.clone(), ActivityType::CredentialAttested, credential_id, attestor.clone(), Some(slice_id));
+            Self::attest(env.clone(), attestor.clone(), credential_id, slice_id, attestation_value, expires_at);
         }
-        let count: u64 = env.storage().instance()
-            .get(&DataKey::AttestorCount(attestor.clone()))
-            .unwrap_or(0u64);
-        env.storage().instance().set(&DataKey::AttestorCount(attestor), &(count + credential_ids.len() as u64));
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Retrieve the total number of attestations an address has made.
@@ -6656,5 +6763,105 @@ mod feature_tests {
         // Child relationship should still exist
         let parent_after = client.get_credential_type_parent(&2u32);
         assert_eq!(parent_after, Some(1u32));
+    }
+
+    #[test]
+    fn test_detect_fork_no_conflict() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), Address::generate(&env)], &2u64);
+
+        // Attest with true value
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Detect fork for another attestor with same value - should not detect fork
+        let attestor2 = Address::generate(&env);
+        let has_fork = client.detect_fork(&credential_id, &slice_id, &attestor2, true);
+        assert!(!has_fork);
+    }
+
+    #[test]
+    fn test_detect_fork_with_conflict() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), Address::generate(&env)], &2u64);
+
+        // Attest with true value
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Detect fork for another attestor with false value - should detect fork
+        let attestor2 = Address::generate(&env);
+        let has_fork = client.detect_fork(&credential_id, &slice_id, &attestor2, false);
+        assert!(has_fork);
+    }
+
+    #[test]
+    #[should_panic(expected = "ForkDetected")]
+    fn test_attest_prevents_conflicting_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let attestor2 = Address::generate(&env);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), attestor2.clone()], &2u64);
+
+        // First attestation with true
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Second attestation with false - should panic
+        client.attest(&attestor2, &credential_id, &slice_id, &false, &None);
+    }
+
+    #[test]
+    fn test_fork_detection_stores_info() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let attestor2 = Address::generate(&env);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), attestor2.clone()], &2u64);
+
+        // First attestation with true
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Try second attestation with false - should store fork info
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.attest(&attestor2, &credential_id, &slice_id, &false, &None);
+        }));
+        assert!(result.is_err()); // Should have panicked
+
+        // Check that fork info was stored
+        let fork_status: ForkStatus = env.storage().instance()
+            .get(&DataKey::ForkStatus(credential_id, slice_id))
+            .unwrap();
+        assert_eq!(fork_status, ForkStatus::ForkDetected);
+
+        let fork_info: ForkInfo = env.storage().instance()
+            .get(&DataKey::ForkInfo(credential_id, slice_id))
+            .unwrap();
+        assert_eq!(fork_info.credential_id, credential_id);
+        assert_eq!(fork_info.slice_id, slice_id);
+        assert_eq!(fork_info.conflicting_attestors.len(), 2);
+        assert_eq!(fork_info.attested_values.len(), 2);
     }
 }
