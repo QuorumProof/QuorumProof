@@ -13,6 +13,13 @@ const TOPIC_RENEWAL: &str = "CredentialRenewed";
 const TOPIC_ATTESTATION_RENEWAL: &str = "AttestationRenewed";
 const TOPIC_SBT_TRANSFER: &str = "SbtTransferred";
 const TOPIC_PROOF_REQUEST: &str = "ProofRequested";
+const TOPIC_RECOVERY_INITIATED: &str = "RecoveryInitiated";
+const TOPIC_RECOVERY_APPROVED: &str = "RecoveryApproved";
+const TOPIC_RECOVERY_EXECUTED: &str = "RecoveryExecuted";
+const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
+const TOPIC_BLACKLIST_REMOVED: &str = "HolderUnblacklisted";
+const TOPIC_FORK_DETECTED: &str = "ForkDetected";
+const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -50,7 +57,7 @@ pub struct RenewalEventData {
     pub new_expires_at: u64,
 }
 
-/// A single attestation record, capturing who attested and when, with optional expiry.
+/// A single attestation record, capturing who attested, when, and the attestation value.
 #[contracttype]
 #[derive(Clone)]
 pub struct AttestationRecord {
@@ -58,6 +65,8 @@ pub struct AttestationRecord {
     pub attested_at: u64,
     /// Optional Unix timestamp after which this attestation is considered expired.
     pub expires_at: Option<u64>,
+    /// The attestation value: true for valid, false for invalid.
+    pub attestation_value: bool,
 }
 
 #[contracttype]
@@ -66,6 +75,137 @@ pub struct AttestationRenewalEventData {
     pub attestor: Address,
     pub credential_id: u64,
     pub new_expires_at: u64,
+}
+
+/// Event data emitted when a recovery is initiated.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecoveryInitiatedEventData {
+    pub recovery_id: u64,
+    pub credential_id: u64,
+    pub issuer: Address,
+    pub new_subject: Address,
+}
+
+/// Event data emitted when a recovery is approved.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecoveryApprovedEventData {
+    pub recovery_id: u64,
+    pub approver: Address,
+}
+
+/// Event data emitted when a recovery is executed.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecoveryExecutedEventData {
+    pub recovery_id: u64,
+    pub credential_id: u64,
+    pub new_subject: Address,
+}
+
+/// Event data emitted when a holder is added to blacklist.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderBlacklistedEventData {
+    pub issuer: Address,
+    pub holder: Address,
+    pub reason: soroban_sdk::String,
+    pub blacklisted_at: u64,
+}
+
+/// Event data emitted when a holder is removed from blacklist.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderUnblacklistedEventData {
+    pub issuer: Address,
+    pub holder: Address,
+    pub removed_at: u64,
+}
+
+/// Record of a holder being blacklisted by an issuer.
+#[contracttype]
+#[derive(Clone)]
+pub struct BlacklistEntry {
+    pub issuer: Address,
+    pub holder: Address,
+    pub reason: soroban_sdk::String,
+    pub blacklisted_at: u64,
+}
+
+/// Event data emitted when a fork is detected.
+#[contracttype]
+#[derive(Clone)]
+pub struct ForkDetectedEventData {
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub conflicting_attestors: Vec<Address>,
+    pub detected_at: u64,
+}
+
+/// Event data emitted when a fork is resolved.
+#[contracttype]
+#[derive(Clone)]
+pub struct ForkResolvedEventData {
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub resolution: soroban_sdk::String,
+    pub resolved_at: u64,
+}
+
+/// Information about a detected fork.
+#[contracttype]
+#[derive(Clone)]
+pub struct ForkInfo {
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub conflicting_attestors: Vec<Address>,
+    pub attested_values: Vec<bool>,
+    pub detected_at: u64,
+}
+
+/// Status of fork detection for a credential.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ForkStatus {
+    NoFork = 1,
+    ForkDetected = 2,
+    ForkResolved = 3,
+}
+
+/// Represents the status of a credential recovery request.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RecoveryStatus {
+    Pending = 1,
+    Approved = 2,
+    Executed = 3,
+    Rejected = 4,
+}
+
+/// A pending credential recovery request initiated by the issuer.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecoveryRequest {
+    pub id: u64,
+    pub credential_id: u64,
+    pub issuer: Address,
+    pub new_subject: Address,
+    pub status: RecoveryStatus,
+    pub created_at: u64,
+    pub executed_at: Option<u64>,
+    pub approvers: Vec<Address>,
+    pub threshold: u32,
+}
+
+/// Records a single approval on a recovery request.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecoveryApproval {
+    pub approver: Address,
+    pub approved_at: u64,
 }
 
 /// Time window during which attestations are allowed for a credential.
@@ -112,9 +252,31 @@ pub enum ContractError {
     AccusedCannotVote = 18,
     AlreadyVoted = 19,
     AttestationWindowOutside = 20,
-    VetoedAttestation = 21,
-    NotVetoMember = 22,
-    DuplicateVeto = 23,
+    RecoveryNotFound = 21,
+    RecoveryAlreadyExists = 22,
+    RecoveryNotPending = 23,
+    RecoveryAlreadyApproved = 24,
+    RecoveryThresholdNotMet = 25,
+    NotRecoveryApprover = 26,
+    DuplicateRecoveryApproval = 27,
+    /// Credential type hierarchy error: parent type not found
+    InvalidParentType = 28,
+    /// Credential type hierarchy error: would create circular dependency
+    CircularHierarchy = 29,
+    /// Credential type is not registered
+    CredentialTypeNotFound = 30,
+    /// Holder is blacklisted by this issuer
+    HolderBlacklisted = 31,
+    /// Holder already on this issuer's blacklist
+    AlreadyBlacklisted = 32,
+    /// Holder not on this issuer's blacklist
+    NotBlacklisted = 33,
+    /// Fork detected: conflicting attestations for the same slice
+    ForkDetected = 34,
+    /// Fork already resolved for this slice
+    ForkAlreadyResolved = 35,
+    /// No fork exists for this slice
+    NoForkExists = 36,
 }
 
 #[contracttype]
@@ -165,10 +327,28 @@ pub enum DataKey {
     AttestationExpiry(u64),
     /// Stores the time window configuration for attestations on a credential
     AttestationWindow(u64),
-    /// Marks an address as a designated veto member
-    VetoMember(Address),
-    /// Stores Vec<VetoRecord> for a credential
-    VetoRecords(u64),
+    /// Stores a recovery request by ID
+    RecoveryRequest(u64),
+    /// Global monotonic counter for recovery request IDs
+    RecoveryRequestCount,
+    /// Maps credential_id to active recovery request ID
+    CredentialRecovery(u64),
+    /// Stores approval records for a recovery request
+    RecoveryApprovals(u64),
+    /// Stores the parent type ID for a credential type (for hierarchy)
+    CredentialTypeParent(u32),
+    /// Stores all child type IDs for a parent credential type
+    CredentialTypeChildren(u32),
+    /// Stores a blacklist entry for (issuer, holder) pair
+    BlacklistEntry(Address, Address),
+    /// Stores all holders blacklisted by an issuer
+    IssuerBlacklist(Address),
+    /// Stores all issuers who have blacklisted a holder
+    HolderBlacklists(Address),
+    /// Stores fork information for a (credential_id, slice_id) pair
+    ForkInfo(u64, u64),
+    /// Stores the fork status for a (credential_id, slice_id) pair
+    ForkStatus(u64, u64),
 }
 
 #[contracttype]
@@ -177,6 +357,9 @@ pub struct CredentialTypeDef {
     pub type_id: u32,
     pub name: soroban_sdk::String,
     pub description: soroban_sdk::String,
+    /// Optional parent type ID for hierarchy support.
+    /// Enables credential type inheritance and verification rule composition.
+    pub parent_type: Option<u32>,
 }
 
 #[contracttype]
@@ -263,6 +446,7 @@ pub enum ActivityType {
     CredentialRenewed = 3,
     CredentialAttested = 4,
     AttestationExpired = 5,
+    CredentialRecovered = 6,
 }
 
 /// Records a single activity event for a credential holder
@@ -585,7 +769,53 @@ impl QuorumProofContract {
         assert!(len <= max, "{} must have at most {} element(s)", name, max);
     }
 
+    /// Check if a parent type exists in storage.
+    /// Returns false if the type is not registered.
+    fn parent_type_exists(env: &Env, parent_type: u32) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey::CredentialType(parent_type))
+    }
+
+    /// Recursively check if adding `potential_parent` as a parent to `type_id` would create
+    /// a circular dependency in the type hierarchy.
+    /// Returns true if a cycle would be created, false otherwise.
+    fn would_create_cycle(env: &Env, type_id: u32, potential_parent: u32) -> bool {
+        if type_id == potential_parent {
+            return true;
+        }
+        
+        // Check if potential_parent is already in the ancestors of type_id
+        let mut current = Some(potential_parent);
+        while let Some(curr_type) = current {
+            if curr_type == type_id {
+                return true;
+            }
+            // Get the parent of current type
+            current = env
+                .storage()
+                .instance()
+                .get::<DataKey, Option<u32>>(&DataKey::CredentialTypeParent(curr_type))
+                .flatten();
+        }
+        false
+    }
+
     /// Issue a new credential to a subject. Returns the new credential ID.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing the credential; must authorize this call.
+    /// - `subject`: The address receiving the credential.
+    /// - `credential_type`: Numeric type identifier for the credential.
+    /// - `metadata_hash`: Non-empty IPFS or content-addressed hash of credential metadata.
+    /// - `expires_at`: Optional Unix timestamp after which the credential is considered expired.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics if `metadata_hash` is empty.
+    /// Panics with `ContractError::DuplicateCredential` if the same issuer has already issued
+    /// a credential of the same type to the same subject.
+    pub fn issue_credential(
     ///
     /// # Parameters
     /// - `issuer`: The address issuing the credential; must authorize this call.
@@ -623,6 +853,11 @@ impl QuorumProofContract {
         let duplicate_key = DataKey::SubjectIssuerType(subject.clone(), issuer.clone(), credential_type);
         if env.storage().instance().has(&duplicate_key) {
             panic_with_error!(&env, ContractError::DuplicateCredential);
+        }
+        
+        // Check if subject is blacklisted by issuer
+        if env.storage().instance().has(&DataKey::BlacklistEntry(issuer.clone(), subject.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
         }
         
         let id: u64 = env.storage().instance().get(&DataKey::CredentialCount).unwrap_or(0u64) + 1;
@@ -696,6 +931,10 @@ impl QuorumProofContract {
             let duplicate_key = DataKey::SubjectIssuerType(subject.clone(), issuer.clone(), credential_type);
             if env.storage().instance().has(&duplicate_key) {
                 panic_with_error!(&env, ContractError::DuplicateCredential);
+            }
+            // Check if subject is blacklisted by issuer
+            if env.storage().instance().has(&DataKey::BlacklistEntry(issuer.clone(), subject.clone())) {
+                panic_with_error!(&env, ContractError::HolderBlacklisted);
             }
             let id = Self::issue_inner(&env, issuer.clone(), subject, credential_type, metadata_hash, expires_at.clone());
             env.storage().instance().set(&duplicate_key, &id);
@@ -1280,7 +1519,285 @@ impl QuorumProofContract {
     /// Panics if the credential is revoked.
     /// Panics if the attestor is not a member of the slice.
     /// Panics if the attestor has already attested for this credential.
-    pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64, expires_at: Option<u64>) {
+    
+    // ── Credential Holder Blacklist (Issue #293) ──────────────────────────────
+
+    /// Add a holder to an issuer's blacklist.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer adding to blacklist; must authorize this call.
+    /// - `holder`: The holder address to blacklist.
+    /// - `reason`: Reason for blacklisting (stored in record).
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::AlreadyBlacklisted` if holder is already blacklisted by issuer.
+    /// Panics if issuer does not authorize the call.
+    pub fn add_holder_to_blacklist(
+        env: Env,
+        issuer: Address,
+        holder: Address,
+        reason: soroban_sdk::String,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_valid_address(&env, &issuer);
+        Self::require_valid_address(&env, &holder);
+
+        let entry_key = DataKey::BlacklistEntry(issuer.clone(), holder.clone());
+        if env.storage().instance().has(&entry_key) {
+            panic_with_error!(&env, ContractError::AlreadyBlacklisted);
+        }
+
+        let blacklist_entry = BlacklistEntry {
+            issuer: issuer.clone(),
+            holder: holder.clone(),
+            reason: reason.clone(),
+            blacklisted_at: env.ledger().timestamp(),
+        };
+
+        // Store the entry
+        env.storage().instance().set(&entry_key, &blacklist_entry);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Add to issuer's blacklist
+        let mut issuer_blacklist: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::IssuerBlacklist(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        if !issuer_blacklist.iter().any(|&addr| addr == holder) {
+            issuer_blacklist.push_back(holder.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::IssuerBlacklist(issuer.clone()), &issuer_blacklist);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Add to holder's recorded blacklists
+        let mut holder_blacklists: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::HolderBlacklists(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        if !holder_blacklists.iter().any(|&addr| addr == issuer) {
+            holder_blacklists.push_back(issuer.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::HolderBlacklists(holder.clone()), &holder_blacklists);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Emit event
+        let event_data = HolderBlacklistedEventData {
+            issuer,
+            holder,
+            reason,
+            blacklisted_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_BLACKLIST_ADDED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Check if a holder is blacklisted by an issuer.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer to check blacklist for.
+    /// - `holder`: The holder address to check.
+    ///
+    /// # Returns
+    /// true if holder is blacklisted by issuer, false otherwise.
+    pub fn is_holder_blacklisted(env: Env, issuer: Address, holder: Address) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey::BlacklistEntry(issuer, holder))
+    }
+
+    /// Remove a holder from an issuer's blacklist.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer removing from blacklist; must authorize this call.
+    /// - `holder`: The holder address to remove from blacklist.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::NotBlacklisted` if holder is not on issuer's blacklist.
+    /// Panics if issuer does not authorize the call.
+    pub fn remove_holder_from_blacklist(env: Env, issuer: Address, holder: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_valid_address(&env, &issuer);
+        Self::require_valid_address(&env, &holder);
+
+        let entry_key = DataKey::BlacklistEntry(issuer.clone(), holder.clone());
+        if !env.storage().instance().has(&entry_key) {
+            panic_with_error!(&env, ContractError::NotBlacklisted);
+        }
+
+        // Remove the entry
+        env.storage().instance().remove(&entry_key);
+
+        // Remove from issuer's blacklist
+        let mut issuer_blacklist: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::IssuerBlacklist(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<Address> = Vec::new(&env);
+        for addr in issuer_blacklist.iter() {
+            if addr != holder {
+                retained.push_back(addr);
+            }
+        }
+        if retained.len() < issuer_blacklist.len() {
+            env.storage()
+                .instance()
+                .set(&DataKey::IssuerBlacklist(issuer.clone()), &retained);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Remove from holder's recorded blacklists
+        let mut holder_blacklists: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::HolderBlacklists(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<Address> = Vec::new(&env);
+        for addr in holder_blacklists.iter() {
+            if addr != issuer {
+                retained.push_back(addr);
+            }
+        }
+        if retained.len() < holder_blacklists.len() {
+            env.storage()
+                .instance()
+                .set(&DataKey::HolderBlacklists(holder.clone()), &retained);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
+        // Emit event
+        let event_data = HolderUnblacklistedEventData {
+            issuer,
+            holder,
+            removed_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_BLACKLIST_REMOVED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get all holders blacklisted by an issuer.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer to query.
+    ///
+    /// # Returns
+    /// Vec of holder addresses blacklisted by this issuer.
+    pub fn get_blacklisted_by_issuer(env: Env, issuer: Address) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::IssuerBlacklist(issuer))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get all issuers who have blacklisted a holder.
+    ///
+    /// # Parameters
+    /// - `holder`: The holder to query.
+    ///
+    /// # Returns
+    /// Vec of issuer addresses that have blacklisted this holder.
+    pub fn get_blacklist_entries_for_holder(env: Env, holder: Address) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::HolderBlacklists(holder))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get the blacklist entry for a specific issuer-holder pair.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer.
+    /// - `holder`: The holder.
+    ///
+    /// # Returns
+    /// Some(BlacklistEntry) if holder is blacklisted by issuer, None otherwise.
+    pub fn get_blacklist_entry(env: Env, issuer: Address, holder: Address) -> Option<BlacklistEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::BlacklistEntry(issuer, holder))
+    }
+
+    /// Detects if a fork would occur or exists for a credential in a slice.
+    /// A fork occurs when attestors in the same slice attest different values.
+    /// Returns true if a fork is detected, false otherwise.
+    pub fn detect_fork(env: &Env, credential_id: u64, slice_id: u64, new_attestor: &Address, new_value: bool) -> bool {
+        // Get the slice to know which attestors are relevant
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
+
+        // Get all attestation records for the credential
+        let records: Vec<AttestationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(env));
+
+        // Collect values attested by attestors in this slice
+        let mut slice_values: Vec<bool> = Vec::new(env);
+        for record in records.iter() {
+            // Check if this attestor is in the slice
+            let mut in_slice = false;
+            for attestor in slice.attestors.iter() {
+                if attestor == record.attestor {
+                    in_slice = true;
+                    break;
+                }
+            }
+            if in_slice {
+                slice_values.push_back(record.attestation_value);
+            }
+        }
+
+        // Check if new attestor is in slice (should be validated elsewhere)
+        let mut new_in_slice = false;
+        for attestor in slice.attestors.iter() {
+            if attestor == *new_attestor {
+                new_in_slice = true;
+                break;
+            }
+        }
+        if !new_in_slice {
+            return false; // Not in slice, no fork concern
+        }
+
+        // Check for conflicts: if any existing value differs from new_value, or if existing values differ
+        for &existing_value in slice_values.iter() {
+            if existing_value != new_value {
+                return true; // Fork detected
+            }
+        }
+
+        false // No fork
+    }
+
+    pub fn attest(env: Env, attestor: Address, credential_id: u64, slice_id: u64, attestation_value: bool, expires_at: Option<u64>) {
         attestor.require_auth();
         Self::require_not_paused(&env);
         Self::require_valid_address(&env, &attestor);
@@ -1313,6 +1830,56 @@ impl QuorumProofContract {
             }
         }
         assert!(found, "attestor not in slice");
+
+        // Check for fork before allowing attestation
+        if Self::detect_fork(&env, credential_id, slice_id, &attestor, attestation_value) {
+            // Store fork information
+            let records: Vec<AttestationRecord> = env.storage().instance()
+                .get(&DataKey::Attestors(credential_id))
+                .unwrap_or(Vec::new(&env));
+            let mut conflicting_attestors: Vec<Address> = Vec::new(&env);
+            let mut attested_values: Vec<bool> = Vec::new(&env);
+            for record in records.iter() {
+                let mut in_slice = false;
+                for a in slice.attestors.iter() {
+                    if a == record.attestor {
+                        in_slice = true;
+                        break;
+                    }
+                }
+                if in_slice {
+                    conflicting_attestors.push_back(record.attestor.clone());
+                    attested_values.push_back(record.attestation_value);
+                }
+            }
+            conflicting_attestors.push_back(attestor.clone());
+            attested_values.push_back(attestation_value);
+
+            let fork_info = ForkInfo {
+                credential_id,
+                slice_id,
+                conflicting_attestors: conflicting_attestors.clone(),
+                attested_values,
+                detected_at: env.ledger().timestamp(),
+            };
+            env.storage().instance().set(&DataKey::ForkInfo(credential_id, slice_id), &fork_info);
+            env.storage().instance().set(&DataKey::ForkStatus(credential_id, slice_id), &ForkStatus::ForkDetected);
+
+            // Emit fork detected event
+            let event_data = ForkDetectedEventData {
+                credential_id,
+                slice_id,
+                conflicting_attestors,
+                detected_at: env.ledger().timestamp(),
+            };
+            let topic = String::from_str(&env, TOPIC_FORK_DETECTED);
+            let mut topics: Vec<String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+
+            panic_with_error!(&env, ContractError::ForkDetected);
+        }
+
         let mut records: Vec<AttestationRecord> = env.storage().instance()
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
@@ -1328,6 +1895,7 @@ impl QuorumProofContract {
             attestor: attestor.clone(),
             attested_at: env.ledger().timestamp(),
             expires_at,
+            attestation_value,
         };
         records.push_back(record);
         env.storage()
@@ -1369,68 +1937,13 @@ impl QuorumProofContract {
     /// Batch attest multiple credentials in a single transaction.
     /// Each credential_id in the list is attested by the caller using the given slice.
     /// Caller must be a member of the slice for each credential.
-    pub fn batch_attest(env: Env, attestor: Address, credential_ids: Vec<u64>, slice_id: u64, expires_at: Option<u64>) {
+    pub fn batch_attest(env: Env, attestor: Address, credential_ids: Vec<u64>, slice_id: u64, attestation_value: bool, expires_at: Option<u64>) {
         attestor.require_auth();
         Self::require_not_paused(&env);
         Self::validate_array_bounds(credential_ids.len(), 1, MAX_BATCH_SIZE, "credential_ids");
-        let slice: QuorumSlice = env.storage().instance()
-            .get(&DataKey::Slice(slice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
-        let mut in_slice = false;
-        for a in slice.attestors.iter() {
-            if a == attestor {
-                in_slice = true;
-                break;
-            }
-        }
-        assert!(in_slice, "attestor not in slice");
         for credential_id in credential_ids.iter() {
-            let credential: Credential = env.storage().instance()
-                .get(&DataKey::Credential(credential_id))
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-            assert!(!credential.revoked, "credential is revoked");
-            // Enforce attestation time window if configured
-            if let Some(window) = env.storage().instance().get::<DataKey, AttestationTimeWindow>(&DataKey::AttestationWindow(credential_id)) {
-                let now = env.ledger().timestamp();
-                if now < window.start || now >= window.end {
-                    panic_with_error!(&env, ContractError::AttestationWindowOutside);
-                }
-            }
-            let mut records: Vec<AttestationRecord> = env.storage().instance()
-                .get(&DataKey::Attestors(credential_id))
-                .unwrap_or(Vec::new(&env));
-            for rec in records.iter() {
-                if rec.attestor == attestor {
-                    panic!("attestor has already attested for this credential");
-                }
-            }
-            let record = AttestationRecord {
-                attestor: attestor.clone(),
-                attested_at: env.ledger().timestamp(),
-                expires_at: expires_at.clone(),
-            };
-            records.push_back(record);
-            env.storage().instance().set(&DataKey::Attestors(credential_id), &records);
-            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-            let event_data = AttestationEventData { attestor: attestor.clone(), credential_id, slice_id };
-            let topic = String::from_str(&env, TOPIC_ATTESTATION);
-            let mut topics: Vec<String> = Vec::new(&env);
-            topics.push_back(topic);
-            env.events().publish(topics, event_data);
-            
-            // Record activity for the holder
-            let credential: Credential = env
-                .storage()
-                .instance()
-                .get(&DataKey::Credential(credential_id))
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-            Self::record_holder_activity(&env, credential.subject.clone(), ActivityType::CredentialAttested, credential_id, attestor.clone(), Some(slice_id));
+            Self::attest(env.clone(), attestor.clone(), credential_id, slice_id, attestation_value, expires_at);
         }
-        let count: u64 = env.storage().instance()
-            .get(&DataKey::AttestorCount(attestor.clone()))
-            .unwrap_or(0u64);
-        env.storage().instance().set(&DataKey::AttestorCount(attestor), &(count + credential_ids.len() as u64));
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Retrieve the total number of attestations an address has made.
@@ -1439,6 +1952,12 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::AttestorCount(address))
             .unwrap_or(0u64)
+    }
+
+    /// Stub for multisig approval check.
+    /// Returns true to preserve backward compatibility until full multisig is implemented.
+    fn is_multisig_approved(_env: &Env, _credential_id: u64) -> bool {
+        true
     }
 
     /// Check if a credential has met its quorum threshold using weighted trust.
@@ -1872,15 +2391,18 @@ impl QuorumProofContract {
         zk_client.verify_claim(&zk_admin, &quorum_proof_id, &credential_id, &claim_type, &proof)
     }
 
-    /// Register a human-readable label for a credential type.
+    /// Register a human-readable label for a credential type with optional parent type.
     ///
     /// # Parameters
     /// - `admin`: The admin address; must authorize this call.
     /// - `type_id`: Numeric identifier for the credential type.
     /// - `name`: Human-readable name (e.g. "Mechanical Engineering Degree").
     /// - `description`: Longer description of what the credential type represents.
+    /// - `parent_type`: Optional parent type ID for hierarchy support (enables inheritance).
     ///
     /// # Panics
+    /// Panics with `ContractError::InvalidParentType` if parent_type is provided but not registered.
+    /// Panics with `ContractError::CircularHierarchy` if setting parent_type would create a cycle.
     /// Does not panic on duplicate registration; overwrites the existing entry.
     pub fn register_credential_type(
         env: Env,
@@ -1888,14 +2410,27 @@ impl QuorumProofContract {
         type_id: u32,
         name: soroban_sdk::String,
         description: soroban_sdk::String,
+        parent_type: Option<u32>,
     ) {
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
+        
+        // Validate parent_type if provided
+        if let Some(parent) = parent_type {
+            if !Self::parent_type_exists(&env, parent) {
+                panic_with_error!(&env, ContractError::InvalidParentType);
+            }
+            if Self::would_create_cycle(&env, type_id, parent) {
+                panic_with_error!(&env, ContractError::CircularHierarchy);
+            }
+        }
+        
         let def = CredentialTypeDef {
             type_id,
             name,
             description,
+            parent_type,
         };
         env.storage()
             .instance()
@@ -1903,6 +2438,35 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        
+        // Store parent relationship
+        if let Some(parent) = parent_type {
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialTypeParent(type_id), &parent);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            
+            // Add to parent's children list
+            let mut children: Vec<u32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::CredentialTypeChildren(parent))
+                .unwrap_or(Vec::new(&env));
+            
+            // Avoid duplicates
+            if !children.iter().any(|&child| child == type_id) {
+                children.push_back(type_id);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::CredentialTypeChildren(parent), &children);
+                env.storage()
+                    .instance()
+                    .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            }
+        }
+        
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("reg_type").into_val(&env));
         env.events().publish(topics, type_id);
@@ -1920,6 +2484,92 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::CredentialType(type_id))
             .expect("credential type not registered")
+    }
+
+    /// Get the direct parent type of a credential type, if one exists.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// Some(parent_type_id) if a parent is defined, None otherwise.
+    /// Returns None if the type does not exist.
+    pub fn get_credential_type_parent(env: Env, type_id: u32) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get::<DataKey, Option<u32>>(&DataKey::CredentialTypeParent(type_id))
+            .flatten()
+    }
+
+    /// Get all direct children of a credential type.
+    ///
+    /// # Parameters
+    /// - `parent_type_id`: The parent credential type to query.
+    ///
+    /// # Returns
+    /// Vec of child type IDs. Empty vector if no children exist.
+    pub fn get_credential_type_children(env: Env, parent_type_id: u32) -> Vec<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CredentialTypeChildren(parent_type_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get the full lineage (ancestors) of a credential type, starting from its parent
+    /// and going up to the root.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// Vec of ancestor type IDs, ordered from direct parent to root.
+    /// Empty vector if the type has no parent (is a root type).
+    pub fn get_credential_type_ancestors(env: Env, type_id: u32) -> Vec<u32> {
+        let mut ancestors: Vec<u32> = Vec::new(&env);
+        let mut current = Self::get_credential_type_parent(env.clone(), type_id);
+        
+        while let Some(curr_type) = current {
+            ancestors.push_back(curr_type);
+            current = Self::get_credential_type_parent(env.clone(), curr_type);
+        }
+        
+        ancestors
+    }
+
+    /// Check if one type is a child (direct or transitive) of another in the hierarchy.
+    ///
+    /// # Parameters
+    /// - `child_id`: The potential child type to check.
+    /// - `parent_id`: The potential parent/ancestor type.
+    ///
+    /// # Returns
+    /// true if child_id is anywhere in parent_id's descendant tree, false otherwise.
+    pub fn is_credential_type_child_of(env: Env, child_id: u32, parent_id: u32) -> bool {
+        let ancestors = Self::get_credential_type_ancestors(env, child_id);
+        ancestors.iter().any(|&ancestor| ancestor == parent_id)
+    }
+
+    /// Get all credential types whose verification rules should be applied to a given type.
+    /// This is used for inheritance chains - returns the type itself plus all ancestors.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// Vec of type IDs to check for verification rules, ordered from most specific (child)
+    /// to most general (root). The first element is always the type_id itself.
+    pub fn inherit_verification_rules(env: Env, type_id: u32) -> Vec<u32> {
+        let mut rules: Vec<u32> = Vec::new(&env);
+        rules.push_back(type_id);
+        
+        let ancestors = Self::get_credential_type_ancestors(env, type_id);
+        // Reverse to go from root to parent
+        let len = ancestors.len();
+        for i in (0..len).rev() {
+            rules.push_back(ancestors.get(i).unwrap());
+        }
+        
+        rules
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
@@ -2561,78 +3211,356 @@ impl QuorumProofContract {
         dispute_id
     }
 
-    /// Designate an address as a veto member. Only admin may call this.
-    pub fn designate_veto_member(env: Env, admin: Address, member: Address) {
-        admin.require_auth();
-        let stored: Address = env
+    // ── Credential Holder Recovery (Issue #290) ──────────────────────────────
+
+    /// Initiate a credential recovery request.
+    ///
+    /// Only the original issuer may initiate recovery for a credential.
+    /// The recovery requires multi-sig approval from the designated approvers.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address that originally issued the credential; must authorize.
+    /// - `credential_id`: The ID of the credential to recover.
+    /// - `new_subject`: The new address that will receive the recovered credential.
+    /// - `approvers`: List of addresses authorized to approve this recovery.
+    /// - `threshold`: Number of approvers required to execute the recovery.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the caller is not the original issuer.
+    /// Panics with `ContractError::RecoveryAlreadyExists` if a pending recovery already exists for this credential.
+    pub fn initiate_recovery(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        new_subject: Address,
+        approvers: Vec<Address>,
+        threshold: u32,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_valid_address(&env, &new_subject);
+        Self::precondition(&env, credential_id > 0);
+        Self::precondition(&env, threshold > 0);
+        Self::validate_array_bounds(approvers.len(), 1, MAX_MULTISIG_SIGNERS, "approvers");
+
+        let credential: Credential = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored == admin, "unauthorized");
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "only the original issuer can initiate recovery");
+        assert!(!credential.revoked, "cannot recover a revoked credential");
+
+        // No duplicate pending recovery
+        if env.storage().instance().has(&DataKey::CredentialRecovery(credential_id)) {
+            panic_with_error!(&env, ContractError::RecoveryAlreadyExists);
+        }
+
+        let recovery_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let request = RecoveryRequest {
+            id: recovery_id,
+            credential_id,
+            issuer: issuer.clone(),
+            new_subject: new_subject.clone(),
+            status: RecoveryStatus::Pending,
+            created_at: env.ledger().timestamp(),
+            executed_at: None,
+            approvers,
+            threshold,
+        };
+
         env.storage()
             .instance()
-            .set(&DataKey::VetoMember(member), &true);
+            .set(&DataKey::RecoveryRequest(recovery_id), &request);
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialRecovery(credential_id), &recovery_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequestCount, &recovery_id);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event
+        let event_data = RecoveryInitiatedEventData {
+            recovery_id,
+            credential_id,
+            issuer,
+            new_subject,
+        };
+        let topic = String::from_str(&env, TOPIC_RECOVERY_INITIATED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        recovery_id
     }
 
-    /// Veto all attestations on a credential. Caller must be a designated veto member.
-    /// Requires a non-empty justification string. Each member may only veto once per credential.
+    /// Approve a pending credential recovery request.
     ///
-    /// # Panics
-    /// Panics with `ContractError::NotVetoMember` if the caller is not a designated veto member.
-    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
-    /// Panics with `ContractError::InvalidInput` if justification is empty.
-    /// Panics with `ContractError::DuplicateVeto` if this member has already vetoed this credential.
-    pub fn veto_attestation(env: Env, vetoer: Address, credential_id: u64, justification: String) {
-        vetoer.require_auth();
+    /// Only addresses in the recovery approvers list may call this.
+    /// When the total number of approvals meets or exceeds the threshold,
+    /// the recovery status is automatically updated to `Approved`.
+    ///
+    /// # Parameters
+    /// - `approver`: The address approving the recovery; must authorize.
+    /// - `recovery_request_id`: The ID of the recovery request to approve.
+    pub fn approve_recovery(env: Env, approver: Address, recovery_request_id: u64) {
+        approver.require_auth();
         Self::require_not_paused(&env);
-        if !env.storage().instance().get::<DataKey, bool>(&DataKey::VetoMember(vetoer.clone())).unwrap_or(false) {
-            panic_with_error!(&env, ContractError::NotVetoMember);
-        }
-        if !env.storage().instance().has(&DataKey::Credential(credential_id)) {
-            panic_with_error!(&env, ContractError::CredentialNotFound);
-        }
-        Self::precondition(&env, !justification.is_empty());
-        let mut records: Vec<VetoRecord> = env
+        Self::require_valid_address(&env, &approver);
+
+        let mut request: RecoveryRequest = env
             .storage()
             .instance()
-            .get(&DataKey::VetoRecords(credential_id))
-            .unwrap_or(Vec::new(&env));
-        for rec in records.iter() {
-            if rec.vetoer == vetoer {
-                panic_with_error!(&env, ContractError::DuplicateVeto);
+            .get(&DataKey::RecoveryRequest(recovery_request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RecoveryNotFound));
+
+        if request.status != RecoveryStatus::Pending {
+            panic_with_error!(&env, ContractError::RecoveryNotPending);
+        }
+
+        // Verify approver is in the approvers list
+        let mut is_approver = false;
+        for a in request.approvers.iter() {
+            if a == approver {
+                is_approver = true;
+                break;
             }
         }
-        records.push_back(VetoRecord {
-            vetoer,
-            credential_id,
-            justification,
-            vetoed_at: env.ledger().timestamp(),
+        if !is_approver {
+            panic_with_error!(&env, ContractError::NotRecoveryApprover);
+        }
+
+        let mut approvals: Vec<RecoveryApproval> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryApprovals(recovery_request_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Check for duplicate approval
+        for approval in approvals.iter() {
+            if approval.approver == approver {
+                panic_with_error!(&env, ContractError::DuplicateRecoveryApproval);
+            }
+        }
+
+        approvals.push_back(RecoveryApproval {
+            approver: approver.clone(),
+            approved_at: env.ledger().timestamp(),
         });
         env.storage()
             .instance()
-            .set(&DataKey::VetoRecords(credential_id), &records);
+            .set(&DataKey::RecoveryApprovals(recovery_request_id), &approvals);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        // Remove all attestation records for this credential
-        env.storage()
-            .instance()
-            .set(&DataKey::Attestors(credential_id), &Vec::<AttestationRecord>::new(&env));
-        env.storage()
-            .instance()
-            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit approval event
+        let event_data = RecoveryApprovedEventData {
+            recovery_id: recovery_request_id,
+            approver,
+        };
+        let topic = String::from_str(&env, TOPIC_RECOVERY_APPROVED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        // Auto-approve if threshold met
+        if approvals.len() as u32 >= request.threshold {
+            request.status = RecoveryStatus::Approved;
+            env.storage()
+                .instance()
+                .set(&DataKey::RecoveryRequest(recovery_request_id), &request);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
     }
 
-    /// Returns all veto records for a credential.
-    pub fn get_veto_records(env: Env, credential_id: u64) -> Vec<VetoRecord> {
+    /// Execute an approved credential recovery.
+    ///
+    /// Only the original issuer may execute the recovery.
+    /// The recovery must have status `Approved` (threshold met).
+    /// Updates the credential subject, subject credential lists, and optionally
+    /// transfers the linked SBT via cross-contract call.
+    ///
+    /// # Parameters
+    /// - `issuer`: The original issuer; must authorize.
+    /// - `recovery_request_id`: The ID of the approved recovery request.
+    /// - `sbt_registry_id`: Optional address of the SBT registry for SBT transfer.
+    pub fn execute_recovery(
+        env: Env,
+        issuer: Address,
+        recovery_request_id: u64,
+        sbt_registry_id: Option<Address>,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut request: RecoveryRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryRequest(recovery_request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RecoveryNotFound));
+
+        assert!(request.issuer == issuer, "only the original issuer can execute recovery");
+
+        if request.status != RecoveryStatus::Approved {
+            panic_with_error!(&env, ContractError::RecoveryThresholdNotMet);
+        }
+
+        let credential_id = request.credential_id;
+        let old_subject = request.new_subject.clone(); // placeholder - will read from credential
+
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        let prev_subject = credential.subject.clone();
+        let new_subject = request.new_subject.clone();
+
+        // Remove credential from old subject's list
+        let mut old_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(prev_subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<u64> = Vec::new(&env);
+        for id in old_creds.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
         env.storage()
             .instance()
-            .get(&DataKey::VetoRecords(credential_id))
+            .set(&DataKey::SubjectCredentials(prev_subject.clone()), &retained);
+
+        // Add to new subject's list
+        let mut new_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(new_subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        new_creds.push_back(credential_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::SubjectCredentials(new_subject.clone()), &new_creds);
+
+        // Update duplicate prevention mapping
+        let old_dup_key = DataKey::SubjectIssuerType(prev_subject.clone(), credential.issuer.clone(), credential.credential_type);
+        env.storage().instance().remove(&old_dup_key);
+        let new_dup_key = DataKey::SubjectIssuerType(new_subject.clone(), credential.issuer.clone(), credential.credential_type);
+        env.storage().instance().set(&new_dup_key, &credential_id);
+
+        // Update credential subject
+        credential.subject = new_subject.clone();
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+
+        // Update recovery request status
+        request.status = RecoveryStatus::Executed;
+        request.executed_at = Some(env.ledger().timestamp());
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequest(recovery_request_id), &request);
+        env.storage()
+            .instance()
+            .remove(&DataKey::CredentialRecovery(credential_id));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Transfer SBT if registry provided
+        if let Some(registry_id) = sbt_registry_id {
+            let sbt_client = SbtRegistryContractClient::new(&env, &registry_id);
+            let tokens = sbt_client.get_tokens_by_owner(&prev_subject);
+            for token_id in tokens.iter() {
+                let token = sbt_client.get_token(&token_id);
+                if token.credential_id == credential_id {
+                    sbt_client.recover_sbt(&env.current_contract_address(), &token_id, &new_subject);
+                }
+            }
+        }
+
+        // Emit event
+        let event_data = RecoveryExecutedEventData {
+            recovery_id: recovery_request_id,
+            credential_id,
+            new_subject: new_subject.clone(),
+        };
+        let topic = String::from_str(&env, TOPIC_RECOVERY_EXECUTED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        // Record activity for audit trail
+        Self::record_holder_activity(
+            &env,
+            new_subject,
+            ActivityType::CredentialRecovered,
+            credential_id,
+            issuer,
+            None,
+        );
+    }
+
+    /// Retrieve a recovery request by ID.
+    pub fn get_recovery_request(env: Env, recovery_request_id: u64) -> RecoveryRequest {
+        env.storage()
+            .instance()
+            .get(&DataKey::RecoveryRequest(recovery_request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RecoveryNotFound))
+    }
+
+    /// Retrieve all approvals for a recovery request.
+    pub fn get_recovery_approvals(env: Env, recovery_request_id: u64) -> Vec<RecoveryApproval> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RecoveryApprovals(recovery_request_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Cancel a pending recovery request. Only the issuer may cancel.
+    pub fn cancel_recovery(env: Env, issuer: Address, recovery_request_id: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let request: RecoveryRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryRequest(recovery_request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RecoveryNotFound));
+
+        assert!(request.issuer == issuer, "only the issuer can cancel recovery");
+
+        if request.status != RecoveryStatus::Pending && request.status != RecoveryStatus::Approved {
+            panic_with_error!(&env, ContractError::RecoveryNotPending);
+        }
+
+        let mut updated = request;
+        updated.status = RecoveryStatus::Rejected;
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequest(recovery_request_id), &updated);
+        env.storage()
+            .instance()
+            .remove(&DataKey::CredentialRecovery(updated.credential_id));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 }
 
@@ -5188,103 +6116,989 @@ mod feature_tests {
         assert!(client.get_attestation_window(&cid).is_none());
     }
 
-    // ── Veto attestation ──────────────────────────────────────────────────────
-
-    fn setup_attested_credential(
-        env: &Env,
-        client: &QuorumProofContractClient,
-    ) -> (Address, Address, u64, u64) {
-        let issuer = Address::generate(env);
-        let subject = Address::generate(env);
-        let attestor = Address::generate(env);
-        let meta = Bytes::from_slice(env, b"QmVetoTest");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
-        let mut attestors = Vec::new(env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(env);
-        weights.push_back(1u32);
-        let sid = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.attest(&attestor, &cid, &sid, &None);
-        (issuer, attestor, cid, sid)
-    }
+    // ── Credential Holder Recovery (Issue #290) ─────────────────────────────
 
     #[test]
-    fn test_veto_happy_path() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin) = setup(&env);
-        let (_, _, cid, sid) = setup_attested_credential(&env, &client);
-        let vetoer = Address::generate(&env);
-        client.designate_veto_member(&admin, &vetoer);
-
-        assert!(client.is_attested(&cid, &sid));
-        client.veto_attestation(&vetoer, &cid, &String::from_str(&env, "fraudulent credential"));
-        assert!(!client.is_attested(&cid, &sid));
-
-        let records = client.get_veto_records(&cid);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records.get(0).unwrap().vetoer, vetoer);
-    }
-
-    #[test]
-    fn test_veto_non_member_rejected() {
+    fn test_initiate_recovery_by_issuer() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
-        let (_, _, cid, _) = setup_attested_credential(&env, &client);
-        let non_member = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
 
-        let result = client.try_veto_attestation(
-            &non_member,
-            &cid,
-            &String::from_str(&env, "justification"),
-        );
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::NotVetoMember as u32
-            )))
-        );
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+
+        let req = client.get_recovery_request(&rid);
+        assert_eq!(req.credential_id, cid);
+        assert_eq!(req.issuer, issuer);
+        assert_eq!(req.new_subject, new_subject);
+        assert_eq!(req.status, RecoveryStatus::Pending);
+        assert_eq!(req.threshold, 1);
     }
 
     #[test]
-    fn test_veto_duplicate_rejected() {
+    #[should_panic(expected = "only the original issuer can initiate recovery")]
+    fn test_initiate_recovery_unauthorized_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin) = setup(&env);
-        let (_, _, cid, _) = setup_attested_credential(&env, &client);
-        let vetoer = Address::generate(&env);
-        client.designate_veto_member(&admin, &vetoer);
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
 
-        client.veto_attestation(&vetoer, &cid, &String::from_str(&env, "first veto"));
-        let result = client.try_veto_attestation(
-            &vetoer,
-            &cid,
-            &String::from_str(&env, "second veto"),
-        );
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::DuplicateVeto as u32
-            )))
-        );
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        client.initiate_recovery(&attacker, &cid, &new_subject, &approvers, &1u32);
     }
 
     #[test]
-    fn test_veto_empty_justification_rejected() {
+    #[should_panic(expected = "Error(Contract, #22)")]
+    fn test_initiate_recovery_duplicate_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        // Second initiation for same credential should panic
+        client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+    }
+
+    #[test]
+    fn test_approve_recovery_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+
+        client.approve_recovery(&approver, &rid);
+        let req = client.get_recovery_request(&rid);
+        assert_eq!(req.status, RecoveryStatus::Approved);
+
+        let approvals = client.get_recovery_approvals(&rid);
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals.get(0).unwrap().approver, approver);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #26)")]
+    fn test_approve_recovery_not_approver_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+
+        client.approve_recovery(&stranger, &rid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #27)")]
+    fn test_approve_recovery_double_vote_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &2u32);
+
+        client.approve_recovery(&approver, &rid);
+        client.approve_recovery(&approver, &rid); // duplicate
+    }
+
+    #[test]
+    fn test_recovery_auto_approves_on_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver1 = Address::generate(&env);
+        let approver2 = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver1.clone());
+        approvers.push_back(approver2.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &2u32);
+
+        client.approve_recovery(&approver1, &rid);
+        let req1 = client.get_recovery_request(&rid);
+        assert_eq!(req1.status, RecoveryStatus::Pending);
+
+        client.approve_recovery(&approver2, &rid);
+        let req2 = client.get_recovery_request(&rid);
+        assert_eq!(req2.status, RecoveryStatus::Approved);
+    }
+
+    #[test]
+    fn test_execute_recovery_updates_subject() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        client.approve_recovery(&approver, &rid);
+
+        client.execute_recovery(&issuer, &rid, &None);
+
+        let cred = client.get_credential(&cid);
+        assert_eq!(cred.subject, new_subject);
+
+        let old_list = client.get_credentials_by_subject(&subject, &1u32, &50u32);
+        let new_list = client.get_credentials_by_subject(&new_subject, &1u32, &50u32);
+        assert!(!old_list.contains(&cid));
+        assert!(new_list.contains(&cid));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #25)")]
+    fn test_execute_recovery_threshold_not_met_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver1 = Address::generate(&env);
+        let approver2 = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver1.clone());
+        approvers.push_back(approver2.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &2u32);
+        client.approve_recovery(&approver1, &rid);
+
+        // Only 1 of 2 approvals — threshold not met
+        client.execute_recovery(&issuer, &rid, &None);
+    }
+
+    #[test]
+    fn test_recovery_transfers_sbt() {
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        sbt.initialize(&admin, &qp_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = sbt.mint(&subject, &cid, &sbt_uri);
+        assert_eq!(sbt.owner_of(&token_id), subject);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        client.approve_recovery(&approver, &rid);
+        client.execute_recovery(&issuer, &rid, &Some(sbt_id));
+
+        assert_eq!(sbt.owner_of(&token_id), new_subject);
+        assert!(sbt.get_tokens_by_owner(&subject).is_empty());
+        assert_eq!(sbt.get_tokens_by_owner(&new_subject).get(0).unwrap(), token_id);
+    }
+
+    #[test]
+    fn test_recovery_emits_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        client.approve_recovery(&approver, &rid);
+        client.execute_recovery(&issuer, &rid, &None);
+
+        let events = env.events().all();
+        let initiated = events.iter().find(|(_, topics, _)| {
+            topics.get(0).map(|t| String::from_val(&env, &t) == String::from_str(&env, TOPIC_RECOVERY_INITIATED)).unwrap_or(false)
+        });
+        let approved = events.iter().find(|(_, topics, _)| {
+            topics.get(0).map(|t| String::from_val(&env, &t) == String::from_str(&env, TOPIC_RECOVERY_APPROVED)).unwrap_or(false)
+        });
+        let executed = events.iter().find(|(_, topics, _)| {
+            topics.get(0).map(|t| String::from_val(&env, &t) == String::from_str(&env, TOPIC_RECOVERY_EXECUTED)).unwrap_or(false)
+        });
+
+        assert!(initiated.is_some(), "RecoveryInitiated event not emitted");
+        assert!(approved.is_some(), "RecoveryApproved event not emitted");
+        assert!(executed.is_some(), "RecoveryExecuted event not emitted");
+    }
+
+    #[test]
+    fn test_recovery_records_activity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        client.approve_recovery(&approver, &rid);
+        client.execute_recovery(&issuer, &rid, &None);
+
+        let activities = client.get_holder_activity(&new_subject, &1u32, &10u32);
+        assert_eq!(activities.len(), 1);
+        let activity = activities.get(0).unwrap();
+        assert_eq!(activity.activity_type, ActivityType::CredentialRecovered);
+        assert_eq!(activity.credential_id, cid);
+        assert_eq!(activity.actor, issuer);
+    }
+
+    #[test]
+    fn test_cancel_recovery() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        client.cancel_recovery(&issuer, &rid);
+
+        let req = client.get_recovery_request(&rid);
+        assert_eq!(req.status, RecoveryStatus::Rejected);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the issuer can cancel recovery")]
+    fn test_cancel_recovery_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        client.cancel_recovery(&attacker, &rid);
+    }
+
+    // ── Credential Type Hierarchy Tests (Issue #291) ──
+
+    #[test]
+    fn test_register_credential_type_without_parent() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin) = setup(&env);
-        let (_, _, cid, _) = setup_attested_credential(&env, &client);
-        let vetoer = Address::generate(&env);
-        client.designate_veto_member(&admin, &vetoer);
 
-        let result = client.try_veto_attestation(&vetoer, &cid, &String::from_str(&env, ""));
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::InvalidInput as u32
-            )))
-        );
+        // Register a root credential type without parent
+        let name = String::from_str(&env, "Engineering Degree");
+        let desc = String::from_str(&env, "Bachelor of Engineering"); 
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        // Verify it was registered
+        let ctype = client.get_credential_type(&1u32);
+        assert_eq!(ctype.type_id, 1);
+        assert_eq!(ctype.name, name);
+        assert_eq!(ctype.description, desc);
+        assert_eq!(ctype.parent_type, None);
+    }
+
+    #[test]
+    fn test_register_credential_type_with_valid_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent type
+        let parent_name = String::from_str(&env, "Engineering");
+        let parent_desc = String::from_str(&env, "Engineering Credential");
+        client.register_credential_type(&admin, &1u32, &parent_name, &parent_desc, &None);
+
+        // Register child type with parent
+        let child_name = String::from_str(&env, "Mechanical Engineering");
+        let child_desc = String::from_str(&env, "Mechanical Engineering Degree");
+        client.register_credential_type(&admin, &2u32, &child_name, &child_desc, &Some(1u32));
+
+        // Verify child has correct parent
+        let child = client.get_credential_type(&2u32);
+        assert_eq!(child.parent_type, Some(1u32));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalidparenttype")]
+    fn test_register_credential_type_invalid_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Try to register type with non-existent parent
+        let name = String::from_str(&env, "Degree");
+        let desc = String::from_str(&env, "Some Degree");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &Some(999u32));
+    }
+
+    #[test]
+    #[should_panic(expected = "circularhierarchy")]
+    fn test_register_credential_type_circular_dependency() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register type A
+        let name_a = String::from_str(&env, "Type A");
+        let desc_a = String::from_str(&env, "Type A");
+        client.register_credential_type(&admin, &1u32, &name_a, &desc_a, &None);
+
+        // Register type B with A as parent
+        let name_b = String::from_str(&env, "Type B");
+        let desc_b = String::from_str(&env, "Type B");
+        client.register_credential_type(&admin, &2u32, &name_b, &desc_b, &Some(1u32));
+
+        // Try to update A with B as parent (would create cycle)
+        let name_a_new = String::from_str(&env, "Type A Updated");
+        let desc_a_new = String::from_str(&env, "Type A Updated");
+        client.register_credential_type(&admin, &1u32, &name_a_new, &desc_a_new, &Some(2u32));
+    }
+
+    #[test]
+    fn test_three_level_hierarchy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register grandparent (A)
+        let name_a = String::from_str(&env, "Professional Credential");
+        let desc_a = String::from_str(&env, "Professional Credential");
+        client.register_credential_type(&admin, &1u32, &name_a, &desc_a, &None);
+
+        // Register parent (B) with A as parent
+        let name_b = String::from_str(&env, "Engineering License");
+        let desc_b = String::from_str(&env, "Engineering License");
+        client.register_credential_type(&admin, &2u32, &name_b, &desc_b, &Some(1u32));
+
+        // Register child (C) with B as parent
+        let name_c = String::from_str(&env, "Mechanical Engineering License");
+        let desc_c = String::from_str(&env, "Mechanical Engineering License");
+        client.register_credential_type(&admin, &3u32, &name_c, &desc_c, &Some(2u32));
+
+        // Verify lineage
+        let parent_of_c = client.get_credential_type_parent(&3u32);
+        assert_eq!(parent_of_c, Some(2u32));
+
+        let parent_of_b = client.get_credential_type_parent(&2u32);
+        assert_eq!(parent_of_b, Some(1u32));
+
+        let parent_of_a = client.get_credential_type_parent(&1u32);
+        assert_eq!(parent_of_a, None);
+    }
+
+    #[test]
+    fn test_get_credential_type_children() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent
+        let parent_name = String::from_str(&env, "Parent");
+        let parent_desc = String::from_str(&env, "Parent Type");
+        client.register_credential_type(&admin, &1u32, &parent_name, &parent_desc, &None);
+
+        // Register two children
+        let child1_name = String::from_str(&env, "Child 1");
+        let child1_desc = String::from_str(&env, "Child 1");
+        client.register_credential_type(&admin, &2u32, &child1_name, &child1_desc, &Some(1u32));
+
+        let child2_name = String::from_str(&env, "Child 2");
+        let child2_desc = String::from_str(&env, "Child 2");
+        client.register_credential_type(&admin, &3u32, &child2_name, &child2_desc, &Some(1u32));
+
+        // Get children of parent
+        let children = client.get_credential_type_children(&1u32);
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().any(|&c| c == 2u32));
+        assert!(children.iter().any(|&c| c == 3u32));
+
+        // Parent with no children
+        let children_of_leaf = client.get_credential_type_children(&2u32);
+        assert_eq!(children_of_leaf.len(), 0);
+    }
+
+    #[test]
+    fn test_get_credential_type_ancestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Build hierarchy: A <- B <- C
+        let name_a = String::from_str(&env, "A");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name_a, &desc, &None);
+
+        let name_b = String::from_str(&env, "B");
+        client.register_credential_type(&admin, &2u32, &name_b, &desc, &Some(1u32));
+
+        let name_c = String::from_str(&env, "C");
+        client.register_credential_type(&admin, &3u32, &name_c, &desc, &Some(2u32));
+
+        // Get ancestors of C: should be [B, A]
+        let ancestors_c = client.get_credential_type_ancestors(&3u32);
+        assert_eq!(ancestors_c.len(), 2);
+        assert_eq!(ancestors_c.get(0).unwrap(), 2u32);
+        assert_eq!(ancestors_c.get(1).unwrap(), 1u32);
+
+        // Get ancestors of B: should be [A]
+        let ancestors_b = client.get_credential_type_ancestors(&2u32);
+        assert_eq!(ancestors_b.len(), 1);
+        assert_eq!(ancestors_b.get(0).unwrap(), 1u32);
+
+        // Get ancestors of A: should be []
+        let ancestors_a = client.get_credential_type_ancestors(&1u32);
+        assert_eq!(ancestors_a.len(), 0);
+    }
+
+    #[test]
+    fn test_is_credential_type_child_of() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register hierarchy
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.register_credential_type(&admin, &2u32, &name, &desc, &Some(1u32));
+        client.register_credential_type(&admin, &3u32, &name, &desc, &Some(2u32));
+
+        // Direct child relationship
+        assert!(client.is_credential_type_child_of(&2u32, &1u32));
+
+        // Transitive child relationship  
+        assert!(client.is_credential_type_child_of(&3u32, &1u32));
+
+        // Not a child relationship
+        assert!(!client.is_credential_type_child_of(&1u32, &2u32));
+
+        // Not a child (unrelated types)
+        client.register_credential_type(&admin, &4u32, &name, &desc, &None);
+        assert!(!client.is_credential_type_child_of(&4u32, &1u32));
+    }
+
+    #[test]
+    fn test_inherit_verification_rules() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Build hierarchy: A <- B <- C <- D
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);  // A
+        client.register_credential_type(&admin, &2u32, &name, &desc, &Some(1u32));  // B <- A
+        client.register_credential_type(&admin, &3u32, &name, &desc, &Some(2u32));  // C <- B
+        client.register_credential_type(&admin, &4u32, &name, &desc, &Some(3u32));  // D <- C
+
+        // For type D, rules should be: [D, C, B, A] (child to root order)
+        let rules = client.inherit_verification_rules(&4u32);
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.get(0).unwrap(), 4u32);  // self
+        assert_eq!(rules.get(1).unwrap(), 3u32);  // parent
+        assert_eq!(rules.get(2).unwrap(), 2u32);  // grandparent
+        assert_eq!(rules.get(3).unwrap(), 1u32);  // great-grandparent
+
+        // For root type A, rules should be just [A]
+        let rules_a = client.inherit_verification_rules(&1u32);
+        assert_eq!(rules_a.len(), 1);
+        assert_eq!(rules_a.get(0).unwrap(), 1u32);
+    }
+
+    #[test]
+    fn test_multiple_children_same_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        // Register multiple children (3 children)
+        for i in 2u32..5u32 {
+            client.register_credential_type(&admin, &i, &name, &desc, &Some(1u32));
+        }
+
+        // Verify all children are registered
+        let children = client.get_credential_type_children(&1u32);
+        assert_eq!(children.len(), 3);
+
+        // Verify each child points to parent
+        for i in 2u32..5u32 {
+            let parent = client.get_credential_type_parent(&i);
+            assert_eq!(parent, Some(1u32));
+        }
+    }
+
+    #[test]
+    fn test_backward_compatibility_no_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register type without parent (backward compatible behavior)
+        let name = String::from_str(&env, "Legacy Type");
+        let desc = String::from_str(&env, "No parent");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        // Should have no parent
+        let parent = client.get_credential_type_parent(&1u32);
+        assert_eq!(parent, None);
+
+        // Should have no children
+        let children = client.get_credential_type_children(&1u32);
+        assert_eq!(children.len(), 0);
+
+        // Should have empty ancestors
+        let ancestors = client.get_credential_type_ancestors(&1u32);
+        assert_eq!(ancestors.len(), 0);
+
+        // Verification rules should just be self
+        let rules = client.inherit_verification_rules(&1u32);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules.get(0).unwrap(), 1u32);
+    }
+
+    #[test]
+    fn test_overwrite_existing_type_maintains_hierarchy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent and child
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.register_credential_type(&admin, &2u32, &name, &desc, &Some(1u32));
+
+        // Verify parent-child relationship
+        let parent = client.get_credential_type_parent(&2u32);
+        assert_eq!(parent, Some(1u32));
+
+        // Overwrite parent type with new description (no parent change)
+        let new_desc = String::from_str(&env, "Updated description");
+        client.register_credential_type(&admin, &1u32, &name, &new_desc, &None);
+
+        // Child relationship should still exist
+        let parent_after = client.get_credential_type_parent(&2u32);
+        assert_eq!(parent_after, Some(1u32));
+    }
+
+    #[test]
+    fn test_detect_fork_no_conflict() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), Address::generate(&env)], &2u64);
+
+        // Attest with true value
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Detect fork for another attestor with same value - should not detect fork
+        let attestor2 = Address::generate(&env);
+        let has_fork = client.detect_fork(&credential_id, &slice_id, &attestor2, true);
+        assert!(!has_fork);
+    }
+
+    #[test]
+    fn test_detect_fork_with_conflict() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), Address::generate(&env)], &2u64);
+
+        // Attest with true value
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Detect fork for another attestor with false value - should detect fork
+        let attestor2 = Address::generate(&env);
+        let has_fork = client.detect_fork(&credential_id, &slice_id, &attestor2, false);
+        assert!(has_fork);
+    }
+
+    #[test]
+    #[should_panic(expected = "ForkDetected")]
+    fn test_attest_prevents_conflicting_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let attestor2 = Address::generate(&env);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), attestor2.clone()], &2u64);
+
+        // First attestation with true
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Second attestation with false - should panic
+        client.attest(&attestor2, &credential_id, &slice_id, &false, &None);
+    }
+
+    #[test]
+    fn test_fork_detection_stores_info() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Create a credential and slice
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue(&issuer, &subject, &1u32, &None);
+        let attestor2 = Address::generate(&env);
+        let slice_id = client.create_slice(&admin, &vec![&env, admin.clone(), attestor2.clone()], &2u64);
+
+        // First attestation with true
+        client.attest(&admin, &credential_id, &slice_id, &true, &None);
+
+        // Try second attestation with false - should store fork info
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.attest(&attestor2, &credential_id, &slice_id, &false, &None);
+        }));
+        assert!(result.is_err()); // Should have panicked
+
+        // Check that fork info was stored
+        let fork_status: ForkStatus = env.storage().instance()
+            .get(&DataKey::ForkStatus(credential_id, slice_id))
+            .unwrap();
+        assert_eq!(fork_status, ForkStatus::ForkDetected);
+
+        let fork_info: ForkInfo = env.storage().instance()
+            .get(&DataKey::ForkInfo(credential_id, slice_id))
+            .unwrap();
+        assert_eq!(fork_info.credential_id, credential_id);
+        assert_eq!(fork_info.slice_id, slice_id);
+        assert_eq!(fork_info.conflicting_attestors.len(), 2);
+        assert_eq!(fork_info.attested_values.len(), 2);
+    }
+
+    #[test]
+    fn test_get_verification_stats_initial_zeros() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let stats = client.get_verification_stats();
+        assert_eq!(stats.total_verifications, 0);
+        assert_eq!(stats.successful_verifications, 0);
+        assert_eq!(stats.failed_verifications, 0);
+    }
+
+    #[test]
+    fn test_verification_stats_increments_on_success() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        assert!(result);
+
+        let stats = qp.get_verification_stats();
+        assert_eq!(stats.total_verifications, 1);
+        assert_eq!(stats.successful_verifications, 1);
+        assert_eq!(stats.failed_verifications, 0);
+    }
+
+    #[test]
+    fn test_verification_stats_increments_on_failure() {
+        use zk_verifier::ClaimType;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, sbt_registry::SbtRegistryContract);
+        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // No SBT minted — verification fails
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        assert!(!result);
+
+        let stats = qp.get_verification_stats();
+        assert_eq!(stats.total_verifications, 1);
+        assert_eq!(stats.successful_verifications, 0);
+        assert_eq!(stats.failed_verifications, 1);
+    }
+
+    #[test]
+    fn test_verification_stats_accumulates_across_calls() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let good_proof = Bytes::from_slice(&env, b"valid-proof");
+        let bad_proof = Bytes::from_slice(&env, b"");
+
+        // 2 successes, 1 failure
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &good_proof);
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasLicense, &good_proof);
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &bad_proof);
+
+        let stats = qp.get_verification_stats();
+        assert_eq!(stats.total_verifications, 3);
+        assert_eq!(stats.successful_verifications, 2);
+        assert_eq!(stats.failed_verifications, 1);
+    }
+
+    #[test]
+    fn test_holder_reputation_zero_before_any_activity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let holder = Address::generate(&env);
+        let rep = client.get_holder_reputation(&holder);
+        assert_eq!(rep.credentials_held, 0);
+        assert_eq!(rep.successful_verifications, 0);
+        assert_eq!(rep.score, 0);
+    }
+
+    #[test]
+    fn test_holder_reputation_increments_on_credential_issue() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let rep = client.get_holder_reputation(&subject);
+        assert_eq!(rep.credentials_held, 1);
+        assert_eq!(rep.score, 1);
+
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
+        let rep = client.get_holder_reputation(&subject);
+        assert_eq!(rep.credentials_held, 2);
+        assert_eq!(rep.score, 2);
+    }
+
+    #[test]
+    fn test_holder_reputation_increments_on_successful_verification() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+
+        let rep = qp.get_holder_reputation(&subject);
+        assert_eq!(rep.successful_verifications, 1);
+        assert_eq!(rep.credentials_held, 1);
+        assert_eq!(rep.score, 2); // 1 credential + 1 verification
+    }
+
+    #[test]
+    fn test_holder_reputation_not_incremented_on_failed_verification() {
+        use zk_verifier::ClaimType;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, sbt_registry::SbtRegistryContract);
+        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // No SBT minted — verification fails, reputation should not increment.
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+
+        let rep = qp.get_holder_reputation(&subject);
+        assert_eq!(rep.successful_verifications, 0);
+        assert_eq!(rep.credentials_held, 1);
+        assert_eq!(rep.score, 1);
+    }
+
+    #[test]
+    fn test_holder_reputation_independent_per_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject_a = Address::generate(&env);
+        let subject_b = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        client.issue_credential(&issuer, &subject_a, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
+
+        assert_eq!(client.get_holder_reputation(&subject_a).credentials_held, 2);
+        assert_eq!(client.get_holder_reputation(&subject_b).credentials_held, 1);
     }
 }
