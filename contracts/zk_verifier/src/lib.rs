@@ -480,4 +480,70 @@ mod tests {
         assert_eq!(result_degree, result_degree_2);
         assert_eq!(result_license, result_license_2);
     }
+
+    #[test]
+    fn test_store_and_get_proof_metadata() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let proof_hash = Bytes::from_slice(&env, b"sha256:abc123");
+        let description = String::from_str(&env, "Degree proof for MIT 2020");
+
+        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &proof_hash, &description);
+
+        let meta = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
+        assert_eq!(meta.credential_id, 1);
+        assert_eq!(meta.proof_hash, proof_hash);
+        assert_eq!(meta.description, description);
+        assert_eq!(meta.claim_type, ClaimType::HasDegree);
+    }
+
+    #[test]
+    fn test_metadata_isolated_per_claim_type() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let hash_degree = Bytes::from_slice(&env, b"hash-degree");
+        let hash_license = Bytes::from_slice(&env, b"hash-license");
+        let desc_degree = String::from_str(&env, "degree desc");
+        let desc_license = String::from_str(&env, "license desc");
+
+        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash_degree, &desc_degree);
+        client.store_proof_metadata(&1u64, &ClaimType::HasLicense, &hash_license, &desc_license);
+
+        let meta_d = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
+        let meta_l = client.get_proof_metadata(&1u64, &ClaimType::HasLicense);
+
+        assert_eq!(meta_d.proof_hash, hash_degree);
+        assert_eq!(meta_l.proof_hash, hash_license);
+    }
+
+    #[test]
+    fn test_metadata_isolated_per_credential() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let hash1 = Bytes::from_slice(&env, b"hash-cred-1");
+        let hash2 = Bytes::from_slice(&env, b"hash-cred-2");
+        let desc = String::from_str(&env, "desc");
+
+        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash1, &desc);
+        client.store_proof_metadata(&2u64, &ClaimType::HasDegree, &hash2, &desc);
+
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash1);
+        assert_eq!(client.get_proof_metadata(&2u64, &ClaimType::HasDegree).proof_hash, hash2);
+    }
+
+    #[test]
+    #[should_panic(expected = "proof metadata not found")]
+    fn test_get_proof_metadata_not_found_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        client.get_proof_metadata(&99u64, &ClaimType::HasLicense);
+    }
 }
