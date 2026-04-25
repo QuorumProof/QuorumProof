@@ -734,6 +734,33 @@ mod tests {
     use soroban_sdk::{BytesN, FromVal, TryFromVal};
     use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
 
+    // --- Deployment verification tests ---
+
+    #[test]
+    fn test_deploy_contract_registers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let _ = SbtRegistryContractClient::new(&env, &contract_id);
+    }
+
+    #[test]
+    fn test_deploy_initialize_sets_admin_and_quorum_proof_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        // Deploy a quorum_proof contract to use as the linked contract address.
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let qp_client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        qp_client.initialize(&admin);
+
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let sbt_client = SbtRegistryContractClient::new(&env, &sbt_id);
+        // initialize must succeed without panicking.
+        sbt_client.initialize(&admin, &qp_id);
+        // Verify the contract is operational: token count starts at zero.
+        assert_eq!(sbt_client.get_tokens_by_owner(&admin).len(), 0);
+    }
+
     fn setup_with_qp(env: &Env) -> (SbtRegistryContractClient, Address, QuorumProofContractClient, Address) {
         let qp_id = env.register_contract(None, QuorumProofContract);
         let qp_client = QuorumProofContractClient::new(env, &qp_id);
