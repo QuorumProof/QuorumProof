@@ -59,6 +59,15 @@ pub enum DataKey {
     Attestors(u64),
     SubjectCredentials(Address),
     AttestorCount(Address),
+    VerificationStats,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct VerificationStats {
+    pub total_verifications: u64,
+    pub successful_verifications: u64,
+    pub failed_verifications: u64,
 }
 
 #[contracttype]
@@ -454,13 +463,45 @@ impl QuorumProofContract {
             let token = sbt_client.get_token(&token_id);
             token.credential_id == credential_id
         });
-        if !has_sbt {
-            return false;
-        }
 
-        // 2. Verify the ZK claim proof
-        let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
-        zk_client.verify_claim(&credential_id, &claim_type, &proof)
+        // 2. Verify the ZK claim proof (only if SBT check passed)
+        let result = has_sbt && {
+            let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
+            zk_client.verify_claim(&credential_id, &claim_type, &proof)
+        };
+
+        // 3. Update verification statistics
+        let mut stats: VerificationStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationStats)
+            .unwrap_or(VerificationStats {
+                total_verifications: 0,
+                successful_verifications: 0,
+                failed_verifications: 0,
+            });
+        stats.total_verifications += 1;
+        if result {
+            stats.successful_verifications += 1;
+        } else {
+            stats.failed_verifications += 1;
+        }
+        env.storage().instance().set(&DataKey::VerificationStats, &stats);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        result
+    }
+
+    /// Returns the cumulative verification statistics for this contract.
+    pub fn get_verification_stats(env: Env) -> VerificationStats {
+        env.storage()
+            .instance()
+            .get(&DataKey::VerificationStats)
+            .unwrap_or(VerificationStats {
+                total_verifications: 0,
+                successful_verifications: 0,
+                failed_verifications: 0,
+            })
     }
 }
 
@@ -1425,6 +1466,117 @@ mod tests {
         hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm2"));
 
         client.batch_issue_credentials(&issuer, &subjects, &cred_types, &hashes, &None);
+    }
+
+    #[test]
+    fn test_get_verification_stats_initial_zeros() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let stats = client.get_verification_stats();
+        assert_eq!(stats.total_verifications, 0);
+        assert_eq!(stats.successful_verifications, 0);
+        assert_eq!(stats.failed_verifications, 0);
+    }
+
+    #[test]
+    fn test_verification_stats_increments_on_success() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        assert!(result);
+
+        let stats = qp.get_verification_stats();
+        assert_eq!(stats.total_verifications, 1);
+        assert_eq!(stats.successful_verifications, 1);
+        assert_eq!(stats.failed_verifications, 0);
+    }
+
+    #[test]
+    fn test_verification_stats_increments_on_failure() {
+        use zk_verifier::ClaimType;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, sbt_registry::SbtRegistryContract);
+        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // No SBT minted — verification fails
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &proof);
+        assert!(!result);
+
+        let stats = qp.get_verification_stats();
+        assert_eq!(stats.total_verifications, 1);
+        assert_eq!(stats.successful_verifications, 0);
+        assert_eq!(stats.failed_verifications, 1);
+    }
+
+    #[test]
+    fn test_verification_stats_accumulates_across_calls() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::{ClaimType, ZkVerifierContract};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let good_proof = Bytes::from_slice(&env, b"valid-proof");
+        let bad_proof = Bytes::from_slice(&env, b"");
+
+        // 2 successes, 1 failure
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &good_proof);
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasLicense, &good_proof);
+        qp.verify_engineer(&sbt_id, &zk_id, &subject, &cred_id, &ClaimType::HasDegree, &bad_proof);
+
+        let stats = qp.get_verification_stats();
+        assert_eq!(stats.total_verifications, 3);
+        assert_eq!(stats.successful_verifications, 2);
+        assert_eq!(stats.failed_verifications, 1);
     }
 }
 
