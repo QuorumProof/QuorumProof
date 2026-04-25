@@ -173,6 +173,12 @@ pub enum ContractError {
     RecoveryThresholdNotMet = 25,
     NotRecoveryApprover = 26,
     DuplicateRecoveryApproval = 27,
+    /// Credential type hierarchy error: parent type not found
+    InvalidParentType = 28,
+    /// Credential type hierarchy error: would create circular dependency
+    CircularHierarchy = 29,
+    /// Credential type is not registered
+    CredentialTypeNotFound = 30,
 }
 
 #[contracttype]
@@ -231,6 +237,10 @@ pub enum DataKey {
     CredentialRecovery(u64),
     /// Stores approval records for a recovery request
     RecoveryApprovals(u64),
+    /// Stores the parent type ID for a credential type (for hierarchy)
+    CredentialTypeParent(u32),
+    /// Stores all child type IDs for a parent credential type
+    CredentialTypeChildren(u32),
 }
 
 #[contracttype]
@@ -239,6 +249,9 @@ pub struct CredentialTypeDef {
     pub type_id: u32,
     pub name: soroban_sdk::String,
     pub description: soroban_sdk::String,
+    /// Optional parent type ID for hierarchy support.
+    /// Enables credential type inheritance and verification rule composition.
+    pub parent_type: Option<u32>,
 }
 
 #[contracttype]
@@ -648,7 +661,53 @@ impl QuorumProofContract {
         assert!(len <= max, "{} must have at most {} element(s)", name, max);
     }
 
+    /// Check if a parent type exists in storage.
+    /// Returns false if the type is not registered.
+    fn parent_type_exists(env: &Env, parent_type: u32) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey::CredentialType(parent_type))
+    }
+
+    /// Recursively check if adding `potential_parent` as a parent to `type_id` would create
+    /// a circular dependency in the type hierarchy.
+    /// Returns true if a cycle would be created, false otherwise.
+    fn would_create_cycle(env: &Env, type_id: u32, potential_parent: u32) -> bool {
+        if type_id == potential_parent {
+            return true;
+        }
+        
+        // Check if potential_parent is already in the ancestors of type_id
+        let mut current = Some(potential_parent);
+        while let Some(curr_type) = current {
+            if curr_type == type_id {
+                return true;
+            }
+            // Get the parent of current type
+            current = env
+                .storage()
+                .instance()
+                .get::<DataKey, Option<u32>>(&DataKey::CredentialTypeParent(curr_type))
+                .flatten();
+        }
+        false
+    }
+
     /// Issue a new credential to a subject. Returns the new credential ID.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing the credential; must authorize this call.
+    /// - `subject`: The address receiving the credential.
+    /// - `credential_type`: Numeric type identifier for the credential.
+    /// - `metadata_hash`: Non-empty IPFS or content-addressed hash of credential metadata.
+    /// - `expires_at`: Optional Unix timestamp after which the credential is considered expired.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics if `metadata_hash` is empty.
+    /// Panics with `ContractError::DuplicateCredential` if the same issuer has already issued
+    /// a credential of the same type to the same subject.
+    pub fn issue_credential(
     ///
     /// # Parameters
     /// - `issuer`: The address issuing the credential; must authorize this call.
@@ -1941,15 +2000,18 @@ impl QuorumProofContract {
         zk_client.verify_claim(&zk_admin, &quorum_proof_id, &credential_id, &claim_type, &proof)
     }
 
-    /// Register a human-readable label for a credential type.
+    /// Register a human-readable label for a credential type with optional parent type.
     ///
     /// # Parameters
     /// - `admin`: The admin address; must authorize this call.
     /// - `type_id`: Numeric identifier for the credential type.
     /// - `name`: Human-readable name (e.g. "Mechanical Engineering Degree").
     /// - `description`: Longer description of what the credential type represents.
+    /// - `parent_type`: Optional parent type ID for hierarchy support (enables inheritance).
     ///
     /// # Panics
+    /// Panics with `ContractError::InvalidParentType` if parent_type is provided but not registered.
+    /// Panics with `ContractError::CircularHierarchy` if setting parent_type would create a cycle.
     /// Does not panic on duplicate registration; overwrites the existing entry.
     pub fn register_credential_type(
         env: Env,
@@ -1957,14 +2019,27 @@ impl QuorumProofContract {
         type_id: u32,
         name: soroban_sdk::String,
         description: soroban_sdk::String,
+        parent_type: Option<u32>,
     ) {
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
+        
+        // Validate parent_type if provided
+        if let Some(parent) = parent_type {
+            if !Self::parent_type_exists(&env, parent) {
+                panic_with_error!(&env, ContractError::InvalidParentType);
+            }
+            if Self::would_create_cycle(&env, type_id, parent) {
+                panic_with_error!(&env, ContractError::CircularHierarchy);
+            }
+        }
+        
         let def = CredentialTypeDef {
             type_id,
             name,
             description,
+            parent_type,
         };
         env.storage()
             .instance()
@@ -1972,6 +2047,35 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        
+        // Store parent relationship
+        if let Some(parent) = parent_type {
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialTypeParent(type_id), &parent);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            
+            // Add to parent's children list
+            let mut children: Vec<u32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::CredentialTypeChildren(parent))
+                .unwrap_or(Vec::new(&env));
+            
+            // Avoid duplicates
+            if !children.iter().any(|&child| child == type_id) {
+                children.push_back(type_id);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::CredentialTypeChildren(parent), &children);
+                env.storage()
+                    .instance()
+                    .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            }
+        }
+        
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("reg_type").into_val(&env));
         env.events().publish(topics, type_id);
@@ -1989,6 +2093,92 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::CredentialType(type_id))
             .expect("credential type not registered")
+    }
+
+    /// Get the direct parent type of a credential type, if one exists.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// Some(parent_type_id) if a parent is defined, None otherwise.
+    /// Returns None if the type does not exist.
+    pub fn get_credential_type_parent(env: Env, type_id: u32) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get::<DataKey, Option<u32>>(&DataKey::CredentialTypeParent(type_id))
+            .flatten()
+    }
+
+    /// Get all direct children of a credential type.
+    ///
+    /// # Parameters
+    /// - `parent_type_id`: The parent credential type to query.
+    ///
+    /// # Returns
+    /// Vec of child type IDs. Empty vector if no children exist.
+    pub fn get_credential_type_children(env: Env, parent_type_id: u32) -> Vec<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CredentialTypeChildren(parent_type_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get the full lineage (ancestors) of a credential type, starting from its parent
+    /// and going up to the root.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// Vec of ancestor type IDs, ordered from direct parent to root.
+    /// Empty vector if the type has no parent (is a root type).
+    pub fn get_credential_type_ancestors(env: Env, type_id: u32) -> Vec<u32> {
+        let mut ancestors: Vec<u32> = Vec::new(&env);
+        let mut current = Self::get_credential_type_parent(env.clone(), type_id);
+        
+        while let Some(curr_type) = current {
+            ancestors.push_back(curr_type);
+            current = Self::get_credential_type_parent(env.clone(), curr_type);
+        }
+        
+        ancestors
+    }
+
+    /// Check if one type is a child (direct or transitive) of another in the hierarchy.
+    ///
+    /// # Parameters
+    /// - `child_id`: The potential child type to check.
+    /// - `parent_id`: The potential parent/ancestor type.
+    ///
+    /// # Returns
+    /// true if child_id is anywhere in parent_id's descendant tree, false otherwise.
+    pub fn is_credential_type_child_of(env: Env, child_id: u32, parent_id: u32) -> bool {
+        let ancestors = Self::get_credential_type_ancestors(env, child_id);
+        ancestors.iter().any(|&ancestor| ancestor == parent_id)
+    }
+
+    /// Get all credential types whose verification rules should be applied to a given type.
+    /// This is used for inheritance chains - returns the type itself plus all ancestors.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// Vec of type IDs to check for verification rules, ordered from most specific (child)
+    /// to most general (root). The first element is always the type_id itself.
+    pub fn inherit_verification_rules(env: Env, type_id: u32) -> Vec<u32> {
+        let mut rules: Vec<u32> = Vec::new(&env);
+        rules.push_back(type_id);
+        
+        let ancestors = Self::get_credential_type_ancestors(env, type_id);
+        // Reverse to go from root to parent
+        let len = ancestors.len();
+        for i in (0..len).rev() {
+            rules.push_back(ancestors.get(i).unwrap());
+        }
+        
+        rules
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
@@ -5881,5 +6071,316 @@ mod feature_tests {
         approvers.push_back(approver.clone());
         let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
         client.cancel_recovery(&attacker, &rid);
+    }
+
+    // ── Credential Type Hierarchy Tests (Issue #291) ──
+
+    #[test]
+    fn test_register_credential_type_without_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register a root credential type without parent
+        let name = String::from_str(&env, "Engineering Degree");
+        let desc = String::from_str(&env, "Bachelor of Engineering"); 
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        // Verify it was registered
+        let ctype = client.get_credential_type(&1u32);
+        assert_eq!(ctype.type_id, 1);
+        assert_eq!(ctype.name, name);
+        assert_eq!(ctype.description, desc);
+        assert_eq!(ctype.parent_type, None);
+    }
+
+    #[test]
+    fn test_register_credential_type_with_valid_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent type
+        let parent_name = String::from_str(&env, "Engineering");
+        let parent_desc = String::from_str(&env, "Engineering Credential");
+        client.register_credential_type(&admin, &1u32, &parent_name, &parent_desc, &None);
+
+        // Register child type with parent
+        let child_name = String::from_str(&env, "Mechanical Engineering");
+        let child_desc = String::from_str(&env, "Mechanical Engineering Degree");
+        client.register_credential_type(&admin, &2u32, &child_name, &child_desc, &Some(1u32));
+
+        // Verify child has correct parent
+        let child = client.get_credential_type(&2u32);
+        assert_eq!(child.parent_type, Some(1u32));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalidparenttype")]
+    fn test_register_credential_type_invalid_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Try to register type with non-existent parent
+        let name = String::from_str(&env, "Degree");
+        let desc = String::from_str(&env, "Some Degree");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &Some(999u32));
+    }
+
+    #[test]
+    #[should_panic(expected = "circularhierarchy")]
+    fn test_register_credential_type_circular_dependency() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register type A
+        let name_a = String::from_str(&env, "Type A");
+        let desc_a = String::from_str(&env, "Type A");
+        client.register_credential_type(&admin, &1u32, &name_a, &desc_a, &None);
+
+        // Register type B with A as parent
+        let name_b = String::from_str(&env, "Type B");
+        let desc_b = String::from_str(&env, "Type B");
+        client.register_credential_type(&admin, &2u32, &name_b, &desc_b, &Some(1u32));
+
+        // Try to update A with B as parent (would create cycle)
+        let name_a_new = String::from_str(&env, "Type A Updated");
+        let desc_a_new = String::from_str(&env, "Type A Updated");
+        client.register_credential_type(&admin, &1u32, &name_a_new, &desc_a_new, &Some(2u32));
+    }
+
+    #[test]
+    fn test_three_level_hierarchy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register grandparent (A)
+        let name_a = String::from_str(&env, "Professional Credential");
+        let desc_a = String::from_str(&env, "Professional Credential");
+        client.register_credential_type(&admin, &1u32, &name_a, &desc_a, &None);
+
+        // Register parent (B) with A as parent
+        let name_b = String::from_str(&env, "Engineering License");
+        let desc_b = String::from_str(&env, "Engineering License");
+        client.register_credential_type(&admin, &2u32, &name_b, &desc_b, &Some(1u32));
+
+        // Register child (C) with B as parent
+        let name_c = String::from_str(&env, "Mechanical Engineering License");
+        let desc_c = String::from_str(&env, "Mechanical Engineering License");
+        client.register_credential_type(&admin, &3u32, &name_c, &desc_c, &Some(2u32));
+
+        // Verify lineage
+        let parent_of_c = client.get_credential_type_parent(&3u32);
+        assert_eq!(parent_of_c, Some(2u32));
+
+        let parent_of_b = client.get_credential_type_parent(&2u32);
+        assert_eq!(parent_of_b, Some(1u32));
+
+        let parent_of_a = client.get_credential_type_parent(&1u32);
+        assert_eq!(parent_of_a, None);
+    }
+
+    #[test]
+    fn test_get_credential_type_children() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent
+        let parent_name = String::from_str(&env, "Parent");
+        let parent_desc = String::from_str(&env, "Parent Type");
+        client.register_credential_type(&admin, &1u32, &parent_name, &parent_desc, &None);
+
+        // Register two children
+        let child1_name = String::from_str(&env, "Child 1");
+        let child1_desc = String::from_str(&env, "Child 1");
+        client.register_credential_type(&admin, &2u32, &child1_name, &child1_desc, &Some(1u32));
+
+        let child2_name = String::from_str(&env, "Child 2");
+        let child2_desc = String::from_str(&env, "Child 2");
+        client.register_credential_type(&admin, &3u32, &child2_name, &child2_desc, &Some(1u32));
+
+        // Get children of parent
+        let children = client.get_credential_type_children(&1u32);
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().any(|&c| c == 2u32));
+        assert!(children.iter().any(|&c| c == 3u32));
+
+        // Parent with no children
+        let children_of_leaf = client.get_credential_type_children(&2u32);
+        assert_eq!(children_of_leaf.len(), 0);
+    }
+
+    #[test]
+    fn test_get_credential_type_ancestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Build hierarchy: A <- B <- C
+        let name_a = String::from_str(&env, "A");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name_a, &desc, &None);
+
+        let name_b = String::from_str(&env, "B");
+        client.register_credential_type(&admin, &2u32, &name_b, &desc, &Some(1u32));
+
+        let name_c = String::from_str(&env, "C");
+        client.register_credential_type(&admin, &3u32, &name_c, &desc, &Some(2u32));
+
+        // Get ancestors of C: should be [B, A]
+        let ancestors_c = client.get_credential_type_ancestors(&3u32);
+        assert_eq!(ancestors_c.len(), 2);
+        assert_eq!(ancestors_c.get(0).unwrap(), 2u32);
+        assert_eq!(ancestors_c.get(1).unwrap(), 1u32);
+
+        // Get ancestors of B: should be [A]
+        let ancestors_b = client.get_credential_type_ancestors(&2u32);
+        assert_eq!(ancestors_b.len(), 1);
+        assert_eq!(ancestors_b.get(0).unwrap(), 1u32);
+
+        // Get ancestors of A: should be []
+        let ancestors_a = client.get_credential_type_ancestors(&1u32);
+        assert_eq!(ancestors_a.len(), 0);
+    }
+
+    #[test]
+    fn test_is_credential_type_child_of() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register hierarchy
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.register_credential_type(&admin, &2u32, &name, &desc, &Some(1u32));
+        client.register_credential_type(&admin, &3u32, &name, &desc, &Some(2u32));
+
+        // Direct child relationship
+        assert!(client.is_credential_type_child_of(&2u32, &1u32));
+
+        // Transitive child relationship  
+        assert!(client.is_credential_type_child_of(&3u32, &1u32));
+
+        // Not a child relationship
+        assert!(!client.is_credential_type_child_of(&1u32, &2u32));
+
+        // Not a child (unrelated types)
+        client.register_credential_type(&admin, &4u32, &name, &desc, &None);
+        assert!(!client.is_credential_type_child_of(&4u32, &1u32));
+    }
+
+    #[test]
+    fn test_inherit_verification_rules() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Build hierarchy: A <- B <- C <- D
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);  // A
+        client.register_credential_type(&admin, &2u32, &name, &desc, &Some(1u32));  // B <- A
+        client.register_credential_type(&admin, &3u32, &name, &desc, &Some(2u32));  // C <- B
+        client.register_credential_type(&admin, &4u32, &name, &desc, &Some(3u32));  // D <- C
+
+        // For type D, rules should be: [D, C, B, A] (child to root order)
+        let rules = client.inherit_verification_rules(&4u32);
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.get(0).unwrap(), 4u32);  // self
+        assert_eq!(rules.get(1).unwrap(), 3u32);  // parent
+        assert_eq!(rules.get(2).unwrap(), 2u32);  // grandparent
+        assert_eq!(rules.get(3).unwrap(), 1u32);  // great-grandparent
+
+        // For root type A, rules should be just [A]
+        let rules_a = client.inherit_verification_rules(&1u32);
+        assert_eq!(rules_a.len(), 1);
+        assert_eq!(rules_a.get(0).unwrap(), 1u32);
+    }
+
+    #[test]
+    fn test_multiple_children_same_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        // Register multiple children (3 children)
+        for i in 2u32..5u32 {
+            client.register_credential_type(&admin, &i, &name, &desc, &Some(1u32));
+        }
+
+        // Verify all children are registered
+        let children = client.get_credential_type_children(&1u32);
+        assert_eq!(children.len(), 3);
+
+        // Verify each child points to parent
+        for i in 2u32..5u32 {
+            let parent = client.get_credential_type_parent(&i);
+            assert_eq!(parent, Some(1u32));
+        }
+    }
+
+    #[test]
+    fn test_backward_compatibility_no_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register type without parent (backward compatible behavior)
+        let name = String::from_str(&env, "Legacy Type");
+        let desc = String::from_str(&env, "No parent");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        // Should have no parent
+        let parent = client.get_credential_type_parent(&1u32);
+        assert_eq!(parent, None);
+
+        // Should have no children
+        let children = client.get_credential_type_children(&1u32);
+        assert_eq!(children.len(), 0);
+
+        // Should have empty ancestors
+        let ancestors = client.get_credential_type_ancestors(&1u32);
+        assert_eq!(ancestors.len(), 0);
+
+        // Verification rules should just be self
+        let rules = client.inherit_verification_rules(&1u32);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules.get(0).unwrap(), 1u32);
+    }
+
+    #[test]
+    fn test_overwrite_existing_type_maintains_hierarchy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Register parent and child
+        let name = String::from_str(&env, "");
+        let desc = String::from_str(&env, "");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.register_credential_type(&admin, &2u32, &name, &desc, &Some(1u32));
+
+        // Verify parent-child relationship
+        let parent = client.get_credential_type_parent(&2u32);
+        assert_eq!(parent, Some(1u32));
+
+        // Overwrite parent type with new description (no parent change)
+        let new_desc = String::from_str(&env, "Updated description");
+        client.register_credential_type(&admin, &1u32, &name, &new_desc, &None);
+
+        // Child relationship should still exist
+        let parent_after = client.get_credential_type_parent(&2u32);
+        assert_eq!(parent_after, Some(1u32));
     }
 }
