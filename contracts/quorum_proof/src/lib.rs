@@ -3570,6 +3570,43 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{Bytes, Env, FromVal, IntoVal};
 
+    // --- Deployment verification tests ---
+
+    #[test]
+    fn test_deploy_contract_registers() {
+        let env = Env::default();
+        // Registering the contract should succeed without panicking.
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        // A valid contract address is returned.
+        let _ = QuorumProofContractClient::new(&env, &contract_id);
+    }
+
+    #[test]
+    fn test_deploy_initialize_sets_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // initialize must succeed and store the admin.
+        client.initialize(&admin);
+        // Verify the contract is operational: is_paused returns false after init.
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_deploy_initialize_only_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // Second call must panic.
+        client.initialize(&admin);
+    }
+
     fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
