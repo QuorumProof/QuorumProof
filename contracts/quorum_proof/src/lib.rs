@@ -20,6 +20,7 @@ const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
 const TOPIC_BLACKLIST_REMOVED: &str = "HolderUnblacklisted";
 const TOPIC_FORK_DETECTED: &str = "ForkDetected";
 const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
+const TOPIC_HOLDER_NOTIFIED: &str = "HolderNotified";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -151,6 +152,16 @@ pub struct ForkResolvedEventData {
     pub slice_id: u64,
     pub resolution: soroban_sdk::String,
     pub resolved_at: u64,
+}
+
+/// Notification sent to a credential holder when an attestation is made on their credential.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderNotification {
+    pub credential_id: u64,
+    pub attestor: Address,
+    pub slice_id: u64,
+    pub notified_at: u64,
 }
 
 /// Information about a detected fork.
@@ -349,6 +360,8 @@ pub enum DataKey {
     ForkInfo(u64, u64),
     /// Stores the fork status for a (credential_id, slice_id) pair
     ForkStatus(u64, u64),
+    /// Stores the Vec<HolderNotification> history for a credential holder
+    NotificationHistory(Address),
 }
 
 #[contracttype]
@@ -1932,6 +1945,23 @@ impl QuorumProofContract {
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         Self::record_holder_activity(&env, credential.subject.clone(), ActivityType::CredentialAttested, credential_id, attestor.clone(), Some(slice_id));
+
+        // Notify the credential holder
+        let notification = HolderNotification {
+            credential_id,
+            attestor: attestor.clone(),
+            slice_id,
+            notified_at: env.ledger().timestamp(),
+        };
+        let mut history: Vec<HolderNotification> = env.storage().instance()
+            .get(&DataKey::NotificationHistory(credential.subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        history.push_back(notification.clone());
+        env.storage().instance().set(&DataKey::NotificationHistory(credential.subject.clone()), &history);
+        let topic = String::from_str(&env, TOPIC_HOLDER_NOTIFIED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, notification);
     }
 
     /// Batch attest multiple credentials in a single transaction.
@@ -2997,6 +3027,14 @@ impl QuorumProofContract {
             }
         }
         result
+    }
+
+    /// Returns all attestation notifications for a credential holder.
+    pub fn get_notification_history(env: Env, holder: Address) -> Vec<HolderNotification> {
+        env.storage()
+            .instance()
+            .get(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Store historical consensus decisions per slice
@@ -4955,6 +4993,95 @@ mod tests {
         assert_eq!(client.get_attestation_count(&cred_id), 1);
         client.attest(&attestor2, &cred_id, &slice_id, &None);
         assert_eq!(client.get_attestation_count(&cred_id), 2);
+    }
+
+    // --- holder notification tests ---
+
+    #[test]
+    fn test_notification_event_emitted_on_attest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        let events = env.events().all();
+        let notified = events.iter().find(|(_, topics, _)| {
+            if let Some(t) = topics.get(0) {
+                t == soroban_sdk::String::from_str(&env, "HolderNotified")
+            } else {
+                false
+            }
+        });
+        assert!(notified.is_some(), "HolderNotified event not emitted");
+    }
+
+    #[test]
+    fn test_notification_history_stored_on_attest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        assert_eq!(client.get_notification_history(&subject).len(), 0);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        let history = client.get_notification_history(&subject);
+        assert_eq!(history.len(), 1);
+        let notif = history.get(0).unwrap();
+        assert_eq!(notif.credential_id, cred_id);
+        assert_eq!(notif.attestor, attestor);
+        assert_eq!(notif.slice_id, slice_id);
+    }
+
+    #[test]
+    fn test_notification_history_accumulates_multiple_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor1, &cred_id, &slice_id, &true, &None);
+        client.attest(&attestor2, &cred_id, &slice_id, &true, &None);
+
+        assert_eq!(client.get_notification_history(&subject).len(), 2);
     }
 
     // --- duplicate credential tests ---
