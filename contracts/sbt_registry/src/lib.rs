@@ -47,6 +47,8 @@ pub struct SoulboundToken {
     pub owner: Address,
     pub credential_id: u64,
     pub metadata_uri: Bytes,
+    /// Monotonically increasing version; starts at 1 on mint, incremented on each metadata update.
+    pub version: u32,
 }
 
 #[contracttype]
@@ -148,7 +150,7 @@ impl SbtRegistryContract {
         let mut token_count: u64 = env.storage().instance().get(&DataKey::TokenCount).unwrap_or(0);
         token_count += 1;
         let token_id = token_count;
-        let token = SoulboundToken { id: token_id, owner: owner.clone(), credential_id, metadata_uri };
+        let token = SoulboundToken { id: token_id, owner: owner.clone(), credential_id, metadata_uri, version: 1 };
         env.storage().persistent().set(&DataKey::Token(token_id), &token);
         env.storage().persistent().extend_ttl(&DataKey::Token(token_id), STANDARD_TTL, EXTENDED_TTL);
         env.storage().persistent().set(&DataKey::Owner(token_id), &owner.clone());
@@ -724,6 +726,27 @@ impl SbtRegistryContract {
     /// Get the total count of audit trail entries.
     pub fn get_audit_trail_count(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64)
+    }
+
+    /// Update the metadata URI of an SBT. Only the token owner may call this.
+    /// Increments the token's version on each successful update.
+    pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
+        owner.require_auth();
+        let mut token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(token_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+        assert!(token.owner == owner, "not the owner");
+        token.metadata_uri = new_metadata_uri;
+        token.version += 1;
+        env.storage().persistent().set(&DataKey::Token(token_id), &token);
+    }
+
+    /// Return the current metadata version for a token (starts at 1, increments on each update).
+    pub fn get_sbt_metadata_version(env: Env, token_id: u64) -> u32 {
+        env.storage().persistent()
+            .get::<DataKey, SoulboundToken>(&DataKey::Token(token_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound))
+            .version
     }
 }
 
@@ -1577,5 +1600,72 @@ mod tests {
 
         let unauthorized = Address::generate(&env);
         client.finalize_recovery(&unauthorized, &recovery_id); // Should panic
+    }
+
+    // ── Metadata versioning tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_version_starts_at_one_on_mint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
+
+        assert_eq!(client.get_sbt_metadata_version(&token_id), 1);
+        assert_eq!(client.get_token(&token_id).version, 1);
+    }
+
+    #[test]
+    fn test_version_increments_on_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
+
+        client.update_metadata(&owner, &token_id, &Bytes::from_slice(&env, b"ipfs://v1"));
+        assert_eq!(client.get_sbt_metadata_version(&token_id), 2);
+
+        client.update_metadata(&owner, &token_id, &Bytes::from_slice(&env, b"ipfs://v2"));
+        assert_eq!(client.get_sbt_metadata_version(&token_id), 3);
+    }
+
+    #[test]
+    fn test_update_metadata_changes_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
+
+        let new_uri = Bytes::from_slice(&env, b"ipfs://v1");
+        client.update_metadata(&owner, &token_id, &new_uri);
+        assert_eq!(client.get_token(&token_id).metadata_uri, new_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "not the owner")]
+    fn test_update_metadata_non_owner_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
+
+        let stranger = Address::generate(&env);
+        client.update_metadata(&stranger, &token_id, &Bytes::from_slice(&env, b"ipfs://hack"));
     }
 }
