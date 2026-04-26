@@ -33,6 +33,12 @@ path = "fuzz_targets/fuzz_zk_verifier.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_credential_issuance"
+path = "fuzz_targets/fuzz_credential_issuance.rs"
+test = false
+doc = false
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
