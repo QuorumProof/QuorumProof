@@ -105,6 +105,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 - [Trust Slice Model](docs/trust-slices.md)
 - [ZK Verification Design](docs/zk-verification.md)
 - [Threat Model & Security](docs/threat-model.md)
+- [Error Code Reference](docs/error-codes.md)
 - [Roadmap](docs/roadmap.md)
 
 ## 🎓 Smart Contract API

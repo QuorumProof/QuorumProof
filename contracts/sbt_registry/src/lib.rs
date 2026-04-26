@@ -38,6 +38,31 @@ pub enum DataKey {
     RecoveryThreshold,
     AuditTrail(u64),
     AuditTrailCount,
+    NotificationHistory(Address),
+    ReputationConfig,
+}
+
+/// Weights used to compute a holder's reputation score.
+/// score = tokens_held * token_weight + notifications * activity_weight
+#[contracttype]
+#[derive(Clone)]
+pub struct ReputationConfig {
+    /// Points awarded per SBT currently held.
+    pub token_weight: u32,
+    /// Points awarded per notification history entry (activity signal).
+    pub activity_weight: u32,
+}
+
+/// A single on-chain notification entry stored per holder.
+#[contracttype]
+#[derive(Clone)]
+pub struct NotificationEntry {
+    /// The SBT token ID this notification relates to.
+    pub token_id: u64,
+    /// Event kind: "mint", "burn", "recover", "transfer"
+    pub event: Symbol,
+    /// Ledger timestamp when the event occurred.
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -169,11 +194,10 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("mint").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token);
+        env.events().publish(topics, (owner.clone(), credential_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("mint"));
         token_id
     }
-
-    /// Retrieve a soulbound token by its ID.
     ///
     /// # Parameters
     /// - `token_id`: The ID of the token to retrieve.
@@ -280,7 +304,8 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token.id);
+        env.events().publish(topics, (owner.clone(), token.credential_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("burn"));
         token.credential_id
     }
 
@@ -314,11 +339,13 @@ impl SbtRegistryContract {
             owner_tokens.remove(pos as u32);
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
-        env.storage().instance().remove(&DataKey::OwnerCredential(owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(owner.clone(), token.credential_id));
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
-        env.events().publish(topics, token_id);
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner.clone(), token_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("burn"));
     }
 
     /// Recover an SBT to a new owner during credential recovery.
@@ -343,7 +370,7 @@ impl SbtRegistryContract {
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
 
         // Add to new owner
         token.owner = new_owner.clone();
@@ -359,7 +386,8 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recover").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token.credential_id);
+        env.events().publish(topics, (old_owner, new_owner.clone()));
+        Self::record_notification(&env, new_owner, token_id, symbol_short!("recover"));
     }
 
     /// Admin-only: transfer an SBT to a new owner (e.g. after credential re-issuance).
@@ -382,7 +410,7 @@ impl SbtRegistryContract {
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
 
         // Add to new owner
         token.owner = new_owner.clone();
@@ -393,7 +421,13 @@ impl SbtRegistryContract {
             .unwrap_or(Vec::new(&env));
         new_tokens.push_back(token_id);
         env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
-        env.storage().instance().set(&DataKey::OwnerCredential(new_owner, token.credential_id), &token_id);
+        env.storage().instance().set(&DataKey::OwnerCredential(new_owner.clone(), token.credential_id), &token_id);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("transfer").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (old_owner, new_owner.clone()));
+        Self::record_notification(&env, new_owner, token_id, symbol_short!("transfer"));
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
@@ -728,25 +762,52 @@ impl SbtRegistryContract {
         env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64)
     }
 
-    /// Update the metadata URI of an SBT. Only the token owner may call this.
-    /// Increments the token's version on each successful update.
-    pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
-        owner.require_auth();
-        let mut token: SoulboundToken = env.storage().persistent()
-            .get(&DataKey::Token(token_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
-        assert!(token.owner == owner, "not the owner");
-        token.metadata_uri = new_metadata_uri;
-        token.version += 1;
-        env.storage().persistent().set(&DataKey::Token(token_id), &token);
+    /// Admin-only: set the weights used by get_holder_reputation.
+    pub fn set_reputation_config(env: Env, admin: Address, token_weight: u32, activity_weight: u32) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+        env.storage().instance().set(&DataKey::ReputationConfig, &ReputationConfig { token_weight, activity_weight });
     }
 
-    /// Return the current metadata version for a token (starts at 1, increments on each update).
-    pub fn get_sbt_metadata_version(env: Env, token_id: u64) -> u32 {
+    /// Return the reputation score for a holder.
+    /// score = tokens_held * token_weight + activity_events * activity_weight
+    /// Defaults: token_weight = 10, activity_weight = 1.
+    pub fn get_holder_reputation(env: Env, holder: Address) -> u32 {
+        let cfg: ReputationConfig = env.storage().instance()
+            .get(&DataKey::ReputationConfig)
+            .unwrap_or(ReputationConfig { token_weight: 10, activity_weight: 1 });
+        let tokens = env.storage().persistent()
+            .get::<DataKey, Vec<u64>>(&DataKey::OwnerTokens(holder.clone()))
+            .unwrap_or(Vec::new(&env))
+            .len();
+        let activity = env.storage().persistent()
+            .get::<DataKey, Vec<NotificationEntry>>(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
+            .len();
+        tokens * cfg.token_weight + activity * cfg.activity_weight
+    }
+
+    /// Append a notification entry to the holder's on-chain history.
+    fn record_notification(env: &Env, holder: Address, token_id: u64, event: Symbol) {
+        let key = DataKey::NotificationHistory(holder);
+        let mut history: Vec<NotificationEntry> = env.storage().persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+        history.push_back(NotificationEntry {
+            token_id,
+            event,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&key, &history);
+        env.storage().persistent().extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return all notification entries recorded for a holder.
+    pub fn get_notifications(env: Env, holder: Address) -> Vec<NotificationEntry> {
         env.storage().persistent()
-            .get::<DataKey, SoulboundToken>(&DataKey::Token(token_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound))
-            .version
+            .get(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
@@ -756,6 +817,33 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::{BytesN, FromVal, TryFromVal};
     use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
+
+    // --- Deployment verification tests ---
+
+    #[test]
+    fn test_deploy_contract_registers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let _ = SbtRegistryContractClient::new(&env, &contract_id);
+    }
+
+    #[test]
+    fn test_deploy_initialize_sets_admin_and_quorum_proof_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        // Deploy a quorum_proof contract to use as the linked contract address.
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let qp_client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        qp_client.initialize(&admin);
+
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let sbt_client = SbtRegistryContractClient::new(&env, &sbt_id);
+        // initialize must succeed without panicking.
+        sbt_client.initialize(&admin, &qp_id);
+        // Verify the contract is operational: token count starts at zero.
+        assert_eq!(sbt_client.get_tokens_by_owner(&admin).len(), 0);
+    }
 
     fn setup_with_qp(env: &Env) -> (SbtRegistryContractClient, Address, QuorumProofContractClient, Address) {
         let qp_id = env.register_contract(None, QuorumProofContract);
@@ -1602,25 +1690,60 @@ mod tests {
         client.finalize_recovery(&unauthorized, &recovery_id); // Should panic
     }
 
-    // ── Metadata versioning tests ─────────────────────────────────────────────
+    // -----------------------------------------------------------------------
+    // Regression tests for fixed issues
+    // -----------------------------------------------------------------------
 
+    // Issue #22 — Duplicate SBT mint for the same (owner, credential_id) must be rejected.
     #[test]
-    fn test_version_starts_at_one_on_mint() {
+    #[should_panic(expected = "HostError")]
+    fn regression_22_duplicate_sbt_mint_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
 
-        assert_eq!(client.get_sbt_metadata_version(&token_id), 1);
-        assert_eq!(client.get_token(&token_id).version, 1);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        client.mint(&owner, &cred_id, &uri);
+        client.mint(&owner, &cred_id, &uri); // must panic — soulbound, non-transferable
+    }
+
+    // Issue #22 — Minting an SBT for a revoked credential must be rejected.
+    #[test]
+    #[should_panic]
+    fn regression_22_mint_for_revoked_credential_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+
+        qp_client.revoke_credential(&issuer, &cred_id);
+
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        client.mint(&owner, &cred_id, &uri); // must panic — credential is revoked
+    }
+
+    // ── Reputation tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reputation_zero_for_new_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let holder = Address::generate(&env);
+        assert_eq!(client.get_holder_reputation(&holder), 0);
     }
 
     #[test]
-    fn test_version_increments_on_update() {
+    fn test_reputation_default_weights() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
@@ -1628,44 +1751,60 @@ mod tests {
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
-        client.update_metadata(&owner, &token_id, &Bytes::from_slice(&env, b"ipfs://v1"));
-        assert_eq!(client.get_sbt_metadata_version(&token_id), 2);
+        client.mint(&owner, &cred_id, &uri);
 
-        client.update_metadata(&owner, &token_id, &Bytes::from_slice(&env, b"ipfs://v2"));
-        assert_eq!(client.get_sbt_metadata_version(&token_id), 3);
+        // 1 token * 10 + 1 activity (mint notification) * 1 = 11
+        assert_eq!(client.get_holder_reputation(&owner), 11);
     }
 
     #[test]
-    fn test_update_metadata_changes_uri() {
+    fn test_reputation_configurable_weights() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
-        let new_uri = Bytes::from_slice(&env, b"ipfs://v1");
-        client.update_metadata(&owner, &token_id, &new_uri);
-        assert_eq!(client.get_token(&token_id).metadata_uri, new_uri);
+        client.set_reputation_config(&admin, &5u32, &2u32);
+        client.mint(&owner, &cred_id, &uri);
+
+        // 1 token * 5 + 1 activity * 2 = 7
+        assert_eq!(client.get_holder_reputation(&owner), 7);
     }
 
     #[test]
-    #[should_panic(expected = "not the owner")]
-    fn test_update_metadata_non_owner_panics() {
+    fn test_reputation_increases_with_activity() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let token_id = client.mint(&owner, &cred_id, &Bytes::from_slice(&env, b"ipfs://v0"));
+        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
-        let stranger = Address::generate(&env);
-        client.update_metadata(&stranger, &token_id, &Bytes::from_slice(&env, b"ipfs://hack"));
+        client.set_reputation_config(&admin, &10u32, &1u32);
+
+        let t1 = client.mint(&owner, &cred_id1, &uri);
+        let score_after_one = client.get_holder_reputation(&owner);
+
+        client.mint(&owner, &cred_id2, &uri);
+        let score_after_two = client.get_holder_reputation(&owner);
+
+        client.burn(&owner, &t1);
+        let score_after_burn = client.get_holder_reputation(&owner);
+
+        // After 1 mint: 1*10 + 1*1 = 11
+        assert_eq!(score_after_one, 11);
+        // After 2 mints: 2*10 + 2*1 = 22
+        assert_eq!(score_after_two, 22);
+        // After burn: 1 token left, 3 activity entries (mint, mint, burn) = 1*10 + 3*1 = 13
+        assert_eq!(score_after_burn, 13);
     }
 }
