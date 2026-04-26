@@ -40,6 +40,12 @@ export function Navbar() {
           >
             Slice Builder
           </Link>
+          <Link
+            to="/help"
+            className={`nav-link${location.pathname === '/help' ? ' active' : ''}`}
+          >
+            Help
+          </Link>
         </div>
 
         <div className="navbar__right">
