@@ -3,6 +3,7 @@ import { Navbar } from '../components/Navbar';
 import { CredentialCard } from '../components/CredentialCard';
 import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
+import { ExportCredentialsDialog } from '../components/ExportCredentialsDialog';
 import { useWallet } from '../hooks';
 import {
   getCredentialsBySubject,
@@ -20,6 +21,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [showExportDialog, setShowExportDialog] = useState(false);
 
   const fetchCredentials = useCallback(async (walletAddress: string) => {
     setLoading(true);
@@ -114,21 +116,31 @@ export default function Dashboard() {
             <h1 className="dashboard-title">Credential Dashboard</h1>
             <p className="dashboard-subtitle">Your verifiable credentials on Stellar Soroban</p>
           </div>
-          {address && (
-            <div className="wallet-sim-card">
-              <div className="wallet-sim__label">Connected Address</div>
-              <div className="mono" style={{ fontSize: '12px', wordBreak: 'break-all' }}>
-                {address}
-              </div>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+            {cards.length > 0 && (
               <button
-                className="btn btn--ghost btn--sm"
-                style={{ marginTop: '8px' }}
-                onClick={disconnect}
+                className="btn btn--primary btn--sm"
+                onClick={() => setShowExportDialog(true)}
               >
-                Disconnect
+                📥 Export
               </button>
-            </div>
-          )}
+            )}
+            {address && (
+              <div className="wallet-sim-card">
+                <div className="wallet-sim__label">Connected Address</div>
+                <div className="mono" style={{ fontSize: '12px', wordBreak: 'break-all' }}>
+                  {address}
+                </div>
+                <button
+                  className="btn btn--ghost btn--sm"
+                  style={{ marginTop: '8px' }}
+                  onClick={disconnect}
+                >
+                  Disconnect
+                </button>
+              </div>
+            )}
+          </div>
         </header>
 
         <div className="dashboard-content">
@@ -195,6 +207,13 @@ export default function Dashboard() {
           </a>
         </div>
       </footer>
+
+      {showExportDialog && (
+        <ExportCredentialsDialog
+          credentials={cards.map(c => c.credential)}
+          onClose={() => setShowExportDialog(false)}
+        />
+      )}
     </>
   );
 }
