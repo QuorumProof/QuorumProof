@@ -38,6 +38,17 @@ pub enum DataKey {
     RecoveryThreshold,
     AuditTrail(u64),
     AuditTrailCount,
+    MetadataHistory(u64),
+}
+
+/// One entry in a token's immutable metadata update history.
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataUpdateEntry {
+    /// The new metadata URI set in this update.
+    pub metadata_uri: Bytes,
+    /// Ledger timestamp of the update.
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -724,6 +735,53 @@ impl SbtRegistryContract {
     /// Get the total count of audit trail entries.
     pub fn get_audit_trail_count(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64)
+    }
+
+    /// Update the metadata URI of an SBT. Only the token owner may call this.
+    /// Each update is appended to an immutable history stored on-chain.
+    pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
+        owner.require_auth();
+        let mut token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(token_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+        assert!(token.owner == owner, "not the owner");
+
+        token.metadata_uri = new_metadata_uri.clone();
+        env.storage().persistent().set(&DataKey::Token(token_id), &token);
+
+        let key = DataKey::MetadataHistory(token_id);
+        let mut history: Vec<MetadataUpdateEntry> = env.storage().persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+        history.push_back(MetadataUpdateEntry {
+            metadata_uri: new_metadata_uri,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&key, &history);
+        env.storage().persistent().extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return a page of metadata update history for a token.
+    ///
+    /// - `offset`: number of entries to skip (0-based).
+    /// - `limit`: maximum entries to return.
+    pub fn get_metadata_update_history(
+        env: Env,
+        token_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<MetadataUpdateEntry> {
+        let history: Vec<MetadataUpdateEntry> = env.storage().persistent()
+            .get(&DataKey::MetadataHistory(token_id))
+            .unwrap_or(Vec::new(&env));
+        let len = history.len();
+        let start = offset.min(len);
+        let end = (start + limit).min(len);
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            page.push_back(history.get(i).unwrap());
+        }
+        page
     }
 }
 
@@ -1577,5 +1635,83 @@ mod tests {
 
         let unauthorized = Address::generate(&env);
         client.finalize_recovery(&unauthorized, &recovery_id); // Should panic
+    }
+
+    // ── Metadata update history tests ─────────────────────────────────────────
+
+    fn mint_one(env: &Env, client: &SbtRegistryContractClient, qp_client: &QuorumProofContractClient) -> (Address, u64) {
+        let issuer = Address::generate(env);
+        let owner = Address::generate(env);
+        let meta = soroban_sdk::Bytes::from_slice(env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(env, b"ipfs://original");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+        (owner, token_id)
+    }
+
+    #[test]
+    fn test_metadata_history_empty_before_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (_owner, token_id) = mint_one(&env, &client, &qp_client);
+        assert_eq!(client.get_metadata_update_history(&token_id, &0u32, &10u32).len(), 0);
+    }
+
+    #[test]
+    fn test_update_metadata_records_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (owner, token_id) = mint_one(&env, &client, &qp_client);
+
+        let uri1 = Bytes::from_slice(&env, b"ipfs://v1");
+        let uri2 = Bytes::from_slice(&env, b"ipfs://v2");
+        client.update_metadata(&owner, &token_id, &uri1);
+        client.update_metadata(&owner, &token_id, &uri2);
+
+        let history = client.get_metadata_update_history(&token_id, &0u32, &10u32);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.get(0).unwrap().metadata_uri, uri1);
+        assert_eq!(history.get(1).unwrap().metadata_uri, uri2);
+        // token reflects latest URI
+        assert_eq!(client.get_token(&token_id).metadata_uri, uri2);
+    }
+
+    #[test]
+    fn test_metadata_history_pagination() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (owner, token_id) = mint_one(&env, &client, &qp_client);
+
+        for i in 0u8..5 {
+            let uri = Bytes::from_slice(&env, &[b'a' + i]);
+            client.update_metadata(&owner, &token_id, &uri);
+        }
+
+        // page 1: entries 0-1
+        let page1 = client.get_metadata_update_history(&token_id, &0u32, &2u32);
+        assert_eq!(page1.len(), 2);
+        // page 2: entries 2-3
+        let page2 = client.get_metadata_update_history(&token_id, &2u32, &2u32);
+        assert_eq!(page2.len(), 2);
+        // page 3: entry 4 (last)
+        let page3 = client.get_metadata_update_history(&token_id, &4u32, &2u32);
+        assert_eq!(page3.len(), 1);
+        // offset beyond end returns empty
+        let empty = client.get_metadata_update_history(&token_id, &10u32, &5u32);
+        assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "not the owner")]
+    fn test_update_metadata_non_owner_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (_owner, token_id) = mint_one(&env, &client, &qp_client);
+        let stranger = Address::generate(&env);
+        client.update_metadata(&stranger, &token_id, &Bytes::from_slice(&env, b"ipfs://hack"));
     }
 }
