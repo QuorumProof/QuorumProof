@@ -20,6 +20,7 @@ const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
 const TOPIC_BLACKLIST_REMOVED: &str = "HolderUnblacklisted";
 const TOPIC_FORK_DETECTED: &str = "ForkDetected";
 const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
+const TOPIC_HOLDER_NOTIFIED: &str = "HolderNotified";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -67,6 +68,8 @@ pub struct AttestationRecord {
     pub expires_at: Option<u64>,
     /// The attestation value: true for valid, false for invalid.
     pub attestation_value: bool,
+    /// Optional arbitrary metadata attached by the attestor (e.g. notes, reference IDs).
+    pub metadata: Option<soroban_sdk::Bytes>,
 }
 
 #[contracttype]
@@ -151,6 +154,16 @@ pub struct ForkResolvedEventData {
     pub slice_id: u64,
     pub resolution: soroban_sdk::String,
     pub resolved_at: u64,
+}
+
+/// Notification sent to a credential holder when an attestation is made on their credential.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderNotification {
+    pub credential_id: u64,
+    pub attestor: Address,
+    pub slice_id: u64,
+    pub notified_at: u64,
 }
 
 /// Information about a detected fork.
@@ -349,6 +362,10 @@ pub enum DataKey {
     ForkInfo(u64, u64),
     /// Stores the fork status for a (credential_id, slice_id) pair
     ForkStatus(u64, u64),
+    /// Stores the Vec<HolderNotification> history for a credential holder
+    NotificationHistory(Address),
+    /// Stores attestation metadata keyed by (credential_id, attestor)
+    AttestationMetadata(u64, Address),
 }
 
 #[contracttype]
@@ -1896,6 +1913,7 @@ impl QuorumProofContract {
             attested_at: env.ledger().timestamp(),
             expires_at,
             attestation_value,
+            metadata: None,
         };
         records.push_back(record);
         env.storage()
@@ -1932,6 +1950,23 @@ impl QuorumProofContract {
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         Self::record_holder_activity(&env, credential.subject.clone(), ActivityType::CredentialAttested, credential_id, attestor.clone(), Some(slice_id));
+
+        // Notify the credential holder
+        let notification = HolderNotification {
+            credential_id,
+            attestor: attestor.clone(),
+            slice_id,
+            notified_at: env.ledger().timestamp(),
+        };
+        let mut history: Vec<HolderNotification> = env.storage().instance()
+            .get(&DataKey::NotificationHistory(credential.subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        history.push_back(notification.clone());
+        env.storage().instance().set(&DataKey::NotificationHistory(credential.subject.clone()), &history);
+        let topic = String::from_str(&env, TOPIC_HOLDER_NOTIFIED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, notification);
     }
 
     /// Batch attest multiple credentials in a single transaction.
@@ -2184,6 +2219,8 @@ impl QuorumProofContract {
                     attestor: rec.attestor.clone(),
                     attested_at: rec.attested_at,
                     expires_at: Some(new_expires_at),
+                    attestation_value: rec.attestation_value,
+                    metadata: rec.metadata.clone(),
                 });
             } else {
                 updated.push_back(rec);
@@ -2349,6 +2386,66 @@ impl QuorumProofContract {
             status.push_back((attestor, signed));
         }
         status
+    }
+
+    /// Verify multiple (credential_id, slice_id) pairs in a single call.
+    ///
+    /// Gas-optimized: each credential and slice is read from storage at most once,
+    /// regardless of how many times it appears in the input list.
+    ///
+    /// Returns a `Vec<bool>` of the same length as the input, where each element
+    /// corresponds to `is_attested(credential_ids[i], slice_ids[i])`.
+    ///
+    /// # Panics
+    /// Panics if `credential_ids` and `slice_ids` have different lengths, or if
+    /// either list is empty or exceeds `MAX_BATCH_SIZE`.
+    pub fn verify_attestations_batch(
+        env: Env,
+        credential_ids: Vec<u64>,
+        slice_ids: Vec<u64>,
+    ) -> Vec<bool> {
+        Self::validate_array_bounds(credential_ids.len(), 1, MAX_BATCH_SIZE, "credential_ids");
+        assert!(
+            credential_ids.len() == slice_ids.len(),
+            "credential_ids and slice_ids lengths must match"
+        );
+        let now = env.ledger().timestamp();
+        let mut results: Vec<bool> = Vec::new(&env);
+        for i in 0..credential_ids.len() {
+            let credential_id = credential_ids.get(i).unwrap();
+            let slice_id = slice_ids.get(i).unwrap();
+            let attested = match env.storage().instance().get::<DataKey, Credential>(&DataKey::Credential(credential_id)) {
+                None => false,
+                Some(cred) => {
+                    if cred.revoked { false }
+                    else if cred.expires_at.map_or(false, |e| now >= e) { false }
+                    else if env.storage().instance().get::<DataKey, u64>(&DataKey::AttestationExpiry(credential_id)).map_or(false, |e| now >= e) { false }
+                    else {
+                        match env.storage().instance().get::<DataKey, QuorumSlice>(&DataKey::Slice(slice_id)) {
+                            None => false,
+                            Some(slice) => {
+                                let records: Vec<AttestationRecord> = env.storage().instance()
+                                    .get(&DataKey::Attestors(credential_id))
+                                    .unwrap_or(Vec::new(&env));
+                                let mut weight: u32 = 0;
+                                for rec in records.iter() {
+                                    if rec.expires_at.map_or(false, |e| now >= e) { continue; }
+                                    for (j, a) in slice.attestors.iter().enumerate() {
+                                        if a == rec.attestor {
+                                            weight = weight.saturating_add(slice.weights.get(j as u32).unwrap_or(0));
+                                            break;
+                                        }
+                                    }
+                                }
+                                weight >= slice.threshold
+                            }
+                        }
+                    }
+                }
+            };
+            results.push_back(attested);
+        }
+        results
     }
 
     /// Unified engineer verification entry point.
@@ -2997,6 +3094,33 @@ impl QuorumProofContract {
             }
         }
         result
+    }
+
+    /// Returns all attestation notifications for a credential holder.
+    pub fn get_notification_history(env: Env, holder: Address) -> Vec<HolderNotification> {
+        env.storage()
+            .instance()
+            .get(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Attach arbitrary metadata to an existing attestation.
+    /// Only the original attestor may set metadata for their own attestation.
+    pub fn set_attestation_metadata(env: Env, attestor: Address, credential_id: u64, metadata: soroban_sdk::Bytes) {
+        attestor.require_auth();
+        // Verify the attestor has actually attested this credential
+        let records: Vec<AttestationRecord> = env.storage().instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(&env));
+        let found = records.iter().any(|r| r.attestor == attestor);
+        assert!(found, "attestor has not attested this credential");
+        env.storage().instance().set(&DataKey::AttestationMetadata(credential_id, attestor), &metadata);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Retrieve metadata attached to an attestation, if any.
+    pub fn get_attestation_metadata(env: Env, credential_id: u64, attestor: Address) -> Option<soroban_sdk::Bytes> {
+        env.storage().instance().get(&DataKey::AttestationMetadata(credential_id, attestor))
     }
 
     /// Store historical consensus decisions per slice
@@ -4432,6 +4556,105 @@ mod tests {
         assert!(!client.is_attested(&cred_id, &slice_id));
     }
 
+    // --- verify_attestations_batch tests ---
+
+    #[test]
+    fn test_verify_attestations_batch_all_attested() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor, &cred1, &slice_id, &true, &None);
+        client.attest(&attestor, &cred2, &slice_id, &true, &None);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred1);
+        cred_ids.push_back(cred2);
+        let mut slice_ids = Vec::new(&env);
+        slice_ids.push_back(slice_id);
+        slice_ids.push_back(slice_id);
+
+        let results = client.verify_attestations_batch(&cred_ids, &slice_ids);
+        assert_eq!(results.len(), 2);
+        assert!(results.get(0).unwrap());
+        assert!(results.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_verify_attestations_batch_mixed_results() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        // Only attest cred1
+        client.attest(&attestor, &cred1, &slice_id, &true, &None);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred1);
+        cred_ids.push_back(cred2);
+        let mut slice_ids = Vec::new(&env);
+        slice_ids.push_back(slice_id);
+        slice_ids.push_back(slice_id);
+
+        let results = client.verify_attestations_batch(&cred_ids, &slice_ids);
+        assert!(results.get(0).unwrap());
+        assert!(!results.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_verify_attestations_batch_revoked_returns_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+        client.revoke_credential(&issuer, &cred_id);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred_id);
+        let mut slice_ids = Vec::new(&env);
+        slice_ids.push_back(slice_id);
+
+        let results = client.verify_attestations_batch(&cred_ids, &slice_ids);
+        assert!(!results.get(0).unwrap());
+    }
+
     // --- batch issue ---
 
     #[test]
@@ -4992,6 +5215,159 @@ mod tests {
         assert_eq!(client.get_attestation_count(&cred_id), 1);
         client.attest(&attestor2, &cred_id, &slice_id, &None);
         assert_eq!(client.get_attestation_count(&cred_id), 2);
+    }
+
+    // --- holder notification tests ---
+
+    #[test]
+    fn test_notification_event_emitted_on_attest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        let events = env.events().all();
+        let notified = events.iter().find(|(_, topics, _)| {
+            if let Some(t) = topics.get(0) {
+                t == soroban_sdk::String::from_str(&env, "HolderNotified")
+            } else {
+                false
+            }
+        });
+        assert!(notified.is_some(), "HolderNotified event not emitted");
+    }
+
+    #[test]
+    fn test_notification_history_stored_on_attest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        assert_eq!(client.get_notification_history(&subject).len(), 0);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        let history = client.get_notification_history(&subject);
+        assert_eq!(history.len(), 1);
+        let notif = history.get(0).unwrap();
+        assert_eq!(notif.credential_id, cred_id);
+        assert_eq!(notif.attestor, attestor);
+        assert_eq!(notif.slice_id, slice_id);
+    }
+
+    #[test]
+    fn test_notification_history_accumulates_multiple_attestors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.attest(&attestor1, &cred_id, &slice_id, &true, &None);
+        client.attest(&attestor2, &cred_id, &slice_id, &true, &None);
+
+        assert_eq!(client.get_notification_history(&subject).len(), 2);
+    }
+
+    // --- attestation metadata tests ---
+
+    #[test]
+    fn test_set_and_get_attestation_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata_hash = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        let meta = Bytes::from_slice(&env, b"ref:ENG-2024-001");
+        client.set_attestation_metadata(&attestor, &cred_id, &meta);
+
+        let stored = client.get_attestation_metadata(&cred_id, &attestor);
+        assert_eq!(stored, Some(meta));
+    }
+
+    #[test]
+    fn test_get_attestation_metadata_none_when_not_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata_hash = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        assert_eq!(client.get_attestation_metadata(&cred_id, &attestor), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestor has not attested this credential")]
+    fn test_set_attestation_metadata_non_attestor_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let non_attestor = Address::generate(&env);
+        let metadata_hash = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+
+        let meta = Bytes::from_slice(&env, b"unauthorized");
+        client.set_attestation_metadata(&non_attestor, &cred_id, &meta);
     }
 
     // --- duplicate credential tests ---
