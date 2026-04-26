@@ -72,6 +72,8 @@ pub struct SoulboundToken {
     pub owner: Address,
     pub credential_id: u64,
     pub metadata_uri: Bytes,
+    /// Monotonically increasing version; starts at 1 on mint, incremented on each metadata update.
+    pub version: u32,
 }
 
 #[contracttype]
@@ -173,7 +175,7 @@ impl SbtRegistryContract {
         let mut token_count: u64 = env.storage().instance().get(&DataKey::TokenCount).unwrap_or(0);
         token_count += 1;
         let token_id = token_count;
-        let token = SoulboundToken { id: token_id, owner: owner.clone(), credential_id, metadata_uri };
+        let token = SoulboundToken { id: token_id, owner: owner.clone(), credential_id, metadata_uri, version: 1 };
         env.storage().persistent().set(&DataKey::Token(token_id), &token);
         env.storage().persistent().extend_ttl(&DataKey::Token(token_id), STANDARD_TTL, EXTENDED_TTL);
         env.storage().persistent().set(&DataKey::Owner(token_id), &owner.clone());
