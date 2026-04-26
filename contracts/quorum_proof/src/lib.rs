@@ -1064,6 +1064,9 @@ impl QuorumProofContract {
         topics.push_back(topic);
         env.events().publish(topics, event_data);
 
+        // Update metrics
+        Self::update_credential_metrics(&env, id, "credential");
+
         // Post-condition: credential must be stored
         Self::postcondition(env.storage().instance().has(&DataKey::Credential(id)), "credential stored");
         id
@@ -1435,7 +1438,17 @@ impl QuorumProofContract {
         topics.push_back(topic);
         env.events().publish(topics, event_data);
 
-        // Record activity for the holder
+        // Update metrics
+        Self::update_credential_metrics(&env, credential_id, "revocation");
+
+        // Emit status update
+        Self::emit_status_update(
+            env,
+            credential_id,
+            String::from_str(&env, "active"),
+            String::from_str(&env, "revoked"),
+        );
+    }        // Record activity for the holder
         Self::record_holder_activity(&env, credential.subject.clone(), ActivityType::CredentialRevoked, credential_id, issuer.clone(), None);
     }
 
