@@ -246,6 +246,42 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
 
+    // --- Deployment verification tests ---
+
+    #[test]
+    fn test_deploy_contract_registers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let _ = ZkVerifierContractClient::new(&env, &contract_id);
+    }
+
+    #[test]
+    fn test_deploy_initialize_sets_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // initialize must succeed without panicking.
+        client.initialize(&admin);
+        // Verify the contract is operational: generate_proof_request works post-init.
+        let req = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        assert_eq!(req.credential_id, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_deploy_initialize_only_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // Second call must panic.
+        client.initialize(&admin);
+    }
+
     fn setup(env: &Env) -> (ZkVerifierContractClient, Address) {
         let contract_id = env.register_contract(None, ZkVerifierContract);
         let client = ZkVerifierContractClient::new(env, &contract_id);
