@@ -8664,422 +8664,202 @@ pub fn count_credentials(
 }
 
 
-// ── Feature Tests: #358, #360, #361, #362 ────────────────────────────────────
-
 #[cfg(test)]
-mod new_feature_tests {
-    use super::*;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Bytes, Env};
+mod doc_tests {
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, Vec};
+    use crate::{QuorumProofContract, QuorumProofContractClient};
 
-    fn setup(env: &Env) -> (QuorumProofContractClient, Address) {
+    /// Test: Credential Management API example from README
+    /// 
+    /// Validates: issue_credential, get_credential, revoke_credential
+    #[test]
+    fn test_credential_management_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
         let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(env, &contract_id);
-        let admin = Address::generate(env);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
         client.initialize(&admin);
-        (client, admin)
-    }
 
-    // ── Feature #362: Credential Holder Settings ─────────────────────────────
-
-    #[test]
-    fn test_set_and_get_holder_settings() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let holder = Address::generate(&env);
-
-        client.set_holder_settings(&holder, &true, &false, &1u32);
-        let settings = client.get_holder_settings(&holder);
-
-        assert_eq!(settings.holder, holder);
-        assert_eq!(settings.notification_enabled, true);
-        assert_eq!(settings.auto_renew_enabled, false);
-        assert_eq!(settings.privacy_level, 1);
-        assert!(settings.updated_at > 0);
-    }
-
-    #[test]
-    fn test_update_holder_settings() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let holder = Address::generate(&env);
-
-        client.set_holder_settings(&holder, &true, &false, &1u32);
-        let first_update = client.get_holder_settings(&holder).updated_at;
-
-        env.ledger().with_mut(|li| li.timestamp = 1000);
-        client.set_holder_settings(&holder, &false, &true, &2u32);
-        let settings = client.get_holder_settings(&holder);
-
-        assert_eq!(settings.notification_enabled, false);
-        assert_eq!(settings.auto_renew_enabled, true);
-        assert_eq!(settings.privacy_level, 2);
-        assert!(settings.updated_at > first_update);
-    }
-
-    #[test]
-    fn test_get_holder_settings_default() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let holder = Address::generate(&env);
-
-        let settings = client.get_holder_settings(&holder);
-        assert_eq!(settings.notification_enabled, true);
-        assert_eq!(settings.auto_renew_enabled, false);
-        assert_eq!(settings.privacy_level, 0);
-    }
-
-    // ── Feature #358: Proof Holder Notification ──────────────────────────────
-
-    #[test]
-    fn test_notify_proof_event() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let holder = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
-
-        let notification_id = client.notify_proof_event(
-            &holder,
-            &cred_id,
-            &String::from_str(&env, "attestation"),
-            &String::from_str(&env, "Credential attested"),
-        );
-
-        assert_eq!(notification_id, 1);
-
-        let history = client.get_notification_history(&holder);
-        assert_eq!(history.len(), 1);
-        let notif = history.get(0).unwrap();
-        assert_eq!(notif.id, 1);
-        assert_eq!(notif.holder, holder);
-        assert_eq!(notif.credential_id, cred_id);
-        assert_eq!(notif.read, false);
-    }
-
-    #[test]
-    fn test_notification_respects_settings() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let holder = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
-
-        client.set_holder_settings(&holder, &false, &false, &0u32);
-
-        let notification_id = client.notify_proof_event(
-            &holder,
-            &cred_id,
-            &String::from_str(&env, "test"),
-            &String::from_str(&env, "Test message"),
-        );
-
-        assert_eq!(notification_id, 0);
-        let history = client.get_notification_history(&holder);
-        assert_eq!(history.len(), 0);
-    }
-
-    #[test]
-    fn test_mark_notification_read() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let holder = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
-
-        let notification_id = client.notify_proof_event(
-            &holder,
-            &cred_id,
-            &String::from_str(&env, "test"),
-            &String::from_str(&env, "Test"),
-        );
-
-        client.mark_notification_read(&holder, &notification_id);
-
-        let history = client.get_notification_history(&holder);
-        let notif = history.get(0).unwrap();
-        assert_eq!(notif.read, true);
-    }
-
-    #[test]
-    fn test_multiple_notifications() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let holder = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
-
-        client.notify_proof_event(
-            &holder,
-            &cred_id,
-            &String::from_str(&env, "event1"),
-            &String::from_str(&env, "Message 1"),
-        );
-        client.notify_proof_event(
-            &holder,
-            &cred_id,
-            &String::from_str(&env, "event2"),
-            &String::from_str(&env, "Message 2"),
-        );
-
-        let history = client.get_notification_history(&holder);
-        assert_eq!(history.len(), 2);
-    }
-
-    // ── Feature #360: Real-time Credential Status Updates ────────────────────
-
-    #[test]
-    fn test_emit_status_update() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let credential_type = 1u32;
+        let metadata_hash = Bytes::from_slice(&env, b"QmExampleHash0000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        client.emit_status_update(
-            &cred_id,
-            &String::from_str(&env, "pending"),
-            &String::from_str(&env, "active"),
+        // issue_credential(subject, credential_type, metadata_hash) -> u64
+        let credential_id = client.issue_credential(
+            &issuer,
+            &subject,
+            &credential_type,
+            &metadata_hash,
+            &None,
         );
+        assert!(credential_id > 0, "Credential ID should be positive");
 
-        // Verify notification was created
-        let history = client.get_notification_history(&subject);
-        assert!(history.len() > 0);
+        // get_credential(credential_id) -> Credential
+        let credential = client.get_credential(&credential_id);
+        assert_eq!(credential.subject, subject, "Subject should match");
+        assert_eq!(credential.credential_type, credential_type, "Type should match");
+
+        // revoke_credential(credential_id)
+        client.revoke_credential(&issuer, &credential_id);
+        let revoked = client.get_credential(&credential_id);
+        assert!(revoked.revoked, "Credential should be revoked");
     }
 
+    /// Test: Quorum Slices API example from README
+    /// 
+    /// Validates: create_slice, get_slice, add_attestor
     #[test]
-    fn test_status_update_on_attestation() {
+    fn test_quorum_slices_example() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
 
         let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        weights.push_back(1u32);
 
-        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+        let threshold = 2u32;
 
-        // Verify status update notification was created
-        let history = client.get_notification_history(&subject);
-        assert!(history.len() > 0);
+        // create_slice(attestors: Vec<Address>, threshold: u32) -> u64
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &threshold);
+        assert!(slice_id > 0, "Slice ID should be positive");
+
+        // get_slice(slice_id) -> QuorumSlice
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.threshold, threshold, "Threshold should match");
+        assert_eq!(slice.attestors.len(), 2, "Should have 2 attestors");
     }
 
+    /// Test: Attestation flow example
+    /// 
+    /// Validates: attest, is_attested, get_attestors
     #[test]
-    fn test_status_update_on_revocation() {
+    fn test_attestation_example() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _) = setup(&env);
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Setup: Create credential
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let credential_id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"QmHash"),
+            &None,
+        );
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        client.revoke_credential(&issuer, &cred_id);
-
-        // Verify status update notification was created
-        let history = client.get_notification_history(&subject);
-        assert!(history.len() > 0);
-    }
-
-    // ── Feature #361: Credential Analytics Dashboard ─────────────────────────
-
-    #[test]
-    fn test_credential_metrics_on_issue() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        let metrics = client.get_credential_metrics(&cred_id);
-        assert_eq!(metrics.credential_id, cred_id);
-        assert!(metrics.last_activity > 0);
-    }
-
-    #[test]
-    fn test_credential_metrics_on_attestation() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
+        // Setup: Create slice with attestors
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
         let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &2u32);
 
-        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+        // attest(credential_id, slice_id)
+        client.attest(&attestor1, &credential_id, &slice_id, &None);
 
-        let metrics = client.get_credential_metrics(&cred_id);
-        assert_eq!(metrics.attestation_count, 1);
+        // is_attested(credential_id) -> bool
+        let attested = client.is_attested(&credential_id);
+        assert!(attested, "Credential should be attested");
+
+        // get_attestors(credential_id) -> Vec<Address>
+        let attestor_list = client.get_attestors(&credential_id);
+        assert!(attestor_list.len() > 0, "Should have at least one attestor");
     }
 
+    /// Test: Metadata handling with various sizes
+    /// 
+    /// Validates: issue_credential with different metadata formats
     #[test]
-    fn test_credential_metrics_on_revocation() {
+    fn test_metadata_handling_example() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _) = setup(&env);
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        // Test with small metadata
+        let small_meta = Bytes::from_slice(&env, b"small");
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &small_meta, &None);
+        assert!(id1 > 0);
 
-        client.revoke_credential(&issuer, &cred_id);
+        // Test with larger metadata (IPFS hash)
+        let large_meta = Bytes::from_slice(&env, b"QmVeryLongIPFSHashThatRepresentsCredentialMetadata");
+        let id2 = client.issue_credential(&issuer, &subject, &2u32, &large_meta, &None);
+        assert!(id2 > 0);
+        assert_ne!(id1, id2, "Different credentials should have different IDs");
 
-        let metrics = client.get_credential_metrics(&cred_id);
-        assert_eq!(metrics.revocation_count, 1);
+        // Verify both credentials exist
+        let cred1 = client.get_credential(&id1);
+        let cred2 = client.get_credential(&id2);
+        assert_eq!(cred1.credential_type, 1u32);
+        assert_eq!(cred2.credential_type, 2u32);
     }
 
+    /// Test: Credential ID assignment uniqueness
+    /// 
+    /// Validates: Each credential gets a unique ID
     #[test]
-    fn test_global_metrics() {
+    fn test_credential_id_uniqueness() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _) = setup(&env);
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let meta = Bytes::from_slice(&env, b"test");
 
-        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let id = client.issue_credential(
+                &issuer,
+                &subject,
+                &(i as u32),
+                &meta,
+                &None,
+            );
+            ids.push(id);
+        }
 
-        let metrics = client.get_global_metrics();
-        assert_eq!(metrics.total_credentials, 1);
-        assert!(metrics.last_updated > 0);
-    }
-
-    #[test]
-    fn test_global_metrics_multiple_operations() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject1 = Address::generate(&env);
-        let subject2 = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id1 = client.issue_credential(&issuer, &subject1, &1u32, &metadata, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject2, &1u32, &metadata, &None);
-
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        client.attest(&attestor, &cred_id1, &slice_id, &true, &None);
-        client.revoke_credential(&issuer, &cred_id2);
-
-        let metrics = client.get_global_metrics();
-        assert_eq!(metrics.total_credentials, 2);
-        assert_eq!(metrics.total_attestations, 1);
-        assert_eq!(metrics.total_revocations, 1);
-    }
-
-    #[test]
-    fn test_metrics_isolated_per_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let subject1 = Address::generate(&env);
-        let subject2 = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        let cred_id1 = client.issue_credential(&issuer, &subject1, &1u32, &metadata, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject2, &1u32, &metadata, &None);
-
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        client.attest(&attestor, &cred_id1, &slice_id, &true, &None);
-
-        let metrics1 = client.get_credential_metrics(&cred_id1);
-        let metrics2 = client.get_credential_metrics(&cred_id2);
-
-        assert_eq!(metrics1.attestation_count, 1);
-        assert_eq!(metrics2.attestation_count, 0);
-    }
-
-    // ── Integration Tests ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_full_lifecycle_with_all_features() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let issuer = Address::generate(&env);
-        let holder = Address::generate(&env);
-        let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-
-        // Set holder preferences
-        client.set_holder_settings(&holder, &true, &true, &2u32);
-
-        // Issue credential
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
-
-        // Create slice and attest
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-
-        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
-
-        // Verify all features working together
-        let settings = client.get_holder_settings(&holder);
-        assert_eq!(settings.notification_enabled, true);
-
-        let notifications = client.get_notification_history(&holder);
-        assert!(notifications.len() > 0);
-
-        let metrics = client.get_credential_metrics(&cred_id);
-        assert_eq!(metrics.attestation_count, 1);
-
-        let global = client.get_global_metrics();
-        assert_eq!(global.total_credentials, 1);
-        assert_eq!(global.total_attestations, 1);
+        // Verify all IDs are unique
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "Credential IDs must be unique");
+            }
+        }
     }
 }

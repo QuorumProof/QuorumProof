@@ -1,0 +1,77 @@
+name: Code Coverage
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/coverage.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'frontend/**'
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+      
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      
+      - name: Run tests with coverage
+        working-directory: frontend
+        run: npm run test:coverage
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./frontend/coverage/lcov.info
+          flags: frontend
+          name: frontend-coverage
+          fail_ci_if_error: false
+      
+      - name: Comment PR with coverage
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const coverage = JSON.parse(fs.readFileSync('./frontend/coverage/coverage-final.json', 'utf8'));
+            const total = coverage.total;
+            
+            const comment = `## 📊 Code Coverage Report
+            
+            | Metric | Coverage |
+            |--------|----------|
+            | Lines | ${total.lines.pct.toFixed(2)}% |
+            | Functions | ${total.functions.pct.toFixed(2)}% |
+            | Branches | ${total.branches.pct.toFixed(2)}% |
+            | Statements | ${total.statements.pct.toFixed(2)}% |
+            
+            [View detailed report](https://codecov.io/gh/${{ github.repository }}/pull/${{ github.event.number }})`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+      
+      - name: Archive coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: frontend/coverage/lcov-report
+          retention-days: 30
