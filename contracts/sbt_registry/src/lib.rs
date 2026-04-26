@@ -39,6 +39,18 @@ pub enum DataKey {
     AuditTrail(u64),
     AuditTrailCount,
     NotificationHistory(Address),
+    ReputationConfig,
+}
+
+/// Weights used to compute a holder's reputation score.
+/// score = tokens_held * token_weight + notifications * activity_weight
+#[contracttype]
+#[derive(Clone)]
+pub struct ReputationConfig {
+    /// Points awarded per SBT currently held.
+    pub token_weight: u32,
+    /// Points awarded per notification history entry (activity signal).
+    pub activity_weight: u32,
 }
 
 /// A single on-chain notification entry stored per holder.
@@ -746,6 +758,32 @@ impl SbtRegistryContract {
     /// Get the total count of audit trail entries.
     pub fn get_audit_trail_count(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64)
+    }
+
+    /// Admin-only: set the weights used by get_holder_reputation.
+    pub fn set_reputation_config(env: Env, admin: Address, token_weight: u32, activity_weight: u32) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+        env.storage().instance().set(&DataKey::ReputationConfig, &ReputationConfig { token_weight, activity_weight });
+    }
+
+    /// Return the reputation score for a holder.
+    /// score = tokens_held * token_weight + activity_events * activity_weight
+    /// Defaults: token_weight = 10, activity_weight = 1.
+    pub fn get_holder_reputation(env: Env, holder: Address) -> u32 {
+        let cfg: ReputationConfig = env.storage().instance()
+            .get(&DataKey::ReputationConfig)
+            .unwrap_or(ReputationConfig { token_weight: 10, activity_weight: 1 });
+        let tokens = env.storage().persistent()
+            .get::<DataKey, Vec<u64>>(&DataKey::OwnerTokens(holder.clone()))
+            .unwrap_or(Vec::new(&env))
+            .len();
+        let activity = env.storage().persistent()
+            .get::<DataKey, Vec<NotificationEntry>>(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
+            .len();
+        tokens * cfg.token_weight + activity * cfg.activity_weight
     }
 
     /// Append a notification entry to the holder's on-chain history.
@@ -1762,5 +1800,82 @@ mod tests {
         let (_, topics, _) = mint_event.unwrap();
         let emitted_id = u64::from_val(&env, &topics.get(1).unwrap());
         assert_eq!(emitted_id, token_id);
+    }
+
+    // ── Reputation tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reputation_zero_for_new_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let holder = Address::generate(&env);
+        assert_eq!(client.get_holder_reputation(&holder), 0);
+    }
+
+    #[test]
+    fn test_reputation_default_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.mint(&owner, &cred_id, &uri);
+
+        // 1 token * 10 + 1 activity (mint notification) * 1 = 11
+        assert_eq!(client.get_holder_reputation(&owner), 11);
+    }
+
+    #[test]
+    fn test_reputation_configurable_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.set_reputation_config(&admin, &5u32, &2u32);
+        client.mint(&owner, &cred_id, &uri);
+
+        // 1 token * 5 + 1 activity * 2 = 7
+        assert_eq!(client.get_holder_reputation(&owner), 7);
+    }
+
+    #[test]
+    fn test_reputation_increases_with_activity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.set_reputation_config(&admin, &10u32, &1u32);
+
+        let t1 = client.mint(&owner, &cred_id1, &uri);
+        let score_after_one = client.get_holder_reputation(&owner);
+
+        client.mint(&owner, &cred_id2, &uri);
+        let score_after_two = client.get_holder_reputation(&owner);
+
+        client.burn(&owner, &t1);
+        let score_after_burn = client.get_holder_reputation(&owner);
+
+        // After 1 mint: 1*10 + 1*1 = 11
+        assert_eq!(score_after_one, 11);
+        // After 2 mints: 2*10 + 2*1 = 22
+        assert_eq!(score_after_two, 22);
+        // After burn: 1 token left, 3 activity entries (mint, mint, burn) = 1*10 + 3*1 = 13
+        assert_eq!(score_after_burn, 13);
     }
 }
