@@ -398,10 +398,14 @@ pub enum DataKey {
     NotificationHistory(Address),
     /// Stores attestation metadata keyed by (credential_id, attestor)
     AttestationMetadata(u64, Address),
-    /// Issue #377: Attestation verification cache keyed by (credential_id, slice_id)
-    AttestationVerificationCache(u64, u64),
-    /// Issue #380: Transfer restrictions per credential type
-    TransferRestriction(u32),
+    /// Stores grace period (in seconds) for credential expiry per credential type
+    GracePeriod(u32),
+    /// Stores the number of attestations a holder has received
+    HolderAttestationCount(Address),
+    /// Stores the whitelist of holders allowed by an issuer
+    HolderWhitelist(Address, Address),
+    /// Stores all holders whitelisted by an issuer
+    IssuerWhitelist(Address),
 }
 
 #[contracttype]
@@ -2012,6 +2016,11 @@ impl QuorumProofContract {
         }
         assert!(found, "attestor not in slice");
 
+        // Check if attestor is suspended
+        if Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
+            panic!("attestor is suspended");
+        }
+
         // Check for fork before allowing attestation
         if Self::detect_fork(&env, credential_id, slice_id, &attestor, attestation_value) {
             // Store fork information
@@ -2119,6 +2128,19 @@ impl QuorumProofContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         Self::record_holder_activity(&env, credential.subject.clone(), ActivityType::CredentialAttested, credential_id, attestor.clone(), Some(slice_id));
 
+        // Increment holder attestation counter (Issue #371)
+        let holder_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::HolderAttestationCount(credential.subject.clone()))
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::HolderAttestationCount(credential.subject.clone()), &(holder_count + 1));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Notify the credential holder
         let notification = HolderNotification {
             credential_id,
@@ -2155,6 +2177,187 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::AttestorCount(address))
             .unwrap_or(0u64)
+    }
+
+    // ── Issue #371: Credential Holder Attestation Counter ──────────────────
+
+    /// Get the total number of attestations a credential holder has received.
+    pub fn get_holder_attestation_count(env: Env, holder: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::HolderAttestationCount(holder))
+            .unwrap_or(0u64)
+    }
+
+    // ── Issue #370: Credential Expiry Renewal with Grace Period ────────────
+
+    /// Set the grace period (in seconds) for a credential type.
+    /// Grace period allows renewal after expiry before full revocation.
+    pub fn set_grace_period(env: Env, admin: Address, credential_type: u32, grace_period_seconds: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+        assert!(admin == stored_admin, "only admin can set grace period");
+        
+        env.storage()
+            .instance()
+            .set(&DataKey::GracePeriod(credential_type as u32), &grace_period_seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the grace period for a credential type.
+    pub fn get_grace_period(env: Env, credential_type: u32) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::GracePeriod(credential_type))
+            .unwrap_or(0u64)
+    }
+
+    /// Check if a credential is expired, considering grace period.
+    /// Returns false during grace period, true only after grace period ends.
+    pub fn is_expired(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        
+        if let Some(expires_at) = credential.expires_at {
+            let now = env.ledger().timestamp();
+            if now >= expires_at {
+                let grace_period = env.storage()
+                    .instance()
+                    .get::<DataKey, u64>(&DataKey::GracePeriod(credential.credential_type))
+                    .unwrap_or(0u64);
+                let grace_end = expires_at + grace_period;
+                return now >= grace_end;
+            }
+        }
+        false
+    }
+
+    /// Renew a credential during its grace period.
+    /// Panics if credential is not in grace period or if not authorized.
+    pub fn renew_credential_with_grace(env: Env, issuer: Address, credential_id: u64, new_expires_at: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        
+        assert!(credential.issuer == issuer, "only issuer can renew credential");
+        assert!(!credential.revoked, "cannot renew revoked credential");
+        
+        if let Some(expires_at) = credential.expires_at {
+            let now = env.ledger().timestamp();
+            assert!(now >= expires_at, "credential not yet expired");
+            
+            let grace_period = env.storage()
+                .instance()
+                .get::<DataKey, u64>(&DataKey::GracePeriod(credential.credential_type))
+                .unwrap_or(0u64);
+            let grace_end = expires_at + grace_period;
+            assert!(now < grace_end, "grace period has ended, cannot renew");
+        }
+        
+        credential.expires_at = Some(new_expires_at);
+        credential.version += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        
+        let event_data = RenewalEventData {
+            credential_id,
+            issuer: issuer.clone(),
+            new_expires_at,
+        };
+        let topic = String::from_str(&env, TOPIC_RENEWAL);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    // ── Issue #372: Credential Holder Whitelist ──────────────────────────
+
+    /// Add a holder to an issuer's whitelist.
+    pub fn add_holder_to_whitelist(env: Env, issuer: Address, holder: Address) {
+        issuer.require_auth();
+        Self::require_valid_address(&env, &holder);
+        
+        env.storage()
+            .instance()
+            .set(&DataKey::HolderWhitelist(issuer.clone(), holder.clone()), &true);
+        
+        let mut whitelist: Vec<Address> = env.storage()
+            .instance()
+            .get(&DataKey::IssuerWhitelist(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        
+        let mut already_exists = false;
+        for addr in whitelist.iter() {
+            if addr == holder {
+                already_exists = true;
+                break;
+            }
+        }
+        
+        if !already_exists {
+            whitelist.push_back(holder);
+            env.storage()
+                .instance()
+                .set(&DataKey::IssuerWhitelist(issuer), &whitelist);
+        }
+        
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check if a holder is whitelisted by an issuer.
+    pub fn is_holder_whitelisted(env: Env, issuer: Address, holder: Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::HolderWhitelist(issuer, holder))
+            .unwrap_or(false)
+    }
+
+    /// Remove a holder from an issuer's whitelist.
+    pub fn remove_holder_from_whitelist(env: Env, issuer: Address, holder: Address) {
+        issuer.require_auth();
+        
+        env.storage()
+            .instance()
+            .remove(&DataKey::HolderWhitelist(issuer.clone(), holder.clone()));
+        
+        let mut whitelist: Vec<Address> = env.storage()
+            .instance()
+            .get(&DataKey::IssuerWhitelist(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        
+        let mut new_whitelist = Vec::new(&env);
+        for addr in whitelist.iter() {
+            if addr != holder {
+                new_whitelist.push_back(addr);
+            }
+        }
+        
+        env.storage()
+            .instance()
+            .set(&DataKey::IssuerWhitelist(issuer), &new_whitelist);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Stub for multisig approval check.
@@ -3865,7 +4068,301 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
+
+    // ── Feature #373: Slice Member Suspension ──────────────────────────────────
+
+    /// Suspend an attestor in a slice. Only the slice creator may call this.
+    ///
+    /// # Parameters
+    /// - `creator`: The slice creator; must authorize this call.
+    /// - `slice_id`: The ID of the slice.
+    /// - `attestor`: The attestor to suspend.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::SliceNotFound` if the slice does not exist.
+    /// Panics if the caller is not the slice creator.
+    /// Panics if the attestor is not in the slice.
+    pub fn suspend_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
+        creator.require_auth();
+        Self::require_not_paused(&env);
+        
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        
+        assert!(slice.creator == creator, "only slice creator can suspend attestors");
+        
+        let mut found = false;
+        for a in slice.attestors.iter() {
+            if a == attestor {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "attestor not in slice");
+        
+        env.storage()
+            .instance()
+            .set(&DataKey::SuspendedAttestor(slice_id, attestor.clone()), &true);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check if an attestor is suspended in a slice.
+    ///
+    /// # Parameters
+    /// - `slice_id`: The ID of the slice.
+    /// - `attestor`: The attestor to check.
+    ///
+    /// # Returns
+    /// true if the attestor is suspended, false otherwise.
+    pub fn is_attestor_suspended(env: Env, slice_id: u64, attestor: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::SuspendedAttestor(slice_id, attestor))
+            .unwrap_or(false)
+    }
+
+    /// Resume a suspended attestor in a slice. Only the slice creator may call this.
+    ///
+    /// # Parameters
+    /// - `creator`: The slice creator; must authorize this call.
+    /// - `slice_id`: The ID of the slice.
+    /// - `attestor`: The attestor to resume.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::SliceNotFound` if the slice does not exist.
+    /// Panics if the caller is not the slice creator.
+    pub fn resume_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
+        creator.require_auth();
+        Self::require_not_paused(&env);
+        
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        
+        assert!(slice.creator == creator, "only slice creator can resume attestors");
+        
+        env.storage()
+            .instance()
+            .remove(&DataKey::SuspendedAttestor(slice_id, attestor));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ── Feature #374: Slice Member Communication Channel ──────────────────────────
+
+    /// Send a message to slice members. Only slice members may call this.
+    ///
+    /// # Parameters
+    /// - `sender`: The sender address; must authorize this call and be in the slice.
+    /// - `slice_id`: The ID of the slice.
+    /// - `content`: The message content.
+    /// - `expires_at`: Unix timestamp when the message expires.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::SliceNotFound` if the slice does not exist.
+    /// Panics if the sender is not in the slice.
+    pub fn send_slice_message(env: Env, sender: Address, slice_id: u64, content: soroban_sdk::String, expires_at: u64) {
+        sender.require_auth();
+        Self::require_not_paused(&env);
+        
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        
+        let mut found = false;
+        for a in slice.attestors.iter() {
+            if a == sender {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "sender not in slice");
+        
+        let message = SliceMessage {
+            sender: sender.clone(),
+            content,
+            sent_at: env.ledger().timestamp(),
+            expires_at,
+        };
+        
+        let mut messages: Vec<SliceMessage> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SliceMessages(slice_id))
+            .unwrap_or(Vec::new(&env));
+        messages.push_back(message);
+        env.storage()
+            .instance()
+            .set(&DataKey::SliceMessages(slice_id), &messages);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get all non-expired messages for a slice.
+    ///
+    /// # Parameters
+    /// - `slice_id`: The ID of the slice.
+    ///
+    /// # Returns
+    /// Vec of non-expired SliceMessage records.
+    pub fn get_slice_messages(env: Env, slice_id: u64) -> Vec<SliceMessage> {
+        let messages: Vec<SliceMessage> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SliceMessages(slice_id))
+            .unwrap_or(Vec::new(&env));
+        
+        let now = env.ledger().timestamp();
+        let mut active: Vec<SliceMessage> = Vec::new(&env);
+        for msg in messages.iter() {
+            if msg.expires_at > now {
+                active.push_back(msg);
+            }
+        }
+        active
+    }
+
+    // ── Feature #375: Attestation with Evidence Attachment ──────────────────────
+
+    /// Attach evidence to an attestation. Only the attestor may call this.
+    ///
+    /// # Parameters
+    /// - `attestor`: The attestor; must authorize this call.
+    /// - `credential_id`: The ID of the credential.
+    /// - `evidence_hash`: Hash of the evidence document.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the evidence_hash is empty.
+    pub fn attach_evidence(env: Env, attestor: Address, credential_id: u64, evidence_hash: soroban_sdk::Bytes) {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+        
+        if !env.storage().instance().has(&DataKey::Credential(credential_id)) {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+        
+        assert!(!evidence_hash.is_empty(), "evidence_hash cannot be empty");
+        
+        let evidence = AttestationEvidence {
+            evidence_hash,
+            attached_at: env.ledger().timestamp(),
+        };
+        
+        env.storage()
+            .instance()
+            .set(&DataKey::AttestationEvidence(credential_id, attestor), &evidence);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get evidence attached to an attestation.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential.
+    /// - `attestor`: The attestor address.
+    ///
+    /// # Returns
+    /// Option containing the AttestationEvidence if it exists.
+    pub fn get_attestation_evidence(env: Env, credential_id: u64, attestor: Address) -> Option<AttestationEvidence> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AttestationEvidence(credential_id, attestor))
+    }
+
+    // ── Feature #376: Attestation Conditional Logic ──────────────────────────────
+
+    /// Set conditions for attestation validity on a credential.
+    ///
+    /// # Parameters
+    /// - `issuer`: The credential issuer; must authorize this call.
+    /// - `credential_id`: The ID of the credential.
+    /// - `conditions`: Vec of AttestationCondition records.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the caller is not the issuer.
+    pub fn set_attestation_conditions(env: Env, issuer: Address, credential_id: u64, conditions: Vec<AttestationCondition>) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        
+        assert!(credential.issuer == issuer, "only the credential issuer can set conditions");
+        
+        env.storage()
+            .instance()
+            .set(&DataKey::AttestationConditions(credential_id), &conditions);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get conditions for attestation validity on a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential.
+    ///
+    /// # Returns
+    /// Vec of AttestationCondition records, or empty Vec if none set.
+    pub fn get_attestation_conditions(env: Env, credential_id: u64) -> Vec<AttestationCondition> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AttestationConditions(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Evaluate if attestation conditions are met for a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential.
+    /// - `condition_values`: Vec of condition values to evaluate against.
+    ///
+    /// # Returns
+    /// true if all conditions are met, false otherwise.
+    pub fn evaluate_attestation_conditions(env: Env, credential_id: u64, condition_values: Vec<soroban_sdk::Bytes>) -> bool {
+        let conditions: Vec<AttestationCondition> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestationConditions(credential_id))
+            .unwrap_or(Vec::new(&env));
+        
+        if conditions.is_empty() {
+            return true;
+        }
+        
+        if condition_values.len() != conditions.len() {
+            return false;
+        }
+        
+        for i in 0..conditions.len() {
+            let condition = conditions.get(i).unwrap();
+            let value = condition_values.get(i).unwrap();
+            if condition.value != value {
+                return false;
+            }
+        }
+        
+        true
+    }
 }
+
 
 #[cfg(test)]
 mod tests {

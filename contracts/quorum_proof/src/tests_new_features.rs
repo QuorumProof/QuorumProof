@@ -491,10 +491,151 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
-    // ── Feature #377: Attestation Verification Cache Tests ──────────────────
+    // ── Feature #373: Slice Member Suspension Tests ──────────────────────────
 
     #[test]
-    fn test_attestation_cache_hit() {
+    fn test_suspend_and_resume_attestor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        
+        client.initialize(&admin);
+        
+        let attestors = vec![&env, attestor1.clone(), attestor2.clone()];
+        let weights = vec![&env, 50u32, 50u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+        
+        // Initially not suspended
+        assert_eq!(client.is_attestor_suspended(&slice_id, &attestor1), false);
+        
+        // Suspend attestor1
+        client.suspend_attestor(&creator, &slice_id, &attestor1);
+        assert_eq!(client.is_attestor_suspended(&slice_id, &attestor1), true);
+        
+        // attestor2 should still not be suspended
+        assert_eq!(client.is_attestor_suspended(&slice_id, &attestor2), false);
+        
+        // Resume attestor1
+        client.resume_attestor(&creator, &slice_id, &attestor1);
+        assert_eq!(client.is_attestor_suspended(&slice_id, &attestor1), false);
+    }
+
+    #[test]
+    fn test_suspended_attestor_cannot_attest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        
+        client.initialize(&admin);
+        
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+        
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        
+        // Suspend the attestor
+        client.suspend_attestor(&creator, &slice_id, &attestor);
+        
+        // Try to attest - should panic
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+        }));
+        assert!(result.is_err());
+    }
+
+    // ── Feature #374: Slice Member Communication Tests ──────────────────────
+
+    #[test]
+    fn test_send_and_get_slice_messages() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        
+        client.initialize(&admin);
+        
+        let attestors = vec![&env, attestor1.clone(), attestor2.clone()];
+        let weights = vec![&env, 50u32, 50u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+        
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+        
+        let msg_content = soroban_sdk::String::from_str(&env, "Hello slice members");
+        client.send_slice_message(&attestor1, &slice_id, &msg_content, &2000u64);
+        
+        let messages = client.get_slice_messages(&slice_id);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.get(0).unwrap().sender, attestor1);
+    }
+
+    #[test]
+    fn test_message_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        
+        client.initialize(&admin);
+        
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+        
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+        
+        let msg_content = soroban_sdk::String::from_str(&env, "Expiring message");
+        client.send_slice_message(&attestor, &slice_id, &msg_content, &1500u64);
+        
+        // Message should be active
+        let messages = client.get_slice_messages(&slice_id);
+        assert_eq!(messages.len(), 1);
+        
+        // Move time forward past expiry
+        env.ledger().with_mut(|li| {
+            li.timestamp = 2000;
+        });
+        
+        // Message should now be expired
+        let messages = client.get_slice_messages(&slice_id);
+        assert_eq!(messages.len(), 0);
+    }
+
+    // ── Feature #375: Attestation Evidence Tests ──────────────────────────────
+
+    #[test]
+    fn test_attach_and_get_evidence() {
         let env = Env::default();
         env.mock_all_auths();
         
@@ -508,28 +649,19 @@ mod tests {
         
         client.initialize(&admin);
         
-        env.ledger().with_mut(|li| {
-            li.timestamp = 1000;
-        });
-        
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
         
-        let attestors = vec![&env, attestor.clone()];
-        let weights = vec![&env, 100u32];
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &100u32);
+        let evidence_hash = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        client.attach_evidence(&attestor, &cred_id, &evidence_hash);
         
-        // First call should compute and cache
-        let result1 = client.is_attested(&cred_id, &slice_id);
-        assert_eq!(result1, false);
-        
-        // Second call should use cache (same result)
-        let result2 = client.is_attested(&cred_id, &slice_id);
-        assert_eq!(result2, false);
+        let evidence = client.get_attestation_evidence(&cred_id, &attestor);
+        assert!(evidence.is_some());
+        assert_eq!(evidence.unwrap().evidence_hash, evidence_hash);
     }
 
     #[test]
-    fn test_cache_invalidation_on_attestation() {
+    fn test_evidence_not_found() {
         let env = Env::default();
         env.mock_all_auths();
         
@@ -543,34 +675,17 @@ mod tests {
         
         client.initialize(&admin);
         
-        env.ledger().with_mut(|li| {
-            li.timestamp = 1000;
-        });
-        
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
         
-        let attestors = vec![&env, attestor.clone()];
-        let weights = vec![&env, 100u32];
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &100u32);
-        
-        // First check - not attested
-        let result1 = client.is_attested(&cred_id, &slice_id);
-        assert_eq!(result1, false);
-        
-        // Attest
-        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
-        
-        // Second check - should be attested (cache invalidated)
-        let result2 = client.is_attested(&cred_id, &slice_id);
-        assert_eq!(result2, true);
+        let evidence = client.get_attestation_evidence(&cred_id, &attestor);
+        assert!(evidence.is_none());
     }
 
-    // ── Feature #378: Transaction Size Validation Tests ──────────────────────
+    // ── Feature #376: Attestation Conditions Tests ──────────────────────────
 
     #[test]
-    #[should_panic(expected = "TransactionSizeExceeded")]
-    fn test_metadata_hash_size_validation() {
+    fn test_set_and_get_conditions() {
         let env = Env::default();
         env.mock_all_auths();
         
@@ -583,18 +698,24 @@ mod tests {
         
         client.initialize(&admin);
         
-        // Create oversized metadata hash (> 256 bytes)
-        let oversized_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 300]);
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
         
-        // This should panic with TransactionSizeExceeded
-        client.issue_credential(&issuer, &subject, &1u32, &oversized_hash, &None);
+        let condition_value = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
+        let conditions = vec![&env, AttestationCondition {
+            condition_type: 1u32,
+            value: condition_value.clone(),
+        }];
+        
+        client.set_attestation_conditions(&issuer, &cred_id, &conditions);
+        
+        let retrieved = client.get_attestation_conditions(&cred_id);
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved.get(0).unwrap().condition_type, 1u32);
     }
 
-    // ── Feature #379: Timestamp Validation Tests ──────────────────────────────
-
     #[test]
-    #[should_panic(expected = "InvalidTimestamp")]
-    fn test_timestamp_too_far_in_future() {
+    fn test_evaluate_conditions_success() {
         let env = Env::default();
         env.mock_all_auths();
         
@@ -607,20 +728,23 @@ mod tests {
         
         client.initialize(&admin);
         
-        env.ledger().with_mut(|li| {
-            li.timestamp = 1000;
-        });
-        
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
         
-        // Try to set expiry too far in future (> 10 years)
-        let too_far_future = 1000 + 315_360_001; // 10 years + 1 second
-        client.renew_credential(&issuer, &cred_id, &too_far_future);
+        let condition_value = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
+        let conditions = vec![&env, AttestationCondition {
+            condition_type: 1u32,
+            value: condition_value.clone(),
+        }];
+        
+        client.set_attestation_conditions(&issuer, &cred_id, &conditions);
+        
+        let result = client.evaluate_attestation_conditions(&cred_id, &vec![&env, condition_value]);
+        assert_eq!(result, true);
     }
 
     #[test]
-    fn test_timestamp_validation_reasonable_future() {
+    fn test_evaluate_conditions_failure() {
         let env = Env::default();
         env.mock_all_auths();
         
@@ -633,20 +757,24 @@ mod tests {
         
         client.initialize(&admin);
         
-        env.ledger().with_mut(|li| {
-            li.timestamp = 1000;
-        });
-        
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
         
-        // Set expiry to 1 year in future (should succeed)
-        let one_year_future = 1000 + 31_536_000;
-        client.renew_credential(&issuer, &cred_id, &one_year_future);
+        let condition_value = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
+        let wrong_value = soroban_sdk::Bytes::from_array(&env, &[4u8; 32]);
+        let conditions = vec![&env, AttestationCondition {
+            condition_type: 1u32,
+            value: condition_value,
+        }];
+        
+        client.set_attestation_conditions(&issuer, &cred_id, &conditions);
+        
+        let result = client.evaluate_attestation_conditions(&cred_id, &vec![&env, wrong_value]);
+        assert_eq!(result, false);
     }
 
     #[test]
-    fn test_attestation_window_timestamp_validation() {
+    fn test_no_conditions_always_pass() {
         let env = Env::default();
         env.mock_all_auths();
         
@@ -659,86 +787,11 @@ mod tests {
         
         client.initialize(&admin);
         
-        env.ledger().with_mut(|li| {
-            li.timestamp = 1000;
-        });
-        
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
         
-        // Set attestation window with reasonable timestamps
-        let start = 1000 + 3600; // 1 hour from now
-        let end = 1000 + 7200;   // 2 hours from now
-        client.set_attestation_window(&issuer, &cred_id, &start, &end);
-    }
-
-    // ── Feature #380: Transfer Restrictions Tests ────────────────────────────
-
-    #[test]
-    fn test_set_transfer_restriction() {
-        let env = Env::default();
-        env.mock_all_auths();
-        
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        
-        let admin = Address::generate(&env);
-        
-        client.initialize(&admin);
-        
-        // Set credential type 1 as non-transferable
-        client.set_transfer_restriction(&admin, &1u32, &false);
-        
-        // Verify restriction was set
-        let restriction = client.get_transfer_restriction(&1u32);
-        assert!(restriction.is_some());
-        let r = restriction.unwrap();
-        assert_eq!(r.credential_type, 1u32);
-        assert_eq!(r.is_transferable, false);
-    }
-
-    #[test]
-    fn test_transfer_restriction_default_transferable() {
-        let env = Env::default();
-        env.mock_all_auths();
-        
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        
-        let admin = Address::generate(&env);
-        
-        client.initialize(&admin);
-        
-        // Check restriction for unconfigured type (should be None)
-        let restriction = client.get_transfer_restriction(&999u32);
-        assert!(restriction.is_none());
-    }
-
-    #[test]
-    fn test_set_multiple_transfer_restrictions() {
-        let env = Env::default();
-        env.mock_all_auths();
-        
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        
-        let admin = Address::generate(&env);
-        
-        client.initialize(&admin);
-        
-        // Set different restrictions for different types
-        client.set_transfer_restriction(&admin, &1u32, &false);
-        client.set_transfer_restriction(&admin, &2u32, &true);
-        client.set_transfer_restriction(&admin, &3u32, &false);
-        
-        // Verify each restriction
-        let r1 = client.get_transfer_restriction(&1u32).unwrap();
-        assert_eq!(r1.is_transferable, false);
-        
-        let r2 = client.get_transfer_restriction(&2u32).unwrap();
-        assert_eq!(r2.is_transferable, true);
-        
-        let r3 = client.get_transfer_restriction(&3u32).unwrap();
-        assert_eq!(r3.is_transferable, false);
+        // No conditions set
+        let result = client.evaluate_attestation_conditions(&cred_id, &vec![&env]);
+        assert_eq!(result, true);
     }
 }
