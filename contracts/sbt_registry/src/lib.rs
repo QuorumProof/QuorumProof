@@ -38,6 +38,19 @@ pub enum DataKey {
     RecoveryThreshold,
     AuditTrail(u64),
     AuditTrailCount,
+    NotificationHistory(Address),
+}
+
+/// A single on-chain notification entry stored per holder.
+#[contracttype]
+#[derive(Clone)]
+pub struct NotificationEntry {
+    /// The SBT token ID this notification relates to.
+    pub token_id: u64,
+    /// Event kind: "mint", "burn", "recover", "transfer"
+    pub event: Symbol,
+    /// Ledger timestamp when the event occurred.
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -167,11 +180,10 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("mint").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token);
+        env.events().publish(topics, (owner.clone(), credential_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("mint"));
         token_id
     }
-
-    /// Retrieve a soulbound token by its ID.
     ///
     /// # Parameters
     /// - `token_id`: The ID of the token to retrieve.
@@ -278,7 +290,8 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token.id);
+        env.events().publish(topics, (owner.clone(), token.credential_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("burn"));
         token.credential_id
     }
 
@@ -312,11 +325,13 @@ impl SbtRegistryContract {
             owner_tokens.remove(pos as u32);
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
-        env.storage().instance().remove(&DataKey::OwnerCredential(owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(owner.clone(), token.credential_id));
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
-        env.events().publish(topics, token_id);
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner.clone(), token_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("burn"));
     }
 
     /// Recover an SBT to a new owner during credential recovery.
@@ -341,7 +356,7 @@ impl SbtRegistryContract {
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
 
         // Add to new owner
         token.owner = new_owner.clone();
@@ -357,7 +372,8 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recover").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token.credential_id);
+        env.events().publish(topics, (old_owner, new_owner.clone()));
+        Self::record_notification(&env, new_owner, token_id, symbol_short!("recover"));
     }
 
     /// Admin-only: transfer an SBT to a new owner (e.g. after credential re-issuance).
@@ -380,7 +396,7 @@ impl SbtRegistryContract {
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
 
         // Add to new owner
         token.owner = new_owner.clone();
@@ -391,7 +407,13 @@ impl SbtRegistryContract {
             .unwrap_or(Vec::new(&env));
         new_tokens.push_back(token_id);
         env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
-        env.storage().instance().set(&DataKey::OwnerCredential(new_owner, token.credential_id), &token_id);
+        env.storage().instance().set(&DataKey::OwnerCredential(new_owner.clone(), token.credential_id), &token_id);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("transfer").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (old_owner, new_owner.clone()));
+        Self::record_notification(&env, new_owner, token_id, symbol_short!("transfer"));
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
@@ -724,6 +746,28 @@ impl SbtRegistryContract {
     /// Get the total count of audit trail entries.
     pub fn get_audit_trail_count(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64)
+    }
+
+    /// Append a notification entry to the holder's on-chain history.
+    fn record_notification(env: &Env, holder: Address, token_id: u64, event: Symbol) {
+        let key = DataKey::NotificationHistory(holder);
+        let mut history: Vec<NotificationEntry> = env.storage().persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+        history.push_back(NotificationEntry {
+            token_id,
+            event,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&key, &history);
+        env.storage().persistent().extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return all notification entries recorded for a holder.
+    pub fn get_notifications(env: Env, holder: Address) -> Vec<NotificationEntry> {
+        env.storage().persistent()
+            .get(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
@@ -1577,5 +1621,146 @@ mod tests {
 
         let unauthorized = Address::generate(&env);
         client.finalize_recovery(&unauthorized, &recovery_id); // Should panic
+    }
+
+    // ── Notification history tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_mint_records_notification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let notifs = client.get_notifications(&owner);
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs.get(0).unwrap().token_id, token_id);
+        assert_eq!(notifs.get(0).unwrap().event, symbol_short!("mint"));
+    }
+
+    #[test]
+    fn test_burn_records_notification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn(&owner, &token_id);
+
+        let notifs = client.get_notifications(&owner);
+        // mint + burn = 2 entries
+        assert_eq!(notifs.len(), 2);
+        assert_eq!(notifs.get(1).unwrap().event, symbol_short!("burn"));
+    }
+
+    #[test]
+    fn test_burn_sbt_records_notification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt(&owner, &token_id);
+
+        let notifs = client.get_notifications(&owner);
+        assert_eq!(notifs.len(), 2);
+        assert_eq!(notifs.get(1).unwrap().event, symbol_short!("burn"));
+    }
+
+    #[test]
+    fn test_admin_transfer_records_notification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let old_owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &old_owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&old_owner, &cred_id, &uri);
+
+        client.admin_transfer_sbt(&admin, &token_id, &new_owner);
+
+        // new_owner gets a "transfer" notification
+        let notifs = client.get_notifications(&new_owner);
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs.get(0).unwrap().token_id, token_id);
+        assert_eq!(notifs.get(0).unwrap().event, symbol_short!("transfer"));
+    }
+
+    #[test]
+    fn test_recover_sbt_records_notification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let old_owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &old_owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&old_owner, &cred_id, &uri);
+
+        // recover_sbt is callable by admin
+        let _ = qp_id;
+        client.recover_sbt(&admin, &token_id, &new_owner);
+
+        let notifs = client.get_notifications(&new_owner);
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs.get(0).unwrap().token_id, token_id);
+        assert_eq!(notifs.get(0).unwrap().event, symbol_short!("recover"));
+    }
+
+    #[test]
+    fn test_get_notifications_empty_for_new_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let holder = Address::generate(&env);
+        assert_eq!(client.get_notifications(&holder).len(), 0);
+    }
+
+    #[test]
+    fn test_mint_emits_structured_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let events = env.events().all();
+        let mint_event = events.iter().find(|(_, topics, _)| {
+            topics.get(0)
+                .and_then(|v| soroban_sdk::Symbol::try_from_val(&env, &v).ok())
+                .map(|s| s == symbol_short!("mint"))
+                .unwrap_or(false)
+        });
+        assert!(mint_event.is_some(), "mint event not emitted");
+        // Second topic is the token_id
+        let (_, topics, _) = mint_event.unwrap();
+        let emitted_id = u64::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(emitted_id, token_id);
     }
 }
