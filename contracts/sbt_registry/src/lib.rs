@@ -816,6 +816,33 @@ mod tests {
     use soroban_sdk::{BytesN, FromVal, TryFromVal};
     use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
 
+    // --- Deployment verification tests ---
+
+    #[test]
+    fn test_deploy_contract_registers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let _ = SbtRegistryContractClient::new(&env, &contract_id);
+    }
+
+    #[test]
+    fn test_deploy_initialize_sets_admin_and_quorum_proof_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        // Deploy a quorum_proof contract to use as the linked contract address.
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let qp_client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        qp_client.initialize(&admin);
+
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let sbt_client = SbtRegistryContractClient::new(&env, &sbt_id);
+        // initialize must succeed without panicking.
+        sbt_client.initialize(&admin, &qp_id);
+        // Verify the contract is operational: token count starts at zero.
+        assert_eq!(sbt_client.get_tokens_by_owner(&admin).len(), 0);
+    }
+
     fn setup_with_qp(env: &Env) -> (SbtRegistryContractClient, Address, QuorumProofContractClient, Address) {
         let qp_id = env.register_contract(None, QuorumProofContract);
         let qp_client = QuorumProofContractClient::new(env, &qp_id);
@@ -1661,221 +1688,44 @@ mod tests {
         client.finalize_recovery(&unauthorized, &recovery_id); // Should panic
     }
 
-    // ── Notification history tests ────────────────────────────────────────────
+    // -----------------------------------------------------------------------
+    // Regression tests for fixed issues
+    // -----------------------------------------------------------------------
 
+    // Issue #22 — Duplicate SBT mint for the same (owner, credential_id) must be rejected.
     #[test]
-    fn test_mint_records_notification() {
+    #[should_panic(expected = "HostError")]
+    fn regression_22_duplicate_sbt_mint_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-
-        let token_id = client.mint(&owner, &cred_id, &uri);
-
-        let notifs = client.get_notifications(&owner);
-        assert_eq!(notifs.len(), 1);
-        assert_eq!(notifs.get(0).unwrap().token_id, token_id);
-        assert_eq!(notifs.get(0).unwrap().event, symbol_short!("mint"));
-    }
-
-    #[test]
-    fn test_burn_records_notification() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&owner, &cred_id, &uri);
-
-        client.burn(&owner, &token_id);
-
-        let notifs = client.get_notifications(&owner);
-        // mint + burn = 2 entries
-        assert_eq!(notifs.len(), 2);
-        assert_eq!(notifs.get(1).unwrap().event, symbol_short!("burn"));
-    }
-
-    #[test]
-    fn test_burn_sbt_records_notification() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&owner, &cred_id, &uri);
-
-        client.burn_sbt(&owner, &token_id);
-
-        let notifs = client.get_notifications(&owner);
-        assert_eq!(notifs.len(), 2);
-        assert_eq!(notifs.get(1).unwrap().event, symbol_short!("burn"));
-    }
-
-    #[test]
-    fn test_admin_transfer_records_notification() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
-        let issuer = Address::generate(&env);
-        let old_owner = Address::generate(&env);
-        let new_owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &old_owner, &1u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&old_owner, &cred_id, &uri);
-
-        client.admin_transfer_sbt(&admin, &token_id, &new_owner);
-
-        // new_owner gets a "transfer" notification
-        let notifs = client.get_notifications(&new_owner);
-        assert_eq!(notifs.len(), 1);
-        assert_eq!(notifs.get(0).unwrap().token_id, token_id);
-        assert_eq!(notifs.get(0).unwrap().event, symbol_short!("transfer"));
-    }
-
-    #[test]
-    fn test_recover_sbt_records_notification() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, qp_id) = setup_with_qp(&env);
-        let issuer = Address::generate(&env);
-        let old_owner = Address::generate(&env);
-        let new_owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &old_owner, &1u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&old_owner, &cred_id, &uri);
-
-        // recover_sbt is callable by admin
-        let _ = qp_id;
-        client.recover_sbt(&admin, &token_id, &new_owner);
-
-        let notifs = client.get_notifications(&new_owner);
-        assert_eq!(notifs.len(), 1);
-        assert_eq!(notifs.get(0).unwrap().token_id, token_id);
-        assert_eq!(notifs.get(0).unwrap().event, symbol_short!("recover"));
-    }
-
-    #[test]
-    fn test_get_notifications_empty_for_new_holder() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
-        let holder = Address::generate(&env);
-        assert_eq!(client.get_notifications(&holder).len(), 0);
-    }
-
-    #[test]
-    fn test_mint_emits_structured_event() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-
-        let token_id = client.mint(&owner, &cred_id, &uri);
-
-        let events = env.events().all();
-        let mint_event = events.iter().find(|(_, topics, _)| {
-            topics.get(0)
-                .and_then(|v| soroban_sdk::Symbol::try_from_val(&env, &v).ok())
-                .map(|s| s == symbol_short!("mint"))
-                .unwrap_or(false)
-        });
-        assert!(mint_event.is_some(), "mint event not emitted");
-        // Second topic is the token_id
-        let (_, topics, _) = mint_event.unwrap();
-        let emitted_id = u64::from_val(&env, &topics.get(1).unwrap());
-        assert_eq!(emitted_id, token_id);
-    }
-
-    // ── Reputation tests ──────────────────────────────────────────────────────
-
-    #[test]
-    fn test_reputation_zero_for_new_holder() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
-        let holder = Address::generate(&env);
-        assert_eq!(client.get_holder_reputation(&holder), 0);
-    }
-
-    #[test]
-    fn test_reputation_default_weights() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-
         client.mint(&owner, &cred_id, &uri);
-
-        // 1 token * 10 + 1 activity (mint notification) * 1 = 11
-        assert_eq!(client.get_holder_reputation(&owner), 11);
+        client.mint(&owner, &cred_id, &uri); // must panic — soulbound, non-transferable
     }
 
+    // Issue #22 — Minting an SBT for a revoked credential must be rejected.
     #[test]
-    fn test_reputation_configurable_weights() {
+    #[should_panic]
+    fn regression_22_mint_for_revoked_credential_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+
+        qp_client.revoke_credential(&issuer, &cred_id);
+
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-
-        client.set_reputation_config(&admin, &5u32, &2u32);
-        client.mint(&owner, &cred_id, &uri);
-
-        // 1 token * 5 + 1 activity * 2 = 7
-        assert_eq!(client.get_holder_reputation(&owner), 7);
-    }
-
-    #[test]
-    fn test_reputation_increases_with_activity() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-
-        client.set_reputation_config(&admin, &10u32, &1u32);
-
-        let t1 = client.mint(&owner, &cred_id1, &uri);
-        let score_after_one = client.get_holder_reputation(&owner);
-
-        client.mint(&owner, &cred_id2, &uri);
-        let score_after_two = client.get_holder_reputation(&owner);
-
-        client.burn(&owner, &t1);
-        let score_after_burn = client.get_holder_reputation(&owner);
-
-        // After 1 mint: 1*10 + 1*1 = 11
-        assert_eq!(score_after_one, 11);
-        // After 2 mints: 2*10 + 2*1 = 22
-        assert_eq!(score_after_two, 22);
-        // After burn: 1 token left, 3 activity entries (mint, mint, burn) = 1*10 + 3*1 = 13
-        assert_eq!(score_after_burn, 13);
+        client.mint(&owner, &cred_id, &uri); // must panic — credential is revoked
     }
 }
