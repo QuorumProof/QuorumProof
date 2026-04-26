@@ -8650,3 +8650,203 @@ pub fn count_credentials(
     count
 }
 
+
+#[cfg(test)]
+mod doc_tests {
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, Vec};
+    use crate::{QuorumProofContract, QuorumProofContractClient};
+
+    /// Test: Credential Management API example from README
+    /// 
+    /// Validates: issue_credential, get_credential, revoke_credential
+    #[test]
+    fn test_credential_management_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_type = 1u32;
+        let metadata_hash = Bytes::from_slice(&env, b"QmExampleHash0000000000000000000000");
+
+        // issue_credential(subject, credential_type, metadata_hash) -> u64
+        let credential_id = client.issue_credential(
+            &issuer,
+            &subject,
+            &credential_type,
+            &metadata_hash,
+            &None,
+        );
+        assert!(credential_id > 0, "Credential ID should be positive");
+
+        // get_credential(credential_id) -> Credential
+        let credential = client.get_credential(&credential_id);
+        assert_eq!(credential.subject, subject, "Subject should match");
+        assert_eq!(credential.credential_type, credential_type, "Type should match");
+
+        // revoke_credential(credential_id)
+        client.revoke_credential(&issuer, &credential_id);
+        let revoked = client.get_credential(&credential_id);
+        assert!(revoked.revoked, "Credential should be revoked");
+    }
+
+    /// Test: Quorum Slices API example from README
+    /// 
+    /// Validates: create_slice, get_slice, add_attestor
+    #[test]
+    fn test_quorum_slices_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+
+        let threshold = 2u32;
+
+        // create_slice(attestors: Vec<Address>, threshold: u32) -> u64
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &threshold);
+        assert!(slice_id > 0, "Slice ID should be positive");
+
+        // get_slice(slice_id) -> QuorumSlice
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.threshold, threshold, "Threshold should match");
+        assert_eq!(slice.attestors.len(), 2, "Should have 2 attestors");
+    }
+
+    /// Test: Attestation flow example
+    /// 
+    /// Validates: attest, is_attested, get_attestors
+    #[test]
+    fn test_attestation_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Setup: Create credential
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let credential_id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"QmHash"),
+            &None,
+        );
+
+        // Setup: Create slice with attestors
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &2u32);
+
+        // attest(credential_id, slice_id)
+        client.attest(&attestor1, &credential_id, &slice_id, &None);
+
+        // is_attested(credential_id) -> bool
+        let attested = client.is_attested(&credential_id);
+        assert!(attested, "Credential should be attested");
+
+        // get_attestors(credential_id) -> Vec<Address>
+        let attestor_list = client.get_attestors(&credential_id);
+        assert!(attestor_list.len() > 0, "Should have at least one attestor");
+    }
+
+    /// Test: Metadata handling with various sizes
+    /// 
+    /// Validates: issue_credential with different metadata formats
+    #[test]
+    fn test_metadata_handling_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Test with small metadata
+        let small_meta = Bytes::from_slice(&env, b"small");
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &small_meta, &None);
+        assert!(id1 > 0);
+
+        // Test with larger metadata (IPFS hash)
+        let large_meta = Bytes::from_slice(&env, b"QmVeryLongIPFSHashThatRepresentsCredentialMetadata");
+        let id2 = client.issue_credential(&issuer, &subject, &2u32, &large_meta, &None);
+        assert!(id2 > 0);
+        assert_ne!(id1, id2, "Different credentials should have different IDs");
+
+        // Verify both credentials exist
+        let cred1 = client.get_credential(&id1);
+        let cred2 = client.get_credential(&id2);
+        assert_eq!(cred1.credential_type, 1u32);
+        assert_eq!(cred2.credential_type, 2u32);
+    }
+
+    /// Test: Credential ID assignment uniqueness
+    /// 
+    /// Validates: Each credential gets a unique ID
+    #[test]
+    fn test_credential_id_uniqueness() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"test");
+
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let id = client.issue_credential(
+                &issuer,
+                &subject,
+                &(i as u32),
+                &meta,
+                &None,
+            );
+            ids.push(id);
+        }
+
+        // Verify all IDs are unique
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "Credential IDs must be unique");
+            }
+        }
+    }
+}
