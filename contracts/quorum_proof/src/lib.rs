@@ -26,6 +26,12 @@ const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
 const MAX_BATCH_SIZE: u32 = 50;
 const MAX_MULTISIG_SIGNERS: u32 = 10;
+// Issue #378: Transaction size validation
+const MAX_METADATA_SIZE: u32 = 256;
+const MAX_METADATA_BYTES_SIZE: u32 = 1024;
+// Issue #379: Timestamp validation
+const MAX_TIMESTAMP_FUTURE_OFFSET: u64 = 315_360_000; // ~10 years in seconds
+const MAX_TIMESTAMP_PAST_OFFSET: u64 = 315_360_000; // ~10 years in seconds
 
 #[contracttype]
 #[derive(Clone)]
@@ -241,6 +247,26 @@ pub struct VetoRecord {
     pub vetoed_at: u64,
 }
 
+/// Issue #377: Cache for attestation verification results
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationVerificationCache {
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub is_attested: bool,
+    pub cached_at: u64,
+    pub expires_at: u64,
+}
+
+/// Issue #380: Transfer restrictions per credential type
+#[contracttype]
+#[derive(Clone)]
+pub struct TransferRestriction {
+    pub credential_type: u32,
+    pub is_transferable: bool,
+    pub configured_at: u64,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -290,6 +316,12 @@ pub enum ContractError {
     ForkAlreadyResolved = 35,
     /// No fork exists for this slice
     NoForkExists = 36,
+    /// Issue #378: Transaction size validation
+    TransactionSizeExceeded = 37,
+    /// Issue #379: Timestamp validation
+    InvalidTimestamp = 38,
+    /// Issue #380: Transfer restrictions
+    TransferNotAllowed = 39,
 }
 
 #[contracttype]
@@ -719,6 +751,10 @@ impl QuorumProofContract {
     pub fn set_attestation_expiry(env: Env, issuer: Address, credential_id: u64, expires_at: u64) {
         issuer.require_auth();
         Self::require_not_paused(&env);
+        
+        // Issue #379: Validate timestamp
+        Self::validate_timestamp(&env, expires_at);
+        
         let credential: Credential = env
             .storage()
             .instance()
@@ -765,6 +801,11 @@ impl QuorumProofContract {
     pub fn set_attestation_window(env: Env, issuer: Address, credential_id: u64, start: u64, end: u64) {
         issuer.require_auth();
         Self::require_not_paused(&env);
+        
+        // Issue #379: Validate timestamps
+        Self::validate_timestamp(&env, start);
+        Self::validate_timestamp(&env, end);
+        
         let credential: Credential = env
             .storage()
             .instance()
@@ -792,6 +833,111 @@ impl QuorumProofContract {
     fn validate_array_bounds(len: u32, min: u32, max: u32, name: &'static str) {
         assert!(len >= min, "{} must have at least {} element(s)", name, min);
         assert!(len <= max, "{} must have at most {} element(s)", name, max);
+    }
+
+    /// Issue #378: Validate transaction size constraints
+    fn validate_transaction_size(env: &Env, metadata_hash: &soroban_sdk::Bytes) {
+        if metadata_hash.len() > MAX_METADATA_SIZE as usize {
+            panic_with_error!(env, ContractError::TransactionSizeExceeded);
+        }
+    }
+
+    /// Issue #378: Validate metadata bytes size
+    fn validate_metadata_bytes_size(env: &Env, metadata: &Option<soroban_sdk::Bytes>) {
+        if let Some(m) = metadata {
+            if m.len() > MAX_METADATA_BYTES_SIZE as usize {
+                panic_with_error!(env, ContractError::TransactionSizeExceeded);
+            }
+        }
+    }
+
+    /// Issue #379: Validate timestamp is within reasonable range
+    fn validate_timestamp(env: &Env, timestamp: u64) {
+        let now = env.ledger().timestamp();
+        let min_allowed = now.saturating_sub(MAX_TIMESTAMP_PAST_OFFSET);
+        let max_allowed = now.saturating_add(MAX_TIMESTAMP_FUTURE_OFFSET);
+        
+        if timestamp < min_allowed || timestamp > max_allowed {
+            panic_with_error!(env, ContractError::InvalidTimestamp);
+        }
+    }
+
+    /// Issue #379: Validate optional timestamp if present
+    fn validate_optional_timestamp(env: &Env, timestamp: &Option<u64>) {
+        if let Some(ts) = timestamp {
+            Self::validate_timestamp(env, *ts);
+        }
+    }
+
+    /// Issue #377: Get cached attestation verification result
+    fn get_verification_cache(env: &Env, credential_id: u64, slice_id: u64) -> Option<AttestationVerificationCache> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AttestationVerificationCache(credential_id, slice_id))
+    }
+
+    /// Issue #377: Set attestation verification cache
+    fn set_verification_cache(env: &Env, credential_id: u64, slice_id: u64, is_attested: bool, cache_ttl: u64) {
+        let now = env.ledger().timestamp();
+        let cache = AttestationVerificationCache {
+            credential_id,
+            slice_id,
+            is_attested,
+            cached_at: now,
+            expires_at: now.saturating_add(cache_ttl),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::AttestationVerificationCache(credential_id, slice_id), &cache);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #377: Invalidate attestation verification cache
+    fn invalidate_verification_cache(env: &Env, credential_id: u64, slice_id: u64) {
+        env.storage()
+            .instance()
+            .remove(&DataKey::AttestationVerificationCache(credential_id, slice_id));
+    }
+
+    /// Issue #380: Set transfer restriction for a credential type
+    pub fn set_transfer_restriction(env: Env, admin: Address, credential_type: u32, is_transferable: bool) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        
+        let restriction = TransferRestriction {
+            credential_type,
+            is_transferable,
+            configured_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::TransferRestriction(credential_type), &restriction);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #380: Get transfer restriction for a credential type
+    pub fn get_transfer_restriction(env: Env, credential_type: u32) -> Option<TransferRestriction> {
+        env.storage()
+            .instance()
+            .get(&DataKey::TransferRestriction(credential_type))
+    }
+
+    /// Issue #380: Check if a credential type is transferable
+    fn is_credential_type_transferable(env: &Env, credential_type: u32) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey, TransferRestriction>(&DataKey::TransferRestriction(credential_type))
+            .map(|r| r.is_transferable)
+            .unwrap_or(true) // Default to transferable if not configured
     }
 
     /// Check if a parent type exists in storage.
@@ -873,6 +1019,12 @@ impl QuorumProofContract {
         );
         assert!(!metadata_hash.is_empty(), "metadata_hash cannot be empty");
         Self::precondition(&env, metadata_hash.len() <= 256);
+        
+        // Issue #378: Validate transaction size
+        Self::validate_transaction_size(&env, &metadata_hash);
+        
+        // Issue #379: Validate timestamp
+        Self::validate_optional_timestamp(&env, &expires_at);
         
         // Check for duplicate credential of same type from same issuer to same subject
         let duplicate_key = DataKey::SubjectIssuerType(subject.clone(), issuer.clone(), credential_type);
@@ -1292,6 +1444,10 @@ impl QuorumProofContract {
     pub fn renew_credential(env: Env, issuer: Address, credential_id: u64, new_expires_at: u64) {
         issuer.require_auth();
         Self::require_not_paused(&env);
+        
+        // Issue #379: Validate timestamp
+        Self::validate_timestamp(&env, new_expires_at);
+        
         let mut credential: Credential = env.storage().instance()
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
@@ -1829,6 +1985,10 @@ impl QuorumProofContract {
         // Pre-condition: credential_id and slice_id must be non-zero
         Self::precondition(&env, credential_id > 0);
         Self::precondition(&env, slice_id > 0);
+        
+        // Issue #379: Validate timestamp
+        Self::validate_optional_timestamp(&env, &expires_at);
+        
         let credential: Credential = env
             .storage()
             .instance()
@@ -1935,6 +2095,10 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        
+        // Issue #377: Invalidate verification cache when attestation changes
+        Self::invalidate_verification_cache(&env, credential_id, slice_id);
+        
         let event_data = AttestationEventData {
             attestor: attestor.clone(),
             credential_id,
@@ -2217,6 +2381,14 @@ impl QuorumProofContract {
     /// Check if a credential is attested by a quorum slice.
     /// Panics with ContractError::CredentialNotFound if missing.
     pub fn is_attested(env: Env, credential_id: u64, slice_id: u64) -> bool {
+        // Issue #377: Check verification cache first
+        if let Some(cache) = Self::get_verification_cache(&env, credential_id, slice_id) {
+            let now = env.ledger().timestamp();
+            if now < cache.expires_at {
+                return cache.is_attested;
+            }
+        }
+        
         let credential: Credential = env
             .storage()
             .instance()
@@ -2300,6 +2472,9 @@ impl QuorumProofContract {
                 .instance()
                 .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         }
+        
+        // Issue #377: Cache the verification result for 60 seconds
+        Self::set_verification_cache(&env, credential_id, slice_id, is_attested_result, 60);
         
         is_attested_result
     }
