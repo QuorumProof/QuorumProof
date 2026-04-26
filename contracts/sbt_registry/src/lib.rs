@@ -1728,4 +1728,81 @@ mod tests {
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         client.mint(&owner, &cred_id, &uri); // must panic — credential is revoked
     }
+
+    // ── Reputation tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reputation_zero_for_new_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let holder = Address::generate(&env);
+        assert_eq!(client.get_holder_reputation(&holder), 0);
+    }
+
+    #[test]
+    fn test_reputation_default_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.mint(&owner, &cred_id, &uri);
+
+        // 1 token * 10 + 1 activity (mint notification) * 1 = 11
+        assert_eq!(client.get_holder_reputation(&owner), 11);
+    }
+
+    #[test]
+    fn test_reputation_configurable_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.set_reputation_config(&admin, &5u32, &2u32);
+        client.mint(&owner, &cred_id, &uri);
+
+        // 1 token * 5 + 1 activity * 2 = 7
+        assert_eq!(client.get_holder_reputation(&owner), 7);
+    }
+
+    #[test]
+    fn test_reputation_increases_with_activity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.set_reputation_config(&admin, &10u32, &1u32);
+
+        let t1 = client.mint(&owner, &cred_id1, &uri);
+        let score_after_one = client.get_holder_reputation(&owner);
+
+        client.mint(&owner, &cred_id2, &uri);
+        let score_after_two = client.get_holder_reputation(&owner);
+
+        client.burn(&owner, &t1);
+        let score_after_burn = client.get_holder_reputation(&owner);
+
+        // After 1 mint: 1*10 + 1*1 = 11
+        assert_eq!(score_after_one, 11);
+        // After 2 mints: 2*10 + 2*1 = 22
+        assert_eq!(score_after_two, 22);
+        // After burn: 1 token left, 3 activity entries (mint, mint, burn) = 1*10 + 3*1 = 13
+        assert_eq!(score_after_burn, 13);
+    }
 }
