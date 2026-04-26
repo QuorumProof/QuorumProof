@@ -4,3 +4,7 @@ frontend/node_modules/
 .agent/
 .agents/
 issue.md
+coverage/
+frontend/coverage/
+*.lcov
+.nyc_output/
