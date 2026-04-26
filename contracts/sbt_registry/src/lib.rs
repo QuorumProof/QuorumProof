@@ -38,6 +38,31 @@ pub enum DataKey {
     RecoveryThreshold,
     AuditTrail(u64),
     AuditTrailCount,
+    NotificationHistory(Address),
+    ReputationConfig,
+}
+
+/// Weights used to compute a holder's reputation score.
+/// score = tokens_held * token_weight + notifications * activity_weight
+#[contracttype]
+#[derive(Clone)]
+pub struct ReputationConfig {
+    /// Points awarded per SBT currently held.
+    pub token_weight: u32,
+    /// Points awarded per notification history entry (activity signal).
+    pub activity_weight: u32,
+}
+
+/// A single on-chain notification entry stored per holder.
+#[contracttype]
+#[derive(Clone)]
+pub struct NotificationEntry {
+    /// The SBT token ID this notification relates to.
+    pub token_id: u64,
+    /// Event kind: "mint", "burn", "recover", "transfer"
+    pub event: Symbol,
+    /// Ledger timestamp when the event occurred.
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -167,11 +192,10 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("mint").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token);
+        env.events().publish(topics, (owner.clone(), credential_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("mint"));
         token_id
     }
-
-    /// Retrieve a soulbound token by its ID.
     ///
     /// # Parameters
     /// - `token_id`: The ID of the token to retrieve.
@@ -278,7 +302,8 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token.id);
+        env.events().publish(topics, (owner.clone(), token.credential_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("burn"));
         token.credential_id
     }
 
@@ -312,11 +337,13 @@ impl SbtRegistryContract {
             owner_tokens.remove(pos as u32);
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
-        env.storage().instance().remove(&DataKey::OwnerCredential(owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(owner.clone(), token.credential_id));
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
-        env.events().publish(topics, token_id);
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner.clone(), token_id));
+        Self::record_notification(&env, owner, token_id, symbol_short!("burn"));
     }
 
     /// Recover an SBT to a new owner during credential recovery.
@@ -341,7 +368,7 @@ impl SbtRegistryContract {
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
 
         // Add to new owner
         token.owner = new_owner.clone();
@@ -357,7 +384,8 @@ impl SbtRegistryContract {
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recover").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, token.credential_id);
+        env.events().publish(topics, (old_owner, new_owner.clone()));
+        Self::record_notification(&env, new_owner, token_id, symbol_short!("recover"));
     }
 
     /// Admin-only: transfer an SBT to a new owner (e.g. after credential re-issuance).
@@ -380,7 +408,7 @@ impl SbtRegistryContract {
         }
         env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner, token.credential_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
 
         // Add to new owner
         token.owner = new_owner.clone();
@@ -391,7 +419,13 @@ impl SbtRegistryContract {
             .unwrap_or(Vec::new(&env));
         new_tokens.push_back(token_id);
         env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
-        env.storage().instance().set(&DataKey::OwnerCredential(new_owner, token.credential_id), &token_id);
+        env.storage().instance().set(&DataKey::OwnerCredential(new_owner.clone(), token.credential_id), &token_id);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("transfer").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (old_owner, new_owner.clone()));
+        Self::record_notification(&env, new_owner, token_id, symbol_short!("transfer"));
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
@@ -724,6 +758,54 @@ impl SbtRegistryContract {
     /// Get the total count of audit trail entries.
     pub fn get_audit_trail_count(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64)
+    }
+
+    /// Admin-only: set the weights used by get_holder_reputation.
+    pub fn set_reputation_config(env: Env, admin: Address, token_weight: u32, activity_weight: u32) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+        env.storage().instance().set(&DataKey::ReputationConfig, &ReputationConfig { token_weight, activity_weight });
+    }
+
+    /// Return the reputation score for a holder.
+    /// score = tokens_held * token_weight + activity_events * activity_weight
+    /// Defaults: token_weight = 10, activity_weight = 1.
+    pub fn get_holder_reputation(env: Env, holder: Address) -> u32 {
+        let cfg: ReputationConfig = env.storage().instance()
+            .get(&DataKey::ReputationConfig)
+            .unwrap_or(ReputationConfig { token_weight: 10, activity_weight: 1 });
+        let tokens = env.storage().persistent()
+            .get::<DataKey, Vec<u64>>(&DataKey::OwnerTokens(holder.clone()))
+            .unwrap_or(Vec::new(&env))
+            .len();
+        let activity = env.storage().persistent()
+            .get::<DataKey, Vec<NotificationEntry>>(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
+            .len();
+        tokens * cfg.token_weight + activity * cfg.activity_weight
+    }
+
+    /// Append a notification entry to the holder's on-chain history.
+    fn record_notification(env: &Env, holder: Address, token_id: u64, event: Symbol) {
+        let key = DataKey::NotificationHistory(holder);
+        let mut history: Vec<NotificationEntry> = env.storage().persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+        history.push_back(NotificationEntry {
+            token_id,
+            event,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&key, &history);
+        env.storage().persistent().extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return all notification entries recorded for a holder.
+    pub fn get_notifications(env: Env, holder: Address) -> Vec<NotificationEntry> {
+        env.storage().persistent()
+            .get(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
