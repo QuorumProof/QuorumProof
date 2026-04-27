@@ -11,6 +11,7 @@ const TOPIC_REVOKE: &str = "RevokeCredential";
 const TOPIC_ATTESTATION: &str = "attestation";
 const TOPIC_THRESHOLD_ADJUSTED: &str = "ThresholdAdjusted";
 const TOPIC_METADATA_UPDATED: &str = "MetadataUpdated";
+const TOPIC_DELEGATION: &str = "DelegationCreated";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -79,6 +80,8 @@ pub enum DataKey {
     Paused,
     SubjectIssuerType(Address, Address, u32),
     MetadataVersions(u64),
+    Delegations(u64, Address),
+    DelegationExpiry(u64, Address),
 }
 
 #[contracttype]
@@ -875,7 +878,96 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
-#[cfg(test)]
+    /// Delegate verification rights for a credential to another address.
+    /// Only the credential holder (subject) can call this.
+    pub fn delegate_verification(
+        env: Env,
+        subject: Address,
+        credential_id: u64,
+        delegate_address: Address,
+        expiry: u64,
+    ) {
+        subject.require_auth();
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(
+            credential.subject == subject,
+            "only the credential holder can delegate"
+        );
+        assert!(expiry > env.ledger().timestamp() as u64, "expiry must be in the future");
+        env.storage()
+            .instance()
+            .set(&DataKey::Delegations(credential_id, delegate_address.clone()), &true);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        env.storage()
+            .instance()
+            .set(&DataKey::DelegationExpiry(credential_id, delegate_address.clone()), &expiry);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Revoke a delegation for a credential.
+    /// Only the credential holder (subject) can call this.
+    pub fn revoke_delegation(
+        env: Env,
+        subject: Address,
+        credential_id: u64,
+        delegate_address: Address,
+    ) {
+        subject.require_auth();
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(
+            credential.subject == subject,
+            "only the credential holder can revoke delegation"
+        );
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegations(credential_id, delegate_address.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::DelegationExpiry(credential_id, delegate_address));
+    }
+
+    /// Check if an address is a valid verifier for a credential (either holder or delegated).
+    pub fn is_valid_verifier(
+        env: Env,
+        credential_id: u64,
+        verifier: Address,
+    ) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.subject == verifier {
+            return true;
+        }
+        let has_delegation: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Delegations(credential_id, verifier.clone()))
+            .unwrap_or(false);
+        if !has_delegation {
+            return false;
+        }
+        let expiry: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegationExpiry(credential_id, verifier))
+            .unwrap_or(0u64);
+        env.ledger().timestamp() as u64 < expiry
+    }
+}
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, LedgerInfo};
@@ -2411,5 +2503,65 @@ mod tests {
 
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
         client.update_credential_metadata(&other, &cred_id, &metadata);
+    }
+
+    // Test #442: Credential holder delegation
+    #[test]
+    fn test_delegate_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let expiry = 1000u64;
+        
+        client.delegate_verification(&subject, &cred_id, &delegate, &expiry);
+        assert!(client.is_valid_verifier(&cred_id, &delegate));
+    }
+
+    #[test]
+    fn test_revoke_delegation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let expiry = 1000u64;
+        
+        client.delegate_verification(&subject, &cred_id, &delegate, &expiry);
+        assert!(client.is_valid_verifier(&cred_id, &delegate));
+        
+        client.revoke_delegation(&subject, &cred_id, &delegate);
+        assert!(!client.is_valid_verifier(&cred_id, &delegate));
+    }
+
+    #[test]
+    #[should_panic(expected = "only the credential holder can delegate")]
+    fn test_delegate_verification_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let other = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.delegate_verification(&other, &cred_id, &delegate, &1000u64);
     }
 }
