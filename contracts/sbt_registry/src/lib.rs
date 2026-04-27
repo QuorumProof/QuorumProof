@@ -17,6 +17,7 @@ pub enum ContractError {
     UnauthorizedRecovery = 5,
     InsufficientApprovals = 6,
     InvalidGuardian = 7,
+    NotWhitelisted = 8,
 }
 
 #[contracttype]
@@ -40,6 +41,7 @@ pub enum DataKey {
     AuditTrailCount,
     NotificationHistory(Address),
     ReputationConfig,
+    SbtWhitelist(u64),
 }
 
 /// Weights used to compute a holder's reputation score.
@@ -168,6 +170,13 @@ impl SbtRegistryContract {
             soroban_sdk::vec![&env, credential_id.into_val(&env)],
         );
         assert!(!revoked, "credential is revoked");
+
+        // Check whitelist if enabled for this SBT
+        if let Some(whitelist) = env.storage().persistent().get::<_, Vec<Address>>(&DataKey::SbtWhitelist(credential_id)) {
+            if !whitelist.iter().any(|addr| addr == &owner) {
+                panic_with_error!(&env, ContractError::NotWhitelisted);
+            }
+        }
 
         if env.storage().instance().has(&DataKey::OwnerCredential(owner.clone(), credential_id)) {
             panic_with_error!(&env, ContractError::SoulboundNonTransferable);
@@ -807,6 +816,69 @@ impl SbtRegistryContract {
     pub fn get_notifications(env: Env, holder: Address) -> Vec<NotificationEntry> {
         env.storage().persistent()
             .get(&DataKey::NotificationHistory(holder))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ── SBT Holder Whitelist (Issue #452) ──────────────────────────────────────
+
+    /// Add an address to the whitelist for a specific SBT. Issuer-only.
+    pub fn add_to_sbt_whitelist(env: Env, issuer: Address, sbt_id: u64, address: Address) {
+        issuer.require_auth();
+        let qp_id: Address = env.storage().instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+        
+        // Verify issuer is the credential issuer
+        let token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(sbt_id))
+            .expect("token not found");
+        let cred_issuer: Address = env.invoke_contract(
+            &qp_id,
+            &Symbol::new(&env, "get_credential_issuer"),
+            soroban_sdk::vec![&env, token.credential_id.into_val(&env)],
+        );
+        assert!(issuer == cred_issuer, "not the issuer");
+
+        let mut whitelist: Vec<Address> = env.storage().persistent()
+            .get(&DataKey::SbtWhitelist(sbt_id))
+            .unwrap_or(Vec::new(&env));
+        if !whitelist.iter().any(|a| a == &address) {
+            whitelist.push_back(address);
+            env.storage().persistent().set(&DataKey::SbtWhitelist(sbt_id), &whitelist);
+            env.storage().persistent().extend_ttl(&DataKey::SbtWhitelist(sbt_id), STANDARD_TTL, EXTENDED_TTL);
+        }
+    }
+
+    /// Remove an address from the whitelist for a specific SBT. Issuer-only.
+    pub fn remove_from_sbt_whitelist(env: Env, issuer: Address, sbt_id: u64, address: Address) {
+        issuer.require_auth();
+        let qp_id: Address = env.storage().instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+        
+        let token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(sbt_id))
+            .expect("token not found");
+        let cred_issuer: Address = env.invoke_contract(
+            &qp_id,
+            &Symbol::new(&env, "get_credential_issuer"),
+            soroban_sdk::vec![&env, token.credential_id.into_val(&env)],
+        );
+        assert!(issuer == cred_issuer, "not the issuer");
+
+        let mut whitelist: Vec<Address> = env.storage().persistent()
+            .get(&DataKey::SbtWhitelist(sbt_id))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = whitelist.iter().position(|a| a == &address) {
+            whitelist.remove(pos as u32);
+            env.storage().persistent().set(&DataKey::SbtWhitelist(sbt_id), &whitelist);
+        }
+    }
+
+    /// Get the whitelist for a specific SBT.
+    pub fn get_sbt_whitelist(env: Env, sbt_id: u64) -> Vec<Address> {
+        env.storage().persistent()
+            .get(&DataKey::SbtWhitelist(sbt_id))
             .unwrap_or(Vec::new(&env))
     }
 }
@@ -1806,5 +1878,49 @@ mod tests {
         assert_eq!(score_after_two, 22);
         // After burn: 1 token left, 3 activity entries (mint, mint, burn) = 1*10 + 3*1 = 13
         assert_eq!(score_after_burn, 13);
+    }
+
+    // ── Issue #452: SBT Holder Whitelist ──────────────────────────────────────
+
+    #[test]
+    fn test_whitelist_add_and_get() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let whitelisted = Address::generate(&env);
+        client.add_to_sbt_whitelist(&issuer, &token_id, &whitelisted);
+
+        let whitelist = client.get_sbt_whitelist(&token_id);
+        assert_eq!(whitelist.len(), 1);
+        assert_eq!(whitelist.get(0).unwrap(), &whitelisted);
+    }
+
+    #[test]
+    fn test_whitelist_remove() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let whitelisted = Address::generate(&env);
+        client.add_to_sbt_whitelist(&issuer, &token_id, &whitelisted);
+        client.remove_from_sbt_whitelist(&issuer, &token_id, &whitelisted);
+
+        let whitelist = client.get_sbt_whitelist(&token_id);
+        assert_eq!(whitelist.len(), 0);
     }
 }
