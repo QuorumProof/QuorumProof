@@ -40,11 +40,11 @@ struct Metrics {
 
 /// Resets the budget, runs `f`, then returns consumed CPU + mem.
 fn measure(env: &Env, f: impl FnOnce()) -> Metrics {
-    env.budget().reset_default().unwrap();
+    env.budget().reset_default();
     f();
     Metrics {
-        cpu: env.budget().get_cpu_insns_consumed().unwrap(),
-        mem: env.budget().get_mem_bytes_consumed().unwrap(),
+        cpu: env.budget().cpu_instruction_cost(),
+        mem: env.budget().memory_bytes_cost(),
     }
 }
 
@@ -57,7 +57,7 @@ fn setup_qp(env: &Env) -> (QuorumProofContractClient, Address) {
     (client, admin)
 }
 
-fn setup_sbt(env: &Env, qp_id: &Address) -> (SbtRegistryContractClient, Address) {
+fn setup_sbt<'a>(env: &'a Env, qp_id: &'a Address) -> (SbtRegistryContractClient<'a>, Address) {
     let id = env.register_contract(None, SbtRegistryContract);
     let client = SbtRegistryContractClient::new(env, &id);
     let admin = Address::generate(env);
@@ -132,7 +132,7 @@ fn bench_attest() {
     let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
     let m = measure(&env, || {
-        client.attest(&attestor, &cid, &slice_id, &None);
+        client.attest(&attestor, &cid, &slice_id, &true, &None);
     });
 
     println!("[bench_attest] cpu={} mem={}", m.cpu, m.mem);
@@ -264,7 +264,7 @@ fn bench_attest_scaling() {
         let first_attestor = attestors.get(0).unwrap();
 
         let m = measure(&env, || {
-            client.attest(&first_attestor, &cid, &slice_id, &None);
+            client.attest(&first_attestor, &cid, &slice_id, &true, &None);
         });
 
         println!("[bench_attest_scaling n={}] cpu={} mem={}", n, m.cpu, m.mem);
