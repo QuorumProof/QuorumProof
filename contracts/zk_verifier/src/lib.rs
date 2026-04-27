@@ -3,7 +3,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Str
 
 /// Supported claim types for ZK verification.
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum ClaimType {
     HasDegree,
     HasLicense,
@@ -223,7 +223,7 @@ impl ZkVerifierContract {
         // Copy first 16 bytes of proof, or pad with zeros if shorter
         let proof_len = proof.len().min(16);
         for i in 0..proof_len {
-            key_data[9 + i] = proof.get(i as u32).unwrap();
+            key_data[9 + i as usize] = proof.get(i).unwrap();
         }
         
         Bytes::from_slice(env, &key_data)
@@ -380,7 +380,7 @@ impl ZkVerifierContract {
         assert!(stored_admin == admin, "unauthorized");
 
         let key = DataKey::ProofMetadata(credential_id, claim_type);
-        let mut metadata = env.storage().instance()
+        let mut metadata: ProofMetadata = env.storage().instance()
             .get(&key)
             .expect("proof metadata not found");
         metadata.compressed = false;
