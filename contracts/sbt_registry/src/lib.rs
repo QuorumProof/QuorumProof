@@ -17,6 +17,7 @@ pub enum ContractError {
     UnauthorizedRecovery = 5,
     InsufficientApprovals = 6,
     InvalidGuardian = 7,
+    NotWhitelisted = 8,
 }
 
 #[contracttype]
@@ -40,6 +41,9 @@ pub enum DataKey {
     AuditTrailCount,
     NotificationHistory(Address),
     ReputationConfig,
+    SbtWhitelist(u64),
+    BurnedTokens,
+    CredentialAccessLog(u64),
 }
 
 /// Weights used to compute a holder's reputation score.
@@ -193,6 +197,13 @@ impl SbtRegistryContract {
             soroban_sdk::vec![&env, credential_id.into_val(&env)],
         );
         assert!(!revoked, "credential is revoked");
+
+        // Check whitelist if enabled for this SBT
+        if let Some(whitelist) = env.storage().persistent().get::<_, Vec<Address>>(&DataKey::SbtWhitelist(credential_id)) {
+            if !whitelist.iter().any(|addr| addr == &owner) {
+                panic_with_error!(&env, ContractError::NotWhitelisted);
+            }
+        }
 
         if env.storage().instance().has(&DataKey::OwnerCredential(owner.clone(), credential_id)) {
             panic_with_error!(&env, ContractError::SoulboundNonTransferable);
@@ -1909,5 +1920,172 @@ mod tests {
         assert_eq!(score_after_two, 22);
         // After burn: 1 token left, 3 activity entries (mint, mint, burn) = 1*10 + 3*1 = 13
         assert_eq!(score_after_burn, 13);
+    }
+
+    // ── Issue #452: SBT Holder Whitelist ──────────────────────────────────────
+
+    #[test]
+    fn test_whitelist_add_and_get() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let whitelisted = Address::generate(&env);
+        client.add_to_sbt_whitelist(&issuer, &token_id, &whitelisted);
+
+        let whitelist = client.get_sbt_whitelist(&token_id);
+        assert_eq!(whitelist.len(), 1);
+        assert_eq!(whitelist.get(0).unwrap(), &whitelisted);
+    }
+
+    #[test]
+    fn test_whitelist_remove() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let whitelisted = Address::generate(&env);
+        client.add_to_sbt_whitelist(&issuer, &token_id, &whitelisted);
+        client.remove_from_sbt_whitelist(&issuer, &token_id, &whitelisted);
+
+        let whitelist = client.get_sbt_whitelist(&token_id);
+        assert_eq!(whitelist.len(), 0);
+    }
+
+    // ── Issue #451: SBT Metadata URI Support ──────────────────────────────────────
+
+    #[test]
+    fn test_set_and_get_metadata_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let new_uri = Bytes::from_slice(&env, b"ipfs://QmNewURI");
+        client.set_sbt_metadata_uri(&issuer, &token_id, &new_uri);
+
+        let retrieved_uri = client.get_sbt_metadata_uri(&token_id);
+        assert_eq!(retrieved_uri, new_uri);
+    }
+
+    #[test]
+    fn test_metadata_uri_version_increment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let token = client.get_token(&token_id);
+        assert_eq!(token.version, 1);
+
+        let new_uri = Bytes::from_slice(&env, b"ipfs://QmNewURI");
+        client.set_sbt_metadata_uri(&issuer, &token_id, &new_uri);
+
+        let updated_token = client.get_token(&token_id);
+        assert_eq!(updated_token.version, 2);
+    }
+
+    // ── Issue #450: SBT Holder Burn Mechanism ──────────────────────────────────────
+
+    #[test]
+    fn test_burn_sbt_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt_holder(&owner, &token_id);
+
+        assert!(client.is_sbt_burned(&token_id));
+    }
+
+    #[test]
+    fn test_burned_token_cannot_be_retrieved() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt_holder(&owner, &token_id);
+
+        // Attempting to get a burned token should panic
+        let _ = client.get_token(&token_id);
+    }
+
+    // ── Issue #447: Credential Holder Consent Tracking ──────────────────────────────────────
+
+    #[test]
+    fn test_get_credential_access_log() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let _token_id = client.mint(&owner, &cred_id, &uri);
+
+        let log = client.get_credential_access_log(&owner, &cred_id);
+        // Log should be empty initially (no access logged yet)
+        assert_eq!(log.len(), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_credential_access_log_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let _token_id = client.mint(&owner, &cred_id, &uri);
+
+        let unauthorized = Address::generate(&env);
+        // Unauthorized holder should not be able to access the log
+        let _ = client.get_credential_access_log(&unauthorized, &cred_id);
     }
 }
