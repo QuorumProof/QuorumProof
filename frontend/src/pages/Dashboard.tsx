@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Navbar } from '../components/Navbar';
-import { WalletGate } from '../components/WalletGate';
 import { CredentialCard } from '../components/CredentialCard';
+import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
+import { ExportCredentialsDialog } from '../components/ExportCredentialsDialog';
 import { useWallet } from '../hooks';
 import {
   getCredentialsBySubject,
@@ -15,11 +16,12 @@ import {
 import { type CredCardData } from '../lib/credentialUtils';
 
 export default function Dashboard() {
-  const { address, hasFreighter, isInitializing, connect, disconnect } = useWallet();
+  const { address, disconnect } = useWallet();
   const [cards, setCards] = useState<CredCardData[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [showExportDialog, setShowExportDialog] = useState(false);
 
   const fetchCredentials = useCallback(async (walletAddress: string) => {
     setLoading(true);
@@ -114,47 +116,45 @@ export default function Dashboard() {
             <h1 className="dashboard-title">Credential Dashboard</h1>
             <p className="dashboard-subtitle">Your verifiable credentials on Stellar Soroban</p>
           </div>
-          {address && (
-            <div className="wallet-sim-card">
-              <div className="wallet-sim__label">Connected Address</div>
-              <div className="mono" style={{ fontSize: '12px', wordBreak: 'break-all' }}>
-                {address}
-              </div>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+            {cards.length > 0 && (
               <button
-                className="btn btn--ghost btn--sm"
-                style={{ marginTop: '8px' }}
-                onClick={disconnect}
+                className="btn btn--primary btn--sm"
+                onClick={() => setShowExportDialog(true)}
               >
-                Disconnect
+                📥 Export
               </button>
-            </div>
-          )}
+            )}
+            {address && (
+              <div className="wallet-sim-card">
+                <div className="wallet-sim__label">Connected Address</div>
+                <div className="mono" style={{ fontSize: '12px', wordBreak: 'break-all' }}>
+                  {address}
+                </div>
+                <button
+                  className="btn btn--ghost btn--sm"
+                  style={{ marginTop: '8px' }}
+                  onClick={disconnect}
+                >
+                  Disconnect
+                </button>
+              </div>
+            )}
+          </div>
         </header>
 
         <div className="dashboard-content">
-          {/* Wallet initializing */}
-          {isInitializing && (
-            <div className="loading-state">
-              <div className="spinner" />
-              <p>Checking wallet…</p>
-            </div>
-          )}
-
-          {/* No wallet connected */}
-          {!isInitializing && !address && (
-            <WalletGate hasFreighter={hasFreighter} connect={connect} />
-          )}
-
           {/* Loading credentials */}
-          {address && loading && (
-            <div className="loading-state">
-              <div className="spinner" />
-              <p>Loading your credentials…</p>
+          {loading && (
+            <div className="dashboard-grid">
+              {[1, 2, 3].map((i) => (
+                <CredentialCardSkeleton key={`skeleton-${i}`} />
+              ))}
             </div>
           )}
 
           {/* Top-level fetch error */}
-          {address && !loading && error && (
+          {!loading && error && (
             <div className="error-card">
               <div className="error-card__icon">⚠️</div>
               <div>
@@ -172,12 +172,12 @@ export default function Dashboard() {
           )}
 
           {/* Empty state */}
-          {address && !loading && !error && cards.length === 0 && (
-            <EmptyState address={address} />
+          {!loading && !error && cards.length === 0 && (
+            <EmptyState address={address!} />
           )}
 
           {/* Credential grid */}
-          {address && !loading && !error && cards.length > 0 && (
+          {!loading && !error && cards.length > 0 && (
             <div className="dashboard-grid">
               {cards.map((card: CredCardData) => (
                 <CredentialCard
@@ -207,6 +207,13 @@ export default function Dashboard() {
           </a>
         </div>
       </footer>
+
+      {showExportDialog && (
+        <ExportCredentialsDialog
+          credentials={cards.map(c => c.credential)}
+          onClose={() => setShowExportDialog(false)}
+        />
+      )}
     </>
   );
 }

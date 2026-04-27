@@ -50,6 +50,12 @@ export function AppLayout({ currentPath, walletAddress, onConnectWallet, network
           <a href="/slice/new" className={`px-3 py-2 rounded ${isActive('/slice/new') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
             New Slice
           </a>
+          <a href="/profile" className={`px-3 py-2 rounded ${isActive('/profile') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Profile
+          </a>
+          <a href="/compare" className={`px-3 py-2 rounded ${isActive('/compare') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Compare
+          </a>
         </nav>
 
         {/* Wallet and Network */}

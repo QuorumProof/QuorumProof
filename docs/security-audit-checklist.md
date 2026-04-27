@@ -1,282 +1,320 @@
-# Security Audit Checklist
+# Security Audit Checklist — QuorumProof Contracts
 
-This checklist provides a systematic approach to auditing QuorumProof smart contracts and infrastructure for security vulnerabilities. Use this before each release and when reviewing security-critical changes.
-
-## General Smart Contract Security
-
-### Reentrancy
-- [ ] **No external calls before state updates**: Verify all state changes occur before calling external contracts
-- [ ] **Check-Effects-Interactions pattern**: Validate contract state before making external calls
-- [ ] **No recursive calls**: Ensure functions cannot call themselves directly or indirectly
-- [ ] **Atomic operations**: Multi-step operations are protected by locks or state flags
-- [ ] **Test reentrancy scenarios**: Include tests that attempt reentrancy attacks
-
-**Soroban-specific**: Soroban's synchronous execution model prevents most reentrancy, but verify no cross-contract calls occur during state mutations.
-
-### Integer Overflow/Underflow
-- [ ] **Use safe math**: Leverage Rust's built-in overflow checks (debug mode catches panics)
-- [ ] **Validate arithmetic bounds**: Check inputs before operations that could overflow
-- [ ] **Test boundary conditions**: Include tests for max/min values
-- [ ] **No unchecked arithmetic**: Avoid `wrapping_*` operations without explicit justification
-- [ ] **Timestamp arithmetic**: Verify date calculations don't overflow (use u64 for Unix timestamps)
-
-**Example**:
-```rust
-// Good: Rust panics on overflow in debug mode
-let new_balance = balance.checked_add(amount)?;
-
-// Avoid: Silent overflow
-let new_balance = balance.wrapping_add(amount);
-```
-
-### Authorization & Access Control
-- [ ] **Function access control**: All state-modifying functions check caller authorization
-- [ ] **Role-based access**: Verify role assignments are correct (admin, attestor, etc.)
-- [ ] **No privilege escalation**: Users cannot elevate their own permissions
-- [ ] **Caller verification**: Use `env.invoker()` to verify caller identity
-- [ ] **Test unauthorized access**: Include tests that verify unauthorized calls fail
-
-**Soroban-specific**: Use `env.invoker()` for caller verification, not `msg.sender()`.
-
-### Storage & State Management
-- [ ] **No uninitialized state**: All storage is initialized before use
-- [ ] **State consistency**: Related state changes are atomic or protected
-- [ ] **No orphaned data**: Deleted records don't leave dangling references
-- [ ] **Proper cleanup**: Revoked credentials are marked, not deleted (for audit trail)
-- [ ] **Storage limits**: Verify contract doesn't exceed Soroban storage limits
-
-**Soroban-specific**: 
-- Check ledger entry size limits (max 64KB per entry)
-- Verify TTL (Time-To-Live) management for persistent entries
-- Test storage expiry scenarios
-
-### Input Validation
-- [ ] **All inputs validated**: Function parameters checked for valid ranges/formats
-- [ ] **No empty collections**: Verify quorum slices have at least one attestor
-- [ ] **Threshold validation**: Quorum thresholds are <= number of attestors
-- [ ] **Metadata validation**: Credential metadata hashes are non-zero
-- [ ] **Address validation**: Attestor addresses are valid Stellar accounts
-
-**Example**:
-```rust
-// Good: Validate before use
-require!(threshold > 0 && threshold <= attestors.len(), Error::InvalidThreshold);
-
-// Avoid: Unchecked input
-let slice = QuorumSlice { attestors, threshold };
-```
-
-## Credential Management Security
-
-### Credential Issuance
-- [ ] **Unique credential IDs**: No ID collisions or reuse
-- [ ] **Issuer authorization**: Only authorized parties can issue credentials
-- [ ] **Metadata immutability**: Credential metadata cannot be modified after issuance
-- [ ] **Timestamp validation**: Issue dates are reasonable (not in future)
-- [ ] **Duplicate prevention**: Cannot issue identical credentials twice
-
-### Credential Revocation
-- [ ] **Revocation authorization**: Only issuer or credential owner can revoke
-- [ ] **Revocation finality**: Revoked credentials cannot be un-revoked
-- [ ] **Revocation audit trail**: All revocations are logged with timestamp and reason
-- [ ] **Revocation verification**: Verifiers check revocation status before accepting credentials
-- [ ] **No revocation bypass**: Revoked credentials cannot be re-issued with same ID
-
-### Credential Expiry
-- [ ] **Expiry enforcement**: Expired credentials are rejected by verifiers
-- [ ] **Expiry date validation**: Expiry dates are after issue dates
-- [ ] **Grace period handling**: Define and test any grace periods
-- [ ] **Renewal mechanism**: Clear process for renewing expired credentials
-- [ ] **Automatic expiry**: Credentials automatically expire without manual revocation
-
-## Quorum Slice Security
-
-### Slice Creation & Management
-- [ ] **Threshold validation**: Threshold is between 1 and number of attestors
-- [ ] **Attestor uniqueness**: No duplicate attestors in slice
-- [ ] **Slice ownership**: Only owner can modify their slice
-- [ ] **Slice immutability**: Cannot change slice after credential attestation
-- [ ] **Slice deletion**: Slices can be deleted only by owner
-
-### Attestation Logic
-- [ ] **Multi-signature verification**: All required attestors have signed
-- [ ] **Signature validation**: Signatures are cryptographically valid
-- [ ] **Signature uniqueness**: Same attestor cannot sign twice
-- [ ] **Attestor authorization**: Attestors are authorized for credential type
-- [ ] **Attestation finality**: Attestations cannot be revoked (only credentials)
-
-### Byzantine Fault Tolerance
-- [ ] **Quorum threshold**: Threshold prevents single-point-of-failure
-- [ ] **Threshold > 50%**: Majority of attestors required (prevents split-brain)
-- [ ] **Attestor diversity**: Attestors are independent entities
-- [ ] **Collusion resistance**: Threshold makes collusion expensive
-- [ ] **Test Byzantine scenarios**: Include tests with malicious attestors
-
-## Zero-Knowledge Verification Security
-
-### Proof Generation
-- [ ] **Proof uniqueness**: Same claim generates different proofs (randomness)
-- [ ] **Proof validity**: Only valid proofs are accepted
-- [ ] **Proof expiry**: Proofs expire after time limit
-- [ ] **Claim specificity**: Proofs only validate claimed attributes
-- [ ] **No proof reuse**: Proofs cannot be replayed for different claims
-
-### Proof Verification
-- [ ] **Proof format validation**: Proofs match expected format
-- [ ] **Cryptographic verification**: Proof verification is cryptographically sound
-- [ ] **No false positives**: Invalid proofs are rejected
-- [ ] **No false negatives**: Valid proofs are accepted
-- [ ] **Timing attack resistance**: Verification time doesn't leak information
-
-**Soroban-specific**: 
-- Verify host function calls for cryptographic operations don't panic
-- Check proof verification doesn't exceed gas limits
-- Test with various proof sizes
-
-## Soroban-Specific Security
-
-### Host Function Safety
-- [ ] **No panics on invalid input**: Host functions handle errors gracefully
-- [ ] **Gas limits**: Operations don't exceed Soroban gas limits
-- [ ] **Cryptographic functions**: Use only Soroban-approved crypto (ed25519, sha256)
-- [ ] **No unsafe operations**: Avoid `unsafe` Rust code
-- [ ] **Error handling**: All host function calls check for errors
-
-**Common Soroban host functions**:
-```rust
-// Cryptographic operations
-env.crypto_sha256(&data)
-env.crypto_ed25519_verify(&public_key, &message, &signature)
-
-// Ledger operations
-env.ledger().sequence()
-env.ledger().timestamp()
-
-// Storage operations
-env.storage().persistent().get(&key)
-env.storage().persistent().set(&key, &value)
-```
-
-### Ledger Entry Limits
-- [ ] **Entry size**: No single entry exceeds 64KB
-- [ ] **Entry count**: Total entries don't exceed contract limits
-- [ ] **TTL management**: Persistent entries have appropriate TTL
-- [ ] **TTL renewal**: Long-lived data renews TTL before expiry
-- [ ] **Cleanup strategy**: Old data is archived or deleted
-
-**Example TTL management**:
-```rust
-// Set TTL for persistent entry
-env.storage().persistent().set(&key, &value);
-env.storage().persistent().extend_ttl(&key, 1_000_000, 2_000_000);
-```
-
-### Timestamp & Ledger Safety
-- [ ] **Timestamp monotonicity**: Ledger timestamps always increase
-- [ ] **No timestamp manipulation**: Contract doesn't rely on user-provided timestamps
-- [ ] **Ledger sequence**: Use for ordering, not timing
-- [ ] **Time-based logic**: Careful with time-dependent operations (expiry, delays)
-- [ ] **Test time scenarios**: Include tests with various timestamps
-
-## Soulbound Token (SBT) Security
-
-### Non-Transferability
-- [ ] **Transfer prevention**: `transfer()` function rejects all transfers
-- [ ] **Burn prevention**: Tokens cannot be burned or destroyed
-- [ ] **Delegation prevention**: Tokens cannot be delegated or approved
-- [ ] **Ownership immutability**: Token owner cannot be changed
-- [ ] **Test transfer attempts**: Include tests that verify transfers fail
-
-### SBT Binding
-- [ ] **Account binding**: SBT is bound to specific Stellar account
-- [ ] **No cross-account transfers**: SBT cannot move between accounts
-- [ ] **Account recovery**: Define process if account is compromised
-- [ ] **Revocation mechanism**: Issuer can revoke SBT if needed
-- [ ] **Test binding**: Verify SBT cannot be transferred to other accounts
-
-## Testing & Verification
-
-### Unit Tests
-- [ ] **Happy path**: Normal operations work correctly
-- [ ] **Error cases**: Invalid inputs are rejected
-- [ ] **Boundary conditions**: Edge cases (empty, max size, etc.) are handled
-- [ ] **State transitions**: State changes are correct
-- [ ] **Coverage**: >90% code coverage
-
-### Integration Tests
-- [ ] **Multi-contract interactions**: Contracts work together correctly
-- [ ] **Cross-contract calls**: External calls are handled safely
-- [ ] **State consistency**: State is consistent across contracts
-- [ ] **Error propagation**: Errors propagate correctly
-- [ ] **Gas efficiency**: Operations don't exceed gas limits
-
-### Security Tests
-- [ ] **Reentrancy tests**: Attempt reentrancy attacks
-- [ ] **Authorization tests**: Unauthorized access is blocked
-- [ ] **Overflow tests**: Arithmetic boundaries are enforced
-- [ ] **Revocation tests**: Revoked credentials are rejected
-- [ ] **Byzantine tests**: Malicious attestors are handled
-
-### Fuzz Testing
-- [ ] **Credential issuance**: Fuzz with random metadata
-- [ ] **Quorum slices**: Fuzz with random attestor sets
-- [ ] **Attestation**: Fuzz with random signatures
-- [ ] **Proof verification**: Fuzz with random proofs
-- [ ] **Long-running**: Run fuzz tests for >1 hour
-
-## Deployment & Operations
-
-### Pre-Deployment
-- [ ] **Code review**: All changes reviewed by security team
-- [ ] **Audit completion**: External audit completed (if applicable)
-- [ ] **Test coverage**: All tests passing, >90% coverage
-- [ ] **Gas optimization**: Operations optimized for gas efficiency
-- [ ] **Documentation**: Security assumptions documented
-
-### Deployment
-- [ ] **Testnet deployment**: Contract deployed to testnet first
-- [ ] **Testnet testing**: Full test suite passes on testnet
-- [ ] **Mainnet readiness**: Contract ready for mainnet deployment
-- [ ] **Upgrade plan**: Clear plan for contract upgrades
-- [ ] **Rollback plan**: Plan to rollback if issues discovered
-
-### Post-Deployment
-- [ ] **Monitoring**: Contract events monitored for anomalies
-- [ ] **Incident response**: Plan for responding to security incidents
-- [ ] **Regular audits**: Schedule regular security audits
-- [ ] **Dependency updates**: Keep dependencies up-to-date
-- [ ] **Threat model review**: Review threat model quarterly
-
-## Threat Model References
-
-See [threat-model.md](./threat-model.md) for detailed threat analysis including:
-- Adversary capabilities and motivations
-- Attack vectors and mitigations
-- Risk assessment and prioritization
-- Incident response procedures
-
-## Security Policy
-
-See [SECURITY.md](../SECURITY.md) for:
-- Vulnerability disclosure process
-- Security contact information
-- Patch release procedures
-- Security update timeline
-
-## Audit Checklist Usage
-
-1. **Before each release**: Complete this checklist
-2. **Document findings**: Record any issues found and resolutions
-3. **Track improvements**: Update checklist based on lessons learned
-4. **Share results**: Communicate audit results to team
-5. **Archive records**: Keep audit records for compliance
-
-## Checklist Version
-
-- **Version**: 1.0
-- **Last Updated**: 2026-04-27
-- **Next Review**: 2026-07-27 (quarterly)
+Covers all three Soroban contracts: `quorum_proof`, `sbt_registry`, `zk_verifier`.  
+Work through each section in order. Mark each item ✅ pass, ❌ fail, or ⚠️ needs review.
 
 ---
 
-**Questions or concerns?** Contact the security team or open an issue on GitHub.
+## 1. Authentication & Authorization
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 1.1 | Every state-mutating function calls `caller.require_auth()` before any storage write | all | |
+| 1.2 | Admin-only functions verify the caller matches the stored `DataKey::Admin` address | all | |
+| 1.3 | `revoke_credential` only allows the original issuer (not subject, not third party) | quorum_proof | |
+| 1.4 | `pause` / `unpause` are gated to admin only | quorum_proof | |
+| 1.5 | `verify_claim` (ZK stub) is gated to admin only until real ZK is implemented | zk_verifier | |
+| 1.6 | `mint` in sbt_registry requires owner auth and cross-validates credential via quorum_proof | sbt_registry | |
+| 1.7 | Recovery execution (`execute_recovery`) is restricted to the original issuer | quorum_proof | |
+| 1.8 | Blacklist add/remove is restricted to the issuer who created the entry | quorum_proof | |
+
+**Remediation**: Any function missing `require_auth()` must have it added before the first storage read or write. Admin checks must compare against the value stored at `DataKey::Admin`, not a constructor argument.
+
+---
+
+## 2. Input Validation
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 2.1 | `credential_type` is validated `> 0` before issuance | quorum_proof | |
+| 2.2 | `metadata_hash` / `metadata_uri` are validated non-empty before storage | quorum_proof, sbt_registry | |
+| 2.3 | `threshold` is validated `> 0` and `<= attestors.len()` in `create_slice` | quorum_proof | |
+| 2.4 | Attestor and slice arrays are bounded by `MAX_ATTESTORS_PER_SLICE = 20` | quorum_proof | |
+| 2.5 | Batch operations are bounded by `MAX_BATCH_SIZE = 50` | quorum_proof | |
+| 2.6 | Multisig approver arrays are bounded by `MAX_MULTISIG_SIGNERS = 10` | quorum_proof | |
+| 2.7 | All `Address` inputs pass `require_valid_address` before use | quorum_proof | |
+| 2.8 | ZK proof `Bytes` are validated non-empty in `verify_claim` | zk_verifier | |
+| 2.9 | `holder_commitment` is validated non-empty in `generate_anonymous_proof_request` | zk_verifier | |
+
+**Remediation**: Add explicit bounds checks and `assert!` / `panic_with_error!` guards at the top of each function. Never rely on downstream storage operations to surface invalid inputs.
+
+---
+
+## 3. Soulbound Token Enforcement
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 3.1 | `transfer` always panics with `SoulboundNonTransferable` — no code path allows transfer | sbt_registry | |
+| 3.2 | `mint` checks `OwnerCredential(owner, credential_id)` key to prevent duplicate SBTs | sbt_registry | |
+| 3.3 | `mint` cross-calls `quorum_proof.is_revoked` and panics if credential is revoked | sbt_registry | |
+| 3.4 | `burn_sbt` is restricted to the token owner or contract admin | sbt_registry | |
+| 3.5 | No function in `sbt_registry` updates the `owner` field of a `SoulboundToken` outside of admin-gated recovery | sbt_registry | |
+
+**Remediation**: The `transfer` function must remain a permanent panic. Any future refactor that adds a transfer path must be treated as a critical security regression.
+
+---
+
+## 4. Credential Lifecycle Integrity
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 4.1 | Revoked credentials cannot be attested | quorum_proof | |
+| 4.2 | Revoked credentials cannot have new SBTs minted against them | sbt_registry | |
+| 4.3 | Double revocation is rejected with `"credential already revoked"` | quorum_proof | |
+| 4.4 | Expired credentials (`expires_at` in the past) are treated as invalid in `is_attested` | quorum_proof | |
+| 4.5 | `DuplicateCredential` error is raised when the same issuer issues the same type to the same subject twice | quorum_proof | |
+| 4.6 | Credential recovery cannot be initiated for a revoked credential | quorum_proof | |
+| 4.7 | Only one pending recovery per credential (`RecoveryAlreadyExists` guard) | quorum_proof | |
+
+**Remediation**: Any path that skips the `revoked` check before a state mutation is a critical bug. Add a dedicated test for each lifecycle transition.
+
+---
+
+## 5. Quorum Slice & Attestation Logic
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 5.1 | An attestor cannot attest the same credential+slice pair twice (`DuplicateAttestor`) | quorum_proof | |
+| 5.2 | An attestor must be a member of the slice to attest (`NotInSlice`) | quorum_proof | |
+| 5.3 | Attestation time windows are enforced: attestations outside the window are rejected | quorum_proof | |
+| 5.4 | Fork detection fires when two attestors submit conflicting boolean values for the same slice | quorum_proof | |
+| 5.5 | `is_attested` correctly counts weighted attestations against the slice threshold | quorum_proof | |
+| 5.6 | Attestation expiry (`expires_at`) is respected in `is_attested` | quorum_proof | |
+
+**Remediation**: Weighted threshold logic must be reviewed for integer overflow. Use `saturating_add` for weight accumulation (already present — verify it is not bypassed in any code path).
+
+---
+
+## 6. Storage & TTL Management
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 6.1 | Every `storage().instance().set()` call is followed by `extend_ttl(STANDARD_TTL, EXTENDED_TTL)` | all | |
+| 6.2 | Persistent storage entries (`Token`, `Owner`, `OwnerTokens`) have TTL extended after write | sbt_registry | |
+| 6.3 | No storage entry can be silently evicted during normal operation (TTL covers expected credential lifetime) | all | |
+| 6.4 | `initialize` is guarded against double-initialization (`already initialized` assert) | all | |
+
+**Remediation**: Missing `extend_ttl` calls cause silent data loss after ledger eviction. Audit every `set()` call and confirm a corresponding `extend_ttl` follows it.
+
+---
+
+## 7. Cross-Contract Call Safety
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 7.1 | `sbt_registry.mint` validates the `quorum_proof_id` is set before making cross-contract calls | sbt_registry | |
+| 7.2 | Cross-contract calls use the stored `DataKey::QuorumProofId`, not a caller-supplied address | sbt_registry | |
+| 7.3 | `quorum_proof` calls to `zk_verifier` pass the admin address from storage, not from the caller | quorum_proof | |
+| 7.4 | No cross-contract call passes unvalidated user input as a contract address | all | |
+
+**Remediation**: Never allow a caller to supply the target contract address for a cross-contract call. Always read it from initialized storage to prevent contract substitution attacks.
+
+---
+
+## 8. ZK Verifier Stub Risk
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 8.1 | `verify_claim` is admin-gated and cannot be called by arbitrary users | zk_verifier | |
+| 8.2 | All call sites of `verify_claim` in `quorum_proof` pass the stored admin address | quorum_proof | |
+| 8.3 | The README and contract doc comment clearly warn that the stub accepts any non-empty proof | zk_verifier | |
+| 8.4 | No production credential decision relies solely on `verify_claim` output until v1.1 | quorum_proof | |
+
+**Remediation**: Until Groth16/PLONK verification is implemented (tracked in issue #ZK-IMPL), treat any `verify_claim` result as untrusted. Do not gate access-control decisions on it.
+
+---
+
+## 9. Pause / Emergency Stop
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 9.1 | `pause` blocks `issue_credential`, `attest`, `revoke_credential`, and `mint` | quorum_proof, sbt_registry | |
+| 9.2 | Read-only functions (`get_credential`, `is_attested`, `get_slice`) remain accessible while paused | quorum_proof | |
+| 9.3 | `unpause` is restricted to admin only | quorum_proof | |
+| 9.4 | There is no way to permanently brick the contract (admin can always unpause) | quorum_proof | |
+
+**Remediation**: Verify `require_not_paused()` is called at the top of every state-mutating function. Read paths must not call it.
+
+---
+
+## 10. Soroban-Specific Security Issues
+
+### 10.1 Host Function Panics
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.1.1 | All host function calls are wrapped in error handling (e.g., `env.storage()`, `env.events()`) | all | |
+| 10.1.2 | `env.invoke_contract()` calls validate the target contract address before invocation | all | |
+| 10.1.3 | No unwrap() calls on host function results without explicit panic handling | all | |
+| 10.1.4 | Serialization/deserialization errors are caught and converted to contract errors | all | |
+
+**Remediation**: Replace `unwrap()` with `?` operator or explicit error handling. Test with malformed inputs to verify graceful degradation.
+
+### 10.2 Ledger Limits & Constraints
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.2.1 | Storage keys are bounded in size (< 64 bytes) | all | |
+| 10.2.2 | Storage values are bounded in size (< 64 KB per entry) | all | |
+| 10.2.3 | Batch operations respect the transaction size limit (~100 KB) | quorum_proof | |
+| 10.2.4 | Vector/collection sizes are bounded to prevent OOM (MAX_ATTESTORS_PER_SLICE, MAX_BATCH_SIZE) | quorum_proof | |
+| 10.2.5 | No unbounded loops over user-supplied data | all | |
+
+**Remediation**: Add explicit size checks before storage writes. Use `clamp()` or `min()` to enforce bounds on user inputs.
+
+### 10.3 TTL (Time-To-Live) Management
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.3.1 | Every persistent storage write is followed by `extend_ttl()` with appropriate TTL values | all | |
+| 10.3.2 | TTL values are set to at least `STANDARD_TTL = 16,384` ledgers (~2 days) | all | |
+| 10.3.3 | Long-lived data (credentials, slices) use `EXTENDED_TTL = 524,288` ledgers (~60 days) | quorum_proof | |
+| 10.3.4 | Temporary data (recovery requests, disputes) use shorter TTL values | quorum_proof | |
+| 10.3.5 | No critical state is stored without TTL extension | all | |
+| 10.3.6 | TTL renewal is tested in the test suite (verify data persists across ledger boundaries) | all | |
+
+**Remediation**: Audit every `storage().instance().set()` call. Confirm a corresponding `extend_ttl()` follows it. Add integration tests that simulate ledger expiry.
+
+### 10.4 Ledger Entry Expiry Handling
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.4.1 | Expired ledger entries are handled gracefully (no panics on missing data) | all | |
+| 10.4.2 | `get()` calls check for `None` before dereferencing | all | |
+| 10.4.3 | Credentials with expired TTL are treated as non-existent (not as revoked) | quorum_proof | |
+| 10.4.4 | Attestations with expired TTL are excluded from `is_attested` calculations | quorum_proof | |
+
+**Remediation**: Use `Option::unwrap_or_default()` or explicit `match` statements. Never assume a key exists in storage.
+
+### 10.5 Event Emission Safety
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.5.1 | Event topics are valid Soroban symbols (max 32 bytes) | all | |
+| 10.5.2 | Event data structures are serializable (no circular references) | all | |
+| 10.5.3 | Sensitive data (private keys, secrets) is never emitted in events | all | |
+| 10.5.4 | Event emission does not fail the transaction (wrapped in error handling) | all | |
+
+**Remediation**: Use `symbol_short!()` for event topics. Verify event data is public and non-sensitive.
+
+### 10.6 Contract Invocation Safety
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.6.1 | Cross-contract calls use `env.invoke_contract()` with validated addresses | all | |
+| 10.6.2 | Contract addresses are stored in persistent storage, not passed as arguments | all | |
+| 10.6.3 | Return values from cross-contract calls are validated before use | all | |
+| 10.6.4 | No recursive contract calls without depth limits | all | |
+
+**Remediation**: Store contract addresses in `DataKey` enums. Validate return types match expectations.
+
+### 10.7 Authorization & Signature Verification
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.7.1 | `require_auth()` is called for all state-mutating operations | all | |
+| 10.7.2 | Multi-signature scenarios use `require_auth()` for each signer | quorum_proof | |
+| 10.7.3 | No custom signature verification (always use `require_auth()`) | all | |
+| 10.7.4 | Authorization checks happen before any state mutation | all | |
+
+**Remediation**: Never implement custom signature verification. Always use Soroban's built-in `require_auth()`.
+
+### 10.8 Reentrancy Prevention
+
+| # | Check | Contract(s) | Status |
+|---|-------|-------------|--------|
+| 10.8.1 | Cross-contract calls do not allow callbacks to the same contract | all | |
+| 10.8.2 | State is updated before cross-contract calls (checks-effects-interactions pattern) | all | |
+| 10.8.3 | No recursive contract invocations without explicit guards | all | |
+
+**Remediation**: Verify the order of operations: validate → update state → call external contracts.
+
+---
+
+## 11. Audit Procedures
+
+### Pre-Audit Preparation
+1. Run `cargo test` — all tests must pass with zero failures.
+2. Run `./scripts/mutation_test.sh` — mutation score must be ≥ 80%.
+3. Run `cargo clippy -- -D warnings` — zero warnings.
+4. Confirm WASM binary sizes are within expected bounds (quorum_proof < 200 KB, others < 50 KB).
+
+### Manual Review Steps
+1. For each public function: verify auth check → input validation → business logic → storage write → TTL extension order.
+2. Trace every cross-contract call: confirm the target address comes from storage, not caller input.
+3. Review every `assert!` and `panic_with_error!`: confirm the error variant is appropriate and the message is not information-leaking.
+4. Check all integer arithmetic for overflow: look for `+`, `-`, `*` on `u32`/`u64` without `saturating_*` or `checked_*`.
+5. Verify the ZK stub is unreachable without admin auth.
+6. **Soroban-Specific**: Verify every `storage().instance().set()` is followed by `extend_ttl()`.
+7. **Soroban-Specific**: Check for host function panics — all `env.*()` calls should have error handling.
+8. **Soroban-Specific**: Validate ledger entry sizes are within limits (< 64 KB per entry).
+9. **Soroban-Specific**: Confirm TTL values are appropriate for data lifetime (STANDARD_TTL for temporary, EXTENDED_TTL for persistent).
+10. **Soroban-Specific**: Test graceful handling of expired ledger entries (missing data should not panic).
+
+### Automated Checks
+```bash
+# Full test suite
+cargo test
+
+# Mutation testing
+./scripts/mutation_test.sh
+
+# Lint
+cargo clippy -- -D warnings
+
+# Check for integer overflow patterns (manual grep)
+grep -n '\bu32\b.*+\|\bu64\b.*+' contracts/*/src/lib.rs | grep -v saturating | grep -v checked
+
+# Check for missing TTL extensions
+grep -n 'storage().instance().set' contracts/*/src/lib.rs | while read line; do
+  file=$(echo "$line" | cut -d: -f1)
+  linenum=$(echo "$line" | cut -d: -f2)
+  nextline=$((linenum + 5))
+  if ! sed -n "${linenum},${nextline}p" "$file" | grep -q 'extend_ttl'; then
+    echo "Missing TTL extension: $line"
+  fi
+done
+
+# Check for unwrap() calls
+grep -n 'unwrap()' contracts/*/src/lib.rs | grep -v test | grep -v '//'
+```
+
+---
+
+## 12. Remediation Severity Guide
+
+| Severity | Definition | SLA |
+|----------|-----------|-----|
+| **Critical** | Unauthorized state mutation, bypass of `require_auth`, SBT transfer enabled, ZK stub exposed without admin gate, missing TTL extension on critical data | Fix before any mainnet deployment |
+| **High** | Missing TTL extension (data loss risk), missing `require_not_paused`, double-initialization possible, host function panics, ledger entry expiry not handled | Fix before next release |
+| **Medium** | Missing input bounds check, integer arithmetic without overflow protection, cross-contract address from caller, event emission of sensitive data | Fix within 2 sprints |
+| **Low** | Missing doc comment, inconsistent error message, non-critical lint warning, suboptimal TTL values | Fix in next maintenance window |
+
+---
+
+## 13. Soroban-Specific Testing Checklist
+
+Before mainnet deployment, verify:
+
+- [ ] TTL extension tests pass (data persists across ledger boundaries)
+- [ ] Expired ledger entry handling is tested (no panics on missing data)
+- [ ] Host function error handling is tested (malformed inputs, network failures)
+- [ ] Cross-contract call failures are handled gracefully
+- [ ] Event emission does not fail transactions
+- [ ] Storage size limits are respected (< 64 KB per entry)
+- [ ] Batch operations respect transaction size limits
+- [ ] Authorization checks work with multi-signature scenarios
+- [ ] Reentrancy is prevented (no recursive calls without guards)
+
+---
+
+## 14. Sign-Off
+
+| Role | Name | Date | Signature |
+|------|------|------|-----------|
+| Lead Auditor | | | |
+| Contract Author | | | |
+| Security Reviewer | | | |
+| Soroban Specialist | | | |
+
+All **Critical** and **High** findings must be resolved and re-verified before sign-off. Soroban-specific checks (Section 10) must be verified by someone familiar with Soroban host functions and ledger constraints.
