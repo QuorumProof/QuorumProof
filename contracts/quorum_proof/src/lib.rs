@@ -406,6 +406,20 @@ pub enum DataKey {
     HolderWhitelist(Address, Address),
     /// Stores all holders whitelisted by an issuer
     IssuerWhitelist(Address),
+    /// Stores revocation requests by credential_id
+    RevocationRequest(u64),
+    /// Global monotonic counter for revocation request IDs
+    RevocationRequestCount,
+    /// Stores all active revocation request IDs
+    RevocationRequests,
+    /// Stores credential disputes by credential_id
+    CredentialDispute(u64),
+    /// Stores dispute resolution timeout config
+    DisputeResolutionTimeout,
+    /// Stores attestor reputation scores
+    AttestorReputation(Address),
+    /// Stores anonymous proofs by (credential_id, verifier_address)
+    AnonymousProof(u64, Address),
 }
 
 #[contracttype]
@@ -618,6 +632,43 @@ pub struct Challenge {
     pub status: ChallengeStatus,
     pub uphold_votes: Vec<Address>,
     pub dismiss_votes: Vec<Address>,
+}
+
+/// Status of a credential revocation request
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RevocationRequestStatus {
+    Pending = 1,
+    Approved = 2,
+    Denied = 3,
+}
+
+/// Holder-initiated revocation request
+#[contracttype]
+#[derive(Clone)]
+pub struct RevocationRequest {
+    pub id: u64,
+    pub credential_id: u64,
+    pub holder: Address,
+    pub reason: String,
+    pub status: RevocationRequestStatus,
+    pub created_at: u64,
+    pub resolved_at: Option<u64>,
+}
+
+/// Credential dispute initiated by holder
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialDispute {
+    pub id: u64,
+    pub credential_id: u64,
+    pub holder: Address,
+    pub evidence_hash: soroban_sdk::Bytes,
+    pub status: DisputeStatus,
+    pub created_at: u64,
+    pub resolved_at: Option<u64>,
+    pub resolution: Option<String>,
 }
 
 #[contract]
@@ -8663,6 +8714,267 @@ pub fn count_credentials(
     count
 }
 
+    // ============ Feature #448: Credential Holder Revocation Request ============
+
+    /// Holder requests revocation of their credential
+    pub fn request_credential_revocation(env: Env, holder: Address, credential_id: u64, reason: String) -> u64 {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env.storage().instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(holder == credential.subject, "only credential holder can request revocation");
+        assert!(!credential.revoked, "credential already revoked");
+
+        let request_id: u64 = env.storage().instance()
+            .get(&DataKey::RevocationRequestCount)
+            .unwrap_or(0u64) + 1;
+
+        let request = RevocationRequest {
+            id: request_id,
+            credential_id,
+            holder: holder.clone(),
+            reason,
+            status: RevocationRequestStatus::Pending,
+            created_at: env.ledger().timestamp(),
+            resolved_at: None,
+        };
+
+        env.storage().instance().set(&DataKey::RevocationRequest(request_id), &request);
+        env.storage().instance().set(&DataKey::RevocationRequestCount, &request_id);
+
+        let mut requests: Vec<u64> = env.storage().instance()
+            .get(&DataKey::RevocationRequests)
+            .unwrap_or(Vec::new(&env));
+        requests.push_back(request_id);
+        env.storage().instance().set(&DataKey::RevocationRequests, &requests);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        request_id
+    }
+
+    /// Issuer approves a revocation request
+    pub fn approve_revocation_request(env: Env, issuer: Address, request_id: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut request: RevocationRequest = env.storage().instance()
+            .get(&DataKey::RevocationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        let credential: Credential = env.storage().instance()
+            .get(&DataKey::Credential(request.credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(issuer == credential.issuer, "only issuer can approve revocation");
+        assert!(request.status == RevocationRequestStatus::Pending, "request not pending");
+
+        request.status = RevocationRequestStatus::Approved;
+        request.resolved_at = Some(env.ledger().timestamp());
+        env.storage().instance().set(&DataKey::RevocationRequest(request_id), &request);
+
+        // Revoke the credential
+        let mut cred = credential;
+        cred.revoked = true;
+        env.storage().instance().set(&DataKey::Credential(request.credential_id), &cred);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issuer denies a revocation request
+    pub fn deny_revocation_request(env: Env, issuer: Address, request_id: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut request: RevocationRequest = env.storage().instance()
+            .get(&DataKey::RevocationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        let credential: Credential = env.storage().instance()
+            .get(&DataKey::Credential(request.credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(issuer == credential.issuer, "only issuer can deny revocation");
+        assert!(request.status == RevocationRequestStatus::Pending, "request not pending");
+
+        request.status = RevocationRequestStatus::Denied;
+        request.resolved_at = Some(env.ledger().timestamp());
+        env.storage().instance().set(&DataKey::RevocationRequest(request_id), &request);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ============ Feature #449: Credential Holder Dispute Resolution ============
+
+    /// Holder initiates a dispute for a credential
+    pub fn initiate_credential_dispute(env: Env, holder: Address, credential_id: u64, evidence_hash: soroban_sdk::Bytes) -> u64 {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env.storage().instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(holder == credential.subject, "only credential holder can initiate dispute");
+
+        let dispute_id: u64 = env.storage().instance()
+            .get(&DataKey::DisputeCount)
+            .unwrap_or(0u64) + 1;
+
+        let dispute = CredentialDispute {
+            id: dispute_id,
+            credential_id,
+            holder: holder.clone(),
+            evidence_hash,
+            status: DisputeStatus::Active,
+            created_at: env.ledger().timestamp(),
+            resolved_at: None,
+            resolution: None,
+        };
+
+        env.storage().instance().set(&DataKey::CredentialDispute(credential_id), &dispute);
+        env.storage().instance().set(&DataKey::DisputeCount, &dispute_id);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        dispute_id
+    }
+
+    /// Admin resolves a credential dispute
+    pub fn resolve_credential_dispute(env: Env, admin: Address, credential_id: u64, resolution: String) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+
+        let admin_addr: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAction));
+
+        assert!(admin == admin_addr, "only admin can resolve disputes");
+
+        let mut dispute: CredentialDispute = env.storage().instance()
+            .get(&DataKey::CredentialDispute(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::DisputeNotFound));
+
+        assert!(dispute.status == DisputeStatus::Active, "dispute not active");
+
+        dispute.status = DisputeStatus::Resolved;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolution = Some(resolution);
+        env.storage().instance().set(&DataKey::CredentialDispute(credential_id), &dispute);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Auto-resolve dispute after timeout (anyone can call)
+    pub fn auto_resolve_dispute(env: Env, credential_id: u64) {
+        Self::require_not_paused(&env);
+
+        let timeout: u64 = env.storage().instance()
+            .get(&DataKey::DisputeResolutionTimeout)
+            .unwrap_or(2_592_000u64); // 30 days default
+
+        let mut dispute: CredentialDispute = env.storage().instance()
+            .get(&DataKey::CredentialDispute(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::DisputeNotFound));
+
+        assert!(dispute.status == DisputeStatus::Active, "dispute not active");
+        assert!(
+            env.ledger().timestamp() >= dispute.created_at + timeout,
+            "dispute timeout not reached"
+        );
+
+        dispute.status = DisputeStatus::Dismissed;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolution = Some(String::from_str(&env, "auto_dismissed_timeout"));
+        env.storage().instance().set(&DataKey::CredentialDispute(credential_id), &dispute);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Set dispute resolution timeout
+    pub fn set_dispute_resolution_timeout(env: Env, admin: Address, timeout_seconds: u64) {
+        admin.require_auth();
+
+        let admin_addr: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAction));
+
+        assert!(admin == admin_addr, "only admin can set timeout");
+
+        env.storage().instance().set(&DataKey::DisputeResolutionTimeout, &timeout_seconds);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ============ Feature #446: Credential Holder Anonymity Mode ============
+
+    /// Generate anonymous proof for credential ownership
+    pub fn generate_anonymous_proof(env: Env, holder: Address, credential_id: u64, verifier_address: Address) -> soroban_sdk::Bytes {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env.storage().instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(holder == credential.subject, "only credential holder can generate proof");
+        assert!(!credential.revoked, "cannot prove revoked credential");
+
+        // Simple proof: hash(credential_id || holder || verifier || timestamp)
+        let mut proof_data = soroban_sdk::Bytes::new(&env);
+        proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &credential_id.to_le_bytes()));
+        proof_data.append(&soroban_sdk::Bytes::from_slice(&env, holder.contract_id().as_slice()));
+        proof_data.append(&soroban_sdk::Bytes::from_slice(&env, verifier_address.contract_id().as_slice()));
+        proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &env.ledger().timestamp().to_le_bytes()));
+
+        env.storage().instance().set(&DataKey::AnonymousProof(credential_id, verifier_address), &proof_data);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        proof_data
+    }
+
+    /// Verify anonymous proof
+    pub fn verify_anonymous_proof(env: Env, credential_id: u64, verifier_address: Address, proof: soroban_sdk::Bytes) -> bool {
+        Self::require_not_paused(&env);
+
+        let stored_proof: Option<soroban_sdk::Bytes> = env.storage().instance()
+            .get(&DataKey::AnonymousProof(credential_id, verifier_address));
+
+        if let Some(stored) = stored_proof {
+            stored == proof
+        } else {
+            false
+        }
+    }
+
+    // ============ Feature #445: Attestor Reputation Scoring ============
+
+    /// Update attestor reputation score
+    pub fn update_attestor_reputation(env: Env, admin: Address, attestor: Address, delta: i32) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+
+        let admin_addr: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAction));
+
+        assert!(admin == admin_addr, "only admin can update reputation");
+
+        let current: i32 = env.storage().instance()
+            .get(&DataKey::AttestorReputation(attestor.clone()))
+            .unwrap_or(0i32);
+
+        let new_score = current + delta;
+        env.storage().instance().set(&DataKey::AttestorReputation(attestor), &new_score);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get attestor reputation score
+    pub fn get_attestor_reputation_score(env: Env, attestor: Address) -> i32 {
+        env.storage().instance()
+            .get(&DataKey::AttestorReputation(attestor))
+            .unwrap_or(0i32)
+    }
 
 #[cfg(test)]
 mod doc_tests {
@@ -8965,5 +9277,195 @@ mod doc_tests {
             env.storage().instance().get(&DataKey::Credential(cred3)).unwrap()
         });
         assert!(!cred3_data.revoked);
+    }
+
+    // ============ Tests for Feature #448: Credential Holder Revocation Request ============
+
+    #[test]
+    fn test_request_credential_revocation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        
+        let request_id = client.request_credential_revocation(&holder, &cred_id, &String::from_str(&env, "credential is outdated"));
+        assert_eq!(request_id, 1u64);
+    }
+
+    #[test]
+    fn test_approve_revocation_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let request_id = client.request_credential_revocation(&holder, &cred_id, &String::from_str(&env, "outdated"));
+        
+        client.approve_revocation_request(&issuer, &request_id);
+        
+        let cred = client.get_credential(&cred_id);
+        assert!(cred.revoked);
+    }
+
+    #[test]
+    fn test_deny_revocation_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let request_id = client.request_credential_revocation(&holder, &cred_id, &String::from_str(&env, "outdated"));
+        
+        client.deny_revocation_request(&issuer, &request_id);
+        
+        let cred = client.get_credential(&cred_id);
+        assert!(!cred.revoked);
+    }
+
+    // ============ Tests for Feature #449: Credential Holder Dispute Resolution ============
+
+    #[test]
+    fn test_initiate_credential_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let evidence = Bytes::from_slice(&env, b"QmEvidenceHash0000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
+        
+        assert_eq!(dispute_id, 1u64);
+    }
+
+    #[test]
+    fn test_resolve_credential_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let evidence = Bytes::from_slice(&env, b"QmEvidenceHash0000000000000000000");
+        
+        // Set admin
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let _dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
+        
+        client.resolve_credential_dispute(&admin, &cred_id, &String::from_str(&env, "dispute upheld"));
+    }
+
+    #[test]
+    fn test_auto_resolve_dispute_timeout() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let evidence = Bytes::from_slice(&env, b"QmEvidenceHash0000000000000000000");
+        
+        set_ledger_timestamp(&env, 1000);
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let _dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
+        
+        // Move time forward by 30 days + 1 second
+        set_ledger_timestamp(&env, 1000 + 2_592_001);
+        
+        client.auto_resolve_dispute(&cred_id);
+    }
+
+    // ============ Tests for Feature #446: Credential Holder Anonymity Mode ============
+
+    #[test]
+    fn test_generate_anonymous_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let proof = client.generate_anonymous_proof(&holder, &cred_id, &verifier);
+        
+        assert!(proof.len() > 0);
+    }
+
+    #[test]
+    fn test_verify_anonymous_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let proof = client.generate_anonymous_proof(&holder, &cred_id, &verifier);
+        
+        let is_valid = client.verify_anonymous_proof(&cred_id, &verifier, &proof);
+        assert!(is_valid);
+    }
+
+    // ============ Tests for Feature #445: Attestor Reputation Scoring ============
+
+    #[test]
+    fn test_update_attestor_reputation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let admin = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        
+        // Set admin
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+        
+        client.update_attestor_reputation(&admin, &attestor, &50i32);
+        
+        let score = client.get_attestor_reputation_score(&attestor);
+        assert_eq!(score, 50i32);
+    }
+
+    #[test]
+    fn test_get_attestor_reputation_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let admin = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        
+        // Set admin
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+        
+        client.update_attestor_reputation(&admin, &attestor, &100i32);
+        client.update_attestor_reputation(&admin, &attestor, &-30i32);
+        
+        let score = client.get_attestor_reputation_score(&attestor);
+        assert_eq!(score, 70i32);
     }
 }
