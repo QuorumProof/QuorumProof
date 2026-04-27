@@ -42,6 +42,7 @@ pub enum DataKey {
     NotificationHistory(Address),
     ReputationConfig,
     SbtWhitelist(u64),
+    BurnedTokens,
 }
 
 /// Weights used to compute a holder's reputation score.
@@ -913,6 +914,52 @@ impl SbtRegistryContract {
             .get(&DataKey::Token(sbt_id))
             .expect("token not found");
         token.metadata_uri
+    }
+
+    // ── SBT Holder Burn Mechanism (Issue #450) ──────────────────────────────────────
+
+    /// Burn an SBT. Holder-only. Marks the token as burned.
+    pub fn burn_sbt_holder(env: Env, holder: Address, sbt_id: u64) {
+        holder.require_auth();
+        let token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+        assert!(token.owner == holder, "not the owner");
+
+        // Mark as burned
+        let mut burned: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::BurnedTokens)
+            .unwrap_or(Vec::new(&env));
+        burned.push_back(sbt_id);
+        env.storage().persistent().set(&DataKey::BurnedTokens, &burned);
+
+        // Remove from storage
+        env.storage().persistent().remove(&DataKey::Token(sbt_id));
+        env.storage().persistent().remove(&DataKey::Owner(sbt_id));
+        env.storage().instance().remove(&DataKey::Delegation(sbt_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(holder.clone(), token.credential_id));
+        
+        let mut owner_tokens: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::OwnerTokens(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = owner_tokens.iter().position(|id| id == sbt_id) {
+            owner_tokens.remove(pos as u32);
+        }
+        env.storage().persistent().set(&DataKey::OwnerTokens(holder.clone()), &owner_tokens);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("burn").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (holder.clone(), sbt_id, env.ledger().timestamp()));
+        Self::record_notification(&env, holder, sbt_id, symbol_short!("burn"));
+    }
+
+    /// Check if an SBT has been burned.
+    pub fn is_sbt_burned(env: Env, sbt_id: u64) -> bool {
+        let burned: Vec<u64> = env.storage().persistent()
+            .get(&DataKey::BurnedTokens)
+            .unwrap_or(Vec::new(&env));
+        burned.iter().any(|id| id == sbt_id)
     }
 }
 
@@ -2000,5 +2047,44 @@ mod tests {
 
         let updated_token = client.get_token(&token_id);
         assert_eq!(updated_token.version, 2);
+    }
+
+    // ── Issue #450: SBT Holder Burn Mechanism ──────────────────────────────────────
+
+    #[test]
+    fn test_burn_sbt_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt_holder(&owner, &token_id);
+
+        assert!(client.is_sbt_burned(&token_id));
+    }
+
+    #[test]
+    fn test_burned_token_cannot_be_retrieved() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.burn_sbt_holder(&owner, &token_id);
+
+        // Attempting to get a burned token should panic
+        let _ = client.get_token(&token_id);
     }
 }
