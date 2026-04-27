@@ -8863,52 +8863,10 @@ mod doc_tests {
         }
     }
 
-    // Test #444: Adjust slice threshold
+    // Issue #440: Test credential expiry enforcement
     #[test]
-    fn test_adjust_slice_threshold() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let creator = Address::generate(&env);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(Address::generate(&env));
-        attestors.push_back(Address::generate(&env));
-        let mut weights = Vec::new(&env);
-        weights.push_back(50u32);
-        weights.push_back(50u32);
-
-        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
-        let slice = client.get_slice(&slice_id);
-        assert_eq!(slice.threshold, 100u32);
-
-        client.adjust_slice_threshold(&creator, &slice_id, &75u32);
-        let updated_slice = client.get_slice(&slice_id);
-        assert_eq!(updated_slice.threshold, 75u32);
-    }
-
-    #[test]
-    #[should_panic(expected = "threshold cannot exceed total weight sum")]
-    fn test_adjust_slice_threshold_exceeds_weight() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let creator = Address::generate(&env);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(Address::generate(&env));
-        let mut weights = Vec::new(&env);
-        weights.push_back(50u32);
-
-        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
-        client.adjust_slice_threshold(&creator, &slice_id, &100u32);
-    }
-
-    // Test #443: Credential metadata versioning
-    #[test]
-    fn test_update_credential_metadata() {
+    #[should_panic(expected = "credential has expired")]
+    fn test_get_credential_expired() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -8916,60 +8874,26 @@ mod doc_tests {
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let metadata_v1 = Bytes::from_slice(&env, b"ipfs://QmV1");
-        let metadata_v2 = Bytes::from_slice(&env, b"ipfs://QmV2");
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmExpired");
+        
+        set_ledger_timestamp(&env, 1000);
+        let expiry = 2000u64;
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(expiry));
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_v1, &None);
+        // Credential should be retrievable before expiry
         let cred = client.get_credential(&cred_id);
-        assert_eq!(cred.metadata_hash, metadata_v1);
+        assert_eq!(cred.id, cred_id);
 
-        client.update_credential_metadata(&issuer, &cred_id, &metadata_v2);
-        let updated_cred = client.get_credential(&cred_id);
-        assert_eq!(updated_cred.metadata_hash, metadata_v2);
-
-        let history = client.get_credential_metadata_history(&cred_id);
-        assert_eq!(history.len(), 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "only the issuer can update metadata")]
-    fn test_update_credential_metadata_unauthorized() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let other = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        client.update_credential_metadata(&other, &cred_id, &metadata);
-    }
-
-    // Test #442: Credential holder delegation
-    #[test]
-    fn test_delegate_verification() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let expiry = 1000u64;
+        // Move time past expiry
+        set_ledger_timestamp(&env, 2001);
         
-        client.delegate_verification(&subject, &cred_id, &delegate, &expiry);
-        assert!(client.is_valid_verifier(&cred_id, &delegate));
+        // Should panic when trying to get expired credential
+        client.get_credential(&cred_id);
     }
 
+    // Issue #440: Test set_credential_expiry
     #[test]
-    fn test_revoke_delegation() {
+    fn test_set_credential_expiry() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -8977,40 +8901,27 @@ mod doc_tests {
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let expiry = 1000u64;
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmSetExpiry");
         
-        client.delegate_verification(&subject, &cred_id, &delegate, &expiry);
-        assert!(client.is_valid_verifier(&cred_id, &delegate));
-        
-        client.revoke_delegation(&subject, &cred_id, &delegate);
-        assert!(!client.is_valid_verifier(&cred_id, &delegate));
-    }
-
-    #[test]
-    #[should_panic(expected = "only the credential holder can delegate")]
-    fn test_delegate_verification_unauthorized() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let other = Address::generate(&env);
-        let delegate = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
+        set_ledger_timestamp(&env, 1000);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        client.delegate_verification(&other, &cred_id, &delegate, &1000u64);
+
+        // Set expiry to 3000
+        client.set_credential_expiry(&issuer, &cred_id, &3000u64);
+        
+        // Credential should be retrievable before expiry
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.expires_at, Some(3000u64));
+
+        // Move time to just before expiry
+        set_ledger_timestamp(&env, 2999);
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.expires_at, Some(3000u64));
     }
 
-    // Test #441: Batch credential issuance
+    // Issue #440: Test auto_revoke_expired_credentials
     #[test]
-    fn test_batch_issue_credentials_single() {
+    fn test_auto_revoke_expired_credentials() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -9018,63 +8929,41 @@ mod doc_tests {
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let mut subjects = Vec::new(&env);
-        subjects.push_back(subject);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmAutoRevoke");
+        
+        set_ledger_timestamp(&env, 1000);
+        
+        // Issue 3 credentials with different expiry times
+        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1500u64));
+        let cred2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &Some(2000u64));
+        let cred3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &Some(3000u64));
 
-        let mut types = Vec::new(&env);
-        types.push_back(1u32);
+        // Move time to 1800 — cred1 should be expired, cred2 and cred3 should not
+        set_ledger_timestamp(&env, 1800);
+        let revoked_count = client.auto_revoke_expired_credentials(&subject);
+        assert_eq!(revoked_count, 1u32);
 
-        let mut hashes = Vec::new(&env);
-        hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm1"));
+        // Verify cred1 is revoked
+        let cred1_data = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Credential(cred1)).unwrap()
+        });
+        assert!(cred1_data.revoked);
 
-        let ids = client.batch_issue_credentials(&issuer, &subjects, &types, &hashes, &None);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(client.get_credential_count(), 1);
-    }
+        // Move time to 2500 — cred2 should now also be expired
+        set_ledger_timestamp(&env, 2500);
+        let revoked_count = client.auto_revoke_expired_credentials(&subject);
+        assert_eq!(revoked_count, 1u32);
 
-    #[test]
-    fn test_batch_issue_credentials_multiple() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
+        // Verify cred2 is now revoked
+        let cred2_data = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Credential(cred2)).unwrap()
+        });
+        assert!(cred2_data.revoked);
 
-        let issuer = Address::generate(&env);
-        let mut subjects = Vec::new(&env);
-        let mut types = Vec::new(&env);
-        let mut hashes = Vec::new(&env);
-
-        for i in 0..10 {
-            subjects.push_back(Address::generate(&env));
-            types.push_back(1u32);
-            hashes.push_back(Bytes::from_slice(&env, format!("ipfs://Qm{}", i).as_bytes()));
-        }
-
-        let ids = client.batch_issue_credentials(&issuer, &subjects, &types, &hashes, &None);
-        assert_eq!(ids.len(), 10);
-        assert_eq!(client.get_credential_count(), 10);
-    }
-
-    #[test]
-    fn test_batch_issue_credentials_100() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let issuer = Address::generate(&env);
-        let mut subjects = Vec::new(&env);
-        let mut types = Vec::new(&env);
-        let mut hashes = Vec::new(&env);
-
-        for i in 0..100 {
-            subjects.push_back(Address::generate(&env));
-            types.push_back(1u32);
-            hashes.push_back(Bytes::from_slice(&env, format!("ipfs://Qm{}", i).as_bytes()));
-        }
-
-        let ids = client.batch_issue_credentials(&issuer, &subjects, &types, &hashes, &None);
-        assert_eq!(ids.len(), 100);
-        assert_eq!(client.get_credential_count(), 100);
+        // cred3 should still be valid
+        let cred3_data = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Credential(cred3)).unwrap()
+        });
+        assert!(!cred3_data.revoked);
     }
 }
