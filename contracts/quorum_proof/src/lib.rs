@@ -32,6 +32,9 @@ const MAX_METADATA_BYTES_SIZE: u32 = 1024;
 // Issue #379: Timestamp validation
 const MAX_TIMESTAMP_FUTURE_OFFSET: u64 = 315_360_000; // ~10 years in seconds
 const MAX_TIMESTAMP_PAST_OFFSET: u64 = 315_360_000; // ~10 years in seconds
+const DEFAULT_REPUTATION_ATTESTATION_WEIGHT: u64 = 1;
+const DEFAULT_REPUTATION_AGE_WEIGHT: u64 = 1;
+const DEFAULT_REPUTATION_AGE_DIVISOR_SECONDS: u64 = 1_000;
 
 #[contracttype]
 #[derive(Clone)]
@@ -674,7 +677,21 @@ pub struct VerificationStats {
 pub struct HolderReputation {
     pub credentials_held: u64,
     pub successful_verifications: u64,
+    pub attestation_count: u64,
+    pub attestation_age_seconds: u64,
     pub score: u64,
+}
+
+/// Scoring configuration for holder reputation.
+#[contracttype]
+#[derive(Clone)]
+pub struct HolderReputationConfig {
+    /// Points awarded per attestation recorded in the holder's history.
+    pub attestation_weight: u64,
+    /// Points awarded per age bucket of attestation history.
+    pub age_weight: u64,
+    /// Age bucket size in seconds. Larger values make age matter more slowly.
+    pub age_divisor_seconds: u64,
 }
 
 #[contract]
@@ -5274,12 +5291,110 @@ impl QuorumProofContract {
         }
     }
 
-    /// Get holder reputation (stub — returns zeroed reputation).
-    pub fn get_holder_reputation(_env: Env, _holder: Address) -> HolderReputation {
+    /// Configure how holder reputation is scored from attestation history.
+    ///
+    /// The score is computed as:
+    /// `attestation_count * attestation_weight + (attestation_age_seconds / age_divisor) * age_weight`
+    pub fn set_holder_reputation_config(
+        env: Env,
+        admin: Address,
+        attestation_weight: u64,
+        age_weight: u64,
+        age_divisor_seconds: u64,
+    ) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        assert!(age_divisor_seconds > 0, "age_divisor_seconds must be greater than 0");
+
+        env.storage().instance().set(
+            &DataKey::AttestConditions(0),
+            &HolderReputationConfig {
+                attestation_weight,
+                age_weight,
+                age_divisor_seconds,
+            },
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the current holder reputation scoring configuration.
+    pub fn get_holder_reputation_config(env: Env) -> HolderReputationConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::AttestConditions(0))
+            .unwrap_or(HolderReputationConfig {
+                attestation_weight: DEFAULT_REPUTATION_ATTESTATION_WEIGHT,
+                age_weight: DEFAULT_REPUTATION_AGE_WEIGHT,
+                age_divisor_seconds: DEFAULT_REPUTATION_AGE_DIVISOR_SECONDS,
+            })
+    }
+
+    fn compute_holder_reputation(
+        env: &Env,
+        holder: Address,
+    ) -> (u64, u64, u64, u64, u64) {
+        let config = Self::get_holder_reputation_config(env.clone());
+        let activities: Vec<ActivityRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::HolderActivity(holder.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut attestation_count: u64 = 0;
+        let mut oldest_attestation_at: Option<u64> = None;
+        for activity in activities.iter() {
+            if activity.activity_type == ActivityType::CredentialAttested {
+                attestation_count = attestation_count.saturating_add(1);
+                oldest_attestation_at = Some(match oldest_attestation_at {
+                    Some(current_oldest) => core::cmp::min(current_oldest, activity.timestamp),
+                    None => activity.timestamp,
+                });
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let attestation_age_seconds = oldest_attestation_at
+            .map(|attested_at| now.saturating_sub(attested_at))
+            .unwrap_or(0);
+        let age_score = attestation_age_seconds
+            .saturating_div(config.age_divisor_seconds)
+            .saturating_mul(config.age_weight);
+        let count_score = attestation_count.saturating_mul(config.attestation_weight);
+        let score = count_score.saturating_add(age_score);
+        let subject_credentials: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(holder.clone()))
+            .unwrap_or(Vec::new(env));
+        let credentials_held: u64 = subject_credentials
+            .len()
+            .into();
+
+        (
+            credentials_held,
+            attestation_count,
+            attestation_age_seconds,
+            count_score,
+            score,
+        )
+    }
+
+    /// Get holder reputation derived from attestation history.
+    pub fn get_holder_reputation(env: Env, holder: Address) -> HolderReputation {
+        let (credentials_held, attestation_count, attestation_age_seconds, _count_score, score) =
+            Self::compute_holder_reputation(&env, holder);
         HolderReputation {
-            credentials_held: 0,
-            successful_verifications: 0,
-            score: 0,
+            credentials_held,
+            successful_verifications: attestation_count,
+            attestation_count,
+            attestation_age_seconds,
+            score,
         }
     }
 
@@ -5300,7 +5415,7 @@ impl QuorumProofContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, LedgerInfo};
-    use soroban_sdk::{Bytes, Env, FromVal, IntoVal};
+    use soroban_sdk::{vec, Bytes, Env, FromVal, IntoVal};
 
     // --- Deployment verification tests ---
 
@@ -7697,7 +7812,7 @@ mod tests {
 mod feature_tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
-    use soroban_sdk::{Bytes, Env};
+    use soroban_sdk::{vec, Bytes, Env};
 
     fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
         env.mock_all_auths();
@@ -9200,7 +9315,6 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_holder_reputation_zero_before_any_activity() {
         let env = Env::default();
         env.mock_all_auths();
@@ -9211,129 +9325,83 @@ mod feature_tests {
         let rep = client.get_holder_reputation(&holder);
         assert_eq!(rep.credentials_held, 0);
         assert_eq!(rep.successful_verifications, 0);
+        assert_eq!(rep.attestation_count, 0);
+        assert_eq!(rep.attestation_age_seconds, 0);
         assert_eq!(rep.score, 0);
     }
 
     #[test]
-    #[ignore]
-    fn test_holder_reputation_increments_on_credential_issue() {
+    fn test_holder_reputation_counts_attestations_and_age() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
+        client.initialize(&admin);
         client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 1u32];
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+        let cred_id = 1u64;
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 3_000;
+        });
         let rep = client.get_holder_reputation(&subject);
+
         assert_eq!(rep.credentials_held, 1);
-        assert_eq!(rep.score, 1);
-
-        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
-        let rep = client.get_holder_reputation(&subject);
-        assert_eq!(rep.credentials_held, 2);
-        assert_eq!(rep.score, 2);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_holder_reputation_increments_on_successful_verification() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::{ClaimType, ZkVerifierContract};
-
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let qp_id = env.register_contract(None, QuorumProofContract);
-        let sbt_id = env.register_contract(None, SbtRegistryContract);
-        let zk_id = env.register_contract(None, ZkVerifierContract);
-
-        let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
-
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
-        sbt.mint(&subject, &cred_id, &sbt_uri);
-
-        let proof = Bytes::from_slice(&env, b"valid-proof");
-        qp.verify_engineer(
-            &sbt_id,
-            &zk_id,
-            &issuer,
-            &subject,
-            &cred_id,
-            &ClaimType::HasDegree,
-            &proof,
-        );
-
-        let rep = qp.get_holder_reputation(&subject);
         assert_eq!(rep.successful_verifications, 1);
-        assert_eq!(rep.credentials_held, 1);
-        assert_eq!(rep.score, 2); // 1 credential + 1 verification
+        assert_eq!(rep.attestation_count, 1);
+        assert_eq!(rep.attestation_age_seconds, 2_000);
+        assert_eq!(rep.score, 3);
     }
 
     #[test]
-    #[ignore]
-    fn test_holder_reputation_not_incremented_on_failed_verification() {
-        use zk_verifier::ClaimType;
-
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let qp_id = env.register_contract(None, QuorumProofContract);
-        let sbt_id = env.register_contract(None, sbt_registry::SbtRegistryContract);
-        let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
-
-        let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-
-        // No SBT minted — verification fails, reputation should not increment.
-        let proof = Bytes::from_slice(&env, b"valid-proof");
-        qp.verify_engineer(
-            &sbt_id,
-            &zk_id,
-            &issuer,
-            &subject,
-            &cred_id,
-            &ClaimType::HasDegree,
-            &proof,
-        );
-
-        let rep = qp.get_holder_reputation(&subject);
-        assert_eq!(rep.successful_verifications, 0);
-        assert_eq!(rep.credentials_held, 1);
-        assert_eq!(rep.score, 1);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_holder_reputation_independent_per_holder() {
+    fn test_holder_reputation_configurable_scoring_algorithm() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
         let issuer = Address::generate(&env);
-        let subject_a = Address::generate(&env);
-        let subject_b = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
-        client.issue_credential(&issuer, &subject_a, &1u32, &metadata, &None);
-        client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
-        client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
+        client.initialize(&admin);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 1u32];
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        assert_eq!(client.get_holder_reputation(&subject_a).credentials_held, 2);
-        assert_eq!(client.get_holder_reputation(&subject_b).credentials_held, 1);
+        client.set_holder_reputation_config(&admin, &5u64, &2u64, &500u64);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+        let cred_id = 1u64;
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 2_500;
+        });
+        let rep = client.get_holder_reputation(&subject);
+
+        assert_eq!(rep.attestation_count, 1);
+        assert_eq!(rep.attestation_age_seconds, 1_500);
+        assert_eq!(rep.score, 11);
     }
 
     // -----------------------------------------------------------------------
