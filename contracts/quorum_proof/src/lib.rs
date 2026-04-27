@@ -8927,4 +8927,194 @@ mod doc_tests {
         });
         assert!(!cred3_data.revoked);
     }
+
+    // ============ Tests for Feature #448: Credential Holder Revocation Request ============
+
+    #[test]
+    fn test_request_credential_revocation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        
+        let request_id = client.request_credential_revocation(&holder, &cred_id, &String::from_str(&env, "credential is outdated"));
+        assert_eq!(request_id, 1u64);
+    }
+
+    #[test]
+    fn test_approve_revocation_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let request_id = client.request_credential_revocation(&holder, &cred_id, &String::from_str(&env, "outdated"));
+        
+        client.approve_revocation_request(&issuer, &request_id);
+        
+        let cred = client.get_credential(&cred_id);
+        assert!(cred.revoked);
+    }
+
+    #[test]
+    fn test_deny_revocation_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let request_id = client.request_credential_revocation(&holder, &cred_id, &String::from_str(&env, "outdated"));
+        
+        client.deny_revocation_request(&issuer, &request_id);
+        
+        let cred = client.get_credential(&cred_id);
+        assert!(!cred.revoked);
+    }
+
+    // ============ Tests for Feature #449: Credential Holder Dispute Resolution ============
+
+    #[test]
+    fn test_initiate_credential_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let evidence = Bytes::from_slice(&env, b"QmEvidenceHash0000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
+        
+        assert_eq!(dispute_id, 1u64);
+    }
+
+    #[test]
+    fn test_resolve_credential_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let evidence = Bytes::from_slice(&env, b"QmEvidenceHash0000000000000000000");
+        
+        // Set admin
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let _dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
+        
+        client.resolve_credential_dispute(&admin, &cred_id, &String::from_str(&env, "dispute upheld"));
+    }
+
+    #[test]
+    fn test_auto_resolve_dispute_timeout() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let evidence = Bytes::from_slice(&env, b"QmEvidenceHash0000000000000000000");
+        
+        set_ledger_timestamp(&env, 1000);
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let _dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
+        
+        // Move time forward by 30 days + 1 second
+        set_ledger_timestamp(&env, 1000 + 2_592_001);
+        
+        client.auto_resolve_dispute(&cred_id);
+    }
+
+    // ============ Tests for Feature #446: Credential Holder Anonymity Mode ============
+
+    #[test]
+    fn test_generate_anonymous_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let proof = client.generate_anonymous_proof(&holder, &cred_id, &verifier);
+        
+        assert!(proof.len() > 0);
+    }
+
+    #[test]
+    fn test_verify_anonymous_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let proof = client.generate_anonymous_proof(&holder, &cred_id, &verifier);
+        
+        let is_valid = client.verify_anonymous_proof(&cred_id, &verifier, &proof);
+        assert!(is_valid);
+    }
+
+    // ============ Tests for Feature #445: Attestor Reputation Scoring ============
+
+    #[test]
+    fn test_update_attestor_reputation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let admin = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        
+        // Set admin
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+        
+        client.update_attestor_reputation(&admin, &attestor, &50i32);
+        
+        let score = client.get_attestor_reputation_score(&attestor);
+        assert_eq!(score, 50i32);
+    }
+
+    #[test]
+    fn test_get_attestor_reputation_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let admin = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        
+        // Set admin
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+        
+        client.update_attestor_reputation(&admin, &attestor, &100i32);
+        client.update_attestor_reputation(&admin, &attestor, &-30i32);
+        
+        let score = client.get_attestor_reputation_score(&attestor);
+        assert_eq!(score, 70i32);
+    }
 }
