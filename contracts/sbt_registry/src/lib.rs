@@ -130,6 +130,31 @@ pub struct AuditTrailEntry {
     pub details: soroban_sdk::String,
 }
 
+/// Entry for a single mint operation within a batch.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchMintEntry {
+    pub owner: Address,
+    pub credential_id: u64,
+    pub metadata_uri: Bytes,
+}
+
+/// Entry for a single burn operation within a batch.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchBurnEntry {
+    pub caller: Address,
+    pub token_id: u64,
+}
+
+/// Entry for a single admin-transfer operation within a batch.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchTransferEntry {
+    pub token_id: u64,
+    pub new_owner: Address,
+}
+
 #[contract]
 pub struct SbtRegistryContract;
 
@@ -381,7 +406,7 @@ impl SbtRegistryContract {
             .unwrap_or(Vec::new(&env));
         new_tokens.push_back(token_id);
         env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
-        env.storage().instance().set(&DataKey::OwnerCredential(new_owner, token.credential_id), &token_id);
+        env.storage().instance().set(&DataKey::OwnerCredential(new_owner.clone(), token.credential_id), &token_id);
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recover").into_val(&env));
@@ -808,6 +833,84 @@ impl SbtRegistryContract {
         env.storage().persistent()
             .get(&DataKey::NotificationHistory(holder))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Mint multiple SBTs in a single atomic transaction.
+    /// Returns the newly assigned token IDs in input order.
+    pub fn batch_mint(env: Env, entries: Vec<BatchMintEntry>) -> Vec<u64> {
+        // Requirement 1.10: empty batch returns immediately with no state changes.
+        if entries.is_empty() {
+            return Vec::new(&env);
+        }
+
+        // ── Validation phase ────────────────────────────────────────────────
+        // All checks run before any state is written, guaranteeing atomicity.
+
+        // Requirement 1.2: require auth from each distinct owner.
+        // Collect distinct owners via O(n²) scan (no std HashSet in no_std).
+        for i in 0..entries.len() {
+            let owner_i = entries.get(i).unwrap().owner.clone();
+            let mut already_authed = false;
+            for j in 0..i {
+                if entries.get(j).unwrap().owner == owner_i {
+                    already_authed = true;
+                    break;
+                }
+            }
+            if !already_authed {
+                owner_i.require_auth();
+            }
+        }
+
+        // Fetch the QuorumProof contract address once.
+        let qp_id: Address = env.storage().instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+
+        for i in 0..entries.len() {
+            let entry = entries.get(i).unwrap();
+
+            // Requirement 1.3 / 1.4: verify credential is not revoked via QuorumProof.
+            // is_revoked panics with CredentialNotFound if the credential doesn't exist.
+            let revoked: bool = env.invoke_contract(
+                &qp_id,
+                &Symbol::new(&env, "is_revoked"),
+                soroban_sdk::vec![&env, entry.credential_id.into_val(&env)],
+            );
+            assert!(!revoked, "credential is revoked");
+
+            // Requirement 1.5: (owner, credential_id) must not already exist in storage.
+            if env.storage().instance().has(&DataKey::OwnerCredential(entry.owner.clone(), entry.credential_id)) {
+                panic_with_error!(&env, ContractError::SoulboundNonTransferable);
+            }
+        }
+
+        // Requirement 1.6: O(n²) intra-batch duplicate (owner, credential_id) scan.
+        for i in 0..entries.len() {
+            for j in (i + 1)..entries.len() {
+                if entries.get(i).unwrap().owner == entries.get(j).unwrap().owner
+                    && entries.get(i).unwrap().credential_id == entries.get(j).unwrap().credential_id
+                {
+                    panic_with_error!(&env, ContractError::SoulboundNonTransferable);
+                }
+            }
+        }
+
+        // ── Execution phase (Task 2.2) ───────────────────────────────────────
+        // Validation passed — execution phase will be added in Task 2.2.
+        Vec::new(&env)
+    }
+
+    /// Burn multiple SBTs in a single atomic transaction.
+    /// Returns the credential_id values of the burned tokens in input order.
+    pub fn batch_burn(env: Env, _entries: Vec<BatchBurnEntry>) -> Vec<u64> {
+        Vec::new(&env)
+    }
+
+    /// Admin-transfer multiple SBTs in a single atomic transaction.
+    /// Returns the transferred token IDs in input order.
+    pub fn batch_transfer(env: Env, _admin: Address, _entries: Vec<BatchTransferEntry>) -> Vec<u64> {
+        Vec::new(&env)
     }
 }
 
