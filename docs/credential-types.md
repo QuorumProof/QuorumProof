@@ -1,296 +1,408 @@
 # Credential Type Registry
 
-This document defines the credential type hierarchy and best practices for defining custom credential types in QuorumProof.
-
 ## Overview
 
-Credential types categorize the kind of professional qualification being attested. Each type has:
-- **Type ID**: Unique identifier (e.g., `degree`, `license`)
-- **Metadata Schema**: Required fields for that credential type
-- **Attestors**: Who can issue this type
-- **Expiry**: Optional validity period
+QuorumProof uses a **credential type registry** to organize and categorize different kinds of professional credentials. Each credential type is identified by a unique 32-bit integer (`u32`) and can have human-readable metadata (name and description) registered on-chain.
 
-## Standard Credential Types
+This document describes the credential type hierarchy, design patterns, and best practices for defining custom types.
 
-### 1. Degree
+## Credential Type Hierarchy
 
-Represents an academic degree from an accredited institution.
+Credential types follow a hierarchical structure to support different domains and use cases:
 
-**Type ID**: `degree`
+```
+Professional Credentials (1000-1999)
+├── Academic (1000-1099)
+│   ├── Degree (1001)
+│   ├── Diploma (1002)
+│   └── Certificate (1003)
+├── Licensing (1100-1199)
+│   ├── Professional License (1101)
+│   ├── Specialty License (1102)
+│   └── Renewal License (1103)
+└── Employment (1200-1299)
+    ├── Employment History (1201)
+    ├── Reference (1202)
+    └── Skill Certification (1203)
 
-**Metadata Fields**:
+Government Credentials (2000-2999)
+├── National ID (2001)
+├── Passport (2002)
+└── Work Permit (2003)
+
+Custom/Domain-Specific (3000+)
+```
+
+## Common Credential Types
+
+### Academic Credentials
+
+#### Degree (Type ID: 1001)
+Represents a formal degree awarded by an accredited educational institution.
+
+**Metadata Hash Contents:**
 ```json
 {
-  "institution": "string",           // University name
-  "field_of_study": "string",        // e.g., "Mechanical Engineering"
-  "degree_level": "string",          // "bachelor", "master", "phd"
-  "graduation_date": "u64",          // Unix timestamp
-  "gpa": "optional<f64>",            // Grade point average (0-4.0)
-  "honors": "optional<string>"       // "cum laude", "magna cum laude", etc.
+  "institution": "University of São Paulo",
+  "field_of_study": "Mechanical Engineering",
+  "degree_level": "Bachelor",
+  "graduation_date": "2020-06-15",
+  "gpa": "3.8",
+  "transcript_hash": "QmXxxx..."
 }
 ```
 
-**Attestor**: University registrar or accredited institution
-
-**Expiry**: None (degrees don't expire)
-
-**Example**:
+**Example Registration:**
 ```rust
-let metadata = map!(
-    ("institution", "MIT"),
-    ("field_of_study", "Mechanical Engineering"),
-    ("degree_level", "bachelor"),
-    ("graduation_date", "1609459200"),  // 2021-01-01
-    ("gpa", "3.85"),
-    ("honors", "cum laude")
+client.register_credential_type(
+    &admin,
+    &1001u32,
+    &String::from_str(&env, "Degree"),
+    &String::from_str(&env, "University degree (Bachelor, Master, PhD)")
 );
 ```
 
-### 2. Professional License
+#### Diploma (Type ID: 1002)
+Represents a diploma or certificate of completion from an educational program.
 
-Represents a government-issued professional license or certification.
-
-**Type ID**: `license`
-
-**Metadata Fields**:
+**Metadata Hash Contents:**
 ```json
 {
-  "license_number": "string",        // Official license ID
-  "issuing_body": "string",          // e.g., "Professional Engineers Ontario"
-  "jurisdiction": "string",          // Country/state code (ISO 3166-1)
-  "discipline": "string",            // e.g., "Mechanical Engineering"
-  "issue_date": "u64",               // Unix timestamp
-  "expiry_date": "u64",              // Unix timestamp
-  "status": "string"                 // "active", "suspended", "revoked"
+  "institution": "Technical Institute",
+  "program": "Advanced Manufacturing",
+  "completion_date": "2021-12-10",
+  "program_hash": "QmYyyy..."
 }
 ```
 
-**Attestor**: National/regional licensing body
+#### Certificate (Type ID: 1003)
+Represents a professional or technical certificate.
 
-**Expiry**: As specified in `expiry_date`
+**Metadata Hash Contents:**
+```json
+{
+  "issuer": "Professional Association",
+  "certification_name": "Certified Professional Engineer",
+  "issue_date": "2019-03-20",
+  "certification_hash": "QmZzzz..."
+}
+```
 
-**Example**:
+### Licensing Credentials
+
+#### Professional License (Type ID: 1101)
+Represents a government-issued professional license (e.g., engineering license, medical license).
+
+**Metadata Hash Contents:**
+```json
+{
+  "license_number": "PE-2019-12345",
+  "jurisdiction": "Brazil",
+  "discipline": "Mechanical Engineering",
+  "issue_date": "2019-05-10",
+  "expiry_date": "2024-05-10",
+  "license_authority": "CREA",
+  "license_hash": "QmAaaa..."
+}
+```
+
+**Example Registration:**
 ```rust
-let metadata = map!(
-    ("license_number", "PE-2024-001234"),
-    ("issuing_body", "Professional Engineers Ontario"),
-    ("jurisdiction", "CA"),
-    ("discipline", "Mechanical Engineering"),
-    ("issue_date", "1609459200"),
-    ("expiry_date", "1672531200"),  // 2023-01-01
-    ("status", "active")
+client.register_credential_type(
+    &admin,
+    &1101u32,
+    &String::from_str(&env, "Professional License"),
+    &String::from_str(&env, "Government-issued professional license")
 );
 ```
 
-### 3. Employment History
+#### Specialty License (Type ID: 1102)
+Represents a specialized license or endorsement (e.g., structural engineering specialty).
 
-Represents employment at an organization during a specific period.
-
-**Type ID**: `employment`
-
-**Metadata Fields**:
+**Metadata Hash Contents:**
 ```json
 {
-  "employer": "string",              // Company name
-  "job_title": "string",             // e.g., "Senior Engineer"
-  "department": "string",            // e.g., "R&D"
-  "start_date": "u64",               // Unix timestamp
-  "end_date": "optional<u64>",       // Unix timestamp (null if current)
-  "employment_type": "string",       // "full-time", "contract", "part-time"
-  "skills": "optional<string>"       // Comma-separated list
+  "base_license": "PE-2019-12345",
+  "specialty": "Structural Engineering",
+  "issue_date": "2020-01-15",
+  "specialty_hash": "QmBbbb..."
 }
 ```
 
-**Attestor**: Employer HR department or manager
+#### Renewal License (Type ID: 1103)
+Represents a renewed or extended license.
 
-**Expiry**: None (historical record)
+**Metadata Hash Contents:**
+```json
+{
+  "original_license": "PE-2019-12345",
+  "renewal_date": "2024-05-10",
+  "new_expiry": "2029-05-10",
+  "renewal_hash": "QmCccc..."
+}
+```
 
-**Example**:
+### Employment Credentials
+
+#### Employment History (Type ID: 1201)
+Represents employment at a specific organization.
+
+**Metadata Hash Contents:**
+```json
+{
+  "employer": "Acme Engineering Corp",
+  "position": "Senior Mechanical Engineer",
+  "start_date": "2018-06-01",
+  "end_date": "2023-12-31",
+  "employment_hash": "QmDddd..."
+}
+```
+
+**Example Registration:**
 ```rust
-let metadata = map!(
-    ("employer", "Tesla"),
-    ("job_title", "Senior Mechanical Engineer"),
-    ("department", "Powertrain"),
-    ("start_date", "1609459200"),
-    ("end_date", "1640995200"),  // 2022-01-01
-    ("employment_type", "full-time"),
-    ("skills", "CAD, MATLAB, Thermal Analysis")
+client.register_credential_type(
+    &admin,
+    &1201u32,
+    &String::from_str(&env, "Employment History"),
+    &String::from_str(&env, "Employment record from an organization")
 );
 ```
 
-### 4. Certification
+#### Reference (Type ID: 1202)
+Represents a professional reference or recommendation.
 
-Represents a professional certification from a recognized body.
-
-**Type ID**: `certification`
-
-**Metadata Fields**:
+**Metadata Hash Contents:**
 ```json
 {
-  "certification_name": "string",    // e.g., "AWS Solutions Architect"
-  "issuing_organization": "string",  // e.g., "Amazon Web Services"
-  "certification_id": "string",      // Official cert ID
-  "issue_date": "u64",               // Unix timestamp
-  "expiry_date": "optional<u64>",    // Unix timestamp
-  "score": "optional<u64>"           // Exam score if applicable
+  "referee_name": "Dr. Jane Smith",
+  "referee_title": "VP Engineering",
+  "referee_organization": "Acme Engineering Corp",
+  "reference_date": "2024-01-15",
+  "reference_hash": "QmEeee..."
 }
 ```
 
-**Attestor**: Certification body
+#### Skill Certification (Type ID: 1203)
+Represents certification of a specific technical skill.
 
-**Expiry**: As specified in `expiry_date`
-
-## Custom Credential Types
-
-You can define custom credential types by following this pattern:
-
-### Design Principles
-
-1. **Immutability**: Metadata should not change after issuance
-2. **Minimalism**: Include only essential fields; avoid redundancy
-3. **Standardization**: Use ISO standards where applicable (dates, country codes, etc.)
-4. **Privacy**: Don't include sensitive personal data (SSN, passport numbers, etc.)
-5. **Auditability**: Include dates and issuing body for verification
-
-### Creating a Custom Type
-
-1. **Define the Type ID**: Use lowercase, hyphenated names (e.g., `security-clearance`)
-
-2. **Design Metadata Schema**: List required and optional fields with types
-
-3. **Specify Attestors**: Who is authorized to issue this credential
-
-4. **Document Expiry**: Does this credential expire? If so, include `expiry_date`
-
-5. **Add Examples**: Provide sample metadata for clarity
-
-### Example: Security Clearance
-
-```rust
-// Type ID: security-clearance
-// Metadata:
+**Metadata Hash Contents:**
+```json
 {
-  "clearance_level": "string",       // "secret", "top-secret", "confidential"
-  "issuing_agency": "string",        // e.g., "US Department of Defense"
-  "issue_date": "u64",
-  "expiry_date": "u64",
-  "scope": "optional<string>"        // e.g., "Nuclear Weapons"
+  "skill": "CAD Design (CATIA)",
+  "certifying_body": "Dassault Systèmes",
+  "proficiency_level": "Advanced",
+  "certification_date": "2022-09-20",
+  "skill_hash": "QmFfff..."
 }
-
-// Attestor: Government security agency
-// Expiry: Yes, as specified in expiry_date
 ```
 
-## Best Practices
+## Best Practices for Type Design
 
-### 1. Use Consistent Date Formats
-Always use Unix timestamps (seconds since epoch) for dates. This ensures consistency across systems and timezones.
+### 1. Use Consistent Type ID Ranges
 
-```rust
-// Good
-("graduation_date", "1609459200")
+Organize your credential types into logical ranges:
+- **1000-1999**: Professional credentials
+- **2000-2999**: Government credentials
+- **3000+**: Custom/domain-specific types
 
-// Avoid
-("graduation_date", "2021-01-01")
-("graduation_date", "01/01/2021")
-```
+This makes it easier to understand the credential landscape and avoid collisions.
 
-### 2. Normalize String Values
-Use lowercase, standardized values for enums:
+### 2. Document Metadata Structure
 
-```rust
-// Good
-("degree_level", "bachelor")
-("employment_type", "full-time")
+Always document the expected JSON structure for your credential type's metadata hash. This helps:
+- Issuers understand what data to include
+- Verifiers know what to expect
+- Auditors can validate credential contents
 
-// Avoid
-("degree_level", "Bachelor's")
-("employment_type", "Full-Time")
-```
+### 3. Include Immutable Identifiers
 
-### 3. Use ISO Standards
-For country codes, use ISO 3166-1 alpha-2 (e.g., "US", "CA", "DE"):
+Metadata should include unique identifiers that cannot be forged:
+- License numbers
+- Degree conferral dates
+- Institution names
+- Issuing authority
 
-```rust
-("jurisdiction", "CA")  // Canada
-("jurisdiction", "DE")  // Germany
-```
+### 4. Use IPFS Hashes for Supporting Documents
 
-### 4. Avoid Redundant Fields
-Don't duplicate information that can be derived:
+Store supporting documents (transcripts, certificates, licenses) on IPFS and include their hashes in the metadata:
 
-```rust
-// Avoid
+```json
 {
-  "start_date": "1609459200",
-  "end_date": "1640995200",
-  "duration_months": "12"  // Redundant
-}
-
-// Good
-{
-  "start_date": "1609459200",
-  "end_date": "1640995200"
+  "transcript_hash": "QmXxxx...",
+  "certificate_hash": "QmYyyy...",
+  "supporting_docs": ["QmZzzz...", "QmAaaa..."]
 }
 ```
 
-### 5. Include Verification Metadata
-Add fields that help verifiers confirm authenticity:
+### 5. Plan for Expiry and Renewal
+
+For time-limited credentials, include:
+- `issue_date`: When the credential was issued
+- `expiry_date`: When the credential expires
+- `renewal_date`: When it was last renewed
+
+Use the `expires_at` field on the Credential struct to enforce expiry at the contract level.
+
+### 6. Support Hierarchical Relationships
+
+For credentials that build on others (e.g., specialty licenses on base licenses), include references:
+
+```json
+{
+  "base_credential_id": 12345,
+  "base_credential_hash": "QmXxxx...",
+  "specialty": "Structural Engineering"
+}
+```
+
+### 7. Minimize Sensitive Data
+
+Avoid storing personally identifiable information (PII) directly in metadata. Instead:
+- Store hashes of sensitive data
+- Use zero-knowledge proofs for verification
+- Keep full records off-chain
+
+Example:
+```json
+{
+  "subject_hash": "sha256(subject_address)",
+  "ssn_hash": "sha256(ssn)",
+  "full_record_ipfs": "QmXxxx..."
+}
+```
+
+## Registering Custom Credential Types
+
+To register a new credential type on-chain:
 
 ```rust
-{
-  "license_number": "PE-2024-001234",  // Verifiable ID
-  "issuing_body": "Professional Engineers Ontario",
-  "jurisdiction": "CA"
-}
+let env = Env::default();
+let client = QuorumProofContractClient::new(&env, &contract_id);
+let admin = Address::generate(&env);
+
+// Register a custom credential type
+client.register_credential_type(
+    &admin,
+    &3001u32,  // Custom type ID
+    &String::from_str(&env, "Custom Certification"),
+    &String::from_str(&env, "A custom professional certification")
+);
+
+// Retrieve the registered type
+let type_def = client.get_credential_type(&3001u32);
+assert_eq!(type_def.name, "Custom Certification");
 ```
 
-### 6. Plan for Privacy
-Don't include sensitive personal data in metadata:
+## Querying Credential Types
+
+Once registered, credential types can be queried:
 
 ```rust
-// Avoid
-{
-  "ssn": "123-45-6789",
-  "date_of_birth": "1990-01-01"
-}
-
-// Good: Use ZK proofs for age verification instead
-{
-  "age_verified": true,
-  "verification_date": "1609459200"
-}
+// Get type definition
+let type_def = client.get_credential_type(&1001u32);
+println!("Type: {}", type_def.name);
+println!("Description: {}", type_def.description);
 ```
 
-## Type Registry
+## Migration and Versioning
 
-To register a new credential type, add it to the `CredentialType` enum in the contract:
+When updating credential type definitions:
+
+1. **Create a new type ID** for the updated version (e.g., 1001 → 1001v2)
+2. **Keep the old type registered** for backward compatibility
+3. **Document the migration path** in your system
+4. **Use credential expiry** to phase out old types
+
+Example:
+```rust
+// Old type (deprecated)
+client.register_credential_type(&admin, &1001u32, &"Degree (v1)", &"...");
+
+// New type (current)
+client.register_credential_type(&admin, &1001u32, &"Degree (v2)", &"...");
+```
+
+## Security Considerations
+
+### Metadata Hash Integrity
+
+The metadata hash is stored on-chain but the actual metadata is stored off-chain (typically on IPFS). To verify integrity:
+
+1. Retrieve the credential from the contract
+2. Fetch the metadata from IPFS using the hash
+3. Verify: `sha256(metadata) == credential.metadata_hash`
+
+### Preventing Type Confusion
+
+Always validate the credential type before processing:
 
 ```rust
-pub enum CredentialType {
-    Degree,
-    License,
-    Employment,
-    Certification,
-    // Add custom types here
-    Custom(String),
-}
+let credential = client.get_credential(&cred_id);
+assert_eq!(credential.credential_type, 1001u32, "Expected degree credential");
 ```
 
-Then document it in this file following the standard template.
+### Attestor Verification
 
-## Verification Workflow
+For credentials with multiple attestors, verify the quorum slice:
 
-When verifying a credential:
+```rust
+let attestors = client.get_attestors(&cred_id);
+let is_attested = client.is_attested(&cred_id, &slice_id);
+assert!(is_attested, "Credential not properly attested");
+```
 
-1. **Retrieve Type**: Get the credential type from the on-chain record
-2. **Validate Metadata**: Ensure all required fields are present
-3. **Check Attestors**: Verify signatures from authorized attestors
-4. **Verify Expiry**: If applicable, check that credential hasn't expired
-5. **Conditional Claims**: Use ZK proofs for selective disclosure
+## Examples
+
+### Complete Degree Credential Flow
+
+```rust
+// 1. Register the degree type
+client.register_credential_type(
+    &admin,
+    &1001u32,
+    &String::from_str(&env, "Degree"),
+    &String::from_str(&env, "University degree")
+);
+
+// 2. Issue a degree credential
+let metadata = Bytes::from_slice(&env, b"ipfs://QmDegreeMetadata");
+let expiry = Some(1735689600u64); // 2025-01-01
+let cred_id = client.issue_credential(
+    &university,
+    &student,
+    &1001u32,
+    &metadata,
+    &expiry
+);
+
+// 3. Create a quorum slice with university, licensing body, and employer
+let mut attestors = Vec::new(&env);
+attestors.push_back(university.clone());
+attestors.push_back(licensing_body.clone());
+attestors.push_back(employer.clone());
+
+let mut weights = Vec::new(&env);
+weights.push_back(50u32);
+weights.push_back(30u32);
+weights.push_back(20u32);
+
+let slice_id = client.create_slice(&student, &attestors, &weights, &50u32);
+
+// 4. Attestors sign the credential
+client.attest(&university, &cred_id, &slice_id);
+client.attest(&licensing_body, &cred_id, &slice_id);
+
+// 5. Verify the credential is attested
+assert!(client.is_attested(&cred_id, &slice_id));
+
+// 6. Mint an SBT for the credential
+let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSBTMetadata");
+let token_id = sbt_client.mint(&student, &cred_id, &sbt_uri);
+```
 
 ## References
 
-- [Credential Management API](../README.md#credential-management)
+- [Credential Expiry and Auto-Revocation](./credential-expiry.md)
 - [Trust Slice Model](./trust-slices.md)
 - [ZK Verification Design](./zk-verification.md)
+- [Threat Model & Security](./threat-model.md)

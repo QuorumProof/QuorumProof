@@ -8862,4 +8862,108 @@ mod doc_tests {
             }
         }
     }
+
+    // Issue #440: Test credential expiry enforcement
+    #[test]
+    #[should_panic(expected = "credential has expired")]
+    fn test_get_credential_expired() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmExpired");
+        
+        set_ledger_timestamp(&env, 1000);
+        let expiry = 2000u64;
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(expiry));
+
+        // Credential should be retrievable before expiry
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.id, cred_id);
+
+        // Move time past expiry
+        set_ledger_timestamp(&env, 2001);
+        
+        // Should panic when trying to get expired credential
+        client.get_credential(&cred_id);
+    }
+
+    // Issue #440: Test set_credential_expiry
+    #[test]
+    fn test_set_credential_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmSetExpiry");
+        
+        set_ledger_timestamp(&env, 1000);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+
+        // Set expiry to 3000
+        client.set_credential_expiry(&issuer, &cred_id, &3000u64);
+        
+        // Credential should be retrievable before expiry
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.expires_at, Some(3000u64));
+
+        // Move time to just before expiry
+        set_ledger_timestamp(&env, 2999);
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.expires_at, Some(3000u64));
+    }
+
+    // Issue #440: Test auto_revoke_expired_credentials
+    #[test]
+    fn test_auto_revoke_expired_credentials() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmAutoRevoke");
+        
+        set_ledger_timestamp(&env, 1000);
+        
+        // Issue 3 credentials with different expiry times
+        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1500u64));
+        let cred2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &Some(2000u64));
+        let cred3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &Some(3000u64));
+
+        // Move time to 1800 — cred1 should be expired, cred2 and cred3 should not
+        set_ledger_timestamp(&env, 1800);
+        let revoked_count = client.auto_revoke_expired_credentials(&subject);
+        assert_eq!(revoked_count, 1u32);
+
+        // Verify cred1 is revoked
+        let cred1_data = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Credential(cred1)).unwrap()
+        });
+        assert!(cred1_data.revoked);
+
+        // Move time to 2500 — cred2 should now also be expired
+        set_ledger_timestamp(&env, 2500);
+        let revoked_count = client.auto_revoke_expired_credentials(&subject);
+        assert_eq!(revoked_count, 1u32);
+
+        // Verify cred2 is now revoked
+        let cred2_data = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Credential(cred2)).unwrap()
+        });
+        assert!(cred2_data.revoked);
+
+        // cred3 should still be valid
+        let cred3_data = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Credential(cred3)).unwrap()
+        });
+        assert!(!cred3_data.revoked);
+    }
 }
