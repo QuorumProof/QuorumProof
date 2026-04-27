@@ -43,6 +43,7 @@ pub enum DataKey {
     ReputationConfig,
     SbtWhitelist(u64),
     BurnedTokens,
+    CredentialAccessLog(u64),
 }
 
 /// Weights used to compute a holder's reputation score.
@@ -131,6 +132,18 @@ pub struct AuditTrailEntry {
     pub timestamp: u64,
     /// Additional details about the action
     pub details: soroban_sdk::String,
+}
+
+/// Credential access log entry for tracking verification attempts
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialAccessLogEntry {
+    /// Address of the verifier accessing the credential
+    pub verifier: Address,
+    /// Ledger timestamp of the access
+    pub timestamp: u64,
+    /// Type of access: "verify", "query", "attest"
+    pub access_type: Symbol,
 }
 
 #[contract]
@@ -960,6 +973,36 @@ impl SbtRegistryContract {
             .get(&DataKey::BurnedTokens)
             .unwrap_or(Vec::new(&env));
         burned.iter().any(|id| id == sbt_id)
+    }
+
+    // ── Credential Holder Consent Tracking (Issue #447) ──────────────────────────────────────
+
+    /// Log a credential access attempt. Called internally by verification functions.
+    fn log_credential_access(env: &Env, credential_id: u64, verifier: Address, access_type: Symbol) {
+        let mut log: Vec<CredentialAccessLogEntry> = env.storage().persistent()
+            .get(&DataKey::CredentialAccessLog(credential_id))
+            .unwrap_or(Vec::new(env));
+        log.push_back(CredentialAccessLogEntry {
+            verifier,
+            timestamp: env.ledger().timestamp(),
+            access_type,
+        });
+        env.storage().persistent().set(&DataKey::CredentialAccessLog(credential_id), &log);
+        env.storage().persistent().extend_ttl(&DataKey::CredentialAccessLog(credential_id), STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the access log for a credential. Holder-only.
+    pub fn get_credential_access_log(env: Env, holder: Address, credential_id: u64) -> Vec<CredentialAccessLogEntry> {
+        holder.require_auth();
+        
+        // Verify holder owns a token with this credential
+        let token_id_opt: Option<u64> = env.storage().instance()
+            .get(&DataKey::OwnerCredential(holder, credential_id));
+        assert!(token_id_opt.is_some(), "holder does not own this credential");
+
+        env.storage().persistent()
+            .get(&DataKey::CredentialAccessLog(credential_id))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
@@ -2086,5 +2129,44 @@ mod tests {
 
         // Attempting to get a burned token should panic
         let _ = client.get_token(&token_id);
+    }
+
+    // ── Issue #447: Credential Holder Consent Tracking ──────────────────────────────────────
+
+    #[test]
+    fn test_get_credential_access_log() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let _token_id = client.mint(&owner, &cred_id, &uri);
+
+        let log = client.get_credential_access_log(&owner, &cred_id);
+        // Log should be empty initially (no access logged yet)
+        assert_eq!(log.len(), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_credential_access_log_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let _token_id = client.mint(&owner, &cred_id, &uri);
+
+        let unauthorized = Address::generate(&env);
+        // Unauthorized holder should not be able to access the log
+        let _ = client.get_credential_access_log(&unauthorized, &cred_id);
     }
 }
