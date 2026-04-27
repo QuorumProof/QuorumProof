@@ -881,6 +881,39 @@ impl SbtRegistryContract {
             .get(&DataKey::SbtWhitelist(sbt_id))
             .unwrap_or(Vec::new(&env))
     }
+
+    // ── SBT Metadata URI Support (Issue #451) ──────────────────────────────────────
+
+    /// Set the metadata URI for an SBT. Issuer-only.
+    pub fn set_sbt_metadata_uri(env: Env, issuer: Address, sbt_id: u64, uri: Bytes) {
+        issuer.require_auth();
+        let qp_id: Address = env.storage().instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+        
+        let mut token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(sbt_id))
+            .expect("token not found");
+        let cred_issuer: Address = env.invoke_contract(
+            &qp_id,
+            &Symbol::new(&env, "get_credential_issuer"),
+            soroban_sdk::vec![&env, token.credential_id.into_val(&env)],
+        );
+        assert!(issuer == cred_issuer, "not the issuer");
+
+        token.metadata_uri = uri;
+        token.version += 1;
+        env.storage().persistent().set(&DataKey::Token(sbt_id), &token);
+        env.storage().persistent().extend_ttl(&DataKey::Token(sbt_id), STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the metadata URI for an SBT.
+    pub fn get_sbt_metadata_uri(env: Env, sbt_id: u64) -> Bytes {
+        let token: SoulboundToken = env.storage().persistent()
+            .get(&DataKey::Token(sbt_id))
+            .expect("token not found");
+        token.metadata_uri
+    }
 }
 
 #[cfg(test)]
@@ -1922,5 +1955,50 @@ mod tests {
 
         let whitelist = client.get_sbt_whitelist(&token_id);
         assert_eq!(whitelist.len(), 0);
+    }
+
+    // ── Issue #451: SBT Metadata URI Support ──────────────────────────────────────
+
+    #[test]
+    fn test_set_and_get_metadata_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let new_uri = Bytes::from_slice(&env, b"ipfs://QmNewURI");
+        client.set_sbt_metadata_uri(&issuer, &token_id, &new_uri);
+
+        let retrieved_uri = client.get_sbt_metadata_uri(&token_id);
+        assert_eq!(retrieved_uri, new_uri);
+    }
+
+    #[test]
+    fn test_metadata_uri_version_increment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let token = client.get_token(&token_id);
+        assert_eq!(token.version, 1);
+
+        let new_uri = Bytes::from_slice(&env, b"ipfs://QmNewURI");
+        client.set_sbt_metadata_uri(&issuer, &token_id, &new_uri);
+
+        let updated_token = client.get_token(&token_id);
+        assert_eq!(updated_token.version, 2);
     }
 }
