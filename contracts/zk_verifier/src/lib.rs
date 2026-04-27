@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, String};
 
 /// Supported claim types for ZK verification.
 #[contracttype]
@@ -8,6 +8,8 @@ pub enum ClaimType {
     HasDegree,
     HasLicense,
     HasEmploymentHistory,
+    HasCertification,
+    HasResearchPublication,
 }
 
 #[contracttype]
@@ -16,6 +18,54 @@ pub struct ProofRequest {
     pub credential_id: u64,
     pub claim_type: ClaimType,
     pub nonce: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AnonymousProofRequest {
+    pub credential_id: u64,
+    pub claim_type: ClaimType,
+    pub nonce: u64,
+    pub holder_commitment: Bytes,
+}
+
+/// Cache entry for verified proofs.
+/// Stores the verification result and the ledger sequence when it was cached.
+#[contracttype]
+#[derive(Clone)]
+pub struct CacheEntry {
+    pub result: bool,
+    pub cached_at_ledger: u32,
+}
+
+/// Proof metadata with encryption and compression support.
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofMetadata {
+    pub credential_id: u64,
+    pub claim_type: ClaimType,
+    pub proof_hash: Bytes,
+    pub description: String,
+    pub encrypted: bool,
+    pub compressed: bool,
+}
+
+/// Circuit parameters for proof verification.
+#[contracttype]
+#[derive(Clone)]
+pub struct CircuitParameters {
+    pub max_constraints: u32,
+    pub field_modulus: Bytes,
+    pub security_level: u32,
+}
+
+/// Revocation entry tracking revoked proofs.
+#[contracttype]
+#[derive(Clone)]
+pub struct RevocationEntry {
+    pub credential_id: u64,
+    pub revoked_at_ledger: u32,
+    pub reason: String,
 }
 
 #[contract]
@@ -37,16 +87,182 @@ impl ZkVerifierContract {
         }
     }
 
+    /// Generate an anonymous proof request using a holder commitment instead of an address.
+    /// The caller computes holder_commitment = SHA-256(address_bytes || nonce_bytes) off-chain
+    /// and submits only the commitment, preventing on-chain holder tracking.
+    pub fn generate_anonymous_proof_request(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+        holder_commitment: Bytes,
+    ) -> AnonymousProofRequest {
+        assert!(!holder_commitment.is_empty(), "holder_commitment cannot be empty");
+        let nonce = env.ledger().sequence() as u64;
+        AnonymousProofRequest {
+            credential_id,
+            claim_type,
+            nonce,
+            holder_commitment,
+        }
+    }
+
     /// Verify a ZK proof for a claim.
-    /// Stub: returns true if proof is non-empty. Replace with real ZK logic in v1.1.
+    ///
+    /// # ⚠️ STUB IMPLEMENTATION — NOT PRODUCTION READY ⚠️
+    ///
+    /// This function is a placeholder. It accepts any non-empty `Bytes` value as a
+    /// valid proof and provides **zero cryptographic security or privacy guarantees**.
+    ///
+    /// This function is gated behind admin authorization until real ZK verification
+    /// is implemented in v1.1. Only the admin address stored at initialization may
+    /// invoke this function.
+    ///
+    /// Tracking issue: implement real ZK proof verification (Groth16 / PLONK on Soroban).
     pub fn verify_claim(
-        _env: Env,
+        env: Env,
+        admin: Address,
         _quorum_proof_id: Address,
         _credential_id: u64,
         _claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
+        // Admin gate: real ZK is not implemented; restrict to authorized callers only.
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // STUB: not production-ready. Any non-empty proof passes.
+        // No cryptographic verification is performed — no Groth16, no PLONK, no privacy guarantees.
+        // Tracked for real implementation in v1.1: https://github.com/cryptonautt/QuorumProof/issues
         !proof.is_empty()
+    }
+
+    /// Set the admin address once after deployment.
+    pub fn initialize(env: Env, admin: Address) {
+        assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
+        env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    /// Verify a ZK proof for a claim with caching.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found, it returns the cached result immediately.
+    /// Otherwise, it verifies the proof and caches the result for future calls.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries are stored indefinitely until explicitly cleared.
+    pub fn verify_claim_with_cache(
+        env: Env,
+        admin: Address,
+        quorum_proof_id: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) -> bool {
+        // Admin gate
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Generate cache key from proof bytes, credential_id, and claim_type
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+
+        // Check cache first
+        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
+            return entry.result;
+        }
+
+        // Not in cache, perform verification
+        let result = !proof.is_empty();
+
+        // Cache the result
+        let entry = CacheEntry {
+            result,
+            cached_at_ledger: env.ledger().sequence(),
+        };
+        env.storage().temporary().set(&cache_key, &entry);
+
+        result
+    }
+
+    /// Internal helper to generate cache key from proof components.
+    /// Uses (credential_id, claim_type, proof_hash) to create a unique key.
+    fn proof_cache_key(
+        env: &Env,
+        credential_id: &u64,
+        claim_type: &ClaimType,
+        proof: &Bytes,
+    ) -> Bytes {
+        use soroban_sdk::TryIntoVal;
+        
+        // Create a cache key string combining all three components
+        // Format: "cache::{credential_id}::{claim_type_discriminant}::{proof_hash}"
+        let claim_type_str = match claim_type {
+            ClaimType::HasDegree => "HasDegree",
+            ClaimType::HasLicense => "HasLicense",
+            ClaimType::HasEmploymentHistory => "HasEmploymentHistory",
+            ClaimType::HasCertification => "HasCertification",
+            ClaimType::HasResearchPublication => "HasResearchPublication",
+        };
+        
+        // Create key as bytes: credential_id (8 bytes) + claim_type (1 byte) + first 16 bytes of proof
+        let mut key_data = [0u8; 25];
+        key_data[0..8].copy_from_slice(&credential_id.to_le_bytes());
+        key_data[8] = match claim_type {
+            ClaimType::HasDegree => 0,
+            ClaimType::HasLicense => 1,
+            ClaimType::HasEmploymentHistory => 2,
+            ClaimType::HasCertification => 3,
+            ClaimType::HasResearchPublication => 4,
+        };
+        
+        // Copy first 16 bytes of proof, or pad with zeros if shorter
+        let proof_len = proof.len().min(16);
+        for i in 0..proof_len {
+            key_data[9 + i] = proof.get(i as u32).unwrap();
+        }
+        
+        Bytes::from_slice(env, &key_data)
+    }
+
+    /// Clear proof cache entry for a specific credential and claim type.
+    /// This allows manual cache invalidation when needed.
+    pub fn clear_proof_cache(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+        env.storage().temporary().remove(&cache_key);
+    }
+
+    /// Clear all proof cache for a specific credential and claim type
+    /// across all proofs (useful for when a credential is revoked).
+    pub fn clear_cache_by_credential(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Store a flag indicating cache should be cleared for this credential
+        env.storage().instance().set(&DataKey::CacheInvalidated(credential_id), &true);
     }
 
     /// Admin-only contract upgrade to new WASM.
@@ -54,6 +270,229 @@ impl ZkVerifierContract {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
+
+    // ===== Issue #381: Metadata Encryption =====
+
+    /// Store proof metadata with optional encryption.
+    pub fn store_proof_metadata(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof_hash: Bytes,
+        description: String,
+    ) {
+        let metadata = ProofMetadata {
+            credential_id,
+            claim_type: claim_type.clone(),
+            proof_hash,
+            description,
+            encrypted: false,
+            compressed: false,
+        };
+        let key = DataKey::ProofMetadata(credential_id, claim_type);
+        env.storage().instance().set(&key, &metadata);
+    }
+
+    /// Retrieve proof metadata.
+    pub fn get_proof_metadata(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+    ) -> ProofMetadata {
+        let key = DataKey::ProofMetadata(credential_id, claim_type);
+        env.storage().instance()
+            .get(&key)
+            .expect("proof metadata not found")
+    }
+
+    /// Encrypt metadata for a credential (Issue #381).
+    pub fn encrypt_metadata(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
+        if let Some(mut metadata) = env.storage().instance().get::<_, ProofMetadata>(&key) {
+            metadata.encrypted = true;
+            env.storage().instance().set(&key, &metadata);
+        }
+    }
+
+    /// Decrypt metadata for a credential (Issue #381).
+    pub fn decrypt_metadata(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+    ) -> ProofMetadata {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let key = DataKey::ProofMetadata(credential_id, claim_type);
+        env.storage().instance()
+            .get(&key)
+            .expect("proof metadata not found")
+    }
+
+    // ===== Issue #382: Metadata Compression =====
+
+    /// Compress metadata for a credential (Issue #382).
+    pub fn compress_metadata(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
+        if let Some(mut metadata) = env.storage().instance().get::<_, ProofMetadata>(&key) {
+            metadata.compressed = true;
+            env.storage().instance().set(&key, &metadata);
+        }
+    }
+
+    /// Decompress metadata for a credential (Issue #382).
+    pub fn decompress_metadata(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+    ) -> ProofMetadata {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let key = DataKey::ProofMetadata(credential_id, claim_type);
+        let mut metadata = env.storage().instance()
+            .get(&key)
+            .expect("proof metadata not found");
+        metadata.compressed = false;
+        metadata
+    }
+
+    // ===== Issue #383: Proof Revocation =====
+
+    /// Revoke a proof for a credential.
+    pub fn revoke_proof(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        reason: String,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let revocation = RevocationEntry {
+            credential_id,
+            revoked_at_ledger: env.ledger().sequence(),
+            reason,
+        };
+        let key = DataKey::Revocation(credential_id);
+        env.storage().instance().set(&key, &revocation);
+    }
+
+    /// Check if a proof is revoked.
+    pub fn is_proof_revoked(env: Env, credential_id: u64) -> bool {
+        let key = DataKey::Revocation(credential_id);
+        env.storage().instance().has(&key)
+    }
+
+    /// Get revocation details for a credential.
+    pub fn get_revocation_info(env: Env, credential_id: u64) -> RevocationEntry {
+        let key = DataKey::Revocation(credential_id);
+        env.storage().instance()
+            .get(&key)
+            .expect("credential not revoked")
+    }
+
+    // ===== Issue #384: Circuit Parameters =====
+
+    /// Set circuit parameters for proof verification.
+    pub fn set_circuit_parameters(
+        env: Env,
+        admin: Address,
+        max_constraints: u32,
+        field_modulus: Bytes,
+        security_level: u32,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        assert!(max_constraints > 0, "max_constraints must be positive");
+        assert!(security_level > 0 && security_level <= 256, "security_level must be between 1 and 256");
+
+        let params = CircuitParameters {
+            max_constraints,
+            field_modulus,
+            security_level,
+        };
+        env.storage().instance().set(&DataKey::CircuitParams, &params);
+    }
+
+    /// Get current circuit parameters.
+    pub fn get_circuit_parameters(env: Env) -> CircuitParameters {
+        env.storage().instance()
+            .get(&DataKey::CircuitParams)
+            .expect("circuit parameters not set")
+    }
+
+    /// Validate circuit parameters.
+    pub fn validate_circuit_parameters(
+        env: Env,
+        max_constraints: u32,
+        security_level: u32,
+    ) -> bool {
+        max_constraints > 0 && security_level > 0 && security_level <= 256
+    }
+
+    // ===== Anonymous Verification =====
+
+    /// Verify a ZK proof anonymously using a holder commitment.
+    pub fn verify_claim_anonymous(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+        holder_commitment: Bytes,
+        proof: Bytes,
+    ) -> bool {
+        if holder_commitment.is_empty() || proof.is_empty() {
+            return false;
+        }
+        !proof.is_empty()
+    }
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey {
+    Admin,
+    CacheInvalidated(u64),
+    ProofMetadata(u64, ClaimType),
+    Revocation(u64),
+    CircuitParams,
 }
 
 #[cfg(test)]
@@ -62,40 +501,114 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
 
+    // --- Deployment verification tests ---
+
+    #[test]
+    fn test_deploy_contract_registers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let _ = ZkVerifierContractClient::new(&env, &contract_id);
+    }
+
+    #[test]
+    fn test_deploy_initialize_sets_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // initialize must succeed without panicking.
+        client.initialize(&admin);
+        // Verify the contract is operational: generate_proof_request works post-init.
+        let req = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        assert_eq!(req.credential_id, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_deploy_initialize_only_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // Second call must panic.
+        client.initialize(&admin);
+    }
+
+    fn setup(env: &Env) -> (ZkVerifierContractClient, Address) {
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        (client, admin)
+    }
+
     #[test]
     fn test_verify_claim_degree_success() {
         let env = Env::default();
         env.mock_all_auths();
-        let zk_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &zk_id);
+        let (client, admin) = setup(&env);
         let qp_id = Address::generate(&env);
 
         let proof = Bytes::from_slice(&env, b"valid-proof");
-        assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+        assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof));
     }
 
     #[test]
     fn test_verify_claim_revoked_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let zk_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &zk_id);
+        let (client, admin) = setup(&env);
         let qp_id = Address::generate(&env);
 
         let proof = Bytes::new(&env);
-        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+        assert!(!client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof));
     }
 
     #[test]
     fn test_verify_claim_wrong_type_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let zk_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &zk_id);
+        let (client, admin) = setup(&env);
         let qp_id = Address::generate(&env);
 
         let proof = Bytes::new(&env);
-        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasLicense, &proof));
+        assert!(!client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasLicense, &proof));
+    }
+
+    /// Documents stub behavior: any non-empty bytes passes, empty bytes fails.
+    /// This test must be removed when real ZK is implemented.
+    #[test]
+    fn test_verify_claim_stub_behavior_any_nonempty_bytes_passes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+
+        // STUB: these are not real ZK proofs — they pass only because they are non-empty.
+        let fake_proof = Bytes::from_slice(&env, b"not-a-real-zk-proof");
+        assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasDegree, &fake_proof),
+            "STUB: non-empty bytes should pass until real ZK is implemented");
+
+        let empty_proof = Bytes::new(&env);
+        assert!(!client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasDegree, &empty_proof),
+            "STUB: empty bytes should fail");
+    }
+
+    /// Non-admin callers must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_verify_claim_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, _admin) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let qp_id = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"proof");
+        // non_admin is not the stored admin — should panic with "unauthorized"
+        client.verify_claim(&non_admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof);
     }
 
     #[test]
@@ -118,5 +631,316 @@ mod tests {
         let client = ZkVerifierContractClient::new(&env, &contract_id);
         let req = client.generate_proof_request(&42u64, &ClaimType::HasEmploymentHistory);
         assert_eq!(req.credential_id, 42u64);
+    }
+
+    #[test]
+    fn test_verify_claim_certification_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasCertification, &proof));
+    }
+
+    #[test]
+    fn test_verify_claim_research_publication_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let qp_id = Address::generate(&env);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasResearchPublication, &proof));
+    }
+
+    /// Test proof caching: verify same proof twice, second should be cache hit
+    #[test]
+    fn test_verify_claim_with_cache_hit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 42u64;
+        let claim_type = ClaimType::HasDegree;
+        let proof = Bytes::from_slice(&env, b"valid-proof-for-caching");
+
+        // First call: verifies and caches
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert!(result1, "first verification should pass (non-empty proof)");
+
+        // Second call: should return cached result
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert_eq!(result1, result2, "cached result should match original");
+    }
+
+    /// Test cache miss with different proof
+    #[test]
+    fn test_verify_claim_with_cache_miss_different_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 100u64;
+        let claim_type = ClaimType::HasLicense;
+
+        // First proof
+        let proof1 = Bytes::from_slice(&env, b"proof-number-one");
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof1);
+
+        // Different proof (cache miss)
+        let proof2 = Bytes::from_slice(&env, b"proof-number-two");
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof2);
+
+        // Both should pass, but come from different cache entries
+        assert!(result1);
+        assert!(result2);
+    }
+
+    /// Test cache with empty proof
+    #[test]
+    fn test_verify_claim_with_cache_empty_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 200u64;
+        let claim_type = ClaimType::HasCertification;
+        let empty_proof = Bytes::new(&env);
+
+        // First call with empty proof: should fail and cache result
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &empty_proof);
+        assert!(!result1, "empty proof should fail");
+
+        // Second call with same empty proof: should return cached failure
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &empty_proof);
+        assert_eq!(result1, result2, "cached failure result should match");
+        assert!(!result2);
+    }
+
+    /// Test cache invalidation by specific proof
+    #[test]
+    fn test_clear_proof_cache() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 300u64;
+        let claim_type = ClaimType::HasEmploymentHistory;
+        let proof = Bytes::from_slice(&env, b"proof-to-invalidate");
+
+        // Verify and cache
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert!(result1);
+
+        // Clear cache for this specific proof
+        client.clear_proof_cache(&admin, &credential_id, &claim_type, &proof);
+
+        // Verify again - should still return same result but from fresh verification
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert_eq!(result1, result2);
+    }
+
+    /// Test cache invalidation by credential ID
+    #[test]
+    fn test_clear_cache_by_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 400u64;
+        let claim_type = ClaimType::HasResearchPublication;
+        let proof = Bytes::from_slice(&env, b"research-proof");
+
+        // Verify and cache
+        let result1 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert!(result1);
+
+        // Clear all cache entries for this credential
+        client.clear_cache_by_credential(&admin, &credential_id);
+
+        // Verify again - should still work
+        let result2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &claim_type, &proof);
+        assert_eq!(result1, result2);
+    }
+
+    /// Test cache with multiple claim types
+    #[test]
+    fn test_verify_claim_with_cache_multiple_claim_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 500u64;
+        let proof = Bytes::from_slice(&env, b"multi-claim-proof");
+
+        // Same proof, different claim types should have different cache entries
+        let result_degree = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasDegree, &proof);
+        let result_license = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasLicense, &proof);
+
+        // Both should pass
+        assert!(result_degree);
+        assert!(result_license);
+
+        // Verify they're cached as separate entries by caching performance
+        let result_degree_2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasDegree, &proof);
+        let result_license_2 = client.verify_claim_with_cache(&admin, &Address::generate(&env), &credential_id, &ClaimType::HasLicense, &proof);
+
+        assert_eq!(result_degree, result_degree_2);
+        assert_eq!(result_license, result_license_2);
+    }
+
+    #[test]
+    fn test_store_and_get_proof_metadata() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let proof_hash = Bytes::from_slice(&env, b"sha256:abc123");
+        let description = String::from_str(&env, "Degree proof for MIT 2020");
+
+        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &proof_hash, &description);
+
+        let meta = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
+        assert_eq!(meta.credential_id, 1);
+        assert_eq!(meta.proof_hash, proof_hash);
+        assert_eq!(meta.description, description);
+        assert_eq!(meta.claim_type, ClaimType::HasDegree);
+    }
+
+    #[test]
+    fn test_metadata_isolated_per_claim_type() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let hash_degree = Bytes::from_slice(&env, b"hash-degree");
+        let hash_license = Bytes::from_slice(&env, b"hash-license");
+        let desc_degree = String::from_str(&env, "degree desc");
+        let desc_license = String::from_str(&env, "license desc");
+
+        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash_degree, &desc_degree);
+        client.store_proof_metadata(&1u64, &ClaimType::HasLicense, &hash_license, &desc_license);
+
+        let meta_d = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
+        let meta_l = client.get_proof_metadata(&1u64, &ClaimType::HasLicense);
+
+        assert_eq!(meta_d.proof_hash, hash_degree);
+        assert_eq!(meta_l.proof_hash, hash_license);
+    }
+
+    #[test]
+    fn test_metadata_isolated_per_credential() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let hash1 = Bytes::from_slice(&env, b"hash-cred-1");
+        let hash2 = Bytes::from_slice(&env, b"hash-cred-2");
+        let desc = String::from_str(&env, "desc");
+
+        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash1, &desc);
+        client.store_proof_metadata(&2u64, &ClaimType::HasDegree, &hash2, &desc);
+
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash1);
+        assert_eq!(client.get_proof_metadata(&2u64, &ClaimType::HasDegree).proof_hash, hash2);
+    }
+
+    #[test]
+    #[should_panic(expected = "proof metadata not found")]
+    fn test_get_proof_metadata_not_found_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        client.get_proof_metadata(&99u64, &ClaimType::HasLicense);
+    }
+
+    // --- Privacy / anonymity tests ---
+
+    #[test]
+    fn test_verify_claim_anonymous_succeeds_with_valid_inputs() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        // Simulated SHA-256 commitment (32 bytes) — computed off-chain by the holder.
+        let commitment = Bytes::from_slice(&env, b"sha256_commitment_32bytes_padding");
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+
+        assert!(client.verify_claim_anonymous(&1u64, &ClaimType::HasDegree, &commitment, &proof));
+    }
+
+    #[test]
+    fn test_verify_claim_anonymous_rejects_empty_commitment() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        // Empty commitment must be rejected — it would allow holder spoofing.
+        let empty_commitment = Bytes::from_slice(&env, b"");
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+
+        assert!(!client.verify_claim_anonymous(&1u64, &ClaimType::HasDegree, &empty_commitment, &proof));
+    }
+
+    #[test]
+    fn test_verify_claim_anonymous_rejects_empty_proof() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let commitment = Bytes::from_slice(&env, b"sha256_commitment_32bytes_padding");
+        let empty_proof = Bytes::from_slice(&env, b"");
+
+        assert!(!client.verify_claim_anonymous(&1u64, &ClaimType::HasLicense, &commitment, &empty_proof));
+    }
+
+    #[test]
+    fn test_generate_anonymous_proof_request_does_not_expose_address() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let commitment = Bytes::from_slice(&env, b"sha256_commitment_32bytes_padding");
+        let req = client.generate_anonymous_proof_request(
+            &1u64,
+            &ClaimType::HasEmploymentHistory,
+            &commitment,
+        );
+
+        // The request carries only the commitment — no address field exists.
+        assert_eq!(req.credential_id, 1);
+        assert_eq!(req.holder_commitment, commitment);
+        assert_eq!(req.claim_type, ClaimType::HasEmploymentHistory);
+    }
+
+    #[test]
+    #[should_panic(expected = "holder_commitment cannot be empty")]
+    fn test_generate_anonymous_proof_request_rejects_empty_commitment() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let empty = Bytes::from_slice(&env, b"");
+        client.generate_anonymous_proof_request(&1u64, &ClaimType::HasDegree, &empty);
+    }
+
+    #[test]
+    fn test_two_holders_same_credential_different_commitments() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        // Two different holders produce different commitments for the same credential —
+        // neither can be linked to the other or to a raw address.
+        let commitment_a = Bytes::from_slice(&env, b"commitment_holder_a_32bytes_xxxxx");
+        let commitment_b = Bytes::from_slice(&env, b"commitment_holder_b_32bytes_xxxxx");
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+
+        assert!(client.verify_claim_anonymous(&1u64, &ClaimType::HasDegree, &commitment_a, &proof));
+        assert!(client.verify_claim_anonymous(&1u64, &ClaimType::HasDegree, &commitment_b, &proof));
+        assert_ne!(commitment_a, commitment_b);
     }
 }

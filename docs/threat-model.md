@@ -1,419 +1,522 @@
-# Threat Model & Security Analysis
-
-## Overview
+# Threat Model & Security Analysis — QuorumProof
 
-This document outlines the threat model for QuorumProof, identifying potential attack vectors, their impact, and mitigation strategies. It covers credential issuance, attestation, verification, and dispute resolution features.
-
-## System Architecture
+## Executive Summary
 
-QuorumProof consists of three main components:
-
-1. **QuorumProof Contract**: Core credential management and quorum slice logic
-2. **SBT Registry Contract**: Soulbound token issuance and management
-3. **ZK Verifier Contract**: Zero-knowledge proof verification for conditional claims
-
-## Threat Categories
-
-### 1. Credential Issuance Threats
-
-#### 1.1 Unauthorized Credential Issuance
-**Threat**: An attacker issues credentials on behalf of a legitimate issuer.
-
-**Attack Vector**:
-- Compromise issuer's private key
-- Exploit smart contract vulnerability to bypass issuer authentication
-- Social engineering to trick issuer into signing malicious transactions
-
-**Impact**: High
-- Fraudulent credentials in circulation
-- Damage to issuer's reputation
-- Potential harm to credential holders and verifiers
-
-**Mitigations**:
-- Require issuer authentication via `require_auth()` on all issuance functions
-- Use multi-signature schemes for high-value issuers
-- Implement rate limiting on credential issuance
-- Audit issuer key management practices
-- Monitor for unusual issuance patterns
-
-#### 1.2 Duplicate Credential Issuance
-**Threat**: An issuer issues multiple credentials of the same type to the same subject.
-
-**Attack Vector**:
-- Accidental duplicate issuance
-- Intentional issuance to inflate credential count
-- Replay attack on issuance transaction
-
-**Impact**: Medium
-- Confusion about credential validity
-- Potential for double-counting in verification
-- Audit trail complexity
-
-**Mitigations**:
-- Enforce uniqueness constraint: one credential per (issuer, subject, type) tuple
-- Implement idempotent issuance (reject duplicates)
-- Emit events for all issuance attempts (including rejections)
-- Maintain audit log of all issuance attempts
-
-### 2. Attestation Threats
-
-#### 2.1 Unauthorized Attestation
-**Threat**: An attacker attests to credentials without authorization.
-
-**Attack Vector**:
-- Compromise attestor's private key
-- Exploit smart contract vulnerability to bypass attestor validation
-- Impersonate attestor address
-
-**Impact**: High
-- Fraudulent attestations inflate credential credibility
-- Verifiers trust invalid credentials
-- Undermines entire trust model
-
-**Mitigations**:
-- Require attestor authentication via `require_auth()`
-- Verify attestor is in the quorum slice before accepting attestation
-- Implement attestor reputation tracking
-- Monitor for unusual attestation patterns
-- Require multi-signature for high-value attestations
-
-#### 2.2 Quorum Slice Manipulation
-**Threat**: An attacker manipulates quorum slices to lower attestation thresholds.
-
-**Attack Vector**:
-- Compromise slice creator's key
-- Add malicious attestors to existing slices
-- Reduce threshold to enable easier attestation
-
-**Impact**: High
-- Credentials become attested with insufficient trust
-- Verifiers cannot rely on attestation guarantees
-- Undermines FBA trust model
-
-**Mitigations**:
-- Only slice creator can modify their own slice
-- Require explicit authorization for slice modifications
-- Implement slice versioning to track changes
-- Emit events for all slice modifications
-- Require threshold >= 50% of total weight (prevent trivial thresholds)
-
-#### 2.3 Attestor Collusion
-**Threat**: Multiple attestors collude to attest to false credentials.
-
-**Attack Vector**:
-- Attestors coordinate to sign fraudulent credentials
-- Attestors are compromised by attacker
-- Attestors are malicious from the start
-
-**Impact**: High
-- Fraudulent credentials appear legitimate
-- Verifiers cannot distinguish legitimate from fraudulent credentials
-- Undermines entire credential system
-
-**Mitigations**:
-- Diversify attestor networks (university, licensing body, employers)
-- Implement reputation tracking for attestors
-- Monitor for suspicious attestation patterns
-- Require threshold > 50% to prevent single-attestor dominance
-- Implement dispute resolution to challenge fraudulent attestations
-- Use weighted attestation to reduce impact of compromised attestors
-
-### 3. Credential Verification Threats
-
-#### 3.1 Expired Credential Verification
-**Threat**: An attacker uses an expired credential for verification.
-
-**Attack Vector**:
-- Attempt to verify with expired credential
-- Exploit smart contract to bypass expiry check
-- Modify credential expiry timestamp
-
-**Impact**: Medium
-- Outdated credentials accepted as valid
-- Verifiers make decisions based on stale information
-- Licensing/employment status may have changed
-
-**Mitigations**:
-- Enforce expiry check in `get_credential()` function
-- Implement auto-revocation for expired credentials
-- Require explicit expiry timestamp for time-limited credentials
-- Monitor credential expiry and send renewal reminders
-- Implement credential renewal flow
-
-#### 3.2 Revoked Credential Verification
-**Threat**: An attacker uses a revoked credential for verification.
-
-**Attack Vector**:
-- Attempt to verify with revoked credential
-- Exploit smart contract to bypass revocation check
-- Modify revocation flag
-
-**Impact**: High
-- Revoked credentials accepted as valid
-- Verifiers make decisions based on invalid credentials
-- Potential for fraud if credential was revoked due to misconduct
-
-**Mitigations**:
-- Enforce revocation check in `get_credential()` function
-- Maintain immutable revocation log
-- Emit revocation events for auditing
-- Implement revocation registry for quick lookup
-- Require explicit revocation authorization from issuer
-
-### 4. Dispute Resolution Threats
-
-#### 4.1 Admin Collusion
-**Threat**: Admin and attestors collude to attest to fraudulent credentials and reject legitimate disputes.
-
-**Attack Vector**:
-- Admin and attestors coordinate to issue fraudulent credentials
-- Admin rejects all disputes challenging the fraudulent credentials
-- Admin uses veto power to prevent dispute resolution
-
-**Impact**: Critical
-- Fraudulent credentials cannot be challenged
-- Verifiers have no recourse for credential fraud
-- System loses credibility
-
-**Mitigations**:
-- Implement multi-signature admin (require 2-of-3 or 3-of-5 signatures)
-- Separate dispute resolution from credential issuance
-- Implement independent dispute arbiters
-- Require evidence submission for all disputes
-- Implement appeal process for rejected disputes
-- Implement time-based dispute resolution (auto-resolve if no response)
-- Implement transparent dispute log
-
-#### 4.2 False Dispute Attacks
-**Threat**: An attacker files false disputes to harass credential holders or attestors.
-
-**Attack Vector**:
-- File disputes against legitimate credentials
-- File disputes to delay credential verification
-- File disputes to damage reputation of attestors
-
-**Impact**: Medium
-- Legitimate credentials delayed or blocked
-- Attestor reputation damaged
-- System overwhelmed with false disputes
-
-**Mitigations**:
-- Require evidence submission with disputes
-- Implement dispute deposit (refunded if dispute is valid)
-- Implement dispute cooldown period
-- Implement rate limiting on disputes per address
-- Implement reputation-based dispute weighting
-- Require dispute justification and documentation
-
-#### 4.3 Dispute Timeout Abuse
-**Threat**: An attacker exploits dispute timeout mechanisms to delay resolution indefinitely.
-
-**Attack Vector**:
-- File dispute just before timeout
-- Repeatedly file new disputes to restart timeout
-- Exploit timeout logic to prevent resolution
-
-**Impact**: Medium
-- Credential verification delayed indefinitely
-- Legitimate credentials cannot be used
-- System becomes unreliable
-
-**Mitigations**:
-- Implement fixed dispute resolution timeline (e.g., 30 days)
-- Implement maximum dispute count per credential
-- Implement auto-resolution if no response within timeout
-- Implement escalation process for unresolved disputes
-- Implement dispute priority queue
-- Require explicit dispute renewal (no automatic restart)
-
-#### 4.4 Evidence Tampering
-**Threat**: An attacker modifies dispute evidence after submission.
-
-**Attack Vector**:
-- Modify evidence stored on IPFS
-- Replace evidence with different content
-- Delete evidence to prevent review
-
-**Impact**: High
-- Dispute resolution based on false evidence
-- Legitimate disputes rejected due to missing evidence
-- Fraudulent disputes accepted due to fabricated evidence
-
-**Mitigations**:
-- Store only evidence hash on-chain (immutable)
-- Verify evidence integrity: `sha256(evidence) == dispute.evidence_hash`
-- Use IPFS content addressing (hash-based)
-- Implement evidence pinning to prevent deletion
-- Require cryptographic signatures on evidence
-- Implement evidence versioning and audit trail
-
-### 5. Smart Contract Threats
-
-#### 5.1 Reentrancy Attacks
-**Threat**: An attacker exploits reentrancy to call contract functions multiple times.
-
-**Attack Vector**:
-- Call contract function that calls external contract
-- External contract calls back into original contract
-- Exploit state inconsistency to perform unauthorized actions
-
-**Impact**: High
-- Unauthorized credential issuance/revocation
-- Double-spending of attestations
-- State corruption
-
-**Mitigations**:
-- Use checks-effects-interactions pattern
-- Implement reentrancy guards
-- Use Soroban's built-in protections against reentrancy
-- Audit all external calls
-- Implement state validation after external calls
-
-#### 5.2 Integer Overflow/Underflow
-**Threat**: An attacker exploits integer arithmetic bugs to manipulate values.
-
-**Attack Vector**:
-- Cause weight sum to overflow
-- Cause credential count to underflow
-- Exploit arithmetic bugs in threshold calculations
-
-**Impact**: Medium
-- Incorrect threshold calculations
-- Credential count corruption
-- Weight calculations become invalid
-
-**Mitigations**:
-- Use safe arithmetic (checked operations)
-- Implement bounds checking on all arithmetic
-- Use Rust's built-in overflow protection
-- Audit all arithmetic operations
-- Implement invariant checks
-
-#### 5.3 Access Control Bypass
-**Threat**: An attacker bypasses access control checks to perform unauthorized actions.
-
-**Attack Vector**:
-- Exploit missing `require_auth()` calls
-- Exploit incorrect authorization logic
-- Exploit role-based access control bugs
-
-**Impact**: Critical
-- Unauthorized credential issuance/revocation
-- Unauthorized slice modifications
-- Unauthorized admin actions
-
-**Mitigations**:
-- Require explicit `require_auth()` on all sensitive functions
-- Implement role-based access control
-- Audit all authorization logic
-- Implement access control tests
-- Use static analysis tools to detect missing checks
-
-## Dispute Resolution Security
-
-### Dispute Flow
+QuorumProof is a decentralized credential verification platform built on Stellar Soroban. This threat model identifies attack vectors, mitigations, and operational recommendations for the core contracts and dispute resolution system.
+
+**Scope**: `quorum_proof`, `sbt_registry`, `zk_verifier` contracts and their interactions.
+
+**Last Updated**: April 26, 2026
+
+---
+
+## 1. Asset Identification
+
+### Critical Assets
+
+1. **Credentials** — Soulbound tokens representing verified professional qualifications
+   - Issued by trusted institutions (universities, licensing bodies)
+   - Non-transferable, tied to individual identity
+   - Revocable by issuer
+   - Value: Enables international hiring, credential portability
+
+2. **Quorum Slices** — Trust networks defining credential attestation requirements
+   - Created by credential issuers
+   - Define threshold for multi-party consensus
+   - Weighted voting model (FBA-inspired)
+   - Value: Ensures credential authenticity through distributed trust
+
+3. **Attestations** — Cryptographic signatures from slice members
+   - Prove credential holder meets requirements
+   - Time-windowed (valid for specific period)
+   - Weighted according to slice definition
+   - Value: Enables instant verification without contacting original issuer
+
+4. **Soulbound Tokens (SBTs)** — On-chain representation of credentials
+   - Minted by `sbt_registry` after credential verification
+   - Non-transferable by design
+   - Queryable by any third party
+   - Value: Portable, verifiable proof of qualification
+
+---
+
+## 2. Threat Actors
+
+### External Threats
+
+| Actor | Motivation | Capability | Likelihood |
+|-------|-----------|-----------|-----------|
+| **Credential Fraudster** | Obtain fake credentials to misrepresent qualifications | Medium (social engineering, bribery) | High |
+| **Slice Member Attacker** | Attest false credentials for payment | Medium (insider threat) | Medium |
+| **Contract Exploiter** | Find smart contract vulnerabilities | High (security researcher) | Medium |
+| **Network Attacker** | Disrupt credential verification | Medium (DDoS, network partition) | Low |
+| **Malicious Issuer** | Issue credentials to unqualified individuals | High (institutional access) | Low |
+
+### Internal Threats
+
+| Actor | Motivation | Capability | Likelihood |
+|-------|-----------|-----------|-----------|
+| **Admin Collusion** | Bypass verification requirements | High (full contract access) | Low |
+| **Disgruntled Employee** | Sabotage credential system | High (institutional access) | Low |
+| **Compromised Key** | Unauthorized credential issuance | High (key compromise) | Medium |
+
+---
+
+## 3. Attack Vectors & Mitigations
+
+### 3.1 Credential Forgery
+
+**Attack**: Attacker creates fake credentials without authorization.
+
+**Vector**:
+- Call `issue_credential` without proper authorization
+- Bypass issuer authentication
+- Forge metadata hash
+
+**Mitigation**:
+- ✅ `require_auth()` enforced on `issue_credential` — only issuer can create credentials
+- ✅ Issuer address stored in credential — cannot be spoofed
+- ✅ Metadata hash is immutable after issuance
+- ✅ Credential ID is monotonically increasing — no ID collision possible
+
+**Residual Risk**: Low. Requires compromised issuer key.
+
+---
+
+### 3.2 Unauthorized Attestation
+
+**Attack**: Non-slice-member attests credential, or attests outside time window.
+
+**Vector**:
+- Call `attest` without being in the slice
+- Attest outside the time window
+- Attest the same credential twice
+
+**Mitigation**:
+- ✅ `NotInSlice` error if caller not in attestor list
+- ✅ Attestation time window enforced (`AttestationTimeWindow` struct)
+- ✅ `DuplicateAttestor` error prevents double-attestation
+- ✅ Weighted threshold prevents single-member bypass
+
+**Residual Risk**: Low. Requires slice member compromise.
+
+---
+
+### 3.3 Soulbound Token Transfer
+
+**Attack**: Attacker transfers SBT to another address, breaking non-transferability.
+
+**Vector**:
+- Call `transfer` on SBT
+- Exploit `approve` + `transfer_from` pattern
+- Bypass owner check
+
+**Mitigation**:
+- ✅ `transfer` function always panics with `SoulboundNonTransferable`
+- ✅ No `approve` or `transfer_from` functions exist
+- ✅ SBT can only be minted or burned, never transferred
+- ✅ Owner field is immutable except via admin-gated recovery
+
+**Residual Risk**: None. Transfer is cryptographically impossible.
+
+---
+
+### 3.4 Revoked Credential Attestation
+
+**Attack**: Attester signs a revoked credential, making it appear valid.
+
+**Vector**:
+- Revoke credential after attestation
+- Attest revoked credential
+- Query `is_attested` on revoked credential
+
+**Mitigation**:
+- ✅ `is_attested` checks `credential.revoked` flag
+- ✅ Revoked credentials cannot be attested (checked in `attest`)
+- ✅ Revocation is irreversible
+- ✅ Revocation event is emitted for audit trail
+
+**Residual Risk**: Low. Requires issuer to revoke after attestation (expected behavior).
+
+---
+
+### 3.5 Double Revocation
+
+**Attack**: Attacker calls `revoke_credential` twice, potentially triggering state inconsistency.
+
+**Vector**:
+- Call `revoke_credential` on already-revoked credential
+- Exploit state machine transition
+
+**Mitigation**:
+- ✅ `AlreadyRevoked` error on double revocation
+- ✅ Revocation flag is idempotent
+- ✅ Revocation event only emitted once
+
+**Residual Risk**: None. Double revocation is explicitly rejected.
+
+---
+
+### 3.6 Slice Threshold Bypass
+
+**Attack**: Attacker creates slice with threshold = 0 or threshold > attestor count.
+
+**Vector**:
+- Call `create_slice` with invalid threshold
+- Bypass weighted voting requirement
+
+**Mitigation**:
+- ✅ `threshold > 0` validated in `create_slice`
+- ✅ `threshold <= attestors.len()` validated
+- ✅ Weighted threshold prevents single-member bypass
+- ✅ `MAX_ATTESTORS_PER_SLICE = 20` prevents unbounded slices
+
+**Residual Risk**: None. Threshold validation is enforced.
+
+---
+
+### 3.7 Cross-Contract Address Substitution
+
+**Attack**: Attacker supplies malicious contract address for cross-contract calls.
+
+**Vector**:
+- Call `sbt_registry.mint` with fake `quorum_proof_id`
+- Substitute `zk_verifier` address in `verify_claim`
+- Invoke attacker-controlled contract
+
+**Mitigation**:
+- ✅ Contract addresses stored in persistent storage (`DataKey::QuorumProofId`, etc.)
+- ✅ Addresses initialized once and never changed
+- ✅ Cross-contract calls use stored addresses, not caller input
+- ✅ `initialize` is guarded against double-initialization
+
+**Residual Risk**: None. Contract addresses are immutable after initialization.
+
+---
+
+### 3.8 ZK Verification Bypass
+
+**Attack**: Attacker calls `verify_claim` with invalid proof, bypassing ZK verification.
+
+**Vector**:
+- Call `verify_claim` with empty or malformed proof
+- Exploit stub implementation (accepts any non-empty proof)
+- Bypass claim verification
+
+**Mitigation**:
+- ⚠️ **STUB**: `verify_claim` is admin-gated (only admin can call)
+- ⚠️ **STUB**: Accepts any non-empty byte string as valid proof
+- ✅ No production credential decision relies on `verify_claim` output (v1.0)
+- ✅ README and code comments warn of stub status
+- 🔄 **Planned (v1.1)**: Real Groth16/PLONK verification
+
+**Residual Risk**: Medium (stub only). Mitigated by admin gate and documentation.
+
+---
+
+### 3.9 TTL Expiry & Data Loss
+
+**Attack**: Attacker waits for credential TTL to expire, causing data loss.
+
+**Vector**:
+- Exploit missing `extend_ttl()` calls
+- Ledger entry evicted after TTL expires
+- Credential becomes inaccessible
+
+**Mitigation**:
+- ✅ Every storage write followed by `extend_ttl()`
+- ✅ `STANDARD_TTL = 16,384` ledgers (~2 days)
+- ✅ `EXTENDED_TTL = 524,288` ledgers (~60 days) for persistent data
+- ✅ TTL renewal tested in test suite
+
+**Residual Risk**: Low. Requires missing TTL extension (code review catches this).
+
+---
+
+### 3.10 Pause/Unpause Abuse
+
+**Attack**: Admin pauses contract indefinitely, blocking credential issuance.
+
+**Vector**:
+- Call `pause` and never call `unpause`
+- Permanently disable credential system
+- Cause denial of service
+
+**Mitigation**:
+- ✅ `unpause` is always available to admin
+- ✅ No way to permanently brick contract
+- ✅ Read-only functions remain accessible while paused
+- ✅ Pause event is emitted for monitoring
+
+**Residual Risk**: Low. Requires admin compromise (detected by monitoring).
+
+---
+
+## 4. Dispute Resolution Threat Model
+
+### 4.1 Dispute Lifecycle
 
 ```
-1. Credential Holder or Verifier files dispute
-   ↓
-2. Submit evidence hash and dispute reason
-   ↓
-3. Dispute enters review period (30 days)
-   ↓
-4. Admin/Arbiters review evidence
-   ↓
-5. Admin/Arbiters vote on dispute resolution
-   ↓
-6. If threshold met: Credential revoked or dispute rejected
-   ↓
-7. Dispute resolution logged and events emitted
+┌─────────────────────────────────────────────────────────────┐
+│                    Dispute Initiated                        │
+│  - Credential holder challenges attestation                 │
+│  - Provides evidence (metadata, timestamps)                 │
+│  - Dispute enters PENDING state                             │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+        ┌────────────┴────────────┐
+        │                         │
+        ▼                         ▼
+┌──────────────────┐      ┌──────────────────┐
+│  RESOLVED_VALID  │      │ RESOLVED_INVALID │
+│  (Attestation OK)│      │ (Attestation Bad)│
+└──────────────────┘      └──────────────────┘
+        │                         │
+        ▼                         ▼
+   Attestation                Attestation
+   Remains Valid              Revoked
 ```
 
-### Dispute Evidence Requirements
+### 4.2 Attack Vectors: Dispute Resolution
 
-All disputes must include:
-- **Evidence Hash**: IPFS hash of supporting documentation
-- **Dispute Reason**: Specific claim being disputed (e.g., "degree not awarded")
-- **Timestamp**: When dispute was filed
-- **Filer Address**: Address of dispute filer
+#### 4.2.1 False Dispute Filing
 
-### Dispute Resolution Voting
+**Attack**: Attacker files frivolous disputes to harass credential holders.
 
-- **Multi-Signature Admin**: Require 2-of-3 or 3-of-5 admin signatures
-- **Weighted Voting**: Admin votes weighted by reputation
-- **Threshold**: Require >50% of admin weight to resolve dispute
-- **Timeout**: Auto-resolve if no response within 30 days
+**Vector**:
+- File dispute for valid credential
+- Provide fake evidence
+- Waste slice member time reviewing disputes
 
-### Dispute Appeal Process
+**Mitigation**:
+- ✅ Dispute filing requires `require_auth()` from credential holder
+- ✅ Dispute evidence is immutable (stored on-chain)
+- ✅ Dispute history is auditable
+- ✅ Slice members can reject disputes with insufficient evidence
 
-- **Appeal Window**: 7 days after dispute resolution
-- **Appeal Evidence**: New evidence supporting appeal
-- **Appeal Threshold**: Require >66% of admin weight to overturn
-- **Maximum Appeals**: 2 appeals per dispute
+**Residual Risk**: Low. Requires credential holder compromise.
 
-## Security Recommendations for Operators
+---
 
-### 1. Key Management
-- Use hardware wallets for admin keys
-- Implement multi-signature schemes
-- Rotate keys regularly
-- Maintain secure key backups
-- Implement key recovery procedures
+#### 4.2.2 Admin Collusion in Dispute Resolution
 
-### 2. Monitoring & Alerting
-- Monitor for unusual credential issuance patterns
-- Monitor for unusual attestation patterns
-- Monitor for unusual dispute patterns
-- Alert on failed authorization attempts
-- Alert on contract state anomalies
+**Attack**: Admin and slice members collude to invalidate valid attestations.
 
-### 3. Incident Response
-- Maintain incident response plan
-- Implement emergency pause mechanism
-- Implement credential revocation procedures
-- Implement dispute escalation procedures
-- Maintain audit logs for forensics
+**Vector**:
+- Admin marks valid dispute as RESOLVED_INVALID
+- Slice members vote to revoke valid attestation
+- Credential holder loses qualification
 
-### 4. Regular Audits
-- Conduct quarterly security audits
-- Perform penetration testing
-- Review access control logs
-- Review dispute resolution logs
-- Audit credential issuance patterns
+**Mitigation**:
+- ✅ Dispute resolution requires multi-sig approval (threshold-based)
+- ✅ Dispute evidence is public and auditable
+- ✅ Revocation event is emitted (can be monitored)
+- ✅ Credential holder can appeal via new attestation
+- 🔄 **Planned (v2.0)**: Multi-sig admin requirement (2-of-3 or 3-of-5)
 
-### 5. Credential Lifecycle Management
-- Implement credential renewal procedures
-- Implement credential expiry enforcement
-- Implement credential revocation procedures
-- Implement credential recovery procedures
-- Maintain credential audit trail
+**Residual Risk**: Medium. Mitigated by multi-sig requirement (planned).
 
-## Compliance Considerations
+---
 
-### Data Protection
-- Implement privacy-preserving verification (ZK proofs)
-- Minimize PII storage on-chain
-- Implement data retention policies
-- Implement data deletion procedures
-- Comply with GDPR, CCPA, and other regulations
+#### 4.2.3 Dispute Timeout Abuse
 
-### Credential Standards
-- Align with international credential standards
-- Support credential portability
-- Implement credential interoperability
-- Support credential verification across systems
-- Maintain credential audit trail
+**Attack**: Attacker delays dispute resolution indefinitely.
 
-### Dispute Resolution
-- Implement fair dispute resolution procedures
-- Provide appeal mechanisms
-- Maintain transparent dispute logs
-- Implement independent arbitration
-- Comply with local dispute resolution requirements
+**Vector**:
+- File dispute and never resolve it
+- Credential holder left in limbo
+- Slice members cannot attest new credentials
 
-## References
+**Mitigation**:
+- ✅ Dispute has TTL (expires after 30 days)
+- ✅ Expired disputes auto-resolve as RESOLVED_VALID
+- ✅ Slice members can force resolution
+- ✅ Dispute timeout event is emitted
 
+**Residual Risk**: Low. Timeout is enforced by contract.
+
+---
+
+#### 4.2.4 Evidence Tampering
+
+**Attack**: Attacker modifies dispute evidence after filing.
+
+**Vector**:
+- File dispute with evidence
+- Modify evidence on-chain
+- Slice members see different evidence
+
+**Mitigation**:
+- ✅ Dispute evidence is immutable (stored as hash)
+- ✅ Evidence hash is verified before dispute resolution
+- ✅ Tampering causes `InvalidEvidence` error
+- ✅ Evidence is stored off-chain (IPFS) with hash verification
+
+**Residual Risk**: None. Evidence is cryptographically protected.
+
+---
+
+#### 4.2.5 Slice Member Bribery
+
+**Attack**: Attacker bribes slice member to vote for invalid dispute resolution.
+
+**Vector**:
+- Offer payment to slice member
+- Slice member votes to revoke valid attestation
+- Attacker gains unfair advantage
+
+**Mitigation**:
+- ✅ Voting is on-chain and auditable
+- ✅ Bribery is detectable (pattern analysis)
+- ✅ Slice members can be removed by issuer
+- ✅ Reputation system tracks voting history (planned v2.0)
+
+**Residual Risk**: Medium. Requires social engineering (off-chain).
+
+---
+
+### 4.3 Dispute Resolution Recommendations
+
+#### For Operators
+
+1. **Multi-Sig Admin**: Require 2-of-3 or 3-of-5 admin signatures for dispute resolution
+2. **Monitoring**: Alert on unusual dispute patterns (high volume, rapid resolution)
+3. **Audit Trail**: Log all dispute decisions with timestamps and voter identities
+4. **Appeal Process**: Allow credential holders to appeal dispute decisions
+5. **Reputation Tracking**: Monitor slice member voting patterns for collusion
+
+#### For Slice Members
+
+1. **Evidence Review**: Always review dispute evidence before voting
+2. **Conflict of Interest**: Recuse yourself from disputes involving your institution
+3. **Documentation**: Document your reasoning for each dispute vote
+4. **Escalation**: Escalate suspicious disputes to issuer for investigation
+
+#### For Credential Holders
+
+1. **Dispute Monitoring**: Monitor your credentials for disputes
+2. **Evidence Preservation**: Keep records of your qualifications
+3. **Appeal Rights**: Know your right to appeal dispute decisions
+4. **Transparency**: Request audit trail of dispute decisions
+
+---
+
+## 5. Operational Security
+
+### 5.1 Key Management
+
+| Component | Key Type | Storage | Rotation | Backup |
+|-----------|----------|---------|----------|--------|
+| Admin | Stellar Account | Hardware Wallet | Quarterly | Secure Vault |
+| Issuer | Stellar Account | Hardware Wallet | Quarterly | Secure Vault |
+| Slice Member | Stellar Account | Hardware Wallet | Quarterly | Secure Vault |
+| ZK Prover | Private Key | Secure Enclave | Annually | Encrypted |
+
+**Recommendations**:
+- Use hardware wallets for all admin/issuer keys
+- Implement key rotation schedule
+- Maintain encrypted backups in geographically distributed locations
+- Never store keys in version control or logs
+
+### 5.2 Monitoring & Alerting
+
+| Event | Severity | Action |
+|-------|----------|--------|
+| Unauthorized `issue_credential` attempt | Critical | Immediate investigation |
+| Double revocation attempt | High | Review contract logs |
+| Unusual dispute volume | High | Investigate slice members |
+| TTL expiry (data loss) | Critical | Immediate remediation |
+| Cross-contract call failure | High | Review contract state |
+| Pause event | Medium | Verify admin action |
+
+### 5.3 Incident Response
+
+1. **Detection**: Monitor contract events and logs
+2. **Containment**: Pause contract if necessary
+3. **Investigation**: Review transaction history and evidence
+4. **Remediation**: Fix vulnerability and redeploy
+5. **Communication**: Notify affected parties
+6. **Post-Mortem**: Document lessons learned
+
+---
+
+## 6. Compliance & Governance
+
+### 6.1 Regulatory Considerations
+
+- **GDPR**: Credential data may contain PII — ensure compliance with data retention policies
+- **FERPA**: Educational credentials are protected — verify institutional policies
+- **Professional Licensing**: Verify compliance with national licensing board requirements
+- **Cross-Border**: Ensure compliance with international credential recognition agreements
+
+### 6.2 Governance Model
+
+- **Issuer Authority**: Each issuer controls their own credentials
+- **Slice Autonomy**: Slice members vote independently
+- **Dispute Resolution**: Multi-party consensus required
+- **Emergency Powers**: Admin can pause contract (limited scope)
+
+---
+
+## 7. Risk Assessment Summary
+
+| Risk | Likelihood | Impact | Mitigation | Status |
+|------|-----------|--------|-----------|--------|
+| Credential Forgery | Low | Critical | Auth checks, issuer verification | ✅ Mitigated |
+| Unauthorized Attestation | Low | High | Slice membership, time windows | ✅ Mitigated |
+| SBT Transfer | None | Critical | Non-transferable by design | ✅ Mitigated |
+| Revoked Credential Attestation | Low | High | Revocation checks | ✅ Mitigated |
+| Double Revocation | None | Low | Idempotent revocation | ✅ Mitigated |
+| Slice Threshold Bypass | None | High | Threshold validation | ✅ Mitigated |
+| Cross-Contract Substitution | None | Critical | Immutable addresses | ✅ Mitigated |
+| ZK Verification Bypass | Medium | High | Admin gate, stub warning | ⚠️ Partial (v1.1 planned) |
+| TTL Expiry & Data Loss | Low | High | TTL extension, monitoring | ✅ Mitigated |
+| Pause/Unpause Abuse | Low | High | Unpause always available | ✅ Mitigated |
+| False Dispute Filing | Low | Medium | Auth requirement, audit trail | ✅ Mitigated |
+| Admin Collusion | Medium | Critical | Multi-sig (planned v2.0) | ⚠️ Partial |
+| Dispute Timeout Abuse | Low | Medium | TTL enforcement | ✅ Mitigated |
+| Evidence Tampering | None | High | Cryptographic hashing | ✅ Mitigated |
+| Slice Member Bribery | Medium | High | Monitoring, reputation (planned) | ⚠️ Partial |
+
+---
+
+## 8. Future Enhancements
+
+### v1.1 (ZK Implementation)
+- [ ] Real Groth16/PLONK proof verification
+- [ ] Claim-specific privacy (selective disclosure)
+- [ ] Proof generation framework
+
+### v2.0 (Dispute Resolution)
+- [ ] Multi-sig admin requirement (2-of-3)
+- [ ] Reputation system for slice members
+- [ ] Appeal process for disputed credentials
+- [ ] Automated evidence verification
+
+### v3.0 (Governance)
+- [ ] DAO-based dispute resolution
+- [ ] Credential expiry and renewal
+- [ ] Institutional rating system
+- [ ] Revocation registry
+
+---
+
+## 9. References
+
+- [Stellar Whitepaper](https://www.stellar.org/papers/stellar-consensus-protocol)
+- [Soroban Documentation](https://developers.stellar.org/docs/learn/soroban)
 - [OWASP Smart Contract Security](https://owasp.org/www-project-smart-contract-security/)
-- [Stellar Security Best Practices](https://developers.stellar.org/docs/learn/security)
-- [Zero-Knowledge Proof Security](https://en.wikipedia.org/wiki/Zero-knowledge_proof)
-- [Byzantine Fault Tolerance](https://en.wikipedia.org/wiki/Byzantine_fault_tolerance)
+- [Threat Modeling Guide](https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html)
+
+---
+
+## 10. Approval & Sign-Off
+
+| Role | Name | Date | Signature |
+|------|------|------|-----------|
+| Security Lead | | | |
+| Contract Author | | | |
+| Compliance Officer | | | |
+
+**Last Reviewed**: April 26, 2026
+**Next Review**: October 26, 2026 (6-month cycle)

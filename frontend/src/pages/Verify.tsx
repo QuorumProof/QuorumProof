@@ -24,6 +24,8 @@ const CLAIM_TYPE_OPTIONS: { value: ClaimType; label: string }[] = [
   { value: 'HasDegree', label: '🎓 Degree' },
   { value: 'HasLicense', label: '🏛️ License' },
   { value: 'HasEmploymentHistory', label: '💼 Employment History' },
+  { value: 'HasCertification', label: '📜 Certification' },
+  { value: 'HasResearchPublication', label: '🔬 Research Publication' },
 ];
 
 const ZK_PRIVACY_TOOLTIP =
