@@ -967,6 +967,38 @@ impl QuorumProofContract {
             .unwrap_or(0u64);
         env.ledger().timestamp() as u64 < expiry
     }
+
+    /// Issue credentials to multiple subjects with all-or-nothing semantics.
+    /// Returns vector of credential IDs in order.
+    pub fn batch_issue_credentials(
+        env: Env,
+        issuer: Address,
+        subjects: Vec<Address>,
+        credential_types: Vec<u32>,
+        metadata_hashes: Vec<soroban_sdk::Bytes>,
+        expires_at: Option<u64>,
+    ) -> Vec<u64> {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let n = subjects.len();
+        assert!(
+            credential_types.len() == n && metadata_hashes.len() == n,
+            "input lengths must match"
+        );
+        let mut ids: Vec<u64> = Vec::new(&env);
+        for i in 0..n {
+            let id = Self::issue_credential(
+                env.clone(),
+                issuer.clone(),
+                subjects.get(i).unwrap(),
+                credential_types.get(i).unwrap(),
+                metadata_hashes.get(i).unwrap(),
+                expires_at.clone(),
+            );
+            ids.push_back(id);
+        }
+        ids
+    }
 }
 mod tests {
     use super::*;
@@ -2563,5 +2595,75 @@ mod tests {
 
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
         client.delegate_verification(&other, &cred_id, &delegate, &1000u64);
+    }
+
+    // Test #441: Batch credential issuance
+    #[test]
+    fn test_batch_issue_credentials_single() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let mut subjects = Vec::new(&env);
+        subjects.push_back(subject);
+
+        let mut types = Vec::new(&env);
+        types.push_back(1u32);
+
+        let mut hashes = Vec::new(&env);
+        hashes.push_back(Bytes::from_slice(&env, b"ipfs://Qm1"));
+
+        let ids = client.batch_issue_credentials(&issuer, &subjects, &types, &hashes, &None);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(client.get_credential_count(), 1);
+    }
+
+    #[test]
+    fn test_batch_issue_credentials_multiple() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let mut subjects = Vec::new(&env);
+        let mut types = Vec::new(&env);
+        let mut hashes = Vec::new(&env);
+
+        for i in 0..10 {
+            subjects.push_back(Address::generate(&env));
+            types.push_back(1u32);
+            hashes.push_back(Bytes::from_slice(&env, format!("ipfs://Qm{}", i).as_bytes()));
+        }
+
+        let ids = client.batch_issue_credentials(&issuer, &subjects, &types, &hashes, &None);
+        assert_eq!(ids.len(), 10);
+        assert_eq!(client.get_credential_count(), 10);
+    }
+
+    #[test]
+    fn test_batch_issue_credentials_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let mut subjects = Vec::new(&env);
+        let mut types = Vec::new(&env);
+        let mut hashes = Vec::new(&env);
+
+        for i in 0..100 {
+            subjects.push_back(Address::generate(&env));
+            types.push_back(1u32);
+            hashes.push_back(Bytes::from_slice(&env, format!("ipfs://Qm{}", i).as_bytes()));
+        }
+
+        let ids = client.batch_issue_credentials(&issuer, &subjects, &types, &hashes, &None);
+        assert_eq!(ids.len(), 100);
+        assert_eq!(client.get_credential_count(), 100);
     }
 }
