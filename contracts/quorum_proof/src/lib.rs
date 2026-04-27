@@ -9,6 +9,7 @@ use zk_verifier::{ClaimType, ZkVerifierContractClient};
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
 const TOPIC_ATTESTATION: &str = "attestation";
+const TOPIC_THRESHOLD_ADJUSTED: &str = "ThresholdAdjusted";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -34,6 +35,14 @@ pub struct AttestationEventData {
     pub attestor: Address,
     pub credential_id: u64,
     pub slice_id: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ThresholdAdjustedEventData {
+    pub slice_id: u64,
+    pub old_threshold: u32,
+    pub new_threshold: u32,
 }
 
 #[contracterror]
@@ -752,6 +761,47 @@ impl QuorumProofContract {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Adjust the threshold of a quorum slice. Only the slice creator can call this.
+    /// Validates that new_threshold <= total weight of all attestors.
+    pub fn adjust_slice_threshold(env: Env, creator: Address, slice_id: u64, new_threshold: u32) {
+        creator.require_auth();
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        assert!(
+            slice.creator == creator,
+            "only the slice creator can adjust threshold"
+        );
+        assert!(new_threshold > 0, "threshold must be greater than 0");
+        let mut total_weight: u32 = 0;
+        for w in slice.weights.iter() {
+            total_weight = total_weight.saturating_add(*w);
+        }
+        assert!(
+            new_threshold <= total_weight,
+            "threshold cannot exceed total weight sum"
+        );
+        let old_threshold = slice.threshold;
+        slice.threshold = new_threshold;
+        env.storage()
+            .instance()
+            .set(&DataKey::Slice(slice_id), &slice);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        let event_data = ThresholdAdjustedEventData {
+            slice_id,
+            old_threshold,
+            new_threshold,
+        };
+        let topic = String::from_str(&env, TOPIC_THRESHOLD_ADJUSTED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
     }
 }
 
@@ -2206,5 +2256,48 @@ mod tests {
 
         // attestor2 is not in the slice — must panic
         client.attest(&attestor2, &cred_id, &slice_id);
+    }
+
+    // Test #444: Adjust slice threshold
+    #[test]
+    fn test_adjust_slice_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(50u32);
+        weights.push_back(50u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.threshold, 100u32);
+
+        client.adjust_slice_threshold(&creator, &slice_id, &75u32);
+        let updated_slice = client.get_slice(&slice_id);
+        assert_eq!(updated_slice.threshold, 75u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold cannot exceed total weight sum")]
+    fn test_adjust_slice_threshold_exceeds_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(50u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+        client.adjust_slice_threshold(&creator, &slice_id, &100u32);
     }
 }
