@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useFreighter } from '../lib/hooks/useFreighter';
+import { NotificationCenter } from './NotificationCenter';
 
 const NETWORK = import.meta.env.VITE_STELLAR_NETWORK || 'testnet';
 
@@ -39,10 +40,17 @@ export function Navbar() {
           >
             Slice Builder
           </Link>
+          <Link
+            to="/help"
+            className={`nav-link${location.pathname === '/help' ? ' active' : ''}`}
+          >
+            Help
+          </Link>
         </div>
 
         <div className="navbar__right">
           <span className="navbar__badge">{NETWORK}</span>
+          <NotificationCenter />
           {isInitializing ? (
             <span className="navbar__badge" style={{ opacity: 0.5 }}>Connecting…</span>
           ) : address ? (
