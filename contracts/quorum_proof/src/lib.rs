@@ -10,6 +10,7 @@ const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
 const TOPIC_ATTESTATION: &str = "attestation";
 const TOPIC_THRESHOLD_ADJUSTED: &str = "ThresholdAdjusted";
+const TOPIC_METADATA_UPDATED: &str = "MetadataUpdated";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -45,6 +46,14 @@ pub struct ThresholdAdjustedEventData {
     pub new_threshold: u32,
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataUpdatedEventData {
+    pub credential_id: u64,
+    pub old_hash: soroban_sdk::Bytes,
+    pub new_hash: soroban_sdk::Bytes,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -69,6 +78,7 @@ pub enum DataKey {
     Admin,
     Paused,
     SubjectIssuerType(Address, Address, u32),
+    MetadataVersions(u64),
 }
 
 #[contracttype]
@@ -803,7 +813,67 @@ impl QuorumProofContract {
         topics.push_back(topic);
         env.events().publish(topics, event_data);
     }
-}
+
+    /// Update credential metadata. Only the issuer can call this.
+    /// Stores new metadata hash with timestamp in version history.
+    pub fn update_credential_metadata(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        new_metadata_hash: soroban_sdk::Bytes,
+    ) {
+        issuer.require_auth();
+        assert!(!new_metadata_hash.is_empty(), "metadata_hash cannot be empty");
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(
+            credential.issuer == issuer,
+            "only the issuer can update metadata"
+        );
+        let old_hash = credential.metadata_hash.clone();
+        credential.metadata_hash = new_metadata_hash.clone();
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        let mut versions: Vec<(u64, soroban_sdk::Bytes)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MetadataVersions(credential_id))
+            .unwrap_or(Vec::new(&env));
+        versions.push_back((env.ledger().timestamp() as u64, new_metadata_hash.clone()));
+        env.storage()
+            .instance()
+            .set(&DataKey::MetadataVersions(credential_id), &versions);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        let event_data = MetadataUpdatedEventData {
+            credential_id,
+            old_hash,
+            new_hash: new_metadata_hash,
+        };
+        let topic = String::from_str(&env, TOPIC_METADATA_UPDATED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get metadata version history for a credential.
+    pub fn get_credential_metadata_history(
+        env: Env,
+        credential_id: u64,
+    ) -> Vec<(u64, soroban_sdk::Bytes)> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MetadataVersions(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
 
 #[cfg(test)]
 mod tests {
@@ -2299,5 +2369,47 @@ mod tests {
 
         let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
         client.adjust_slice_threshold(&creator, &slice_id, &100u32);
+    }
+
+    // Test #443: Credential metadata versioning
+    #[test]
+    fn test_update_credential_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata_v1 = Bytes::from_slice(&env, b"ipfs://QmV1");
+        let metadata_v2 = Bytes::from_slice(&env, b"ipfs://QmV2");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_v1, &None);
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.metadata_hash, metadata_v1);
+
+        client.update_credential_metadata(&issuer, &cred_id, &metadata_v2);
+        let updated_cred = client.get_credential(&cred_id);
+        assert_eq!(updated_cred.metadata_hash, metadata_v2);
+
+        let history = client.get_credential_metadata_history(&cred_id);
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the issuer can update metadata")]
+    fn test_update_credential_metadata_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let other = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.update_credential_metadata(&other, &cred_id, &metadata);
     }
 }
