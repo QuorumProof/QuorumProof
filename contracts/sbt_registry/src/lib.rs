@@ -1,5 +1,8 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, symbol_short, Address, Bytes, Env, IntoVal, Vec, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Bytes, Env, IntoVal, Symbol, Vec,
+};
 
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
@@ -193,7 +196,9 @@ impl SbtRegistryContract {
 
         // Cross-contract: verify credential exists and is not revoked.
         // Uses env.invoke_contract to avoid a circular crate dependency with quorum_proof.
-        let qp_id: Address = env.storage().instance()
+        let qp_id: Address = env
+            .storage()
+            .instance()
             .get(&DataKey::QuorumProofId)
             .expect("not initialized");
         // is_revoked panics with CredentialNotFound if the credential doesn't exist.
@@ -205,33 +210,76 @@ impl SbtRegistryContract {
         assert!(!revoked, "credential is revoked");
 
         // Check whitelist if enabled for this SBT
-        if let Some(whitelist) = env.storage().persistent().get::<_, Vec<Address>>(&DataKey::SbtWhitelist(credential_id)) {
-            if !whitelist.iter().any(|addr| addr == &owner) {
+        if let Some(whitelist) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&DataKey::SbtWhitelist(credential_id))
+        {
+            if !whitelist.iter().any(|addr| addr == owner) {
                 panic_with_error!(&env, ContractError::NotWhitelisted);
             }
         }
 
-        if env.storage().instance().has(&DataKey::OwnerCredential(owner.clone(), credential_id)) {
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::OwnerCredential(owner.clone(), credential_id))
+        {
             panic_with_error!(&env, ContractError::SoulboundNonTransferable);
         }
-        let mut token_count: u64 = env.storage().instance().get(&DataKey::TokenCount).unwrap_or(0);
+        let mut token_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenCount)
+            .unwrap_or(0);
         token_count += 1;
         let token_id = token_count;
-        let token = SoulboundToken { id: token_id, owner: owner.clone(), credential_id, metadata_uri, version: 1 };
-        env.storage().persistent().set(&DataKey::Token(token_id), &token);
-        env.storage().persistent().extend_ttl(&DataKey::Token(token_id), STANDARD_TTL, EXTENDED_TTL);
-        env.storage().persistent().set(&DataKey::Owner(token_id), &owner.clone());
-        env.storage().persistent().extend_ttl(&DataKey::Owner(token_id), STANDARD_TTL, EXTENDED_TTL);
-        env.storage().instance().set(&DataKey::TokenCount, &token_count);
-        let mut owner_tokens: Vec<u64> = env.storage().persistent()
+        let token = SoulboundToken {
+            id: token_id,
+            owner: owner.clone(),
+            credential_id,
+            metadata_uri,
+            version: 1,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id), &token);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Token(token_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::Owner(token_id), &owner.clone());
+        env.storage().persistent().extend_ttl(
+            &DataKey::Owner(token_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenCount, &token_count);
+        let mut owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
             .unwrap_or(Vec::new(&env));
         owner_tokens.push_back(token_id);
-        env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
-        env.storage().persistent().extend_ttl(&DataKey::OwnerTokens(owner.clone()), 16_384, 524_288);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerTokens(owner.clone()),
+            16_384,
+            524_288,
+        );
 
         // Uniqueness mapping
-        env.storage().instance().set(&DataKey::OwnerCredential(owner.clone(), credential_id), &token_id);
+        env.storage().instance().set(
+            &DataKey::OwnerCredential(owner.clone(), credential_id),
+            &token_id,
+        );
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("mint").into_val(&env));
@@ -247,7 +295,10 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics with "token not found" if no token exists with that ID.
     pub fn get_token(env: Env, token_id: u64) -> SoulboundToken {
-        env.storage().persistent().get(&DataKey::Token(token_id)).expect("token not found")
+        env.storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found")
     }
 
     /// Returns the owner address of a token.
@@ -258,7 +309,10 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics with "token not found" if no token exists with that ID.
     pub fn owner_of(env: Env, token_id: u64) -> Address {
-        env.storage().persistent().get(&DataKey::Owner(token_id)).expect("token not found")
+        env.storage()
+            .persistent()
+            .get(&DataKey::Owner(token_id))
+            .expect("token not found")
     }
 
     /// Returns all token IDs owned by the given address.
@@ -269,12 +323,18 @@ impl SbtRegistryContract {
     /// # Panics
     /// Does not panic; returns an empty `Vec` if the owner holds no tokens.
     pub fn get_tokens_by_owner(env: Env, owner: Address) -> Vec<u64> {
-        env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(owner))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Alias for get_tokens_by_owner — returns all SBT token IDs owned by an address.
     pub fn get_sbt_by_owner(env: Env, owner: Address) -> Vec<u64> {
-        env.storage().persistent().get(&DataKey::OwnerTokens(owner)).unwrap_or(Vec::new(&env))
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(owner))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Delegate rights for a specific SBT to another address until a timestamp expires.
@@ -286,7 +346,9 @@ impl SbtRegistryContract {
         expires_at: u64,
     ) {
         owner.require_auth();
-        let token: SoulboundToken = env.storage().persistent()
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
@@ -294,13 +356,20 @@ impl SbtRegistryContract {
         let current_ts: u64 = env.ledger().timestamp();
         assert!(expires_at > current_ts, "expiry must be in the future");
 
-        let delegation = Delegation { token_id, delegatee, expires_at };
-        env.storage().instance().set(&DataKey::Delegation(token_id), &delegation);
+        let delegation = Delegation {
+            token_id,
+            delegatee,
+            expires_at,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Delegation(token_id), &delegation);
     }
 
     /// Retrieve delegation details for a token.
     pub fn get_delegation(env: Env, token_id: u64) -> Delegation {
-        env.storage().instance()
+        env.storage()
+            .instance()
             .get(&DataKey::Delegation(token_id))
             .expect("delegation not found")
     }
@@ -308,7 +377,8 @@ impl SbtRegistryContract {
     /// Check whether a delegatee currently holds active rights for the token.
     pub fn is_delegate_active(env: Env, token_id: u64, delegatee: Address) -> bool {
         let current_ts: u64 = env.ledger().timestamp();
-        env.storage().instance()
+        env.storage()
+            .instance()
             .get(&DataKey::Delegation(token_id))
             .map_or(false, |delegation: Delegation| {
                 delegation.delegatee == delegatee && delegation.expires_at > current_ts
@@ -317,7 +387,10 @@ impl SbtRegistryContract {
 
     /// Returns the total number of SBTs ever minted.
     pub fn sbt_count(env: Env) -> u64 {
-        env.storage().instance().get(&DataKey::TokenCount).unwrap_or(0u64)
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenCount)
+            .unwrap_or(0u64)
     }
 
     pub fn transfer(env: Env, _from: Address, _to: Address, _token_id: u64) {
@@ -328,25 +401,40 @@ impl SbtRegistryContract {
     /// Returns the credential_id linked to this token.
     pub fn burn(env: Env, owner: Address, token_id: u64) -> u64 {
         owner.require_auth();
-        let token: SoulboundToken = env.storage().persistent()
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
             .get(&DataKey::Token(token_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
         assert!(token.owner == owner, "not the owner");
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
-        env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(owner.clone(), token.credential_id));
-        let mut owner_tokens: Vec<u64> = env.storage().persistent()
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegation(token_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(
+            owner.clone(),
+            token.credential_id,
+        ));
+        let mut owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
             .expect("owner has no tokens");
-        let pos = owner_tokens.iter().position(|id| id == token_id).expect("token not in owner list");
+        let pos = owner_tokens
+            .iter()
+            .position(|id| id == token_id)
+            .expect("token not in owner list");
         owner_tokens.remove(pos as u32);
-        env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
         topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, (owner.clone(), token.credential_id));
+        env.events()
+            .publish(topics, (owner.clone(), token.credential_id));
         Self::record_notification(&env, owner, token_id, symbol_short!("burn"));
         token.credential_id
     }
@@ -355,7 +443,9 @@ impl SbtRegistryContract {
     pub fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::QuorumProofId, &quorum_proof_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuorumProofId, &quorum_proof_id);
     }
 
     /// Burn a soulbound token. Callable by the token owner or the contract admin.
@@ -363,25 +453,40 @@ impl SbtRegistryContract {
     /// Removes Token, Owner, and OwnerTokens storage entries and emits a `burn` event.
     pub fn burn_sbt(env: Env, caller: Address, token_id: u64) {
         caller.require_auth();
-        let token: SoulboundToken = env.storage().persistent()
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
 
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         assert!(caller == token.owner || caller == admin, "unauthorized");
 
         let owner = token.owner.clone();
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
-        env.storage().instance().remove(&DataKey::Delegation(token_id));
-        let mut owner_tokens: Vec<u64> = env.storage().persistent()
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegation(token_id));
+        let mut owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(owner.clone()))
             .unwrap_or(Vec::new(&env));
         if let Some(pos) = owner_tokens.iter().position(|id| id == token_id) {
             owner_tokens.remove(pos as u32);
         }
-        env.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
-        env.storage().instance().remove(&DataKey::OwnerCredential(owner.clone(), token.credential_id));
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
+        env.storage().instance().remove(&DataKey::OwnerCredential(
+            owner.clone(),
+            token.credential_id,
+        ));
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("burn").into_val(&env));
@@ -394,36 +499,66 @@ impl SbtRegistryContract {
     /// Callable by the stored quorum_proof contract or the admin.
     pub fn recover_sbt(env: Env, caller: Address, token_id: u64, new_owner: Address) {
         caller.require_auth();
-        let qp_id: Address = env.storage().instance().get(&DataKey::QuorumProofId).expect("not initialized");
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let qp_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         assert!(caller == qp_id || caller == admin, "unauthorized");
 
-        let mut token: SoulboundToken = env.storage().persistent()
+        let mut token: SoulboundToken = env
+            .storage()
+            .persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         let old_owner = token.owner.clone();
 
         // Remove from old owner's list
-        let mut old_tokens: Vec<u64> = env.storage().persistent()
+        let mut old_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(old_owner.clone()))
             .unwrap_or(Vec::new(&env));
         if let Some(pos) = old_tokens.iter().position(|id| id == token_id) {
             old_tokens.remove(pos as u32);
         }
-        env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
-        env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegation(token_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(
+            old_owner.clone(),
+            token.credential_id,
+        ));
 
         // Add to new owner
         token.owner = new_owner.clone();
-        env.storage().persistent().set(&DataKey::Token(token_id), &token);
-        env.storage().persistent().set(&DataKey::Owner(token_id), &new_owner);
-        let mut new_tokens: Vec<u64> = env.storage().persistent()
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id), &token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Owner(token_id), &new_owner);
+        let mut new_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(new_owner.clone()))
             .unwrap_or(Vec::new(&env));
         new_tokens.push_back(token_id);
-        env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
-        env.storage().instance().set(&DataKey::OwnerCredential(new_owner.clone(), token.credential_id), &token_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
+        env.storage().instance().set(
+            &DataKey::OwnerCredential(new_owner.clone(), token.credential_id),
+            &token_id,
+        );
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recover").into_val(&env));
@@ -435,35 +570,61 @@ impl SbtRegistryContract {
     /// Admin-only: transfer an SBT to a new owner (e.g. after credential re-issuance).
     pub fn admin_transfer_sbt(env: Env, admin: Address, token_id: u64, new_owner: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
 
-        let mut token: SoulboundToken = env.storage().persistent()
+        let mut token: SoulboundToken = env
+            .storage()
+            .persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         let old_owner = token.owner.clone();
 
         // Remove from old owner's list
-        let mut old_tokens: Vec<u64> = env.storage().persistent()
+        let mut old_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(old_owner.clone()))
             .unwrap_or(Vec::new(&env));
         if let Some(pos) = old_tokens.iter().position(|id| id == token_id) {
             old_tokens.remove(pos as u32);
         }
-        env.storage().persistent().set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
-        env.storage().instance().remove(&DataKey::Delegation(token_id));
-        env.storage().instance().remove(&DataKey::OwnerCredential(old_owner.clone(), token.credential_id));
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegation(token_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(
+            old_owner.clone(),
+            token.credential_id,
+        ));
 
         // Add to new owner
         token.owner = new_owner.clone();
-        env.storage().persistent().set(&DataKey::Token(token_id), &token);
-        env.storage().persistent().set(&DataKey::Owner(token_id), &new_owner);
-        let mut new_tokens: Vec<u64> = env.storage().persistent()
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id), &token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Owner(token_id), &new_owner);
+        let mut new_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(new_owner.clone()))
             .unwrap_or(Vec::new(&env));
         new_tokens.push_back(token_id);
-        env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
-        env.storage().instance().set(&DataKey::OwnerCredential(new_owner.clone(), token.credential_id), &token_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
+        env.storage().instance().set(
+            &DataKey::OwnerCredential(new_owner.clone(), token.credential_id),
+            &token_id,
+        );
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("transfer").into_val(&env));
@@ -492,19 +653,37 @@ impl SbtRegistryContract {
     /// Panics if caller is not the admin.
     /// Panics if guardians list is empty or exceeds maximum allowed.
     /// Panics if threshold is 0 or exceeds the number of guardians.
-    pub fn setup_recovery_guardians(env: Env, admin: Address, guardians: Vec<Address>, threshold: u32) {
+    pub fn setup_recovery_guardians(
+        env: Env,
+        admin: Address,
+        guardians: Vec<Address>,
+        threshold: u32,
+    ) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         assert!(stored_admin == admin, "unauthorized");
-        
+
         assert!(!guardians.is_empty(), "guardians list cannot be empty");
         assert!(guardians.len() <= 10, "too many guardians (max 10)");
         assert!(threshold > 0, "threshold must be greater than 0");
-        assert!(threshold <= guardians.len() as u32, "threshold cannot exceed number of guardians");
-        
-        env.storage().instance().set(&DataKey::RecoveryGuardians, &guardians);
-        env.storage().instance().set(&DataKey::RecoveryThreshold, &threshold);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        assert!(
+            threshold <= guardians.len() as u32,
+            "threshold cannot exceed number of guardians"
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryGuardians, &guardians);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryThreshold, &threshold);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Get the current recovery guardians configured for this contract.
@@ -526,7 +705,7 @@ impl SbtRegistryContract {
     /// Initiate a recovery request for a lost or compromised account.
     ///
     /// The holder calls this to request recovery of their SBTs to a new address.
-    /// Once the recovery is approved by the threshold number of guardians, 
+    /// Once the recovery is approved by the threshold number of guardians,
     /// the holder can finalize the recovery to transfer their SBTs.
     ///
     /// # Parameters
@@ -539,21 +718,34 @@ impl SbtRegistryContract {
     /// Panics if initiator is the same as new_owner.
     pub fn initiate_recovery(env: Env, initiator: Address, new_owner: Address) -> u64 {
         initiator.require_auth();
-        
-        let guardians: Vec<Address> = env.storage()
+
+        let guardians: Vec<Address> = env
+            .storage()
             .instance()
             .get(&DataKey::RecoveryGuardians)
             .unwrap_or(Vec::new(&env));
         assert!(!guardians.is_empty(), "recovery guardians not configured");
-        assert!(initiator != new_owner, "new owner must be different from initiator");
-        
+        assert!(
+            initiator != new_owner,
+            "new owner must be different from initiator"
+        );
+
         // Check if there's already a pending recovery for this holder
-        if env.storage().instance().has(&DataKey::PendingRecoveryByHolder(initiator.clone())) {
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::PendingRecoveryByHolder(initiator.clone()))
+        {
             panic_with_error!(&env, ContractError::RecoveryAlreadyExists);
         }
-        
+
         // Create recovery request
-        let request_id: u64 = env.storage().instance().get(&DataKey::RecoveryRequestCount).unwrap_or(0u64) + 1;
+        let request_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryRequestCount)
+            .unwrap_or(0u64)
+            + 1;
         let request = RecoveryRequest {
             id: request_id,
             initiator: initiator.clone(),
@@ -562,34 +754,52 @@ impl SbtRegistryContract {
             completed: false,
             approvals_count: 0,
         };
-        
-        env.storage().instance().set(&DataKey::RecoveryRequest(request_id), &request);
-        env.storage().instance().set(&DataKey::RecoveryRequestCount, &request_id);
-        env.storage().instance().set(&DataKey::PendingRecoveryByHolder(initiator.clone()), &request_id);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequest(request_id), &request);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequestCount, &request_id);
+        env.storage().instance().set(
+            &DataKey::PendingRecoveryByHolder(initiator.clone()),
+            &request_id,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Initialize empty approvals vector
         let approvals: Vec<RecoveryApproval> = Vec::new(&env);
-        env.storage().instance().set(&DataKey::RecoveryApprovals(request_id), &approvals);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryApprovals(request_id), &approvals);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Record audit trail
-        Self::record_audit_trail(&env, request_id, symbol_short!("init"), initiator.clone(), 
-            soroban_sdk::String::from_str(&env, "Recovery initiated"));
-        
+        Self::record_audit_trail(
+            &env,
+            request_id,
+            symbol_short!("init"),
+            initiator.clone(),
+            soroban_sdk::String::from_str(&env, "Recovery initiated"),
+        );
+
         // Emit event
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recov_in").into_val(&env));
         topics.push_back(request_id.into_val(&env));
         env.events().publish(topics, initiator);
-        
+
         request_id
     }
 
     /// Approve a pending recovery request as a guardian.
     ///
     /// A configured recovery guardian calls this to approve a recovery request.
-    /// Once the threshold number of approvals is reached, the initiator can 
+    /// Once the threshold number of approvals is reached, the initiator can
     /// finalize the recovery.
     ///
     /// # Parameters
@@ -603,12 +813,13 @@ impl SbtRegistryContract {
     /// Panics if the recovery has already been completed.
     pub fn approve_recovery(env: Env, guardian: Address, recovery_request_id: u64) {
         guardian.require_auth();
-        
-        let guardians: Vec<Address> = env.storage()
+
+        let guardians: Vec<Address> = env
+            .storage()
             .instance()
             .get(&DataKey::RecoveryGuardians)
             .unwrap_or(Vec::new(&env));
-        
+
         let mut is_guardian = false;
         for g in guardians.iter() {
             if g == guardian {
@@ -616,43 +827,64 @@ impl SbtRegistryContract {
                 break;
             }
         }
-        assert!(is_guardian, "only configured guardians can approve recoveries");
-        
+        assert!(
+            is_guardian,
+            "only configured guardians can approve recoveries"
+        );
+
         // Get recovery request
-        let mut recovery: RecoveryRequest = env.storage().instance()
+        let mut recovery: RecoveryRequest = env
+            .storage()
+            .instance()
             .get(&DataKey::RecoveryRequest(recovery_request_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::RecoveryNotFound));
-        
+
         assert!(!recovery.completed, "recovery already completed");
-        
+
         // Get existing approvals
-        let mut approvals: Vec<RecoveryApproval> = env.storage().instance()
+        let mut approvals: Vec<RecoveryApproval> = env
+            .storage()
+            .instance()
             .get(&DataKey::RecoveryApprovals(recovery_request_id))
             .unwrap_or(Vec::new(&env));
-        
+
         // Check if guardian has already approved
         for approval in approvals.iter() {
-            assert!(approval.guardian != guardian, "guardian has already approved this recovery");
+            assert!(
+                approval.guardian != guardian,
+                "guardian has already approved this recovery"
+            );
         }
-        
+
         // Add approval
         let new_approval = RecoveryApproval {
             guardian: guardian.clone(),
             approved_at: env.ledger().timestamp(),
         };
         approvals.push_back(new_approval);
-        
+
         // Update recovery request with new approval count
         recovery.approvals_count += 1;
-        
-        env.storage().instance().set(&DataKey::RecoveryApprovals(recovery_request_id), &approvals);
-        env.storage().instance().set(&DataKey::RecoveryRequest(recovery_request_id), &recovery);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryApprovals(recovery_request_id), &approvals);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequest(recovery_request_id), &recovery);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Record audit trail
-        Self::record_audit_trail(&env, recovery_request_id, symbol_short!("approv"), guardian.clone(),
-            soroban_sdk::String::from_str(&env, "Recovery approved by guardian"));
-        
+        Self::record_audit_trail(
+            &env,
+            recovery_request_id,
+            symbol_short!("approv"),
+            guardian.clone(),
+            soroban_sdk::String::from_str(&env, "Recovery approved by guardian"),
+        );
+
         // Emit event
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recov_ap").into_val(&env));
@@ -675,67 +907,113 @@ impl SbtRegistryContract {
     /// Panics if recovery already completed.
     pub fn finalize_recovery(env: Env, initiator: Address, recovery_request_id: u64) {
         initiator.require_auth();
-        
-        let mut recovery: RecoveryRequest = env.storage().instance()
+
+        let mut recovery: RecoveryRequest = env
+            .storage()
+            .instance()
             .get(&DataKey::RecoveryRequest(recovery_request_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::RecoveryNotFound));
-        
-        assert!(recovery.initiator == initiator, "only recovery initiator can finalize");
+
+        assert!(
+            recovery.initiator == initiator,
+            "only recovery initiator can finalize"
+        );
         assert!(!recovery.completed, "recovery already completed");
-        
-        let threshold: u32 = env.storage().instance().get(&DataKey::RecoveryThreshold).unwrap_or(0u32);
-        assert!(recovery.approvals_count >= threshold, 
-            "insufficient approvals: need {} but have {}", threshold, recovery.approvals_count);
-        
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryThreshold)
+            .unwrap_or(0u32);
+        assert!(
+            recovery.approvals_count >= threshold,
+            "insufficient approvals: need {} but have {}",
+            threshold,
+            recovery.approvals_count
+        );
+
         // Transfer all SBTs from initiator to new_owner
-        let token_ids: Vec<u64> = env.storage().persistent()
+        let token_ids: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(initiator.clone()))
             .unwrap_or(Vec::new(&env));
-        
+
         let new_owner = recovery.new_owner.clone();
-        
+
         // Update each token and transfer ownership
         for token_id in token_ids.iter() {
-            let mut token: SoulboundToken = env.storage().persistent()
+            let mut token: SoulboundToken = env
+                .storage()
+                .persistent()
                 .get(&DataKey::Token(token_id))
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
-            
+
             // Update token owner
             token.owner = new_owner.clone();
-            env.storage().persistent().set(&DataKey::Token(token_id), &token);
-            env.storage().persistent().set(&DataKey::Owner(token_id), &new_owner);
-            
+            env.storage()
+                .persistent()
+                .set(&DataKey::Token(token_id), &token);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Owner(token_id), &new_owner);
+
             // Remove from old owner's mapping
-            env.storage().instance().remove(&DataKey::OwnerCredential(initiator.clone(), token.credential_id));
-            
+            env.storage().instance().remove(&DataKey::OwnerCredential(
+                initiator.clone(),
+                token.credential_id,
+            ));
+
             // Add to new owner's mapping
-            env.storage().instance().set(&DataKey::OwnerCredential(new_owner.clone(), token.credential_id), &token_id);
+            env.storage().instance().set(
+                &DataKey::OwnerCredential(new_owner.clone(), token.credential_id),
+                &token_id,
+            );
         }
-        
+
         // Clear initiator's token list
-        env.storage().persistent().remove(&DataKey::OwnerTokens(initiator.clone()));
-        
+        env.storage()
+            .persistent()
+            .remove(&DataKey::OwnerTokens(initiator.clone()));
+
         // Add to new owner's token list
-        let mut new_owner_tokens: Vec<u64> = env.storage().persistent()
+        let mut new_owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::OwnerTokens(new_owner.clone()))
             .unwrap_or(Vec::new(&env));
         for token_id in token_ids.iter() {
             new_owner_tokens.push_back(token_id);
         }
-        env.storage().persistent().set(&DataKey::OwnerTokens(new_owner.clone()), &new_owner_tokens);
-        env.storage().persistent().extend_ttl(&DataKey::OwnerTokens(new_owner.clone()), STANDARD_TTL, EXTENDED_TTL);
-        
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(new_owner.clone()), &new_owner_tokens);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerTokens(new_owner.clone()),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+
         // Mark recovery as completed
         recovery.completed = true;
-        env.storage().instance().set(&DataKey::RecoveryRequest(recovery_request_id), &recovery);
-        
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequest(recovery_request_id), &recovery);
+
         // Clear pending recovery tracking
-        env.storage().instance().remove(&DataKey::PendingRecoveryByHolder(initiator.clone()));
-        
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingRecoveryByHolder(initiator.clone()));
+
         // Record audit trail
-        Self::record_audit_trail(&env, recovery_request_id, symbol_short!("final"), initiator.clone(),
-            soroban_sdk::String::from_str(&env, "Recovery finalized and SBTs transferred"));
-        
+        Self::record_audit_trail(
+            &env,
+            recovery_request_id,
+            symbol_short!("final"),
+            initiator.clone(),
+            soroban_sdk::String::from_str(&env, "Recovery finalized and SBTs transferred"),
+        );
+
         // Emit event
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("recov_fn").into_val(&env));
@@ -751,7 +1029,8 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics with `ContractError::RecoveryNotFound` if the request doesn't exist.
     pub fn get_recovery_request(env: Env, recovery_request_id: u64) -> RecoveryRequest {
-        env.storage().instance()
+        env.storage()
+            .instance()
             .get(&DataKey::RecoveryRequest(recovery_request_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::RecoveryNotFound))
     }
@@ -764,14 +1043,26 @@ impl SbtRegistryContract {
     /// # Returns
     /// Vector of all approvals for the recovery request.
     pub fn get_recovery_approvals(env: Env, recovery_request_id: u64) -> Vec<RecoveryApproval> {
-        env.storage().instance()
+        env.storage()
+            .instance()
             .get(&DataKey::RecoveryApprovals(recovery_request_id))
             .unwrap_or(Vec::new(&env))
     }
 
     /// Helper function to record audit trail entries for recovery operations.
-    fn record_audit_trail(env: &Env, recovery_request_id: u64, action: Symbol, actor: Address, details: soroban_sdk::String) {
-        let entry_id: u64 = env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64) + 1;
+    fn record_audit_trail(
+        env: &Env,
+        recovery_request_id: u64,
+        action: Symbol,
+        actor: Address,
+        details: soroban_sdk::String,
+    ) {
+        let entry_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AuditTrailCount)
+            .unwrap_or(0u64)
+            + 1;
         let entry = AuditTrailEntry {
             id: entry_id,
             recovery_request_id,
@@ -780,10 +1071,16 @@ impl SbtRegistryContract {
             timestamp: env.ledger().timestamp(),
             details,
         };
-        
-        env.storage().instance().set(&DataKey::AuditTrail(entry_id), &entry);
-        env.storage().instance().set(&DataKey::AuditTrailCount, &entry_id);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AuditTrail(entry_id), &entry);
+        env.storage()
+            .instance()
+            .set(&DataKey::AuditTrailCount, &entry_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Get an audit trail entry by ID.
@@ -794,36 +1091,64 @@ impl SbtRegistryContract {
     /// # Returns
     /// The audit trail entry, or panics if not found.
     pub fn get_audit_trail_entry(env: Env, audit_id: u64) -> AuditTrailEntry {
-        env.storage().instance()
+        env.storage()
+            .instance()
             .get(&DataKey::AuditTrail(audit_id))
             .expect("audit trail entry not found")
     }
 
     /// Get the total count of audit trail entries.
     pub fn get_audit_trail_count(env: Env) -> u64 {
-        env.storage().instance().get(&DataKey::AuditTrailCount).unwrap_or(0u64)
+        env.storage()
+            .instance()
+            .get(&DataKey::AuditTrailCount)
+            .unwrap_or(0u64)
     }
 
     /// Admin-only: set the weights used by get_holder_reputation.
-    pub fn set_reputation_config(env: Env, admin: Address, token_weight: u32, activity_weight: u32) {
+    pub fn set_reputation_config(
+        env: Env,
+        admin: Address,
+        token_weight: u32,
+        activity_weight: u32,
+    ) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
-        env.storage().instance().set(&DataKey::ReputationConfig, &ReputationConfig { token_weight, activity_weight });
+        env.storage().instance().set(
+            &DataKey::ReputationConfig,
+            &ReputationConfig {
+                token_weight,
+                activity_weight,
+            },
+        );
     }
 
     /// Return the reputation score for a holder.
     /// score = tokens_held * token_weight + activity_events * activity_weight
     /// Defaults: token_weight = 10, activity_weight = 1.
     pub fn get_holder_reputation(env: Env, holder: Address) -> u32 {
-        let cfg: ReputationConfig = env.storage().instance()
+        let cfg: ReputationConfig = env
+            .storage()
+            .instance()
             .get(&DataKey::ReputationConfig)
-            .unwrap_or(ReputationConfig { token_weight: 10, activity_weight: 1 });
-        let tokens = env.storage().persistent()
+            .unwrap_or(ReputationConfig {
+                token_weight: 10,
+                activity_weight: 1,
+            });
+        let tokens = env
+            .storage()
+            .persistent()
             .get::<DataKey, Vec<u64>>(&DataKey::OwnerTokens(holder.clone()))
             .unwrap_or(Vec::new(&env))
             .len();
-        let activity = env.storage().persistent()
+        let activity = env
+            .storage()
+            .persistent()
             .get::<DataKey, Vec<NotificationEntry>>(&DataKey::NotificationHistory(holder))
             .unwrap_or(Vec::new(&env))
             .len();
@@ -833,7 +1158,9 @@ impl SbtRegistryContract {
     /// Append a notification entry to the holder's on-chain history.
     fn record_notification(env: &Env, holder: Address, token_id: u64, event: Symbol) {
         let key = DataKey::NotificationHistory(holder);
-        let mut history: Vec<NotificationEntry> = env.storage().persistent()
+        let mut history: Vec<NotificationEntry> = env
+            .storage()
+            .persistent()
             .get(&key)
             .unwrap_or(Vec::new(env));
         history.push_back(NotificationEntry {
@@ -842,12 +1169,15 @@ impl SbtRegistryContract {
             timestamp: env.ledger().timestamp(),
         });
         env.storage().persistent().set(&key, &history);
-        env.storage().persistent().extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Return all notification entries recorded for a holder.
     pub fn get_notifications(env: Env, holder: Address) -> Vec<NotificationEntry> {
-        env.storage().persistent()
+        env.storage()
+            .persistent()
             .get(&DataKey::NotificationHistory(holder))
             .unwrap_or(Vec::new(&env))
     }
@@ -880,7 +1210,9 @@ impl SbtRegistryContract {
         }
 
         // Fetch the QuorumProof contract address once.
-        let qp_id: Address = env.storage().instance()
+        let qp_id: Address = env
+            .storage()
+            .instance()
             .get(&DataKey::QuorumProofId)
             .expect("not initialized");
 
@@ -897,7 +1229,10 @@ impl SbtRegistryContract {
             assert!(!revoked, "credential is revoked");
 
             // Requirement 1.5: (owner, credential_id) must not already exist in storage.
-            if env.storage().instance().has(&DataKey::OwnerCredential(entry.owner.clone(), entry.credential_id)) {
+            if env.storage().instance().has(&DataKey::OwnerCredential(
+                entry.owner.clone(),
+                entry.credential_id,
+            )) {
                 panic_with_error!(&env, ContractError::SoulboundNonTransferable);
             }
         }
@@ -906,7 +1241,8 @@ impl SbtRegistryContract {
         for i in 0..entries.len() {
             for j in (i + 1)..entries.len() {
                 if entries.get(i).unwrap().owner == entries.get(j).unwrap().owner
-                    && entries.get(i).unwrap().credential_id == entries.get(j).unwrap().credential_id
+                    && entries.get(i).unwrap().credential_id
+                        == entries.get(j).unwrap().credential_id
                 {
                     panic_with_error!(&env, ContractError::SoulboundNonTransferable);
                 }
@@ -926,7 +1262,11 @@ impl SbtRegistryContract {
 
     /// Admin-transfer multiple SBTs in a single atomic transaction.
     /// Returns the transferred token IDs in input order.
-    pub fn batch_transfer(env: Env, _admin: Address, _entries: Vec<BatchTransferEntry>) -> Vec<u64> {
+    pub fn batch_transfer(
+        env: Env,
+        _admin: Address,
+        _entries: Vec<BatchTransferEntry>,
+    ) -> Vec<u64> {
         Vec::new(&env)
     }
 
@@ -950,9 +1290,9 @@ impl SbtRegistryContract {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
     use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::{BytesN, FromVal, TryFromVal};
-    use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
 
     // --- Deployment verification tests ---
 
@@ -981,7 +1321,14 @@ mod tests {
         assert_eq!(sbt_client.get_tokens_by_owner(&admin).len(), 0);
     }
 
-    fn setup_with_qp(env: &Env) -> (SbtRegistryContractClient, Address, QuorumProofContractClient, Address) {
+    fn setup_with_qp(
+        env: &Env,
+    ) -> (
+        SbtRegistryContractClient,
+        Address,
+        QuorumProofContractClient,
+        Address,
+    ) {
         let qp_id = env.register_contract(None, QuorumProofContract);
         let qp_client = QuorumProofContractClient::new(env, &qp_id);
         let admin = Address::generate(env);
@@ -1141,7 +1488,8 @@ mod tests {
     }
 
     #[test]
-    fn test_get_tokens_by_owner_single() { /* impl from previous */ }
+    fn test_get_tokens_by_owner_single() { /* impl from previous */
+    }
 
     // --- Issue #196: get_sbt_by_owner ---
 
@@ -1251,7 +1599,8 @@ mod tests {
         // Verify a burn event was emitted by checking events list is non-empty
         let events = env.events().all();
         let burn_event = events.iter().find(|(_, topics, _)| {
-            topics.get(0)
+            topics
+                .get(0)
                 .and_then(|v| soroban_sdk::Symbol::try_from_val(&env, &v).ok())
                 .map(|s| s == symbol_short!("burn"))
                 .unwrap_or(false)
@@ -1352,7 +1701,10 @@ mod tests {
         assert_eq!(client.owner_of(&token_id), new_owner);
         assert_eq!(client.get_token(&token_id).owner, new_owner);
         assert!(client.get_tokens_by_owner(&old_owner).is_empty());
-        assert_eq!(client.get_tokens_by_owner(&new_owner).get(0).unwrap(), token_id);
+        assert_eq!(
+            client.get_tokens_by_owner(&new_owner).get(0).unwrap(),
+            token_id
+        );
     }
 
     #[test]
