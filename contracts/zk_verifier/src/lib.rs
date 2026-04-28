@@ -63,7 +63,7 @@ fn groth16_verify(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
     binding_input.append(proof);
     let digest = env.crypto().sha256(&binding_input);
     // The digest must not start with 0xFF (collision guard)
-    digest.get(0).unwrap_or(0xFF) != 0xFF
+    digest.to_array()[0] != 0xFF
 }
 
 /// Supported claim types for ZK verification.
