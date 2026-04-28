@@ -18,6 +18,7 @@ pub enum ContractError {
     InsufficientApprovals = 6,
     InvalidGuardian = 7,
     NotWhitelisted = 8,
+    HolderBlacklisted = 9,
 }
 
 #[contracttype]
@@ -44,6 +45,7 @@ pub enum DataKey {
     SbtWhitelist(u64),
     BurnedTokens,
     CredentialAccessLog(u64),
+    Blacklist(Address),
 }
 
 /// Weights used to compute a holder's reputation score.
@@ -184,6 +186,10 @@ impl SbtRegistryContract {
     /// Panics if the credential does not exist or is revoked in `quorum_proof`.
     pub fn mint(env: Env, owner: Address, credential_id: u64, metadata_uri: Bytes) -> u64 {
         owner.require_auth();
+
+        if env.storage().instance().has(&DataKey::Blacklist(owner.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
 
         // Cross-contract: verify credential exists and is not revoked.
         // Uses env.invoke_contract to avoid a circular crate dependency with quorum_proof.
@@ -922,6 +928,22 @@ impl SbtRegistryContract {
     /// Returns the transferred token IDs in input order.
     pub fn batch_transfer(env: Env, _admin: Address, _entries: Vec<BatchTransferEntry>) -> Vec<u64> {
         Vec::new(&env)
+    }
+
+    /// Blacklist a holder address. Admin-only.
+    /// Blacklisted holders cannot mint new SBTs.
+    pub fn add_holder_to_blacklist(env: Env, admin: Address, holder: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Blacklist(holder), &true);
+    }
+
+    /// Returns true if the holder is blacklisted.
+    pub fn is_holder_blacklisted(env: Env, holder: Address) -> bool {
+        env.storage().instance().has(&DataKey::Blacklist(holder))
     }
 }
 
@@ -2087,5 +2109,57 @@ mod tests {
         let unauthorized = Address::generate(&env);
         // Unauthorized holder should not be able to access the log
         let _ = client.get_credential_access_log(&unauthorized, &cred_id);
+    }
+
+    // --- Blacklist tests ---
+
+    #[test]
+    fn test_is_holder_blacklisted_returns_false_by_default() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let holder = Address::generate(&env);
+        assert!(!client.is_holder_blacklisted(&holder));
+    }
+
+    #[test]
+    fn test_add_holder_to_blacklist_and_check() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let holder = Address::generate(&env);
+
+        assert!(!client.is_holder_blacklisted(&holder));
+        client.add_holder_to_blacklist(&admin, &holder);
+        assert!(client.is_holder_blacklisted(&holder));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_mint_blacklisted_holder_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+
+        client.add_holder_to_blacklist(&admin, &owner);
+
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        client.mint(&owner, &cred_id, &uri); // must panic
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_add_holder_to_blacklist_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let non_admin = Address::generate(&env);
+        let holder = Address::generate(&env);
+        client.add_holder_to_blacklist(&non_admin, &holder);
     }
 }
