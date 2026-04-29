@@ -4,6 +4,7 @@ import { CredentialCard } from '../components/CredentialCard';
 import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
 import { ExportCredentialsDialog } from '../components/ExportCredentialsDialog';
+import { ImportCredentialsDialog } from '../components/ImportCredentialsDialog';
 import { useWallet } from '../hooks';
 import {
   getCredentialsBySubject,
@@ -22,6 +23,7 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  const [showImportDialog, setShowImportDialog] = useState(false);
 
   const fetchCredentials = useCallback(async (walletAddress: string) => {
     setLoading(true);
@@ -125,6 +127,12 @@ export default function Dashboard() {
                 📥 Export
               </button>
             )}
+            <button
+              className="btn btn--ghost btn--sm"
+              onClick={() => setShowImportDialog(true)}
+            >
+              📤 Import
+            </button>
             {address && (
               <div className="wallet-sim-card">
                 <div className="wallet-sim__label">Connected Address</div>
@@ -212,6 +220,25 @@ export default function Dashboard() {
         <ExportCredentialsDialog
           credentials={cards.map(c => c.credential)}
           onClose={() => setShowExportDialog(false)}
+        />
+      )}
+
+      {showImportDialog && (
+        <ImportCredentialsDialog
+          onImport={(imported) => {
+            setCards(prev => [
+              ...prev,
+              ...imported.map(credential => ({
+                credential,
+                attested: false,
+                slice: null,
+                expired: false,
+                sliceError: false,
+                credError: null,
+              })),
+            ]);
+          }}
+          onClose={() => setShowImportDialog(false)}
         />
       )}
     </>
