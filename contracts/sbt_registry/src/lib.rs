@@ -455,7 +455,7 @@ impl SbtRegistryContract {
     }
 
     /// Initialize the contract with an admin and the quorum_proof contract address.
-    pub fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
+    fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -650,7 +650,7 @@ impl SbtRegistryContract {
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+    fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
@@ -732,7 +732,7 @@ impl SbtRegistryContract {
     /// Panics if no recovery guardians have been configured.
     /// Panics if a recovery request already exists for this holder.
     /// Panics if initiator is the same as new_owner.
-    pub fn initiate_recovery(env: Env, initiator: Address, new_owner: Address) -> u64 {
+    fn initiate_recovery(env: Env, initiator: Address, new_owner: Address) -> u64 {
         initiator.require_auth();
 
         let guardians: Vec<Address> = env
@@ -827,7 +827,7 @@ impl SbtRegistryContract {
     /// Panics if the guardian is not in the configured guardians list.
     /// Panics if the guardian has already approved this request.
     /// Panics if the recovery has already been completed.
-    pub fn approve_recovery(env: Env, guardian: Address, recovery_request_id: u64) {
+    fn approve_recovery(env: Env, guardian: Address, recovery_request_id: u64) {
         guardian.require_auth();
 
         let guardians: Vec<Address> = env
@@ -1044,7 +1044,7 @@ impl SbtRegistryContract {
     ///
     /// # Panics
     /// Panics with `ContractError::RecoveryNotFound` if the request doesn't exist.
-    pub fn get_recovery_request(env: Env, recovery_request_id: u64) -> RecoveryRequest {
+    fn get_recovery_request(env: Env, recovery_request_id: u64) -> RecoveryRequest {
         env.storage()
             .instance()
             .get(&DataKey::RecoveryRequest(recovery_request_id))
@@ -1058,7 +1058,7 @@ impl SbtRegistryContract {
     ///
     /// # Returns
     /// Vector of all approvals for the recovery request.
-    pub fn get_recovery_approvals(env: Env, recovery_request_id: u64) -> Vec<RecoveryApproval> {
+    fn get_recovery_approvals(env: Env, recovery_request_id: u64) -> Vec<RecoveryApproval> {
         env.storage()
             .instance()
             .get(&DataKey::RecoveryApprovals(recovery_request_id))
@@ -1147,7 +1147,7 @@ impl SbtRegistryContract {
     /// Return the reputation score for a holder.
     /// score = tokens_held * token_weight + activity_events * activity_weight
     /// Defaults: token_weight = 10, activity_weight = 1.
-    pub fn get_holder_reputation(env: Env, holder: Address) -> u32 {
+    fn get_holder_reputation(env: Env, holder: Address) -> u32 {
         let cfg: ReputationConfig = env
             .storage()
             .instance()
@@ -1298,13 +1298,13 @@ impl SbtRegistryContract {
     }
 
     /// Returns true if the holder is blacklisted.
-    pub fn is_holder_blacklisted(env: Env, holder: Address) -> bool {
+    fn is_holder_blacklisted(env: Env, holder: Address) -> bool {
         env.storage().instance().has(&DataKey::Blacklist(holder))
     }
 
     /// Update the metadata URI of an SBT. Only the token owner may call this.
     /// Increments the token version on each update.
-    pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
+    fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
         owner.require_auth();
         let mut token: SoulboundToken = env
             .storage()

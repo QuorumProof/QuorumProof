@@ -208,7 +208,7 @@ impl ZkVerifierContract {
     }
 
     /// Set the admin address once after deployment.
-    pub fn initialize(env: Env, admin: Address) {
+    fn initialize(env: Env, admin: Address) {
         assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
@@ -325,7 +325,7 @@ impl ZkVerifierContract {
     }
 
     /// Admin-only contract upgrade to new WASM.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+    fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
