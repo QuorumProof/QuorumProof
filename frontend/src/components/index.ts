@@ -11,3 +11,4 @@ export { AppLayout } from './AppLayout';
 export { ToastContainer } from './ToastContainer';
 export { FeedbackForm } from './FeedbackForm';
 export { ImportCredentialsDialog } from './ImportCredentialsDialog';
+export { NotificationPreferences } from './NotificationPreferences';
