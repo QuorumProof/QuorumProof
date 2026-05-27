@@ -12,3 +12,8 @@ export { ToastContainer } from './ToastContainer';
 export { FeedbackForm } from './FeedbackForm';
 export { ImportCredentialsDialog } from './ImportCredentialsDialog';
 export { NotificationPreferences } from './NotificationPreferences';
+export { SliceMemberManager } from './SliceMemberManager';
+export type { SliceMember } from './SliceMemberManager';
+export { SliceThresholdVisualizer, getSliceHealth } from './SliceThresholdVisualizer';
+export type { SliceHealth, SliceThresholdVisualizerProps } from './SliceThresholdVisualizer';
+export { SliceRecommendationPanel } from './SliceRecommendationPanel';
