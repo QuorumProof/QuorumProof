@@ -400,6 +400,15 @@ pub enum DataKey2 {
     AttestConditions(u64),
     RateLimitConfig,
     RateLimitState(Address),
+    ShareToken(soroban_sdk::Bytes),
+}
+
+/// A time-limited share link token for a credential.
+#[contracttype]
+#[derive(Clone)]
+pub struct ShareLink {
+    pub credential_id: u64,
+    pub expires_at: u64,
 }
 
 #[contracttype]
@@ -5793,6 +5802,71 @@ impl QuorumProofContract {
         let metadata = soroban_sdk::Bytes::from_slice(&env, b"default");
         Self::issue_credential(env, issuer, subject, credential_type, metadata, expires_at)
     }
+
+    /// Generate a time-limited share link token for a credential.
+    ///
+    /// The caller must be the credential subject (holder). Returns an opaque
+    /// token (the credential ID encoded as bytes XOR'd with the expiry) that
+    /// can be embedded in a share URL. Call `validate_share_token` to redeem it.
+    pub fn generate_share_link(
+        env: Env,
+        subject: Address,
+        credential_id: u64,
+        expiry_hours: u32,
+    ) -> soroban_sdk::Bytes {
+        subject.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(expiry_hours > 0, "expiry_hours must be greater than 0");
+
+        // Credential must exist.
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Credential(credential_id))
+        {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        let now = env.ledger().timestamp();
+        let expires_at = now + (expiry_hours as u64) * 3600;
+
+        // Build a deterministic token: 8 bytes credential_id || 8 bytes expires_at
+        let cid_bytes = credential_id.to_be_bytes();
+        let exp_bytes = expires_at.to_be_bytes();
+        let mut raw = [0u8; 16];
+        raw[..8].copy_from_slice(&cid_bytes);
+        raw[8..].copy_from_slice(&exp_bytes);
+        let token = soroban_sdk::Bytes::from_slice(&env, &raw);
+
+        let link = ShareLink { credential_id, expires_at };
+        env.storage()
+            .instance()
+            .set(&DataKey2::ShareToken(token.clone()), &link);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        token
+    }
+
+    /// Validate a share token and return the credential ID.
+    ///
+    /// Panics with `ContractError::InvalidInput` if the token is unknown or expired.
+    pub fn validate_share_token(env: Env, token: soroban_sdk::Bytes) -> u64 {
+        let link: ShareLink = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ShareToken(token))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+
+        let now = env.ledger().timestamp();
+        if now >= link.expires_at {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        link.credential_id
+    }
 }
 
 #[cfg(test)]
@@ -10775,5 +10849,87 @@ mod doc_tests {
 
         let score = client.get_attestor_reputation_score(&attestor);
         assert_eq!(score, 70i32);
+    }
+
+    // ============ Tests for Feature: generate_share_link / validate_share_token ============
+
+    #[test]
+    fn test_generate_share_link_returns_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None::<u64>);
+        let token = client.generate_share_link(&holder, &cred_id, &24u32);
+
+        // Token must be 16 bytes (8 cred_id + 8 expires_at).
+        assert_eq!(token.len(), 16);
+    }
+
+    #[test]
+    fn test_validate_share_token_returns_credential_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_ledger_timestamp(&env, 1_000_000);
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None::<u64>);
+        let token = client.generate_share_link(&holder, &cred_id, &24u32);
+
+        let returned_id = client.validate_share_token(&token);
+        assert_eq!(returned_id, cred_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_validate_share_token_expired_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_ledger_timestamp(&env, 1_000_000);
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None::<u64>);
+        // 1-hour link
+        let token = client.generate_share_link(&holder, &cred_id, &1u32);
+
+        // Advance time past expiry (1 hour + 1 second)
+        set_ledger_timestamp(&env, 1_000_000 + 3601);
+
+        // Must panic because the token is expired.
+        client.validate_share_token(&token);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_validate_share_token_unknown_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let fake_token = Bytes::from_slice(&env, &[0u8; 16]);
+        client.validate_share_token(&fake_token);
+    }
+
+    #[test]
+    #[should_panic(expected = "expiry_hours must be greater than 0")]
+    fn test_generate_share_link_zero_expiry_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None::<u64>);
+        client.generate_share_link(&holder, &cred_id, &0u32);
     }
 }

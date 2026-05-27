@@ -11,7 +11,7 @@ import {
 import type { Credential } from '../lib/contracts/quorumProof';
 import { verifyClaim } from '../lib/contracts/zkVerifier';
 import type { ClaimType } from '../lib/contracts/zkVerifier';
-import { decodeMetadataHash, CONTRACT_ID, RPC_URL, NETWORK } from '../stellar';
+import { decodeMetadataHash, CONTRACT_ID, RPC_URL, NETWORK, validateShareToken, hexToUint8Array } from '../stellar';
 
 export const DEFAULT_SLICE_ID = 1n;
 
@@ -271,7 +271,14 @@ export default function Verify() {
 
   useEffect(() => {
     const preId = searchParams.get('id');
-    if (preId && !autoTriggered.current) {
+    const preToken = searchParams.get('token');
+    if (autoTriggered.current) return;
+    if (preToken) {
+      autoTriggered.current = true;
+      validateShareToken(hexToUint8Array(preToken))
+        .then((id) => fetchCred(BigInt(id)))
+        .catch(() => setError('This share link is invalid or has expired.'));
+    } else if (preId) {
       autoTriggered.current = true;
       const id = parseInt(preId, 10);
       if (!isNaN(id) && id > 0) fetchCred(BigInt(id));
