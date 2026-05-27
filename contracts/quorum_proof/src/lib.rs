@@ -340,14 +340,6 @@ pub enum ContractError {
     PermissionDenied = 44,
     /// Issue #521: PoW nonce does not satisfy difficulty
     InvalidPoWNonce = 45,
-    /// Issue #522: Consent request not found
-    ConsentRequestNotFound = 46,
-    /// Issue #522: Consent request already exists
-    ConsentRequestAlreadyExists = 47,
-    /// Issue #522: Consent request expired
-    ConsentRequestExpired = 48,
-    /// Issue #522: Consent not yet granted
-    ConsentNotGranted = 49,
 }
 
 #[contracttype]
@@ -412,10 +404,6 @@ pub enum DataKey2 {
     RateLimitState(Address),
     // Issue #521: PoW difficulty setting
     PowDifficulty,
-    // Issue #522: Consent request tracking
-    ConsentRequest(u64),
-    ConsentRequestCount,
-    PendingConsent(Address, Address, u32),
 }
 
 #[contracttype]
@@ -707,21 +695,6 @@ pub struct HolderReputationConfig {
 
 // Issue #521: Default PoW difficulty (0 = disabled; admin can set to require leading zero bits)
 const DEFAULT_POW_DIFFICULTY: u32 = 0;
-// Issue #522: Consent request timeout (7 days in seconds)
-const CONSENT_REQUEST_TIMEOUT: u64 = 7 * 24 * 3600;
-
-/// Issue #522: Pending consent request for credential issuance
-#[contracttype]
-#[derive(Clone)]
-pub struct ConsentRequest {
-    pub id: u64,
-    pub issuer: Address,
-    pub subject: Address,
-    pub credential_type: u32,
-    pub metadata_hash: soroban_sdk::Bytes,
-    pub expires_at_ts: u64,
-    pub approved: bool,
-}
 
 #[contract]
 pub struct QuorumProofContract;
@@ -5899,140 +5872,6 @@ impl QuorumProofContract {
         }
     }
 
-    // ── Issue #522: Credential holder consent tracking ────────────────────────
-
-    /// Issuer requests consent from a subject to issue a credential.
-    /// Returns the consent request ID. Expires after 7 days.
-    pub fn request_credential(
-        env: Env,
-        issuer: Address,
-        subject: Address,
-        credential_type: u32,
-        metadata_hash: soroban_sdk::Bytes,
-    ) -> u64 {
-        issuer.require_auth();
-        Self::require_not_paused(&env);
-
-        // Prevent duplicate pending requests
-        let pending_key = DataKey2::PendingConsent(issuer.clone(), subject.clone(), credential_type);
-        if env.storage().instance().has(&pending_key) {
-            panic_with_error!(&env, ContractError::ConsentRequestAlreadyExists);
-        }
-
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey2::ConsentRequestCount)
-            .unwrap_or(0u64)
-            + 1;
-
-        let now = env.ledger().timestamp();
-        let request = ConsentRequest {
-            id,
-            issuer: issuer.clone(),
-            subject: subject.clone(),
-            credential_type,
-            metadata_hash,
-            expires_at_ts: now + CONSENT_REQUEST_TIMEOUT,
-            approved: false,
-        };
-
-        env.storage().instance().set(&DataKey2::ConsentRequest(id), &request);
-        env.storage().instance().set(&DataKey2::ConsentRequestCount, &id);
-        env.storage().instance().set(&pending_key, &id);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        // Emit consent requested event
-        let topic = String::from_str(&env, "ConsentRequested");
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, id);
-
-        id
-    }
-
-    /// Subject approves a pending consent request.
-    pub fn approve_credential_request(env: Env, subject: Address, request_id: u64) {
-        subject.require_auth();
-
-        let mut request: ConsentRequest = env
-            .storage()
-            .instance()
-            .get(&DataKey2::ConsentRequest(request_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ConsentRequestNotFound));
-
-        assert!(request.subject == subject, "unauthorized");
-
-        let now = env.ledger().timestamp();
-        if now > request.expires_at_ts {
-            panic_with_error!(&env, ContractError::ConsentRequestExpired);
-        }
-
-        request.approved = true;
-        env.storage().instance().set(&DataKey2::ConsentRequest(request_id), &request);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        // Emit consent approved event (audit trail)
-        let topic = String::from_str(&env, "ConsentApproved");
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, request_id);
-    }
-
-    /// Issue a credential after consent has been granted. Consumes the consent request.
-    pub fn issue_with_consent(
-        env: Env,
-        issuer: Address,
-        request_id: u64,
-        nonce: u64,
-    ) -> u64 {
-        issuer.require_auth();
-
-        let request: ConsentRequest = env
-            .storage()
-            .instance()
-            .get(&DataKey2::ConsentRequest(request_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ConsentRequestNotFound));
-
-        assert!(request.issuer == issuer, "unauthorized");
-
-        if !request.approved {
-            panic_with_error!(&env, ContractError::ConsentNotGranted);
-        }
-
-        let now = env.ledger().timestamp();
-        if now > request.expires_at_ts {
-            panic_with_error!(&env, ContractError::ConsentRequestExpired);
-        }
-
-        // Remove pending consent marker
-        let pending_key = DataKey2::PendingConsent(
-            request.issuer.clone(),
-            request.subject.clone(),
-            request.credential_type,
-        );
-        env.storage().instance().remove(&pending_key);
-        env.storage().instance().remove(&DataKey2::ConsentRequest(request_id));
-
-        // Issue the credential
-        Self::issue_credential(
-            env,
-            request.issuer,
-            request.subject,
-            request.credential_type,
-            request.metadata_hash,
-            None,
-            nonce,
-        )
-    }
-
-    /// Get a consent request by ID.
-    pub fn get_consent_request(env: Env, request_id: u64) -> ConsentRequest {
-        env.storage()
-            .instance()
-            .get(&DataKey2::ConsentRequest(request_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ConsentRequestNotFound))
-    }
 
     /// Alias for issue_credential for backward compatibility.
     pub fn issue(
