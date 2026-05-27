@@ -380,6 +380,20 @@ impl SbtRegistryContract {
             .set(&DataKey::Delegation(token_id), &delegation);
     }
 
+    /// Revoke an active delegation for a specific SBT. Only the token owner may call this.
+    pub fn revoke_sbt_delegation(env: Env, owner: Address, token_id: u64) {
+        owner.require_auth();
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegation(token_id));
+    }
+
     /// Retrieve delegation details for a token.
     pub fn get_delegation(env: Env, token_id: u64) -> Delegation {
         env.storage()
@@ -2670,5 +2684,49 @@ mod tests {
         let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
         let log = client.get_sbt_activity_log(&999u64);
         assert_eq!(log.len(), 0);
+    }
+
+    #[test]
+    fn test_revoke_sbt_delegation_removes_delegation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+        assert!(client.is_delegate_active(&token_id, &delegatee));
+
+        client.revoke_sbt_delegation(&owner, &token_id);
+        assert!(!client.is_delegate_active(&token_id, &delegatee));
+    }
+
+    #[test]
+    #[should_panic(expected = "not the owner")]
+    fn test_revoke_sbt_delegation_non_owner_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let other = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+
+        client.revoke_sbt_delegation(&other, &token_id);
     }
 }

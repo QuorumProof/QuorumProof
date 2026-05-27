@@ -230,6 +230,7 @@ mod integration {
             &cred_id,
             &ClaimType::HasDegree,
             &valid_proof(&env),
+        &None,
         );
         assert!(result);
     }
@@ -253,6 +254,7 @@ mod integration {
             &cred_id,
             &ClaimType::HasDegree,
             &valid_proof(&env),
+        &None,
         );
         assert!(!result);
     }
@@ -585,6 +587,7 @@ mod integration {
             &(cred_id + 1),
             &ClaimType::HasDegree,
             &valid_proof(&env),
+            &None,
         );
         assert!(!result);
     }
