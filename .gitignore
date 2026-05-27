@@ -8,3 +8,28 @@ coverage/
 frontend/coverage/
 *.lcov
 .nyc_output/
+
+# Test snapshots
+**/test_snapshots/
+**/*.snap
+
+# Backup files
+*.bak
+*.bak.*
+lib.rs.bak
+
+# Build artifacts
+*.wasm
+*.d
+
+# IDE / OS
+.DS_Store
+*.swp
+*.swo
+.vscode/settings.json
+
+# Misc
+.env
+dist/
+dashboard/dist/
+frontend/dist/

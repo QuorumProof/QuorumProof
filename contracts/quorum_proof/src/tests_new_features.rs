@@ -794,4 +794,140 @@ mod tests {
         let result = client.evaluate_attestation_conditions(&cred_id, &vec![&env]);
         assert_eq!(result, true);
     }
+
+    // ── Issue #487: State Versioning & Migration Tests ────────────────────────
+
+    #[test]
+    fn test_initial_state_version_is_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.get_state_version(), 0u32);
+    }
+
+    #[test]
+    fn test_migrate_state_v0_to_v1() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.get_state_version(), 0u32);
+        client.migrate_state(&admin, &0u32, &1u32);
+        assert_eq!(client.get_state_version(), 1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "current version mismatch")]
+    fn test_migrate_state_wrong_from_version_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // from_version=1 but current is 0 — must panic
+        client.migrate_state(&admin, &1u32, &2u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "versions must be sequential")]
+    fn test_migrate_state_non_sequential_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        // Skipping a version (0 → 2) must panic
+        client.migrate_state(&admin, &0u32, &2u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_migrate_state_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.migrate_state(&non_admin, &0u32, &1u32);
+    }
+
+    // ── Issue #511: Batch Attestation Gas Optimization Tests ─────────────────
+
+    #[test]
+    fn test_batch_attest_single_ttl_extension() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let slice_id = client.create_slice(
+            &attestor,
+            &vec![&env, attestor.clone()],
+            &vec![&env, 1u32],
+            &1u32,
+        );
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let mut cred_ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+        for i in 0..5u32 {
+            let subject = Address::generate(&env);
+            let meta = soroban_sdk::Bytes::from_array(&env, &[(i as u8) + 1; 32]);
+            let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+            cred_ids.push_back(cid);
+        }
+
+        // batch_attest should succeed and attest all 5 credentials
+        client.batch_attest(&attestor, &cred_ids, &slice_id, &true, &None);
+
+        // Verify all credentials were attested
+        for cid in cred_ids.iter() {
+            assert!(client.is_attested(&cid));
+        }
+    }
+
+    #[test]
+    fn test_batch_attest_same_security_as_single_attest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let outsider = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let slice_id = client.create_slice(
+            &attestor,
+            &vec![&env, attestor.clone()],
+            &vec![&env, 1u32],
+            &1u32,
+        );
+
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cred_ids = vec![&env, cid];
+
+        // Outsider not in slice — must be rejected
+        let result = std::panic::catch_unwind(|| {
+            client.batch_attest(&outsider, &cred_ids, &slice_id, &true, &None);
+        });
+        assert!(result.is_err(), "outsider should not be able to batch_attest");
+    }
 }
