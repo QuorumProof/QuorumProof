@@ -49,7 +49,7 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
 
     // Test single issuance
     let cid = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.issue_credential(&issuer, &subject, &ctype, &meta, &input.expires_at)
+        client.issue_credential(&issuer, &subject, &ctype, &meta, &input.expires_at, &0u64)
     })) {
         Ok(id) => id,
         Err(_) => return, // Contract rejected input — expected for invalid cases
@@ -77,7 +77,7 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
         let ctype_i = (ctype.wrapping_add(i as u32)).max(1);
         
         let id_i = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.issue_credential(&issuer, &subject_i, &ctype_i, &meta, &input.expires_at)
+            client.issue_credential(&issuer, &subject_i, &ctype_i, &meta, &input.expires_at, &0u64)
         })) {
             Ok(id) => id,
             Err(_) => continue,

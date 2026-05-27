@@ -1416,7 +1416,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
@@ -1434,7 +1434,7 @@ mod tests {
         let owner = Address::generate(&env);
         let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1458,7 +1458,7 @@ mod tests {
         let owner = Address::generate(&env);
         let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1474,7 +1474,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         // mint, burn, then re-mint the same credential — must succeed
@@ -1494,7 +1494,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         let token_id = client.mint(&owner, &cred_id, &uri);
@@ -1514,7 +1514,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         client.mint(&owner, &cred_id, &uri);
@@ -1546,7 +1546,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         qp_client.revoke_credential(&issuer, &cred_id);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
@@ -1567,8 +1567,8 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
+        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         assert_eq!(client.get_sbt_by_owner(&owner).len(), 0);
@@ -1592,8 +1592,8 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
+        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         assert_eq!(client.sbt_count(), 0);
@@ -1616,7 +1616,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1634,7 +1634,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1654,7 +1654,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1685,7 +1685,7 @@ mod tests {
         let owner = Address::generate(&env);
         let stranger = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1701,7 +1701,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1757,7 +1757,7 @@ mod tests {
         let old_owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &old_owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &old_owner, &1u32, &meta, &None, &0u64);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&old_owner, &cred_id, &uri);
@@ -1785,7 +1785,7 @@ mod tests {
         let new_owner = Address::generate(&env);
         let issuer = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
@@ -1808,7 +1808,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -1836,7 +1836,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
         client.burn(&owner, &token_id);
@@ -1866,7 +1866,7 @@ mod tests {
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
         client.admin_transfer_sbt(&admin, &token_id, &new_owner);
@@ -1897,7 +1897,7 @@ mod tests {
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         for i in 1u32..=4 {
-            let cred_id = qp_client.issue_credential(&issuer, &owner, &i, &meta, &None);
+            let cred_id = qp_client.issue_credential(&issuer, &owner, &i, &meta, &None, &0u64);
             let token_id = client.mint(&owner, &cred_id, &uri);
             assert_eq!(token_id, i as u64);
             assert_eq!(client.sbt_count(), i as u64);
@@ -1916,7 +1916,7 @@ mod tests {
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         client.mint(&owner, &cred_id, &uri);
         // Second mint for same (owner, cred_id) — must panic
         client.mint(&owner, &cred_id, &uri);
@@ -1932,7 +1932,7 @@ mod tests {
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let token_id = client.mint(&owner, &cred_id, &uri);
         assert_eq!(client.sbt_count(), 1);
         client.burn(&owner, &token_id);
@@ -1980,7 +1980,7 @@ mod tests {
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let _token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2110,8 +2110,8 @@ mod tests {
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
+        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id1 = client.mint(&owner, &cred_id1, &uri);
         let token_id2 = client.mint(&owner, &cred_id2, &uri);
@@ -2162,7 +2162,7 @@ mod tests {
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let _token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2261,7 +2261,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         client.mint(&owner, &cred_id, &uri);
@@ -2279,7 +2279,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
         qp_client.revoke_credential(&issuer, &cred_id);
 
@@ -2306,7 +2306,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         client.mint(&owner, &cred_id, &uri);
@@ -2323,7 +2323,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         client.set_reputation_config(&admin, &5u32, &2u32);
@@ -2341,8 +2341,8 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
-        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None);
+        let cred_id1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let cred_id2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
         client.set_reputation_config(&admin, &10u32, &1u32);
@@ -2375,7 +2375,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
         // Whitelist management API not yet implemented; verify mint succeeds without whitelist
@@ -2392,7 +2392,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
         // Whitelist management API not yet implemented; verify token exists
@@ -2411,7 +2411,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2432,7 +2432,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2458,7 +2458,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2478,7 +2478,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2499,7 +2499,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2517,7 +2517,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2558,7 +2558,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
         client.add_holder_to_blacklist(&admin, &owner);
 
@@ -2588,7 +2588,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -2607,7 +2607,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
         client.burn(&owner, &token_id);
@@ -2627,7 +2627,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
         client.burn_sbt(&admin, &token_id);
@@ -2646,7 +2646,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
