@@ -34,7 +34,7 @@ fuzz_target!(|input: FuzzInput| {
 
     // Issue a credential first
     let cred_id = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None)
+        qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64)
     })) {
         Ok(id) => id,
         Err(_) => return,

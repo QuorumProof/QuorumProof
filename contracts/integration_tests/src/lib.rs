@@ -73,7 +73,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         assert_eq!(cred_id, 1);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
@@ -94,7 +94,7 @@ mod integration {
         let holder = soroban_sdk::Address::generate(&env);
         let other = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = c.sbt.mint(&holder, &cred_id, &uri);
 
@@ -113,7 +113,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         c.qp.revoke_credential(&issuer, &cred_id);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
@@ -130,7 +130,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         let result = c.zk.verify_claim(
             &c.admin,
             &c.qp.address,
@@ -149,7 +149,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         let empty_proof = Bytes::new(&env);
         let result = c.zk.verify_claim(
             &c.admin,
@@ -174,7 +174,7 @@ mod integration {
         let attestor2 = soroban_sdk::Address::generate(&env);
 
         // 1. Issue credential
-        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None, &0u64);
 
         // 2. Create quorum slice (2-of-2)
         let mut attestors = Vec::new(&env);
@@ -218,7 +218,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let engineer = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         c.sbt.mint(&engineer, &cred_id, &uri);
 
@@ -242,7 +242,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let engineer = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None, &0u64);
         // No SBT minted
 
         let result = c.qp.verify_engineer(
@@ -269,7 +269,7 @@ mod integration {
         let holder = soroban_sdk::Address::generate(&env);
         let attestor = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -295,8 +295,8 @@ mod integration {
         let attestor = soroban_sdk::Address::generate(&env);
 
         // Issue two credentials
-        let cred1 = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
-        let cred2 = c.qp.issue_credential(&issuer, &holder, &2u32, &metadata(&env), &None);
+        let cred1 = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+        let cred2 = c.qp.issue_credential(&issuer, &holder, &2u32, &metadata(&env), &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -329,7 +329,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = c.sbt.mint(&holder, &cred_id, &uri);
 
@@ -374,7 +374,7 @@ mod integration {
 
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
-        let cred_id = qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         let empty = Bytes::new(&env);
         assert!(!zk.verify_claim(&admin, &qp_id, &cred_id, &ClaimType::HasLicense, &empty));
     }
@@ -392,7 +392,7 @@ mod integration {
 
         c.qp.pause(&c.admin);
         // Must panic — contract is paused
-        c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod integration {
         assert!(!c.qp.is_paused());
 
         // Should succeed after unpause
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         assert_eq!(cred_id, 1);
     }
 
@@ -425,7 +425,7 @@ mod integration {
         let holder = soroban_sdk::Address::generate(&env);
         let attestor = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -447,7 +447,7 @@ mod integration {
         let holder = soroban_sdk::Address::generate(&env);
         let attestor = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -472,7 +472,7 @@ mod integration {
 
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         let proof = valid_proof(&env);
 
         for claim in [
@@ -499,8 +499,8 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
 
-        let cred1 = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
-        let cred2 = c.qp.issue_credential(&issuer, &holder, &2u32, &metadata(&env), &None);
+        let cred1 = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+        let cred2 = c.qp.issue_credential(&issuer, &holder, &2u32, &metadata(&env), &None, &0u64);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         c.sbt.mint(&holder, &cred1, &uri);
@@ -523,7 +523,7 @@ mod integration {
 
         assert!(!c.qp.credential_exists(&1));
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         assert!(c.qp.credential_exists(&cred_id));
 
         let cred = c.qp.get_credential(&cred_id);
@@ -544,7 +544,7 @@ mod integration {
         let attestor1 = soroban_sdk::Address::generate(&env);
         let attestor2 = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -572,7 +572,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let engineer = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &engineer, &1u32, &metadata(&env), &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         c.sbt.mint(&engineer, &cred_id, &uri);
 
@@ -598,7 +598,7 @@ mod integration {
 
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
 
         let req = c.zk.generate_proof_request(&cred_id, &ClaimType::HasLicense);
         assert_eq!(req.credential_id, cred_id);
@@ -614,7 +614,7 @@ mod integration {
         let issuer = soroban_sdk::Address::generate(&env);
         let holder = soroban_sdk::Address::generate(&env);
 
-        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None);
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = c.sbt.mint(&holder, &cred_id, &uri);
 
