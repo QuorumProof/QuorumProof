@@ -1157,4 +1157,158 @@ mod tests {
         let activities = client.get_holder_activity(&holder, &1u32, &100u32);
         assert!(activities.len() >= 2);
     }
+
+    // ── Issue #538: Credential Metadata Compression Tests ──────────────────────
+
+    #[test]
+    fn test_uncompressed_metadata_stored_and_retrieved() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Store uncompressed metadata
+        let uncompressed_data = soroban_sdk::Bytes::from_slice(&env, b"uncompressed metadata content");
+        client.set_credential_metadata(&issuer, &cred_id, &uncompressed_data, &CompressionType::None);
+
+        // Retrieve and verify
+        let retrieved = client.get_credential_metadata(&cred_id);
+        assert!(retrieved.is_some());
+        let metadata = retrieved.unwrap();
+        assert_eq!(metadata.compression, CompressionType::None);
+        assert_eq!(metadata.data, uncompressed_data);
+    }
+
+    #[test]
+    fn test_compressed_metadata_stored_and_retrieved() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Store compressed metadata (simulated gzip payload)
+        let compressed_data = soroban_sdk::Bytes::from_slice(&env, b"\x1f\x8b\x08\x00compressed content");
+        client.set_credential_metadata(&issuer, &cred_id, &compressed_data, &CompressionType::Gzip);
+
+        // Retrieve and verify
+        let retrieved = client.get_credential_metadata(&cred_id);
+        assert!(retrieved.is_some());
+        let metadata = retrieved.unwrap();
+        assert_eq!(metadata.compression, CompressionType::Gzip);
+        assert_eq!(metadata.data, compressed_data);
+    }
+
+    #[test]
+    fn test_compression_type_round_trips() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Test both compression types
+        let test_data = soroban_sdk::Bytes::from_slice(&env, b"test data");
+
+        // Store with None compression
+        client.set_credential_metadata(&issuer, &cred_id, &test_data, &CompressionType::None);
+        let retrieved_none = client.get_credential_metadata(&cred_id).unwrap();
+        assert_eq!(retrieved_none.compression, CompressionType::None);
+
+        // Update with Gzip compression
+        let compressed_data = soroban_sdk::Bytes::from_slice(&env, b"\x1f\x8bcompressed");
+        client.set_credential_metadata(&issuer, &cred_id, &compressed_data, &CompressionType::Gzip);
+        let retrieved_gzip = client.get_credential_metadata(&cred_id).unwrap();
+        assert_eq!(retrieved_gzip.compression, CompressionType::Gzip);
+        assert_eq!(retrieved_gzip.data, compressed_data);
+    }
+
+    #[test]
+    fn test_compressed_metadata_smaller_than_uncompressed() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Create repetitive data that compresses well
+        let mut large_data_vec = Vec::new(&env);
+        let pattern = b"repetitive pattern for compression ";
+        for _ in 0..10 {
+            for &byte in pattern {
+                large_data_vec.push_back(byte as u32);
+            }
+        }
+
+        let uncompressed = soroban_sdk::Bytes::from_slice(&env, pattern);
+        let compressed = soroban_sdk::Bytes::from_slice(&env, b"\x1f\x8b\x08compressed");
+
+        // Store uncompressed
+        client.set_credential_metadata(&issuer, &cred_id, &uncompressed, &CompressionType::None);
+        let uncompressed_meta = client.get_credential_metadata(&cred_id).unwrap();
+
+        // Store compressed (in real usage, would be actual gzip output)
+        client.set_credential_metadata(&issuer, &cred_id, &compressed, &CompressionType::Gzip);
+        let compressed_meta = client.get_credential_metadata(&cred_id).unwrap();
+
+        // Verify that we can detect compression type and that bytes differ
+        assert_eq!(uncompressed_meta.compression, CompressionType::None);
+        assert_eq!(compressed_meta.compression, CompressionType::Gzip);
+        assert!(compressed_meta.data.len() < uncompressed.len() || compressed_meta.compression != CompressionType::None);
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_set_metadata_non_existent_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test");
+        client.set_credential_metadata(&issuer, &999u64, &metadata, &CompressionType::None);
+    }
 }

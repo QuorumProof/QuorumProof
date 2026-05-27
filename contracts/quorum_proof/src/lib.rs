@@ -412,6 +412,7 @@ pub enum DataKey2 {
     RateLimitConfig,
     RateLimitState(Address),
     CredentialAuditTrail(u64),
+    CredentialMetadataStore(u64),
 }
 
 #[contracttype]
@@ -531,6 +532,23 @@ pub struct AuditEntry {
     pub updated_by: Address,
     pub timestamp: u64,
     pub change_summary: soroban_sdk::Bytes,
+}
+
+/// Compression type for credential metadata
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CompressionType {
+    None = 0,
+    Gzip = 1,
+}
+
+/// Stores credential metadata with compression information
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialMetadata {
+    pub data: soroban_sdk::Bytes,
+    pub compression: CompressionType,
 }
 
 /// Records a consensus decision for a quorum slice
@@ -1880,6 +1898,77 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Store credential metadata with compression information.
+    ///
+    /// Only the original issuer may call this function.
+    /// The metadata bytes are stored as-is (compressed or uncompressed as provided).
+    /// Compression and decompression are the caller's responsibility.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address that originally issued the credential; must authorize.
+    /// - `credential_id`: The ID of the credential.
+    /// - `metadata`: The metadata bytes (may be compressed or uncompressed).
+    /// - `compression`: The compression type (None for uncompressed, Gzip for compressed).
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the caller is not the original issuer.
+    pub fn set_credential_metadata(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        metadata: soroban_sdk::Bytes,
+        compression: CompressionType,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let _credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(
+            _credential.issuer == issuer,
+            "only the issuer may set metadata"
+        );
+        let credential_metadata = CredentialMetadata {
+            data: metadata,
+            compression,
+        };
+        env.storage().instance().set(
+            &DataKey2::CredentialMetadataStore(credential_id),
+            &credential_metadata,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Retrieve credential metadata with compression information.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential.
+    ///
+    /// # Returns
+    /// The stored metadata bytes and compression type, or None if no metadata is stored.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    pub fn get_credential_metadata(
+        env: Env,
+        credential_id: u64,
+    ) -> Option<CredentialMetadata> {
+        let _credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        env.storage()
+            .instance()
+            .get(&DataKey2::CredentialMetadataStore(credential_id))
     }
 
     /// Initiate a consent-based transfer of a credential to a new subject.
