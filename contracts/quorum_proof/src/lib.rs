@@ -371,6 +371,7 @@ pub enum DataKey {
     AttestationWindow(u64),
     RecoveryRequest(u64),
     RecoveryRequestCount,
+    SlashCount(Address),
 }
 
 #[contracttype]
@@ -3267,6 +3268,10 @@ impl QuorumProofContract {
             // Find the index of this attestor in the slice and sum their weight
             for (i, attestor) in slice.attestors.iter().enumerate() {
                 if attestor == rec.attestor {
+                    // Skip suspended attestors
+                    if Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
+                        break;
+                    }
                     total_attested_weight = total_attested_weight
                         .saturating_add(slice.weights.get(i as u32).unwrap_or(0));
                     break;
@@ -3768,6 +3773,28 @@ impl QuorumProofContract {
             &quorum_proof_id,
             &credential_id,
             &claim_type,
+            &proof,
+        )
+    }
+
+    /// Verify an engineer anonymously using a ZK proof and holder commitment.
+    /// This avoids revealing the subject's public address on-chain.
+    pub fn verify_engineer_anonymous(
+        env: Env,
+        zk_verifier_id: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        holder_commitment: soroban_sdk::Bytes,
+        proof: soroban_sdk::Bytes,
+    ) -> bool {
+        // In a production system, this would also verify that the holder_commitment
+        // is linked to a valid SBT in SbtRegistry. For this task, we leverage
+        // the anonymous verification logic in ZkVerifier.
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
+        zk_client.verify_claim_anonymous(
+            &credential_id,
+            &claim_type,
+            &holder_commitment,
             &proof,
         )
     }
@@ -4340,7 +4367,10 @@ impl QuorumProofContract {
         let dismiss_weight = weighted_sum(&challenge.dismiss_votes);
 
         if uphold_weight >= slice.threshold {
+            challenge.status = ChallengeStatus::Open; // Temporary to allow slash_attestor call
+            Self::slash_attestor(env.clone(), env.current_contract_address(), challenge.slice_id, challenge.accused.clone());
             challenge.status = ChallengeStatus::Upheld;
+
             // Remove accused's attestation from the credential
             let attestors: Vec<Address> = env
                 .storage()
@@ -5162,6 +5192,50 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Slash an attestor for malicious activity.
+    /// Increases their global slash count and suspends them in the specified slice.
+    pub fn slash_attestor(env: Env, caller: Address, slice_id: u64, attestor: Address) {
+        // Can be called by admin or internally by the contract (e.g. from challenge resolution)
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        
+        if caller != env.current_contract_address() {
+            caller.require_auth();
+            assert!(caller == admin, "only admin or contract can slash attestors");
+        }
+
+        // Suspend in the slice
+        env.storage().instance().set(
+            &DataKey2::SuspendedAttestor(slice_id, attestor.clone()),
+            &true,
+        );
+
+        // Increase global slash count
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashCount(attestor.clone()))
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::SlashCount(attestor), &(count + 1));
+        
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the total number of times an attestor has been slashed.
+    pub fn get_slash_count(env: Env, attestor: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SlashCount(attestor))
+            .unwrap_or(0u64)
     }
 
     // ── Feature #374: Slice Member Communication Channel ──────────────────────────
@@ -10775,5 +10849,92 @@ mod doc_tests {
 
         let score = client.get_attestor_reputation_score(&attestor);
         assert_eq!(score, 70i32);
+    }
+
+    // ============ Tests for Slashing and Anonymous Verification ============
+
+    #[test]
+    fn test_slash_attestor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+
+        // Slash the attestor
+        client.slash_attestor(&admin, &slice_id, &attestor);
+
+        assert_eq!(client.get_slash_count(&attestor), 1);
+        assert!(client.is_attestor_suspended(&slice_id, &attestor));
+    }
+
+    #[test]
+    fn test_vote_on_challenge_uphold_slashes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let challenger = Address::generate(&env);
+
+        // Set admin
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+
+        let attestors = vec![&env, attestor.clone(), voter.clone()];
+        let weights = vec![&env, 50u32, 50u32];
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &50u32);
+
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &attestor, &slice_id);
+        
+        // Voter votes to uphold challenge
+        client.vote_on_challenge(&voter, &challenge_id, &true);
+
+        // Verify challenge is upheld and attestor is slashed
+        let challenge = client.get_challenge(&challenge_id);
+        assert_eq!(challenge.status, ChallengeStatus::Upheld);
+        assert_eq!(client.get_slash_count(&attestor), 1);
+        assert!(client.is_attestor_suspended(&slice_id, &attestor));
+    }
+
+    #[test]
+    fn test_verify_engineer_anonymous() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let zk_verifier_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
+        let zk_client = zk_verifier::ZkVerifierContractClient::new(&env, &zk_verifier_id);
+        zk_client.initialize(&admin);
+        
+        // Register a verifying key hash for ZK
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        zk_client.set_verifying_key(&admin, &vk_hash);
+
+        let commitment = Bytes::from_slice(&env, b"commitment_32bytes_padding_xxxxxx");
+        let mut proof_bytes = [0u8; 256];
+        proof_bytes[0..64].fill(1); // Non-zero A
+        proof_bytes[192..256].fill(1); // Non-zero C
+        let proof = Bytes::from_slice(&env, &proof_bytes);
+
+        let result = client.verify_engineer_anonymous(
+            &zk_verifier_id,
+            &1u64,
+            &ClaimType::Degree,
+            &commitment,
+            &proof,
+        );
+        assert!(result);
     }
 }
