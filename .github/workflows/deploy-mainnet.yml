@@ -1,0 +1,94 @@
+name: Deploy Mainnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-mainnet" to confirm production deployment'
+        required: true
+
+jobs:
+  validate-input:
+    name: Validate Confirmation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation string
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy-mainnet" ]; then
+            echo "ERROR: Confirmation string does not match. Aborting."
+            exit 1
+          fi
+
+  deploy-mainnet:
+    name: Deploy to Mainnet
+    needs: validate-input
+    runs-on: ubuntu-latest
+    environment: mainnet  # requires manual approval in GitHub environment settings
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+
+      - name: Build contracts
+        run: ./scripts/build.sh
+
+      - name: Run tests
+        run: ./scripts/test.sh
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: Deploy to mainnet
+        id: deploy
+        env:
+          STELLAR_NETWORK: mainnet
+          STELLAR_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+          STELLAR_SECRET_KEY: ${{ secrets.MAINNET_SECRET_KEY }}
+        run: |
+          stellar keys add deployer --secret-key "$STELLAR_SECRET_KEY"
+
+          CONTRACT_QUORUM_PROOF=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/quorum_proof.wasm \
+            --source deployer \
+            --network mainnet)
+
+          CONTRACT_SBT_REGISTRY=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/sbt_registry.wasm \
+            --source deployer \
+            --network mainnet)
+
+          CONTRACT_ZK_VERIFIER=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/zk_verifier.wasm \
+            --source deployer \
+            --network mainnet)
+
+          echo "quorum_proof=$CONTRACT_QUORUM_PROOF" >> "$GITHUB_OUTPUT"
+          echo "sbt_registry=$CONTRACT_SBT_REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "zk_verifier=$CONTRACT_ZK_VERIFIER" >> "$GITHUB_OUTPUT"
+
+          echo "### Mainnet Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract | ID |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| quorum_proof | \`$CONTRACT_QUORUM_PROOF\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| sbt_registry | \`$CONTRACT_SBT_REGISTRY\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| zk_verifier | \`$CONTRACT_ZK_VERIFIER\` |" >> "$GITHUB_STEP_SUMMARY"

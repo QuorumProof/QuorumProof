@@ -1,10 +1,50 @@
+# Build artifacts
 target/
+*.wasm
+
+# Node
 node_modules/
 frontend/node_modules/
+dashboard/node_modules/
+
+# Coverage
+coverage/
+frontend/coverage/
+dashboard/coverage/
+*.lcov
+.nyc_output/
+
+# Test snapshots
+**/test_snapshots/
+
+# Environment files
+.env
+frontend/.env
+dashboard/.env
+
+# Kiro/agent workspace
 .agent/
 .agents/
 issue.md
-coverage/
-frontend/coverage/
-*.lcov
-.nyc_output/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fuzz corpus and artifacts
+fuzz/corpus/
+fuzz/artifacts/
+
+# Mutation testing output
+mutants.out/
+mutants.out.old/
+
+# Cargo audit cache
+.cargo/advisory-db/
+
+# Logs
+*.log
