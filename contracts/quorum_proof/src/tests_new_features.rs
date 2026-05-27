@@ -4,6 +4,72 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{vec, Env};
 
+    // ── Upgrade Validation Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let zero_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.validate_upgrade(&zero_hash);
+        }));
+        assert!(result.is_err(), "zero hash should be rejected");
+    }
+
+    #[test]
+    fn test_validate_upgrade_rejects_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[1u8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.validate_upgrade(&valid_hash);
+        }));
+        assert!(result.is_err(), "upgrade should be blocked while paused");
+    }
+
+    #[test]
+    fn test_validate_upgrade_accepts_valid_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+        // Should not panic
+        client.validate_upgrade(&valid_hash);
+    }
+
+    #[test]
+    fn test_upgrade_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.initialize(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.upgrade(&stranger, &valid_hash);
+        }));
+        assert!(result.is_err(), "non-admin should not be able to upgrade");
+    }
+
     // ── Feature #355: Proof Expiry Tests ─────────────────────────────────────
 
     #[test]
