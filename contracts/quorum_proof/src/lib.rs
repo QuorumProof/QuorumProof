@@ -517,6 +517,40 @@ pub struct ThresholdAuditEntry {
     pub timestamp: u64,
 }
 
+/// Input parameters for batch credential issuance.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialInput {
+    /// The subject/holder of the credential.
+    pub subject: Address,
+    /// The type ID of the credential.
+    pub credential_type: u32,
+    /// Hash of the credential metadata.
+    pub metadata_hash: soroban_sdk::Bytes,
+    /// Optional expiration timestamp.
+    pub expires_at: Option<u64>,
+}
+
+/// Error information for batch credential issuance.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchError {
+    /// The index in the batch where the error occurred.
+    pub failing_index: u32,
+    /// Description of the validation error.
+    pub reason: soroban_sdk::String,
+}
+
+/// Result type for batch credential issuance operations.
+#[contracttype]
+#[derive(Clone)]
+pub enum BatchResult {
+    /// Success: contains the newly issued credential IDs.
+    Ok(Vec<u64>),
+    /// Error: contains error details with failing index.
+    Err(BatchError),
+}
+
 /// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
 /// Each attestor has an associated weight that contributes to the threshold check.
 /// The threshold represents the minimum total weight of attestors required
@@ -1793,6 +1827,166 @@ impl QuorumProofContract {
         );
 
         id
+    }
+
+    /// Issue multiple credentials atomically with rollback on validation failure.
+    ///
+    /// This function validates all credentials in the batch before issuing any of them.
+    /// If any validation fails, no credentials are written to storage and a BatchError
+    /// is returned indicating which entry failed and why.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing all credentials; must authorize this call.
+    /// - `credentials`: Vector of credential inputs to issue.
+    ///
+    /// # Returns
+    /// - `BatchResult::Ok(Vec<u64>)`: Vector of newly issued credential IDs in same order as input
+    /// - `BatchResult::Err(BatchError)`: Validation error with failing index and reason
+    ///
+    /// # Validation Checks
+    /// - Contract is not paused
+    /// - All addresses are valid
+    /// - All credential types > 0
+    /// - All metadata hashes are non-empty and correctly sized
+    /// - No duplicate credentials for same issuer/subject/type
+    /// - No subjects are blacklisted by issuer
+    /// - Batch size is within limits
+    pub fn issue_batch(
+        env: Env,
+        issuer: Address,
+        credentials: Vec<CredentialInput>,
+    ) -> BatchResult {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let batch_len = credentials.len() as u32;
+        if batch_len == 0 {
+            // Empty batch is valid - return empty result
+            return BatchResult::Ok(Vec::new(&env));
+        }
+
+        Self::validate_array_bounds(batch_len, 1, MAX_BATCH_SIZE, "credentials");
+
+        // Pre-validation phase: validate all entries before issuing any
+        for i in 0..batch_len {
+            let cred_input = credentials.get(i).unwrap();
+
+            // Validate subject address
+            Self::require_valid_address(&env, &cred_input.subject);
+
+            // Validate credential type
+            if cred_input.credential_type == 0 {
+                let reason = String::from_str(&env, "credential_type must be greater than 0");
+                return BatchResult::Err(BatchError {
+                    failing_index: i,
+                    reason,
+                });
+            }
+
+            // Validate metadata hash
+            if cred_input.metadata_hash.is_empty() {
+                let reason = String::from_str(&env, "metadata_hash cannot be empty");
+                return BatchResult::Err(BatchError {
+                    failing_index: i,
+                    reason,
+                });
+            }
+
+            if cred_input.metadata_hash.len() > 256 {
+                let reason = String::from_str(&env, "metadata_hash exceeds 256 bytes");
+                return BatchResult::Err(BatchError {
+                    failing_index: i,
+                    reason,
+                });
+            }
+
+            // Validate optional timestamp
+            if let Some(expires) = cred_input.expires_at {
+                let current_time = env.ledger().timestamp();
+                if expires > current_time + MAX_TIMESTAMP_FUTURE_OFFSET
+                    || expires < current_time - MAX_TIMESTAMP_PAST_OFFSET
+                {
+                    let reason = String::from_str(&env, "expires_at timestamp out of valid range");
+                    return BatchResult::Err(BatchError {
+                        failing_index: i,
+                        reason,
+                    });
+                }
+            }
+
+            // Check for duplicates within the batch and in storage
+            let duplicate_key = DataKey::SubjectIssuerType(
+                cred_input.subject.clone(),
+                issuer.clone(),
+                cred_input.credential_type,
+            );
+
+            if env.storage().instance().has(&duplicate_key) {
+                let reason = String::from_str(&env, "duplicate credential type for this subject");
+                return BatchResult::Err(BatchError {
+                    failing_index: i,
+                    reason,
+                });
+            }
+
+            // Check for blacklist
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey2::BlacklistEntry(issuer.clone(), cred_input.subject.clone()))
+            {
+                let reason = String::from_str(&env, "subject is blacklisted by this issuer");
+                return BatchResult::Err(BatchError {
+                    failing_index: i,
+                    reason,
+                });
+            }
+
+            // Check for duplicates within the batch itself
+            for j in 0..i {
+                let other = credentials.get(j as u32).unwrap();
+                if cred_input.subject == other.subject
+                    && cred_input.credential_type == other.credential_type
+                {
+                    let reason = String::from_str(&env, "duplicate within batch");
+                    return BatchResult::Err(BatchError {
+                        failing_index: i,
+                        reason,
+                    });
+                }
+            }
+        }
+
+        // Validation complete - issue all credentials
+        let mut ids: Vec<u64> = Vec::new(&env);
+
+        for i in 0..batch_len {
+            let cred_input = credentials.get(i).unwrap();
+
+            let id = Self::issue_inner(
+                &env,
+                issuer.clone(),
+                cred_input.subject.clone(),
+                cred_input.credential_type,
+                cred_input.metadata_hash.clone(),
+                cred_input.expires_at,
+            );
+
+            // Store duplicate prevention mapping
+            let duplicate_key = DataKey::SubjectIssuerType(
+                cred_input.subject.clone(),
+                issuer.clone(),
+                cred_input.credential_type,
+            );
+            env.storage().instance().set(&duplicate_key, &id);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            ids.push_back(id);
+        }
+
+        BatchResult::Ok(ids)
     }
 
     /// Retrieve a credential by ID.
@@ -11606,5 +11800,177 @@ mod doc_tests {
         let entry3 = audit_log.get(2).unwrap();
         assert_eq!(entry3.old_threshold, 70u32);
         assert_eq!(entry3.new_threshold, 80u32);
+    }
+
+    // ── Tests for Issue #534: Credential Batch Issuance with Rollback ─────────
+
+    #[test]
+    fn test_issue_batch_all_valid_credentials() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        let mut batch = Vec::new(&env);
+        batch.push_back(CredentialInput {
+            subject: subject1.clone(),
+            credential_type: 1u32,
+            metadata_hash: Bytes::from_slice(&env, b"hash1"),
+            expires_at: None,
+        });
+        batch.push_back(CredentialInput {
+            subject: subject2.clone(),
+            credential_type: 2u32,
+            metadata_hash: Bytes::from_slice(&env, b"hash2"),
+            expires_at: Some(env.ledger().timestamp() + 1000),
+        });
+
+        let result = client.issue_batch(&issuer, &batch);
+
+        match result {
+            BatchResult::Ok(ids) => {
+                assert_eq!(ids.len(), 2);
+                // Verify credentials were created
+                let cred1 = client.get_credential(&ids.get(0).unwrap());
+                assert_eq!(cred1.subject, subject1);
+                assert_eq!(cred1.credential_type, 1u32);
+
+                let cred2 = client.get_credential(&ids.get(1).unwrap());
+                assert_eq!(cred2.subject, subject2);
+                assert_eq!(cred2.credential_type, 2u32);
+            }
+            BatchResult::Err(_) => panic!("Expected success"),
+        }
+    }
+
+    #[test]
+    fn test_issue_batch_invalid_credential_type_zero() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        let mut batch = Vec::new(&env);
+        batch.push_back(CredentialInput {
+            subject: subject.clone(),
+            credential_type: 0u32, // Invalid
+            metadata_hash: Bytes::from_slice(&env, b"hash"),
+            expires_at: None,
+        });
+
+        let result = client.issue_batch(&issuer, &batch);
+
+        match result {
+            BatchResult::Ok(_) => panic!("Expected error"),
+            BatchResult::Err(err) => {
+                assert_eq!(err.failing_index, 0);
+                // Verify no credentials were created
+                let count = client.get_credential_count();
+                assert_eq!(count, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_issue_batch_empty_metadata_hash() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        let mut batch = Vec::new(&env);
+        batch.push_back(CredentialInput {
+            subject: subject.clone(),
+            credential_type: 1u32,
+            metadata_hash: Bytes::new(&env), // Empty
+            expires_at: None,
+        });
+
+        let result = client.issue_batch(&issuer, &batch);
+
+        match result {
+            BatchResult::Ok(_) => panic!("Expected error"),
+            BatchResult::Err(err) => {
+                assert_eq!(err.failing_index, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_issue_batch_empty_batch_is_valid() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let batch = Vec::<CredentialInput>::new(&env);
+
+        let result = client.issue_batch(&issuer, &batch);
+
+        match result {
+            BatchResult::Ok(ids) => {
+                assert_eq!(ids.len(), 0);
+            }
+            BatchResult::Err(_) => panic!("Expected success for empty batch"),
+        }
+    }
+
+    #[test]
+    fn test_issue_batch_duplicate_in_batch_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        let mut batch = Vec::new(&env);
+        // Add duplicate entries (same subject, same type)
+        batch.push_back(CredentialInput {
+            subject: subject.clone(),
+            credential_type: 1u32,
+            metadata_hash: Bytes::from_slice(&env, b"hash1"),
+            expires_at: None,
+        });
+        batch.push_back(CredentialInput {
+            subject: subject.clone(),
+            credential_type: 1u32, // Duplicate
+            metadata_hash: Bytes::from_slice(&env, b"hash2"),
+            expires_at: None,
+        });
+
+        let result = client.issue_batch(&issuer, &batch);
+
+        match result {
+            BatchResult::Ok(_) => panic!("Expected error for duplicate in batch"),
+            BatchResult::Err(err) => {
+                assert_eq!(err.failing_index, 1); // Second entry fails
+                // Verify no credentials were created
+                let count = client.get_credential_count();
+                assert_eq!(count, 0);
+            }
+        }
     }
 }
