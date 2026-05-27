@@ -22,6 +22,7 @@ const TOPIC_FORK_DETECTED: &str = "ForkDetected";
 const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
 const TOPIC_HOLDER_NOTIFIED: &str = "HolderNotified";
 const TOPIC_DELEGATION: &str = "DelegationGranted";
+const TOPIC_THRESHOLD_CHANGE: &str = "ThresholdChanged";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -404,6 +405,7 @@ pub enum DataKey2 {
     RateLimitState(Address),
     Delegation(u64, Address),
     DelegationAuditLog(u64),
+    ThresholdAuditLog(u64),
 }
 
 #[contracttype]
@@ -497,6 +499,22 @@ pub struct DelegationAuditEntry {
     pub expiry: u64,
     /// Ledger sequence when the delegation was granted.
     pub granted_at: u64,
+}
+
+/// Audit log entry for quorum slice threshold changes.
+#[contracttype]
+#[derive(Clone)]
+pub struct ThresholdAuditEntry {
+    /// The slice whose threshold was changed.
+    pub slice_id: u64,
+    /// The previous threshold value.
+    pub old_threshold: u32,
+    /// The new threshold value.
+    pub new_threshold: u32,
+    /// The address that made the change.
+    pub changed_by: Address,
+    /// Ledger timestamp when the change was made.
+    pub timestamp: u64,
 }
 
 /// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
@@ -2337,6 +2355,22 @@ impl QuorumProofContract {
         slice.creator
     }
 
+    /// Retrieve the audit log of all threshold changes for a slice.
+    ///
+    /// Returns a vector of threshold change audit entries in chronological order.
+    ///
+    /// # Parameters
+    /// - `slice_id`: The slice ID.
+    ///
+    /// # Returns
+    /// A vector of threshold audit entries, empty if none exist.
+    pub fn get_slice_threshold_audit(env: Env, slice_id: u64) -> Vec<ThresholdAuditEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::ThresholdAuditLog(slice_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Remove an attestor from an existing quorum slice. Only the slice creator may call this.
     /// If the removal would make the threshold unreachable, the threshold is clamped to the new total weight.
     pub fn remove_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
@@ -2442,6 +2476,9 @@ impl QuorumProofContract {
             new_threshold <= total_weight,
             "threshold cannot exceed total weight sum"
         );
+
+        // Store old threshold for audit log
+        let old_threshold = slice.threshold;
         slice.threshold = new_threshold;
         env.storage()
             .instance()
@@ -2449,6 +2486,34 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Record audit log entry
+        let audit_entry = ThresholdAuditEntry {
+            slice_id,
+            old_threshold,
+            new_threshold,
+            changed_by: creator.clone(),
+            timestamp: env.ledger().timestamp(),
+        };
+
+        let mut audit_log: Vec<ThresholdAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ThresholdAuditLog(slice_id))
+            .unwrap_or(Vec::new(&env));
+        audit_log.push_back(audit_entry.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey2::ThresholdAuditLog(slice_id), &audit_log);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event
+        let topic = String::from_str(&env, TOPIC_THRESHOLD_CHANGE);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, audit_entry);
     }
 
     /// Attest a credential using a quorum slice.
@@ -11381,5 +11446,165 @@ mod doc_tests {
             &proof,
         );
         assert!(!result);
+    }
+
+    // ── Tests for Issue #533: Quorum Slice Threshold Adjustment ────────────────
+
+    #[test]
+    fn test_update_slice_threshold_issuer_can_update() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Creator updates threshold
+        let new_threshold = 75u32;
+        client.update_slice_threshold(&creator, &slice_id, &new_threshold);
+
+        // Verify threshold was updated
+        let updated_slice = client.get_slice(&slice_id);
+        assert_eq!(updated_slice.threshold, new_threshold);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the slice creator can update threshold")]
+    fn test_update_slice_threshold_non_issuer_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let non_creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Non-creator tries to update threshold - should panic
+        client.update_slice_threshold(&non_creator, &slice_id, &75u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold must be greater than 0")]
+    fn test_update_slice_threshold_zero_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Zero threshold should be rejected
+        client.update_slice_threshold(&creator, &slice_id, &0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold cannot exceed total weight sum")]
+    fn test_update_slice_threshold_exceeds_max_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Threshold exceeds total weight (100) should be rejected
+        client.update_slice_threshold(&creator, &slice_id, &101u32);
+    }
+
+    #[test]
+    fn test_threshold_audit_entry_written() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Update threshold
+        let new_threshold = 75u32;
+        client.update_slice_threshold(&creator, &slice_id, &new_threshold);
+
+        // Check audit log
+        let audit_log = client.get_slice_threshold_audit(&slice_id);
+        assert_eq!(audit_log.len(), 1);
+        let entry = audit_log.get(0).unwrap();
+        assert_eq!(entry.slice_id, slice_id);
+        assert_eq!(entry.old_threshold, 50u32);
+        assert_eq!(entry.new_threshold, new_threshold);
+        assert_eq!(entry.changed_by, creator);
+    }
+
+    #[test]
+    fn test_multiple_threshold_updates_produce_multiple_audit_entries() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let creator = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 100u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Make multiple threshold updates
+        client.update_slice_threshold(&creator, &slice_id, &60u32);
+        client.update_slice_threshold(&creator, &slice_id, &70u32);
+        client.update_slice_threshold(&creator, &slice_id, &80u32);
+
+        // Check audit log has all entries in order
+        let audit_log = client.get_slice_threshold_audit(&slice_id);
+        assert_eq!(audit_log.len(), 3);
+
+        // Verify entries in order
+        let entry1 = audit_log.get(0).unwrap();
+        assert_eq!(entry1.old_threshold, 50u32);
+        assert_eq!(entry1.new_threshold, 60u32);
+
+        let entry2 = audit_log.get(1).unwrap();
+        assert_eq!(entry2.old_threshold, 60u32);
+        assert_eq!(entry2.new_threshold, 70u32);
+
+        let entry3 = audit_log.get(2).unwrap();
+        assert_eq!(entry3.old_threshold, 70u32);
+        assert_eq!(entry3.new_threshold, 80u32);
     }
 }
