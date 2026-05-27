@@ -199,6 +199,19 @@ function hexToBytes(hex) {
   return bytes;
 }
 
+/**
+ * Get all proof requests (verification history) for a credential.
+ * Returns array of { id, credential_id, verifier, requested_at, claim_types }
+ */
+export async function getProofRequests(credentialId) {
+  try {
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return await simulate(CONTRACT_QUORUM_PROOF, 'get_proof_requests', [credVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
+}
+
 /** Metadata hash bytes → readable string (utf8 or hex fallback) */
 export function decodeMetadataHash(rawValue) {
   if (typeof rawValue === 'string') return rawValue;
@@ -219,3 +232,4 @@ function uint8ArrayToHex(arr) {
 }
 
 export { STELLAR_NETWORK as NETWORK, CONTRACT_QUORUM_PROOF as CONTRACT_ID, STELLAR_RPC_URL as RPC_URL };
+export { getProofRequests };
