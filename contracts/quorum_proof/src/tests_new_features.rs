@@ -777,21 +777,113 @@ mod tests {
     fn test_no_conditions_always_pass() {
         let env = Env::default();
         env.mock_all_auths();
-        
+
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
-        
+
         let admin = Address::generate(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        
+
         client.initialize(&admin);
-        
+
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
-        
+
         // No conditions set
         let result = client.evaluate_attestation_conditions(&cred_id, &vec![&env]);
         assert_eq!(result, true);
+    }
+
+    // ── Issue #535: Credential Holder Consent Revocation Tests ────────────────
+
+    #[test]
+    fn test_revoke_consent_holder_can_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Holder revokes consent
+        client.revoke_consent(&holder, &cred_id);
+
+        // Verify credential is revoked
+        assert_eq!(client.is_revoked(&cred_id), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the credential holder can revoke consent")]
+    fn test_revoke_consent_non_holder_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Non-holder tries to revoke - should panic
+        client.revoke_consent(&attacker, &cred_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential already revoked")]
+    fn test_revoke_consent_already_revoked_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Holder revokes consent once
+        client.revoke_consent(&holder, &cred_id);
+
+        // Try to revoke again - should panic
+        client.revoke_consent(&holder, &cred_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_revoke_consent_non_existent_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Try to revoke non-existent credential
+        client.revoke_consent(&holder, &999u64);
     }
 }

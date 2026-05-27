@@ -8,6 +8,7 @@ use zk_verifier::{ClaimType, ZkVerifierContractClient};
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
+const TOPIC_CONSENT_REVOKED: &str = "ConsentRevoked";
 const TOPIC_ATTESTATION: &str = "attestation";
 const TOPIC_RENEWAL: &str = "CredentialRenewed";
 const TOPIC_ATTESTATION_RENEWAL: &str = "AttestationRenewed";
@@ -52,6 +53,15 @@ pub struct CredentialIssuedEventData {
 pub struct RevokeEventData {
     pub credential_id: u64,
     pub subject: Address,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ConsentRevokedEventData {
+    pub credential_id: u64,
+    pub holder: Address,
+    pub issuer: Address,
+    pub revoked_at: u64,
 }
 
 #[contracttype]
@@ -2049,6 +2059,81 @@ impl QuorumProofContract {
             ActivityType::CredentialRevoked,
             credential_id,
             issuer.clone(),
+            None,
+        );
+    }
+
+    /// Revoke a credential by the holder withdrawing consent.
+    ///
+    /// # Parameters
+    /// - `holder`: The credential subject; must authorize this call.
+    /// - `credential_id`: The ID of the credential to revoke.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    /// Panics if the caller is not the credential holder.
+    /// Panics if the credential is already revoked.
+    pub fn revoke_consent(env: Env, holder: Address, credential_id: u64) {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &holder);
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(
+            holder == credential.subject,
+            "only the credential holder can revoke consent"
+        );
+        assert!(!credential.revoked, "credential already revoked");
+        credential.revoked = true;
+        credential.suspended = false;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        let mut subject_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubjectCredentials(credential.subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<u64> = Vec::new(&env);
+        for id in subject_creds.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        if retained.len() != subject_creds.len() {
+            subject_creds = retained;
+            env.storage().instance().set(
+                &DataKey::SubjectCredentials(credential.subject.clone()),
+                &subject_creds,
+            );
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        Self::invalidate_verification_caches_for_credential(&env, credential_id);
+        let timestamp = env.ledger().timestamp();
+        let event_data = ConsentRevokedEventData {
+            credential_id,
+            holder: credential.subject.clone(),
+            issuer: credential.issuer.clone(),
+            revoked_at: timestamp,
+        };
+        let topic = String::from_str(&env, TOPIC_CONSENT_REVOKED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        // Record activity for the holder
+        Self::record_holder_activity(
+            &env,
+            credential.subject.clone(),
+            ActivityType::CredentialRevoked,
+            credential_id,
+            holder.clone(),
             None,
         );
     }
@@ -10938,3 +11023,6 @@ mod doc_tests {
         assert!(result);
     }
 }
+
+#[path = "tests_new_features.rs"]
+mod tests_new_features;
