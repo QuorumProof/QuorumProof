@@ -886,4 +886,157 @@ mod tests {
         // Try to revoke non-existent credential
         client.revoke_consent(&holder, &999u64);
     }
+
+    // ── Issue #536: Credential Metadata Audit Trail Tests ─────────────────────
+
+    #[test]
+    fn test_audit_trail_first_update_creates_entry() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get audit trail before update - should be empty
+        let trail_before = client.get_audit_trail(&cred_id);
+        assert_eq!(trail_before.len(), 0);
+
+        // Update metadata
+        let new_metadata = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        client.update_metadata(&issuer, &cred_id, &new_metadata);
+
+        // Get audit trail after update
+        let trail = client.get_audit_trail(&cred_id);
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail.get(0).unwrap().updated_by, issuer);
+    }
+
+    #[test]
+    fn test_audit_trail_appends_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Update metadata multiple times
+        for i in 2..5 {
+            let new_metadata = soroban_sdk::Bytes::from_array(&env, &[i as u8; 32]);
+            client.update_metadata(&issuer, &cred_id, &new_metadata);
+        }
+
+        // Check audit trail has all entries
+        let trail = client.get_audit_trail(&cred_id);
+        assert_eq!(trail.len(), 3);
+
+        // Verify all entries are from the issuer
+        for i in 0..3 {
+            assert_eq!(trail.get(i).unwrap().updated_by, issuer);
+        }
+    }
+
+    #[test]
+    fn test_audit_trail_preserved_after_new_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // First update
+        let new_metadata_1 = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        client.update_metadata(&issuer, &cred_id, &new_metadata_1);
+
+        let trail_1 = client.get_audit_trail(&cred_id);
+        let first_entry = trail_1.get(0).unwrap().clone();
+
+        // Second update
+        let new_metadata_2 = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
+        client.update_metadata(&issuer, &cred_id, &new_metadata_2);
+
+        let trail_2 = client.get_audit_trail(&cred_id);
+        assert_eq!(trail_2.len(), 2);
+
+        // Verify first entry is unchanged
+        assert_eq!(trail_2.get(0).unwrap().updated_by, first_entry.updated_by);
+        assert_eq!(trail_2.get(0).unwrap().timestamp, first_entry.timestamp);
+    }
+
+    #[test]
+    fn test_audit_trail_chronological_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Update metadata multiple times
+        let mut timestamps = Vec::new(&env);
+        for i in 2..5 {
+            let new_metadata = soroban_sdk::Bytes::from_array(&env, &[i as u8; 32]);
+            client.update_metadata(&issuer, &cred_id, &new_metadata);
+
+            let trail = client.get_audit_trail(&cred_id);
+            let entry = trail.get(timestamps.len()).unwrap();
+            timestamps.push_back(entry.timestamp);
+        }
+
+        // Verify timestamps are in chronological order
+        for i in 1..timestamps.len() {
+            assert!(timestamps.get(i).unwrap() >= timestamps.get(i - 1).unwrap());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_audit_trail_non_existent_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Try to get audit trail for non-existent credential
+        client.get_audit_trail(&999u64);
+    }
 }

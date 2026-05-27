@@ -411,6 +411,7 @@ pub enum DataKey2 {
     AttestConditions(u64),
     RateLimitConfig,
     RateLimitState(Address),
+    CredentialAuditTrail(u64),
 }
 
 #[contracttype]
@@ -521,6 +522,15 @@ pub struct ActivityRecord {
     pub timestamp: u64,
     pub actor: Address,        // issuer, attestor, or revoker
     pub slice_id: Option<u64>, // for attestation-related activities
+}
+
+/// Records a single metadata update in the immutable audit trail
+#[contracttype]
+#[derive(Clone)]
+pub struct AuditEntry {
+    pub updated_by: Address,
+    pub timestamp: u64,
+    pub change_summary: soroban_sdk::Bytes,
 }
 
 /// Records a consensus decision for a quorum slice
@@ -1208,6 +1218,35 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
+    fn record_metadata_audit(
+        env: &Env,
+        credential_id: u64,
+        updated_by: Address,
+        _old_metadata_hash: soroban_sdk::Bytes,
+        new_metadata_hash: soroban_sdk::Bytes,
+    ) {
+        let change_summary = new_metadata_hash.clone();
+
+        let entry = AuditEntry {
+            updated_by,
+            timestamp: env.ledger().timestamp(),
+            change_summary,
+        };
+
+        let mut audit_trail: Vec<AuditEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialAuditTrail(credential_id))
+            .unwrap_or(Vec::new(env));
+        audit_trail.push_back(entry);
+        env.storage()
+            .instance()
+            .set(&DataKey2::CredentialAuditTrail(credential_id), &audit_trail);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
     /// Set a condition-based expiry timestamp for attestations on a credential.
     /// After this timestamp, `is_attestation_expired` returns `true` and
     /// `is_attested` treats the attestation as invalid.
@@ -1812,11 +1851,21 @@ impl QuorumProofContract {
             credential.issuer == issuer,
             "only the issuer may update metadata"
         );
-        credential.metadata_hash = new_metadata_hash;
+        let old_metadata_hash = credential.metadata_hash.clone();
+        credential.metadata_hash = new_metadata_hash.clone();
         credential.version += 1;
         env.storage()
             .instance()
             .set(&DataKey::Credential(credential_id), &credential);
+
+        Self::record_metadata_audit(
+            &env,
+            credential_id,
+            issuer.clone(),
+            old_metadata_hash,
+            new_metadata_hash,
+        );
+
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -4529,6 +4578,29 @@ impl QuorumProofContract {
             }
         }
         result
+    }
+
+    /// Returns the immutable audit trail for a credential's metadata updates.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential to get the audit trail for.
+    ///
+    /// # Returns
+    /// All audit entries for the credential in chronological order (oldest first).
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    pub fn get_audit_trail(env: Env, credential_id: u64) -> Vec<AuditEntry> {
+        let _credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        env.storage()
+            .instance()
+            .get(&DataKey2::CredentialAuditTrail(credential_id))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Returns all attestation notifications for a credential holder.
