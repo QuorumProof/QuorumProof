@@ -21,6 +21,7 @@ const TOPIC_BLACKLIST_REMOVED: &str = "HolderUnblacklisted";
 const TOPIC_FORK_DETECTED: &str = "ForkDetected";
 const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
 const TOPIC_HOLDER_NOTIFIED: &str = "HolderNotified";
+const TOPIC_DELEGATION: &str = "DelegationGranted";
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -401,6 +402,8 @@ pub enum DataKey2 {
     AttestConditions(u64),
     RateLimitConfig,
     RateLimitState(Address),
+    Delegation(u64, Address),
+    DelegationAuditLog(u64),
 }
 
 #[contracttype]
@@ -466,6 +469,34 @@ pub struct TransferRequest {
     pub from: Address,
     /// The intended recipient who must accept.
     pub to: Address,
+}
+
+/// Represents a delegation grant allowing a delegate to verify a credential on behalf of the holder.
+#[contracttype]
+#[derive(Clone)]
+pub struct Delegation {
+    /// The address delegated to verify the credential.
+    pub delegate: Address,
+    /// The credential being delegated for verification.
+    pub credential_id: u64,
+    /// Ledger timestamp until which this delegation is valid.
+    pub expiry: u64,
+    /// Ledger sequence number when this delegation was granted.
+    pub granted_at: u64,
+}
+
+/// Audit log entry for delegation grants.
+#[contracttype]
+#[derive(Clone)]
+pub struct DelegationAuditEntry {
+    /// The delegate who can verify the credential.
+    pub delegate: Address,
+    /// The credential being delegated.
+    pub credential_id: u64,
+    /// When the delegation expires.
+    pub expiry: u64,
+    /// Ledger sequence when the delegation was granted.
+    pub granted_at: u64,
 }
 
 /// QuorumSlice represents a federated Byzantine agreement (FBA) trust slice.
@@ -3757,16 +3788,11 @@ impl QuorumProofContract {
         claim_type: ClaimType,
         proof: soroban_sdk::Bytes,
     ) -> bool {
-        let quorum_proof_id = env.current_contract_address();
-        let sbt_client = SbtRegistryContractClient::new(&env, &sbt_registry_id);
-        let tokens = sbt_client.get_tokens_by_owner(&subject);
-        let has_sbt = tokens.iter().any(|token_id| {
-            let token = sbt_client.get_token(&token_id);
-            token.credential_id == credential_id
-        });
-        if !has_sbt {
+        // Check if subject or a delegate is authorized
+        if !Self::is_authorized_verifier(&env, subject.clone(), sbt_registry_id, credential_id) {
             return false;
         }
+        let quorum_proof_id = env.current_contract_address();
         let zk_client = ZkVerifierContractClient::new(&env, &zk_verifier_id);
         zk_client.verify_claim(
             &zk_admin,
@@ -3775,6 +3801,46 @@ impl QuorumProofContract {
             &claim_type,
             &proof,
         )
+    }
+
+    /// Check if a caller is authorized to verify a credential.
+    ///
+    /// Authorization is granted if the caller is either:
+    /// 1. The credential subject (holder) with a valid SBT token, OR
+    /// 2. A delegate with a non-expired delegation for the credential
+    ///
+    /// # Parameters
+    /// - `caller`: The address attempting to verify.
+    /// - `sbt_registry_id`: Address of the SBT registry contract.
+    /// - `credential_id`: The credential being verified.
+    ///
+    /// # Returns
+    /// true if the caller is authorized, false otherwise.
+    fn is_authorized_verifier(
+        env: &Env,
+        caller: Address,
+        sbt_registry_id: Address,
+        credential_id: u64,
+    ) -> bool {
+        // Check if caller has a valid delegation
+        if let Some(delegation) = env
+            .storage()
+            .instance()
+            .get::<DataKey2, Delegation>(&DataKey2::Delegation(credential_id, caller.clone()))
+        {
+            // Check if delegation hasn't expired (current ledger time < expiry)
+            if env.ledger().timestamp() < delegation.expiry {
+                return true;
+            }
+        }
+
+        // Check if caller is the holder with valid SBT
+        let sbt_client = SbtRegistryContractClient::new(env, &sbt_registry_id);
+        let tokens = sbt_client.get_tokens_by_owner(&caller);
+        tokens.iter().any(|token_id| {
+            let token = sbt_client.get_token(&token_id);
+            token.credential_id == credential_id
+        })
     }
 
     /// Verify an engineer anonymously using a ZK proof and holder commitment.
@@ -4085,6 +4151,119 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .get(&DataKey::ReputationRecovery(attestor))
+    }
+
+    // ── Credential Holder Delegation (Issue #532) ────────────────────────────
+
+    /// Grant a delegate the right to verify a credential on behalf of the holder.
+    ///
+    /// Only the credential holder (subject) can call this function.
+    /// The delegation is valid until the specified expiry timestamp.
+    ///
+    /// # Parameters
+    /// - `holder`: The credential holder delegating verification rights; must authorize.
+    /// - `credential_id`: The credential for which delegation is granted.
+    /// - `delegate`: The address that will be allowed to verify the credential.
+    /// - `expiry`: Ledger timestamp when this delegation expires.
+    ///
+    /// # Panics
+    /// Panics if the credential does not exist.
+    /// Panics if the caller is not the credential subject (holder).
+    pub fn delegate_verification(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+        delegate: Address,
+        expiry: u64,
+    ) {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        // Verify credential exists and holder is the subject
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.subject == holder,
+            "only the credential holder can delegate"
+        );
+
+        // Store the delegation record
+        let delegation = Delegation {
+            delegate: delegate.clone(),
+            credential_id,
+            expiry,
+            granted_at: env.ledger().sequence() as u64,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::Delegation(credential_id, delegate.clone()), &delegation);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Record delegation in audit log
+        let audit_entry = DelegationAuditEntry {
+            delegate: delegate.clone(),
+            credential_id,
+            expiry,
+            granted_at: env.ledger().sequence() as u64,
+        };
+
+        let mut audit_log: Vec<DelegationAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::DelegationAuditLog(credential_id))
+            .unwrap_or(Vec::new(&env));
+        audit_log.push_back(audit_entry.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey2::DelegationAuditLog(credential_id), &audit_log);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event
+        let topic = String::from_str(&env, TOPIC_DELEGATION);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, audit_entry);
+    }
+
+    /// Retrieve the delegation record for a specific credential and delegate.
+    ///
+    /// Returns the delegation if it exists, or None if no delegation is found.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential ID.
+    /// - `delegate`: The delegate address.
+    ///
+    /// # Returns
+    /// The delegation record if it exists, None otherwise.
+    pub fn get_delegation(env: Env, credential_id: u64, delegate: Address) -> Option<Delegation> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::Delegation(credential_id, delegate))
+    }
+
+    /// Retrieve the audit log of all delegations for a credential.
+    ///
+    /// Returns a vector of delegation audit entries in chronological order.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential ID.
+    ///
+    /// # Returns
+    /// A vector of delegation audit entries, empty if none exist.
+    pub fn get_delegation_audit(env: Env, credential_id: u64) -> Vec<DelegationAuditEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::DelegationAuditLog(credential_id))
+            .unwrap_or(Vec::new(&env))
     }
 
     // ── Proof Request History (Issue #38) ────────────────────────────────────    /// Record a new proof request for a credential and return its unique request ID.
@@ -10917,7 +11096,7 @@ mod doc_tests {
         let zk_verifier_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
         let zk_client = zk_verifier::ZkVerifierContractClient::new(&env, &zk_verifier_id);
         zk_client.initialize(&admin);
-        
+
         // Register a verifying key hash for ZK
         let vk_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
         zk_client.set_verifying_key(&admin, &vk_hash);
@@ -10936,5 +11115,271 @@ mod doc_tests {
             &proof,
         );
         assert!(result);
+    }
+
+    // ── Tests for Issue #532: Credential Holder Delegation ────────────────────
+
+    #[test]
+    fn test_delegate_verification_holder_can_delegate() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::ZkVerifierContract;
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let holder = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let delegate = Address::generate(&env);
+
+        // Issue a credential
+        let cred_id = client.issue_credential(
+            &issuer,
+            &holder,
+            &1u32,
+            &Bytes::from_slice(&env, b"metadata_hash"),
+            &None,
+        );
+
+        // Holder delegates to delegate
+        let expiry = env.ledger().timestamp() + 3600; // 1 hour from now
+        client.delegate_verification(&holder, &cred_id, &delegate, &expiry);
+
+        // Verify delegation was recorded
+        let delegation = client.get_delegation(&cred_id, &delegate);
+        assert!(delegation.is_some());
+        let deleg = delegation.unwrap();
+        assert_eq!(deleg.delegate, delegate);
+        assert_eq!(deleg.credential_id, cred_id);
+        assert_eq!(deleg.expiry, expiry);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the credential holder can delegate")]
+    fn test_delegate_verification_non_holder_rejected() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::ZkVerifierContract;
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let holder = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let non_holder = Address::generate(&env);
+
+        // Issue a credential
+        let cred_id = client.issue_credential(
+            &issuer,
+            &holder,
+            &1u32,
+            &Bytes::from_slice(&env, b"metadata_hash"),
+            &None,
+        );
+
+        // Non-holder tries to delegate - should panic
+        let expiry = env.ledger().timestamp() + 3600;
+        client.delegate_verification(&non_holder, &cred_id, &delegate, &expiry);
+    }
+
+    #[test]
+    fn test_delegation_audit_entry_written() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::ZkVerifierContract;
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let holder = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let delegate = Address::generate(&env);
+
+        // Issue a credential
+        let cred_id = client.issue_credential(
+            &issuer,
+            &holder,
+            &1u32,
+            &Bytes::from_slice(&env, b"metadata_hash"),
+            &None,
+        );
+
+        // Delegate
+        let expiry = env.ledger().timestamp() + 3600;
+        client.delegate_verification(&holder, &cred_id, &delegate, &expiry);
+
+        // Check audit log
+        let audit_log = client.get_delegation_audit(&cred_id);
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log.get(0).unwrap().delegate, delegate);
+        assert_eq!(audit_log.get(0).unwrap().expiry, expiry);
+    }
+
+    #[test]
+    fn test_holder_can_grant_multiple_delegations() {
+        use sbt_registry::SbtRegistryContract;
+        use zk_verifier::ZkVerifierContract;
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let holder = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let delegate1 = Address::generate(&env);
+        let delegate2 = Address::generate(&env);
+
+        // Issue a credential
+        let cred_id = client.issue_credential(
+            &issuer,
+            &holder,
+            &1u32,
+            &Bytes::from_slice(&env, b"metadata_hash"),
+            &None,
+        );
+
+        // Grant delegations to two different parties
+        let expiry1 = env.ledger().timestamp() + 3600;
+        let expiry2 = env.ledger().timestamp() + 7200;
+        client.delegate_verification(&holder, &cred_id, &delegate1, &expiry1);
+        client.delegate_verification(&holder, &cred_id, &delegate2, &expiry2);
+
+        // Both delegations should exist
+        assert!(client.get_delegation(&cred_id, &delegate1).is_some());
+        assert!(client.get_delegation(&cred_id, &delegate2).is_some());
+
+        // Audit log should have 2 entries
+        let audit_log = client.get_delegation_audit(&cred_id);
+        assert_eq!(audit_log.len(), 2);
+    }
+
+    #[test]
+    fn test_expired_delegation_is_rejected() {
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt_client = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        zk_client.initialize(&admin);
+        sbt_client.initialize(&admin, &qp_id);
+
+        let holder = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let delegate = Address::generate(&env);
+
+        // Issue a credential
+        let cred_id = client.issue_credential(
+            &issuer,
+            &holder,
+            &1u32,
+            &Bytes::from_slice(&env, b"metadata_hash"),
+            &None,
+        );
+
+        // Grant delegation with expiry in the past
+        let expiry = env.ledger().timestamp() - 1; // Already expired
+        client.delegate_verification(&holder, &cred_id, &delegate, &expiry);
+
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        zk_client.set_verifying_key(&admin, &vk_hash);
+
+        let mut proof_bytes = [0u8; 256];
+        proof_bytes[0..64].fill(1);
+        proof_bytes[192..256].fill(1);
+        let proof = Bytes::from_slice(&env, &proof_bytes);
+
+        // Verify should fail because delegation is expired
+        let result = client.verify_engineer(
+            &sbt_id,
+            &zk_id,
+            &admin,
+            &delegate,
+            &cred_id,
+            &ClaimType::Degree,
+            &proof,
+        );
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_non_delegate_non_holder_cannot_verify() {
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt_client = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        zk_client.initialize(&admin);
+        sbt_client.initialize(&admin, &qp_id);
+
+        let holder = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+
+        // Issue a credential
+        let cred_id = client.issue_credential(
+            &issuer,
+            &holder,
+            &1u32,
+            &Bytes::from_slice(&env, b"metadata_hash"),
+            &None,
+        );
+
+        // Grant delegation to delegate (not unauthorized)
+        let expiry = env.ledger().timestamp() + 3600;
+        client.delegate_verification(&holder, &cred_id, &delegate, &expiry);
+
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        zk_client.set_verifying_key(&admin, &vk_hash);
+
+        let mut proof_bytes = [0u8; 256];
+        proof_bytes[0..64].fill(1);
+        proof_bytes[192..256].fill(1);
+        let proof = Bytes::from_slice(&env, &proof_bytes);
+
+        // Unauthorized party should not be able to verify
+        let result = client.verify_engineer(
+            &sbt_id,
+            &zk_id,
+            &admin,
+            &unauthorized,
+            &cred_id,
+            &ClaimType::Degree,
+            &proof,
+        );
+        assert!(!result);
     }
 }
