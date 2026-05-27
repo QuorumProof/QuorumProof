@@ -794,4 +794,198 @@ mod tests {
         let result = client.evaluate_attestation_conditions(&cred_id, &vec![&env]);
         assert_eq!(result, true);
     }
+
+    // ── Issue #520: CredentialTypeIndex Tests ─────────────────────────────────
+
+    #[test]
+    fn test_get_credentials_by_type_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.get_credentials_by_type(&1u32);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_get_credentials_by_type_after_issuance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let id1 = client.issue_credential(&issuer, &subject1, &1u32, &hash, &None);
+        let id2 = client.issue_credential(&issuer, &subject2, &1u32, &hash, &None);
+        // Different type
+        let hash2 = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        let _id3 = client.issue_credential(&issuer, &subject1, &2u32, &hash2, &None);
+
+        let type1_creds = client.get_credentials_by_type(&1u32);
+        assert_eq!(type1_creds.len(), 2);
+        assert!(type1_creds.contains(&id1));
+        assert!(type1_creds.contains(&id2));
+
+        let type2_creds = client.get_credentials_by_type(&2u32);
+        assert_eq!(type2_creds.len(), 1);
+    }
+
+    #[test]
+    fn test_type_index_updated_on_revocation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+
+        assert_eq!(client.get_credentials_by_type(&1u32).len(), 1);
+
+        client.revoke_credential(&issuer, &cred_id);
+
+        assert_eq!(client.get_credentials_by_type(&1u32).len(), 0);
+    }
+
+    // ── Issue #518: batch_revoke Tests ────────────────────────────────────────
+
+    #[test]
+    fn test_batch_revoke_basic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        let hash2 = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        let id2 = client.issue_credential(&issuer, &subject, &2u32, &hash2, &None);
+
+        client.batch_revoke(&issuer, &soroban_sdk::vec![&env, id1, id2]);
+
+        assert!(client.get_credential(&id1).revoked);
+        assert!(client.get_credential(&id2).revoked);
+    }
+
+    #[test]
+    fn test_batch_revoke_updates_type_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        let hash2 = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        let id2 = client.issue_credential(&issuer, &subject, &1u32, &hash2, &None);
+
+        assert_eq!(client.get_credentials_by_type(&1u32).len(), 2);
+
+        client.batch_revoke(&issuer, &soroban_sdk::vec![&env, id1, id2]);
+
+        assert_eq!(client.get_credentials_by_type(&1u32).len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the original issuer can revoke")]
+    fn test_batch_revoke_wrong_issuer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let other = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+
+        client.batch_revoke(&other, &soroban_sdk::vec![&env, id1]);
+    }
+
+    // ── Issue #519: MetadataHashCache Tests ───────────────────────────────────
+
+    #[test]
+    fn test_validate_metadata_hash_valid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+
+        assert!(client.validate_metadata_hash(&cred_id, &hash));
+    }
+
+    #[test]
+    fn test_validate_metadata_hash_wrong_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+
+        let wrong_hash = soroban_sdk::Bytes::from_array(&env, &[9u8; 32]);
+        assert!(!client.validate_metadata_hash(&cred_id, &wrong_hash));
+    }
+
+    #[test]
+    fn test_validate_metadata_hash_invalidated_on_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+
+        // Cache the valid result
+        assert!(client.validate_metadata_hash(&cred_id, &hash));
+
+        // Update metadata
+        let new_hash = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        client.update_metadata(&issuer, &cred_id, &new_hash);
+
+        // Old hash should now be invalid
+        assert!(!client.validate_metadata_hash(&cred_id, &hash));
+        // New hash should be valid
+        assert!(client.validate_metadata_hash(&cred_id, &new_hash));
+    }
 }

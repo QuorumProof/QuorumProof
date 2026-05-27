@@ -38,6 +38,8 @@ const DEFAULT_REPUTATION_AGE_DIVISOR_SECONDS: u64 = 1_000;
 // Issue #381: Rate limiting configuration
 const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 100;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 3600; // 1 hour
+/// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
+const METADATA_CACHE_TTL_SECS: u64 = 3_600;
 
 #[contracttype]
 #[derive(Clone)]
@@ -273,6 +275,17 @@ pub struct TransferRestriction {
     pub configured_at: u64,
 }
 
+/// Issue #519: Cache for metadata hash validation result
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataHashCache {
+    pub credential_id: u64,
+    pub metadata_hash: soroban_sdk::Bytes,
+    pub is_valid: bool,
+    pub cached_at: u64,
+    pub expires_at: u64,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -400,6 +413,10 @@ pub enum DataKey2 {
     AttestConditions(u64),
     RateLimitConfig,
     RateLimitState(Address),
+    /// Issue #520: Index of credential IDs by credential type for O(1) lookup
+    CredentialTypeIndex(u32),
+    /// Issue #519: Cache for metadata hash validation result per credential
+    MetadataHashCache(u64),
 }
 
 #[contracttype]
@@ -1403,6 +1420,81 @@ impl QuorumProofContract {
         }
     }
 
+    // ── Issue #520: CredentialTypeIndex helpers ───────────────────────────────
+
+    fn type_index_add(env: &Env, credential_type: u32, credential_id: u64) {
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeIndex(credential_type))
+            .unwrap_or(Vec::new(env));
+        ids.push_back(credential_id);
+        env.storage()
+            .instance()
+            .set(&DataKey2::CredentialTypeIndex(credential_type), &ids);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn type_index_remove(env: &Env, credential_type: u32, credential_id: u64) {
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeIndex(credential_type))
+            .unwrap_or(Vec::new(env));
+        let mut retained: Vec<u64> = Vec::new(env);
+        for id in ids.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::CredentialTypeIndex(credential_type), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ── Issue #519: MetadataHashCache helpers ─────────────────────────────────
+
+    fn get_metadata_cache(env: &Env, credential_id: u64) -> Option<MetadataHashCache> {
+        let cache: Option<MetadataHashCache> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::MetadataHashCache(credential_id));
+        if let Some(ref c) = cache {
+            if env.ledger().timestamp() >= c.expires_at {
+                return None;
+            }
+        }
+        cache
+    }
+
+    fn set_metadata_cache(env: &Env, credential_id: u64, metadata_hash: &soroban_sdk::Bytes, is_valid: bool) {
+        let now = env.ledger().timestamp();
+        let cache = MetadataHashCache {
+            credential_id,
+            metadata_hash: metadata_hash.clone(),
+            is_valid,
+            cached_at: now,
+            expires_at: now.saturating_add(METADATA_CACHE_TTL_SECS),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey2::MetadataHashCache(credential_id), &cache);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn invalidate_metadata_cache(env: &Env, credential_id: u64) {
+        env.storage()
+            .instance()
+            .remove(&DataKey2::MetadataHashCache(credential_id));
+    }
+
     /// Issue #380: Set transfer restriction for a credential type
     pub fn set_transfer_restriction(
         env: Env,
@@ -1582,6 +1674,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Issue #520: Maintain CredentialTypeIndex
+        Self::type_index_add(&env, credential_type, id);
 
         let event_data = CredentialIssuedEventData {
             id,
@@ -1809,6 +1904,8 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #519: Invalidate metadata hash cache on update
+        Self::invalidate_metadata_cache(&env, credential_id);
     }
 
     /// Initiate a consent-based transfer of a credential to a new subject.
@@ -1946,6 +2043,51 @@ impl QuorumProofContract {
         result
     }
 
+    /// Issue #520: Get all credential IDs for a given credential type (O(1) index lookup).
+    ///
+    /// # Parameters
+    /// - `credential_type`: The credential type to look up.
+    ///
+    /// # Returns
+    /// Returns a `Vec<u64>` of credential IDs of the given type (excluding revoked ones are still
+    /// present in the index until revoked; revocation removes them).
+    pub fn get_credentials_by_type(env: Env, credential_type: u32) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeIndex(credential_type))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Issue #519: Validate a metadata hash for a credential, using a 1-hour cache.
+    ///
+    /// Returns `true` if the hash is non-empty and matches the stored credential's metadata hash.
+    /// The result is cached for 1 hour and invalidated when metadata is updated or credential is revoked.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to validate against.
+    /// - `metadata_hash`: The hash to validate.
+    pub fn validate_metadata_hash(
+        env: Env,
+        credential_id: u64,
+        metadata_hash: soroban_sdk::Bytes,
+    ) -> bool {
+        if let Some(cache) = Self::get_metadata_cache(&env, credential_id) {
+            if cache.metadata_hash == metadata_hash {
+                return cache.is_valid;
+            }
+        }
+        let credential: Option<Credential> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id));
+        let is_valid = match credential {
+            Some(c) => !metadata_hash.is_empty() && c.metadata_hash == metadata_hash,
+            None => false,
+        };
+        Self::set_metadata_cache(&env, credential_id, &metadata_hash, is_valid);
+        is_valid
+    }
+
     /// Check if a credential with the given ID exists.
     ///
     /// # Parameters
@@ -2022,6 +2164,10 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         Self::invalidate_verification_caches_for_credential(&env, credential_id);
+        // Issue #520: Remove from CredentialTypeIndex
+        Self::type_index_remove(&env, credential.credential_type, credential_id);
+        // Issue #519: Invalidate metadata hash cache
+        Self::invalidate_metadata_cache(&env, credential_id);
         let event_data = RevokeEventData {
             credential_id,
             subject: credential.subject.clone(),
@@ -2050,6 +2196,94 @@ impl QuorumProofContract {
             issuer.clone(),
             None,
         );
+    }
+
+    /// Issue #518: Revoke multiple credentials in a single transaction.
+    ///
+    /// Applies the same authorization and validation checks as `revoke_credential` for each ID.
+    /// Panics on the first credential that fails any check, leaving prior revocations applied.
+    ///
+    /// # Parameters
+    /// - `issuer`: Must be the original issuer of every credential in the list.
+    /// - `credential_ids`: List of credential IDs to revoke. Max `MAX_BATCH_SIZE` entries.
+    pub fn batch_revoke(env: Env, issuer: Address, credential_ids: Vec<u64>) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &issuer);
+        assert!(
+            credential_ids.len() <= MAX_BATCH_SIZE,
+            "batch size exceeds maximum"
+        );
+        for credential_id in credential_ids.iter() {
+            let mut credential: Credential = env
+                .storage()
+                .instance()
+                .get(&DataKey::Credential(credential_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+            assert!(
+                issuer == credential.issuer,
+                "only the original issuer can revoke"
+            );
+            assert!(!credential.revoked, "credential already revoked");
+            if let Some(expires_at) = credential.expires_at {
+                assert!(
+                    env.ledger().timestamp() < expires_at,
+                    "credential has expired"
+                );
+            }
+            credential.revoked = true;
+            credential.suspended = false;
+            env.storage()
+                .instance()
+                .set(&DataKey::Credential(credential_id), &credential);
+
+            // Remove from SubjectCredentials
+            let mut subject_creds: Vec<u64> = env
+                .storage()
+                .instance()
+                .get(&DataKey::SubjectCredentials(credential.subject.clone()))
+                .unwrap_or(Vec::new(&env));
+            let mut retained: Vec<u64> = Vec::new(&env);
+            for id in subject_creds.iter() {
+                if id != credential_id {
+                    retained.push_back(id);
+                }
+            }
+            if retained.len() != subject_creds.len() {
+                subject_creds = retained;
+                env.storage().instance().set(
+                    &DataKey::SubjectCredentials(credential.subject.clone()),
+                    &subject_creds,
+                );
+            }
+
+            Self::invalidate_verification_caches_for_credential(&env, credential_id);
+            // Issue #520: Remove from CredentialTypeIndex
+            Self::type_index_remove(&env, credential.credential_type, credential_id);
+            // Issue #519: Invalidate metadata hash cache
+            Self::invalidate_metadata_cache(&env, credential_id);
+
+            let event_data = RevokeEventData {
+                credential_id,
+                subject: credential.subject.clone(),
+            };
+            let topic = String::from_str(&env, TOPIC_REVOKE);
+            let mut topics: Vec<String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+
+            Self::record_holder_activity(
+                &env,
+                credential.subject.clone(),
+                ActivityType::CredentialRevoked,
+                credential_id,
+                issuer.clone(),
+                None,
+            );
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Suspend a credential temporarily. Only the original issuer may call this.
