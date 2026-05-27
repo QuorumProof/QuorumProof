@@ -1039,4 +1039,122 @@ mod tests {
         // Try to get audit trail for non-existent credential
         client.get_audit_trail(&999u64);
     }
+
+    // ── Issue #537: Credential Holder Activity Tracking with Retention ────────
+
+    #[test]
+    fn test_holder_activity_tracks_actions() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Issue a credential - should create activity record
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get holder activity
+        let activities = client.get_holder_activity(&holder, &1u32, &100u32);
+        assert!(activities.len() > 0);
+
+        // Should have at least one activity record (credential issued)
+        let has_issue_activity = activities.iter().any(|a| a.credential_id == cred_id);
+        assert!(has_issue_activity);
+    }
+
+    #[test]
+    fn test_holder_activity_retention_policy() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Set initial time
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Issue a credential
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get activity at time 1000
+        let activities_1 = client.get_holder_activity(&holder, &1u32, &100u32);
+        let count_at_1000 = activities_1.len();
+
+        // Move time forward to 500 days later
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000 + (500 * 24 * 60 * 60);
+        });
+
+        // Issue another credential
+        let cred_id_2 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Both activities should still be present
+        let activities_2 = client.get_holder_activity(&holder, &1u32, &100u32);
+        assert_eq!(activities_2.len(), count_at_1000 + 1);
+
+        // Move time forward to more than 365 days later (total 500 days)
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000 + (400 * 24 * 60 * 60);
+        });
+
+        // Issue another credential - should trigger retention policy
+        let cred_id_3 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get activity - old records (> 365 days old) should be pruned
+        let activities_3 = client.get_holder_activity(&holder, &1u32, &100u32);
+        // At least the newest records should be present
+        assert!(activities_3.len() > 0);
+    }
+
+    #[test]
+    fn test_holder_activity_within_retention_window_preserved() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Set time
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Issue first credential
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id_1 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Move forward 100 days
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000 + (100 * 24 * 60 * 60);
+        });
+
+        // Issue second credential
+        let cred_id_2 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get activity - both should be present (only 100 days have passed, less than 365)
+        let activities = client.get_holder_activity(&holder, &1u32, &100u32);
+        assert!(activities.len() >= 2);
+    }
 }

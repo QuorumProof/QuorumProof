@@ -1196,10 +1196,11 @@ impl QuorumProofContract {
         actor: Address,
         slice_id: Option<u64>,
     ) {
+        let current_time = env.ledger().timestamp();
         let activity = ActivityRecord {
             activity_type,
             credential_id,
-            timestamp: env.ledger().timestamp(),
+            timestamp: current_time,
             actor,
             slice_id,
         };
@@ -1209,10 +1210,20 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::HolderActivity(holder.clone()))
             .unwrap_or(Vec::new(env));
-        activities.push_back(activity);
+
+        // Apply retention policy: drop records older than 365 days (1 year)
+        const ONE_YEAR_SECONDS: u64 = 365 * 24 * 60 * 60;
+        let mut retained: Vec<ActivityRecord> = Vec::new(env);
+        for record in activities.iter() {
+            if current_time - record.timestamp < ONE_YEAR_SECONDS {
+                retained.push_back(record);
+            }
+        }
+
+        retained.push_back(activity);
         env.storage()
             .instance()
-            .set(&DataKey::HolderActivity(holder), &activities);
+            .set(&DataKey::HolderActivity(holder), &retained);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
