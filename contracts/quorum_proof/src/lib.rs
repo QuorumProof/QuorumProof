@@ -8865,8 +8865,8 @@ mod tests {
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
+        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
         assert_eq!(client.get_attestor_reputation(&attestor), 0);
         client.attest(&attestor, &cred_id1, &slice_id, &true, &None);
         assert_eq!(client.get_attestor_reputation(&attestor), 1);
