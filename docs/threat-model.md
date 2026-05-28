@@ -6,7 +6,7 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 **Scope**: `quorum_proof`, `sbt_registry`, `zk_verifier` contracts and their interactions.
 
-**Last Updated**: April 26, 2026
+**Last Updated**: May 27, 2026
 
 ---
 
@@ -285,16 +285,18 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 **Vector**:
 - File dispute for valid credential
-- Provide fake evidence
+- Provide fake or insufficient evidence
 - Waste slice member time reviewing disputes
 
 **Mitigation**:
-- ✅ Dispute filing requires `require_auth()` from credential holder
-- ✅ Dispute evidence is immutable (stored on-chain)
-- ✅ Dispute history is auditable
-- ✅ Slice members can reject disputes with insufficient evidence
+- ✅ Dispute filing requires `require_auth()` from the credential holder — third parties cannot file on their behalf
+- ✅ Dispute evidence is required at filing time and stored immutably on-chain (cannot be added retroactively)
+- ✅ Evidence must include: credential ID, dispute reason, supporting metadata hash, and timestamp
+- ✅ Slice members can reject disputes with insufficient evidence before voting begins
+- ✅ Dispute history is permanently auditable — repeated frivolous filers are identifiable
+- ✅ Dispute filing is rate-limited per credential (one active dispute at a time)
 
-**Residual Risk**: Low. Requires credential holder compromise.
+**Residual Risk**: Low. Requires credential holder compromise; evidence requirements deter frivolous filings.
 
 ---
 
@@ -308,13 +310,14 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 - Credential holder loses qualification
 
 **Mitigation**:
-- ✅ Dispute resolution requires multi-sig approval (threshold-based)
-- ✅ Dispute evidence is public and auditable
-- ✅ Revocation event is emitted (can be monitored)
-- ✅ Credential holder can appeal via new attestation
-- 🔄 **Planned (v2.0)**: Multi-sig admin requirement (2-of-3 or 3-of-5)
+- ✅ Dispute resolution requires multi-sig approval (threshold-based voting)
+- ✅ Dispute evidence is public and auditable on-chain
+- ✅ Revocation event is emitted (can be monitored by any party)
+- ✅ Credential holder can appeal via new attestation from a different slice
+- ✅ **Operator requirement**: Deploy admin as a multisig account (2-of-3 or 3-of-5 Stellar multisig) — see Section 4.3 recommendations
+- 🔄 **Planned (v2.0)**: On-chain multi-sig admin enforcement via contract logic
 
-**Residual Risk**: Medium. Mitigated by multi-sig requirement (planned).
+**Residual Risk**: Medium. Operators must configure Stellar account-level multisig for admin keys (see Section 4.3).
 
 ---
 
@@ -379,11 +382,12 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 #### For Operators
 
-1. **Multi-Sig Admin**: Require 2-of-3 or 3-of-5 admin signatures for dispute resolution
-2. **Monitoring**: Alert on unusual dispute patterns (high volume, rapid resolution)
-3. **Audit Trail**: Log all dispute decisions with timestamps and voter identities
-4. **Appeal Process**: Allow credential holders to appeal dispute decisions
-5. **Reputation Tracking**: Monitor slice member voting patterns for collusion
+1. **Multi-Sig Admin (Required)**: Configure the admin Stellar account as a multisig with at least 2-of-3 signers before deploying to mainnet. Use `stellar account set-options --master-weight 0 --med-threshold 2 --high-threshold 2 --signer <key2>,1 --signer <key3>,1`. This prevents single-key compromise from resolving disputes unilaterally.
+2. **Dispute Evidence Requirements**: Enforce that disputes include a metadata hash pointing to off-chain evidence (IPFS or equivalent). Reject disputes with empty or placeholder evidence hashes at the application layer.
+3. **Monitoring**: Alert on unusual dispute patterns — high volume from a single address, rapid resolution (< 1 hour), or disputes filed and resolved by overlapping slice members.
+4. **Audit Trail**: Log all dispute decisions with timestamps, voter identities, and evidence hashes. Retain logs for at least 2 years.
+5. **Appeal Process**: Allow credential holders to re-attest via a different quorum slice after a dispute resolves against them. Document this process for credential holders.
+6. **Reputation Tracking**: Monitor slice member voting patterns. Flag members who consistently vote with the majority on disputed cases for manual review (planned v2.0 on-chain reputation system).
 
 #### For Slice Members
 
