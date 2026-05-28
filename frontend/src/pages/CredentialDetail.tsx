@@ -15,6 +15,7 @@ import type { Credential, QuorumSlice } from '../lib/contracts/quorumProof';
 import { decodeMetadataHash, getProofRequests } from '../stellar';
 import { credTypeLabel, formatTimestamp, formatAddress } from './Verify';
 import { attestorRole, deriveStatus } from '../lib/credentialUtils';
+import { exportToJSON, exportToPDF, downloadFile } from '../lib/exportUtils';
 
 const STATUS_CONFIG = {
   attested: { label: 'Attested', icon: '✅', bannerMod: 'valid' },
@@ -150,6 +151,20 @@ export default function CredentialDetail() {
             aria-label="Copy verification link to clipboard"
           >
             {copied ? '✅ Copied' : '📋 Copy'}
+          </button>
+          <button
+            className="btn btn--sm btn--ghost"
+            onClick={() => downloadFile(exportToJSON([credential]), `credential-${id}.json`, 'application/json')}
+            aria-label="Download credential as JSON"
+          >
+            ⬇️ JSON
+          </button>
+          <button
+            className="btn btn--sm btn--ghost"
+            onClick={() => exportToPDF(credential)}
+            aria-label="Download credential as PDF"
+          >
+            🖨️ PDF
           </button>
           <button
             className="btn btn--sm btn--primary"
