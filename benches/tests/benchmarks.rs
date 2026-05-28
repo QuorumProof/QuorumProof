@@ -84,7 +84,7 @@ fn bench_issue_credential() {
     let meta = Bytes::from_slice(&env, b"QmBenchHash000000000000000000000000");
 
     let m = measure(&env, || {
-        client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
     });
 
     println!("[bench_issue_credential] cpu={} mem={}", m.cpu, m.mem);
@@ -124,7 +124,7 @@ fn bench_attest() {
     let subject = Address::generate(&env);
     let attestor = Address::generate(&env);
     let meta = Bytes::from_slice(&env, b"QmBenchHash000000000000000000000000");
-    let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+    let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
     let mut attestors = Vec::new(&env);
     attestors.push_back(attestor.clone());
     let mut weights = Vec::new(&env);
@@ -149,7 +149,7 @@ fn bench_revoke_credential() {
     let issuer = Address::generate(&env);
     let subject = Address::generate(&env);
     let meta = Bytes::from_slice(&env, b"QmBenchHash000000000000000000000000");
-    let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+    let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
     let m = measure(&env, || {
         client.revoke_credential(&issuer, &cid);
@@ -177,7 +177,7 @@ fn bench_mint_sbt() {
     let issuer = Address::generate(&env);
     let owner = Address::generate(&env);
     let meta = Bytes::from_slice(&env, b"ipfs://bench");
-    let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+    let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
     let uri = Bytes::from_slice(&env, b"ipfs://QmBench");
 
     let m = measure(&env, || {
@@ -204,7 +204,7 @@ fn bench_burn_sbt() {
     let issuer = Address::generate(&env);
     let owner = Address::generate(&env);
     let meta = Bytes::from_slice(&env, b"ipfs://bench");
-    let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+    let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
     let uri = Bytes::from_slice(&env, b"ipfs://QmBench");
     let token_id = sbt_client.mint(&owner, &cred_id, &uri);
 
@@ -252,7 +252,7 @@ fn bench_attest_scaling() {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmBenchHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         let mut weights = Vec::new(&env);

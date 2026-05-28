@@ -22,11 +22,33 @@ Upgrades are **admin-only** operations. The `upgrade()` function requires:
 ```rust
 pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
     admin.require_auth();
+    // stored admin check
+    Self::validate_upgrade(env.clone(), new_wasm_hash.clone());
     env.deployer().update_current_contract_wasm(new_wasm_hash);
 }
 ```
 
 Only the address stored in `DataKey::Admin` can authorize upgrades.
+
+### Upgrade Safety Validation
+
+Before applying any upgrade, `validate_upgrade(env, new_wasm_hash)` is called automatically. It enforces:
+
+| Check | Rationale |
+|---|---|
+| Hash is non-zero | Prevents accidental deployment of a blank/empty WASM |
+| Contract is not paused | Upgrades are blocked during incident response windows |
+| Error code baseline preserved | Ensures existing clients that depend on specific error codes are not broken |
+
+An `UpgradeValidated` event is emitted on every successful validation call, giving off-chain tooling an auditable trail of upgrade attempts.
+
+**Upgrade safety requirements:**
+
+1. New WASM **must not remove** any `DataKey` or `DataKey2` variants — existing storage keys must remain readable.
+2. New WASM **must not renumber** `ContractError` variants — error codes are part of the public API.
+3. New WASM **must not remove** public contract functions — callers depend on a stable interface.
+4. Struct fields may only be **appended**, never removed or reordered, to preserve XDR deserialization of stored data.
+5. Run `validate_upgrade` on testnet before mainnet to confirm the hash is non-zero and the contract is unpaused.
 
 ## Upgrade Procedures
 
