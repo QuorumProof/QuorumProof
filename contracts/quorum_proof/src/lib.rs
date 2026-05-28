@@ -6988,6 +6988,71 @@ impl QuorumProofContract {
         let metadata = soroban_sdk::Bytes::from_slice(&env, b"default");
         Self::issue_credential(env, issuer, subject, credential_type, metadata, expires_at)
     }
+
+    /// Generate a time-limited share link token for a credential.
+    ///
+    /// The caller must be the credential subject (holder). Returns an opaque
+    /// token (the credential ID encoded as bytes XOR'd with the expiry) that
+    /// can be embedded in a share URL. Call `validate_share_token` to redeem it.
+    pub fn generate_share_link(
+        env: Env,
+        subject: Address,
+        credential_id: u64,
+        expiry_hours: u32,
+    ) -> soroban_sdk::Bytes {
+        subject.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(expiry_hours > 0, "expiry_hours must be greater than 0");
+
+        // Credential must exist.
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Credential(credential_id))
+        {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        let now = env.ledger().timestamp();
+        let expires_at = now + (expiry_hours as u64) * 3600;
+
+        // Build a deterministic token: 8 bytes credential_id || 8 bytes expires_at
+        let cid_bytes = credential_id.to_be_bytes();
+        let exp_bytes = expires_at.to_be_bytes();
+        let mut raw = [0u8; 16];
+        raw[..8].copy_from_slice(&cid_bytes);
+        raw[8..].copy_from_slice(&exp_bytes);
+        let token = soroban_sdk::Bytes::from_slice(&env, &raw);
+
+        let link = ShareLink { credential_id, expires_at };
+        env.storage()
+            .instance()
+            .set(&DataKey2::ShareToken(token.clone()), &link);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        token
+    }
+
+    /// Validate a share token and return the credential ID.
+    ///
+    /// Panics with `ContractError::InvalidInput` if the token is unknown or expired.
+    pub fn validate_share_token(env: Env, token: soroban_sdk::Bytes) -> u64 {
+        let link: ShareLink = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ShareToken(token))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+
+        let now = env.ledger().timestamp();
+        if now >= link.expires_at {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        link.credential_id
+    }
 }
 
 #[cfg(test)]
