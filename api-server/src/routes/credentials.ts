@@ -20,8 +20,97 @@ function serializeBigInt(value: unknown): unknown {
   return value;
 }
 
+type CredentialRecord = {
+  id: string;
+  subject: string;
+  issuer: string;
+  credential_type: number;
+  metadata_hash: string;
+  revoked: boolean;
+  suspended: boolean;
+  expires_at: string | null;
+  version: number;
+};
+
 export function createCredentialsRouter(soroban: SorobanClient) {
   const router = Router();
+
+  /**
+   * GET /api/credentials/search
+   * Query params: type, issuer, subject, status (active|revoked|suspended),
+   *               page, page_size, sort_by (id|type), sort_order (asc|desc)
+   */
+  router.get('/search', async (req: Request, res: Response) => {
+    const {
+      type,
+      issuer,
+      subject,
+      status,
+      page: pageQ = '1',
+      page_size: pageSizeQ = '20',
+      sort_by: sortBy = 'id',
+      sort_order: sortOrder = 'asc',
+    } = req.query as Record<string, string>;
+
+    const page = Math.max(1, parseInt(pageQ, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(pageSizeQ, 10) || 20));
+
+    if (sortBy && !['id', 'type'].includes(sortBy)) {
+      res.status(400).json({ error: 'sort_by must be "id" or "type"' });
+      return;
+    }
+    if (sortOrder && !['asc', 'desc'].includes(sortOrder)) {
+      res.status(400).json({ error: 'sort_order must be "asc" or "desc"' });
+      return;
+    }
+
+    try {
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+
+      // Fetch all credentials and filter in-memory
+      // (On-chain filtering is not supported; this is a read-only query layer)
+      const all: CredentialRecord[] = [];
+      for (let i = 1; i <= total; i++) {
+        try {
+          const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          all.push(serializeBigInt(cred) as CredentialRecord);
+        } catch {
+          // skip missing/expired credentials
+        }
+      }
+
+      // Filter
+      let filtered = all.filter((c) => {
+        if (type !== undefined && c.credential_type !== parseInt(type, 10)) return false;
+        if (issuer !== undefined && c.issuer !== issuer) return false;
+        if (subject !== undefined && c.subject !== subject) return false;
+        if (status === 'revoked' && !c.revoked) return false;
+        if (status === 'suspended' && !c.suspended) return false;
+        if (status === 'active' && (c.revoked || c.suspended)) return false;
+        return true;
+      });
+
+      // Sort
+      filtered.sort((a, b) => {
+        const aVal = sortBy === 'type' ? a.credential_type : parseInt(a.id, 10);
+        const bVal = sortBy === 'type' ? b.credential_type : parseInt(b.id, 10);
+        return sortOrder === 'desc' ? bVal - aVal : aVal - bVal;
+      });
+
+      const totalFiltered = filtered.length;
+      const start = (page - 1) * pageSize;
+      const data = filtered.slice(start, start + pageSize);
+
+      res.json({
+        data,
+        pagination: { page, page_size: pageSize, total: totalFiltered },
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
 
   /**
    * POST /api/credentials/verify-batch
