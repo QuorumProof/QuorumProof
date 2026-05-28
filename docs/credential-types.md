@@ -18,8 +18,8 @@ Professional Credentials (1000-1999)
 │   └── Certificate (1003)
 ├── Licensing (1100-1199)
 │   ├── Professional License (1101)
-│   ├── Specialty License (1102)
-│   └── Renewal License (1103)
+│   ├── Specialty License (1102)  ← parent: Professional License (1101)
+│   └── Renewal License (1103)    ← parent: Professional License (1101)
 └── Employment (1200-1299)
     ├── Employment History (1201)
     ├── Reference (1202)
@@ -32,6 +32,47 @@ Government Credentials (2000-2999)
 
 Custom/Domain-Specific (3000+)
 ```
+
+### On-Chain Hierarchy API
+
+Parent-child relationships are stored on-chain and enforced by the contract. Use these functions to work with the hierarchy:
+
+```rust
+// Register a child type with a parent
+client.register_credential_type(
+    &admin, &1102u32,
+    &String::from_str(&env, "Specialty License"),
+    &String::from_str(&env, "Specialized engineering endorsement"),
+    &Some(1101u32),  // parent: Professional License
+);
+
+// Get the direct parent of a type
+let parent: Option<u32> = client.get_credential_type_parent(&1102u32);
+// => Some(1101)
+
+// Get all children of a type
+let children: Vec<u32> = client.get_credential_type_children(&1101u32);
+// => [1102, 1103]
+
+// Get full ancestor chain (parent → grandparent → root)
+let ancestors: Vec<u32> = client.get_credential_type_ancestors(&1102u32);
+// => [1101]  (Professional License is the root here)
+
+// Check if a type is a descendant of another
+let is_child: bool = client.is_credential_type_child_of(&1102u32, &1101u32);
+// => true
+```
+
+### Verification Rule Inheritance
+
+When verifying a credential, use `inherit_verification_rules` to get the full ordered list of types whose rules apply — from most specific (the credential's own type) to most general (the root):
+
+```rust
+// Returns [1102, 1101] — check Specialty License rules first, then Professional License rules
+let rule_chain: Vec<u32> = client.inherit_verification_rules(&1102u32);
+```
+
+This allows verifiers to apply layered validation: a Specialty License must satisfy both its own rules and all rules inherited from Professional License.
 
 ## Common Credential Types
 
@@ -280,18 +321,45 @@ let env = Env::default();
 let client = QuorumProofContractClient::new(&env, &contract_id);
 let admin = Address::generate(&env);
 
-// Register a custom credential type
+// Register a root custom type (no parent)
 client.register_credential_type(
     &admin,
-    &3001u32,  // Custom type ID
+    &3001u32,
     &String::from_str(&env, "Custom Certification"),
-    &String::from_str(&env, "A custom professional certification")
+    &String::from_str(&env, "A custom professional certification"),
+    &None,  // no parent
+);
+
+// Register a child type under the custom root
+client.register_credential_type(
+    &admin,
+    &3002u32,
+    &String::from_str(&env, "Custom Specialty"),
+    &String::from_str(&env, "A specialization of Custom Certification"),
+    &Some(3001u32),  // parent: Custom Certification
 );
 
 // Retrieve the registered type
 let type_def = client.get_credential_type(&3001u32);
 assert_eq!(type_def.name, "Custom Certification");
+
+// Verify hierarchy
+assert!(client.is_credential_type_child_of(&3002u32, &3001u32));
 ```
+
+### Circular Hierarchy Prevention
+
+The contract prevents circular parent references. Attempting to create a cycle panics with `ContractError::CircularHierarchy`:
+
+```rust
+// This would panic — 3001 cannot be its own ancestor
+client.register_credential_type(&admin, &3001u32, &name, &desc, &Some(3002u32));
+// Error: CircularHierarchy
+```
+
+### Registering with an Unregistered Parent
+
+If the parent type is not yet registered, the call panics with `ContractError::InvalidParentType`. Always register parent types before child types.
 
 ## Querying Credential Types
 

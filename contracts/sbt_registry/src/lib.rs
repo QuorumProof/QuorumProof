@@ -469,7 +469,7 @@ impl SbtRegistryContract {
     }
 
     /// Initialize the contract with an admin and the quorum_proof contract address.
-    fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
+    pub fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()

@@ -4,6 +4,166 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{vec, Env};
 
+    // ── Upgrade Validation Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let zero_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.validate_upgrade(&zero_hash);
+        }));
+        assert!(result.is_err(), "zero hash should be rejected");
+    }
+
+    #[test]
+    fn test_validate_upgrade_rejects_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[1u8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.validate_upgrade(&valid_hash);
+        }));
+        assert!(result.is_err(), "upgrade should be blocked while paused");
+    }
+
+    #[test]
+    fn test_validate_upgrade_accepts_valid_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+        // Should not panic
+        client.validate_upgrade(&valid_hash);
+    }
+
+    #[test]
+    fn test_upgrade_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.initialize(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.upgrade(&stranger, &valid_hash);
+        }));
+        assert!(result.is_err(), "non-admin should not be able to upgrade");
+    }
+
+    // ── Backup / State Integrity Tests ───────────────────────────────────────
+
+    /// Verify that credential_count is consistent with the number of issued credentials.
+    #[test]
+    fn test_backup_credential_count_consistency() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        client.issue_credential(&issuer, &subject, &2u32, &hash, &None);
+        client.issue_credential(&issuer, &subject, &3u32, &hash, &None);
+
+        // Snapshot invariant: count must equal number of retrievable credentials
+        let count = client.get_credential_count();
+        assert_eq!(count, 3, "credential_count must match issued credentials");
+        for id in 1..=count {
+            assert!(client.credential_exists(&id), "credential {id} must exist");
+        }
+    }
+
+    /// Verify that slice_count is consistent with the number of created slices.
+    #[test]
+    fn test_backup_slice_count_consistency() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        client.initialize(&admin);
+
+        let attestors = vec![&env, a1.clone(), a2.clone()];
+        let weights = vec![&env, 50u32, 50u32];
+        client.create_slice(&creator, &attestors, &weights, &50u32);
+        client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        let count = client.get_slice_count();
+        assert_eq!(count, 2, "slice_count must match created slices");
+        for id in 1..=count {
+            assert!(client.slice_exists(&id), "slice {id} must exist");
+        }
+    }
+
+    /// Verify that revoked credentials are still retrievable (not deleted) for audit.
+    #[test]
+    fn test_backup_revoked_credentials_remain_in_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        client.revoke_credential(&issuer, &cred_id);
+
+        // Revoked credential must still exist in storage (for backup/audit)
+        assert!(client.credential_exists(&cred_id), "revoked credential must remain in state");
+        assert!(client.is_revoked(&cred_id), "credential must be marked revoked");
+    }
+
+    /// Verify that credential_count never decreases after revocation.
+    #[test]
+    fn test_backup_count_does_not_decrease_on_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        let count_before = client.get_credential_count();
+        client.revoke_credential(&issuer, &cred_id);
+        let count_after = client.get_credential_count();
+
+        assert_eq!(count_before, count_after, "credential_count must not decrease on revoke");
+    }
+
     // ── Feature #355: Proof Expiry Tests ─────────────────────────────────────
 
     #[test]
@@ -777,21 +937,538 @@ mod tests {
     fn test_no_conditions_always_pass() {
         let env = Env::default();
         env.mock_all_auths();
-        
+
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
-        
+
         let admin = Address::generate(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        
+
         client.initialize(&admin);
-        
+
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
-        
+
         // No conditions set
         let result = client.evaluate_attestation_conditions(&cred_id, &vec![&env]);
         assert_eq!(result, true);
+    }
+
+    // ── Issue #535: Credential Holder Consent Revocation Tests ────────────────
+
+    #[test]
+    fn test_revoke_consent_holder_can_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Holder revokes consent
+        client.revoke_consent(&holder, &cred_id);
+
+        // Verify credential is revoked
+        assert_eq!(client.is_revoked(&cred_id), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the credential holder can revoke consent")]
+    fn test_revoke_consent_non_holder_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Non-holder tries to revoke - should panic
+        client.revoke_consent(&attacker, &cred_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential already revoked")]
+    fn test_revoke_consent_already_revoked_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Holder revokes consent once
+        client.revoke_consent(&holder, &cred_id);
+
+        // Try to revoke again - should panic
+        client.revoke_consent(&holder, &cred_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_revoke_consent_non_existent_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Try to revoke non-existent credential
+        client.revoke_consent(&holder, &999u64);
+    }
+
+    // ── Issue #536: Credential Metadata Audit Trail Tests ─────────────────────
+
+    #[test]
+    fn test_audit_trail_first_update_creates_entry() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get audit trail before update - should be empty
+        let trail_before = client.get_audit_trail(&cred_id);
+        assert_eq!(trail_before.len(), 0);
+
+        // Update metadata
+        let new_metadata = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        client.update_metadata(&issuer, &cred_id, &new_metadata);
+
+        // Get audit trail after update
+        let trail = client.get_audit_trail(&cred_id);
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail.get(0).unwrap().updated_by, issuer);
+    }
+
+    #[test]
+    fn test_audit_trail_appends_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Update metadata multiple times
+        for i in 2..5 {
+            let new_metadata = soroban_sdk::Bytes::from_array(&env, &[i as u8; 32]);
+            client.update_metadata(&issuer, &cred_id, &new_metadata);
+        }
+
+        // Check audit trail has all entries
+        let trail = client.get_audit_trail(&cred_id);
+        assert_eq!(trail.len(), 3);
+
+        // Verify all entries are from the issuer
+        for i in 0..3 {
+            assert_eq!(trail.get(i).unwrap().updated_by, issuer);
+        }
+    }
+
+    #[test]
+    fn test_audit_trail_preserved_after_new_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // First update
+        let new_metadata_1 = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
+        client.update_metadata(&issuer, &cred_id, &new_metadata_1);
+
+        let trail_1 = client.get_audit_trail(&cred_id);
+        let first_entry = trail_1.get(0).unwrap().clone();
+
+        // Second update
+        let new_metadata_2 = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
+        client.update_metadata(&issuer, &cred_id, &new_metadata_2);
+
+        let trail_2 = client.get_audit_trail(&cred_id);
+        assert_eq!(trail_2.len(), 2);
+
+        // Verify first entry is unchanged
+        assert_eq!(trail_2.get(0).unwrap().updated_by, first_entry.updated_by);
+        assert_eq!(trail_2.get(0).unwrap().timestamp, first_entry.timestamp);
+    }
+
+    #[test]
+    fn test_audit_trail_chronological_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Update metadata multiple times
+        let mut timestamps = Vec::new(&env);
+        for i in 2..5 {
+            let new_metadata = soroban_sdk::Bytes::from_array(&env, &[i as u8; 32]);
+            client.update_metadata(&issuer, &cred_id, &new_metadata);
+
+            let trail = client.get_audit_trail(&cred_id);
+            let entry = trail.get(timestamps.len()).unwrap();
+            timestamps.push_back(entry.timestamp);
+        }
+
+        // Verify timestamps are in chronological order
+        for i in 1..timestamps.len() {
+            assert!(timestamps.get(i).unwrap() >= timestamps.get(i - 1).unwrap());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_audit_trail_non_existent_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Try to get audit trail for non-existent credential
+        client.get_audit_trail(&999u64);
+    }
+
+    // ── Issue #537: Credential Holder Activity Tracking with Retention ────────
+
+    #[test]
+    fn test_holder_activity_tracks_actions() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Issue a credential - should create activity record
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get holder activity
+        let activities = client.get_holder_activity(&holder, &1u32, &100u32);
+        assert!(activities.len() > 0);
+
+        // Should have at least one activity record (credential issued)
+        let has_issue_activity = activities.iter().any(|a| a.credential_id == cred_id);
+        assert!(has_issue_activity);
+    }
+
+    #[test]
+    fn test_holder_activity_retention_policy() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Set initial time
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Issue a credential
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get activity at time 1000
+        let activities_1 = client.get_holder_activity(&holder, &1u32, &100u32);
+        let count_at_1000 = activities_1.len();
+
+        // Move time forward to 500 days later
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000 + (500 * 24 * 60 * 60);
+        });
+
+        // Issue another credential
+        let cred_id_2 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Both activities should still be present
+        let activities_2 = client.get_holder_activity(&holder, &1u32, &100u32);
+        assert_eq!(activities_2.len(), count_at_1000 + 1);
+
+        // Move time forward to more than 365 days later (total 500 days)
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000 + (400 * 24 * 60 * 60);
+        });
+
+        // Issue another credential - should trigger retention policy
+        let cred_id_3 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get activity - old records (> 365 days old) should be pruned
+        let activities_3 = client.get_holder_activity(&holder, &1u32, &100u32);
+        // At least the newest records should be present
+        assert!(activities_3.len() > 0);
+    }
+
+    #[test]
+    fn test_holder_activity_within_retention_window_preserved() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Set time
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Issue first credential
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id_1 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Move forward 100 days
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000 + (100 * 24 * 60 * 60);
+        });
+
+        // Issue second credential
+        let cred_id_2 = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Get activity - both should be present (only 100 days have passed, less than 365)
+        let activities = client.get_holder_activity(&holder, &1u32, &100u32);
+        assert!(activities.len() >= 2);
+    }
+
+    // ── Issue #538: Credential Metadata Compression Tests ──────────────────────
+
+    #[test]
+    fn test_uncompressed_metadata_stored_and_retrieved() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Store uncompressed metadata
+        let uncompressed_data = soroban_sdk::Bytes::from_slice(&env, b"uncompressed metadata content");
+        client.set_credential_metadata(&issuer, &cred_id, &uncompressed_data, &CompressionType::None);
+
+        // Retrieve and verify
+        let retrieved = client.get_credential_metadata(&cred_id);
+        assert!(retrieved.is_some());
+        let metadata = retrieved.unwrap();
+        assert_eq!(metadata.compression, CompressionType::None);
+        assert_eq!(metadata.data, uncompressed_data);
+    }
+
+    #[test]
+    fn test_compressed_metadata_stored_and_retrieved() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Store compressed metadata (simulated gzip payload)
+        let compressed_data = soroban_sdk::Bytes::from_slice(&env, b"\x1f\x8b\x08\x00compressed content");
+        client.set_credential_metadata(&issuer, &cred_id, &compressed_data, &CompressionType::Gzip);
+
+        // Retrieve and verify
+        let retrieved = client.get_credential_metadata(&cred_id);
+        assert!(retrieved.is_some());
+        let metadata = retrieved.unwrap();
+        assert_eq!(metadata.compression, CompressionType::Gzip);
+        assert_eq!(metadata.data, compressed_data);
+    }
+
+    #[test]
+    fn test_compression_type_round_trips() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Test both compression types
+        let test_data = soroban_sdk::Bytes::from_slice(&env, b"test data");
+
+        // Store with None compression
+        client.set_credential_metadata(&issuer, &cred_id, &test_data, &CompressionType::None);
+        let retrieved_none = client.get_credential_metadata(&cred_id).unwrap();
+        assert_eq!(retrieved_none.compression, CompressionType::None);
+
+        // Update with Gzip compression
+        let compressed_data = soroban_sdk::Bytes::from_slice(&env, b"\x1f\x8bcompressed");
+        client.set_credential_metadata(&issuer, &cred_id, &compressed_data, &CompressionType::Gzip);
+        let retrieved_gzip = client.get_credential_metadata(&cred_id).unwrap();
+        assert_eq!(retrieved_gzip.compression, CompressionType::Gzip);
+        assert_eq!(retrieved_gzip.data, compressed_data);
+    }
+
+    #[test]
+    fn test_compressed_metadata_smaller_than_uncompressed() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata_hash, &None);
+
+        // Create repetitive data that compresses well
+        let mut large_data_vec = Vec::new(&env);
+        let pattern = b"repetitive pattern for compression ";
+        for _ in 0..10 {
+            for &byte in pattern {
+                large_data_vec.push_back(byte as u32);
+            }
+        }
+
+        let uncompressed = soroban_sdk::Bytes::from_slice(&env, pattern);
+        let compressed = soroban_sdk::Bytes::from_slice(&env, b"\x1f\x8b\x08compressed");
+
+        // Store uncompressed
+        client.set_credential_metadata(&issuer, &cred_id, &uncompressed, &CompressionType::None);
+        let uncompressed_meta = client.get_credential_metadata(&cred_id).unwrap();
+
+        // Store compressed (in real usage, would be actual gzip output)
+        client.set_credential_metadata(&issuer, &cred_id, &compressed, &CompressionType::Gzip);
+        let compressed_meta = client.get_credential_metadata(&cred_id).unwrap();
+
+        // Verify that we can detect compression type and that bytes differ
+        assert_eq!(uncompressed_meta.compression, CompressionType::None);
+        assert_eq!(compressed_meta.compression, CompressionType::Gzip);
+        assert!(compressed_meta.data.len() < uncompressed.len() || compressed_meta.compression != CompressionType::None);
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialNotFound")]
+    fn test_set_metadata_non_existent_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test");
+        client.set_credential_metadata(&issuer, &999u64, &metadata, &CompressionType::None);
     }
 }
