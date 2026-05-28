@@ -1,0 +1,59 @@
+{
+  "title": "API Latency & Errors",
+  "uid": "qp-api-latency",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1,
+      "title": "RPC Latency Percentiles",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(quorumproof_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(quorumproof_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(quorumproof_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "x": 0, "y": 0, "w": 16, "h": 8 }
+    },
+    {
+      "id": 2,
+      "title": "Error Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(quorumproof_api_errors_total[5m])",
+          "legendFormat": "errors/s"
+        }
+      ],
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 }
+    },
+    {
+      "id": 3,
+      "title": "Contract Paused",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "quorumproof_contract_paused",
+          "legendFormat": "paused"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Running", "color": "green" }, "1": { "text": "PAUSED", "color": "red" } } }
+          ]
+        }
+      },
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 4 }
+    }
+  ]
+}
