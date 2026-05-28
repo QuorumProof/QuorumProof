@@ -208,7 +208,7 @@ impl ZkVerifierContract {
     }
 
     /// Set the admin address once after deployment.
-    fn initialize(env: Env, admin: Address) {
+    pub fn initialize(env: Env, admin: Address) {
         assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
