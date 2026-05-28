@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Navbar } from '../components/Navbar';
 import { ShareCredentialDialog } from '../components/ShareCredentialDialog';
 import { AuditTrail } from '../components/AuditTrail';
+import { VerificationHistory } from '../components/VerificationHistory';
+import type { VerificationRecord } from '../components/VerificationHistory';
 import {
   getCredential,
   getAttestors,
@@ -10,7 +12,7 @@ import {
   getSlice,
 } from '../lib/contracts/quorumProof';
 import type { Credential, QuorumSlice } from '../lib/contracts/quorumProof';
-import { decodeMetadataHash } from '../stellar';
+import { decodeMetadataHash, getProofRequests } from '../stellar';
 import { credTypeLabel, formatTimestamp, formatAddress } from './Verify';
 import { attestorRole, deriveStatus } from '../lib/credentialUtils';
 
@@ -28,6 +30,7 @@ export default function CredentialDetail() {
   const [attestors, setAttestors] = useState<string[]>([]);
   const [slice, setSlice] = useState<QuorumSlice | null>(null);
   const [isExpiredFlag, setIsExpiredFlag] = useState(false);
+  const [verifications, setVerifications] = useState<VerificationRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -47,6 +50,9 @@ export default function CredentialDetail() {
         setCredential(cred);
         setIsExpiredFlag(expired);
         setAttestors(attestorList ?? []);
+
+        // Load verification history (non-fatal)
+        getProofRequests(credId).then((reqs) => setVerifications(reqs ?? [])).catch(() => {});
 
         // Try to load slice from localStorage (same pattern as Dashboard)
         const sliceIdRaw = localStorage.getItem('qp-slice-id');
@@ -284,6 +290,28 @@ export default function CredentialDetail() {
               attestors={attestors}
               expired={isExpiredFlag}
             />
+          </div>
+        </div>
+
+        {/* Verification History */}
+        <div className="detail-card" style={{ marginTop: '20px' }}>
+          <div className="detail-card__header">
+            <span className="detail-card__title">Verification History</span>
+            <span className="badge badge--gray">{verifications.length} total</span>
+          </div>
+          <div className="detail-card__body">
+            <VerificationHistory records={verifications} />
+          </div>
+        </div>
+
+        {/* Verification History */}
+        <div className="detail-card" style={{ marginTop: '20px' }}>
+          <div className="detail-card__header">
+            <span className="detail-card__title">Verification History</span>
+            <span className="badge badge--gray">{verifications.length} total</span>
+          </div>
+          <div className="detail-card__body">
+            <VerificationHistory records={verifications} />
           </div>
         </div>
       </main>
