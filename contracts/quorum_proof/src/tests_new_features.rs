@@ -4,6 +4,166 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{vec, Env};
 
+    // ── Upgrade Validation Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let zero_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.validate_upgrade(&zero_hash);
+        }));
+        assert!(result.is_err(), "zero hash should be rejected");
+    }
+
+    #[test]
+    fn test_validate_upgrade_rejects_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[1u8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.validate_upgrade(&valid_hash);
+        }));
+        assert!(result.is_err(), "upgrade should be blocked while paused");
+    }
+
+    #[test]
+    fn test_validate_upgrade_accepts_valid_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+        // Should not panic
+        client.validate_upgrade(&valid_hash);
+    }
+
+    #[test]
+    fn test_upgrade_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.initialize(&admin);
+
+        let valid_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.upgrade(&stranger, &valid_hash);
+        }));
+        assert!(result.is_err(), "non-admin should not be able to upgrade");
+    }
+
+    // ── Backup / State Integrity Tests ───────────────────────────────────────
+
+    /// Verify that credential_count is consistent with the number of issued credentials.
+    #[test]
+    fn test_backup_credential_count_consistency() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        client.issue_credential(&issuer, &subject, &2u32, &hash, &None);
+        client.issue_credential(&issuer, &subject, &3u32, &hash, &None);
+
+        // Snapshot invariant: count must equal number of retrievable credentials
+        let count = client.get_credential_count();
+        assert_eq!(count, 3, "credential_count must match issued credentials");
+        for id in 1..=count {
+            assert!(client.credential_exists(&id), "credential {id} must exist");
+        }
+    }
+
+    /// Verify that slice_count is consistent with the number of created slices.
+    #[test]
+    fn test_backup_slice_count_consistency() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        client.initialize(&admin);
+
+        let attestors = vec![&env, a1.clone(), a2.clone()];
+        let weights = vec![&env, 50u32, 50u32];
+        client.create_slice(&creator, &attestors, &weights, &50u32);
+        client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        let count = client.get_slice_count();
+        assert_eq!(count, 2, "slice_count must match created slices");
+        for id in 1..=count {
+            assert!(client.slice_exists(&id), "slice {id} must exist");
+        }
+    }
+
+    /// Verify that revoked credentials are still retrievable (not deleted) for audit.
+    #[test]
+    fn test_backup_revoked_credentials_remain_in_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        client.revoke_credential(&issuer, &cred_id);
+
+        // Revoked credential must still exist in storage (for backup/audit)
+        assert!(client.credential_exists(&cred_id), "revoked credential must remain in state");
+        assert!(client.is_revoked(&cred_id), "credential must be marked revoked");
+    }
+
+    /// Verify that credential_count never decreases after revocation.
+    #[test]
+    fn test_backup_count_does_not_decrease_on_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &hash, &None);
+        let count_before = client.get_credential_count();
+        client.revoke_credential(&issuer, &cred_id);
+        let count_after = client.get_credential_count();
+
+        assert_eq!(count_before, count_after, "credential_count must not decrease on revoke");
+    }
+
     // ── Feature #355: Proof Expiry Tests ─────────────────────────────────────
 
     #[test]
