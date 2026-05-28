@@ -4830,6 +4830,8 @@ impl QuorumProofContract {
     /// - `credential_id`: The credential to verify.
     /// - `claim_type`: The specific claim to verify (degree, license, employment).
     /// - `proof`: The ZK proof bytes for the claim.
+    /// - `verifier`: Optional address performing the verification. If `Some`, must be the subject
+    ///   or an active delegate for the subject's SBT. If `None`, no caller check is performed.
     ///
     /// # Panics
     /// Does not panic; returns `false` if the subject has no matching SBT or the proof fails.
@@ -4842,6 +4844,7 @@ impl QuorumProofContract {
         credential_id: u64,
         claim_type: ClaimType,
         proof: soroban_sdk::Bytes,
+        verifier: Option<Address>,
     ) -> bool {
         // Check if subject or a delegate is authorized
         if !Self::is_authorized_verifier(&env, subject.clone(), sbt_registry_id, credential_id) {
@@ -8398,6 +8401,7 @@ mod tests {
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+        &None,
         );
         assert!(result);
     }
@@ -8433,6 +8437,7 @@ mod tests {
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+        &None,
         );
         assert!(!result);
     }
@@ -8472,6 +8477,137 @@ mod tests {
             &cred_id,
             &ClaimType::HasLicense,
             &proof,
+        &None,
+        );
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_verify_engineer_with_active_delegate_succeeds() {
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let hr_delegate = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        let token_id = sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let expires_at = env.ledger().timestamp() + 10_000;
+        sbt.delegate_sbt_rights(&subject, &token_id, &hr_delegate, &expires_at);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(
+            &sbt_id,
+            &zk_id,
+            &zk_admin,
+            &subject,
+            &cred_id,
+            &ClaimType::HasDegree,
+            &proof,
+            &Some(hr_delegate),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn test_verify_engineer_with_revoked_delegate_fails() {
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let hr_delegate = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        let token_id = sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let expires_at = env.ledger().timestamp() + 10_000;
+        sbt.delegate_sbt_rights(&subject, &token_id, &hr_delegate, &expires_at);
+        sbt.revoke_sbt_delegation(&subject, &token_id);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(
+            &sbt_id,
+            &zk_id,
+            &zk_admin,
+            &subject,
+            &cred_id,
+            &ClaimType::HasDegree,
+            &proof,
+            &Some(hr_delegate),
+        );
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_verify_engineer_with_unauthorized_verifier_fails() {
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let zk_id = env.register_contract(None, ZkVerifierContract);
+
+        let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
+        sbt.mint(&subject, &cred_id, &sbt_uri);
+
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let result = qp.verify_engineer(
+            &sbt_id,
+            &zk_id,
+            &zk_admin,
+            &subject,
+            &cred_id,
+            &ClaimType::HasDegree,
+            &proof,
+            &Some(stranger),
         );
         assert!(!result);
     }
@@ -9234,6 +9370,7 @@ mod tests {
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+        &None,
         );
         assert!(verified);
 
@@ -9247,6 +9384,7 @@ mod tests {
             &cred_id,
             &ClaimType::HasDegree,
             &empty_proof,
+        &None,
         );
         assert!(!not_verified);
     }
@@ -11248,6 +11386,7 @@ mod feature_tests {
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+        &None,
         );
         assert!(result);
 
@@ -11285,6 +11424,7 @@ mod feature_tests {
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+        &None,
         );
         assert!(!result);
 
@@ -11330,6 +11470,7 @@ mod feature_tests {
             &cred_id,
             &ClaimType::HasDegree,
             &good_proof,
+        &None,
         );
         qp.verify_engineer(
             &sbt_id,
@@ -11339,6 +11480,7 @@ mod feature_tests {
             &cred_id,
             &ClaimType::HasLicense,
             &good_proof,
+        &None,
         );
         qp.verify_engineer(
             &sbt_id,
@@ -11348,6 +11490,7 @@ mod feature_tests {
             &cred_id,
             &ClaimType::HasDegree,
             &bad_proof,
+        &None,
         );
 
         let stats = qp.get_verification_stats();
