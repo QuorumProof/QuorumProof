@@ -893,6 +893,24 @@ pub struct HolderReputationConfig {
     pub age_divisor_seconds: u64,
 }
 
+// Issue #521: Default PoW difficulty (0 = disabled; admin can set to require leading zero bits)
+const DEFAULT_POW_DIFFICULTY: u32 = 0;
+// Issue #522: Consent request timeout (7 days in seconds)
+const CONSENT_REQUEST_TIMEOUT: u64 = 7 * 24 * 3600;
+
+/// Issue #522: Pending consent request for credential issuance
+#[contracttype]
+#[derive(Clone)]
+pub struct ConsentRequest {
+    pub id: u64,
+    pub issuer: Address,
+    pub subject: Address,
+    pub credential_type: u32,
+    pub metadata_hash: soroban_sdk::Bytes,
+    pub expires_at_ts: u64,
+    pub approved: bool,
+}
+
 #[contract]
 pub struct QuorumProofContract;
 
@@ -1005,6 +1023,86 @@ impl QuorumProofContract {
     /// Get the rate limit configuration
     pub fn get_rate_limit_config_pub(env: Env) -> RateLimitConfig {
         Self::get_rate_limit_config(&env)
+    }
+
+    // ── Issue #521: Proof of Work for credential issuance ─────────────────────
+
+    /// Set the PoW difficulty (number of leading zero bits). Admin only.
+    pub fn set_pow_difficulty(env: Env, admin: Address, difficulty: u32) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey2::PowDifficulty, &difficulty);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the current PoW difficulty setting.
+    pub fn get_pow_difficulty(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::PowDifficulty)
+            .unwrap_or(DEFAULT_POW_DIFFICULTY)
+    }
+
+    /// Verify that SHA-256(issuer_bytes || subject_bytes || credential_type || nonce) has
+    /// at least `difficulty` leading zero bits. Panics with InvalidPoWNonce if not satisfied.
+    fn verify_pow(
+        env: &Env,
+        issuer: &Address,
+        subject: &Address,
+        credential_type: u32,
+        nonce: u64,
+    ) {
+        let difficulty: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::PowDifficulty)
+            .unwrap_or(DEFAULT_POW_DIFFICULTY);
+
+        if difficulty == 0 {
+            return;
+        }
+
+        // Build input: issuer_xdr || subject_xdr || credential_type(4 BE bytes) || nonce(8 BE bytes)
+        let issuer_xdr = issuer.clone().to_xdr(env);
+        let subject_xdr = subject.clone().to_xdr(env);
+
+        let mut input = soroban_sdk::Bytes::new(env);
+        input.append(&issuer_xdr);
+        input.append(&subject_xdr);
+        // Append credential_type as 4 big-endian bytes
+        let ct_bytes = credential_type.to_be_bytes();
+        input.append(&soroban_sdk::Bytes::from_slice(env, &ct_bytes));
+        // Append nonce as 8 big-endian bytes
+        let nonce_bytes = nonce.to_be_bytes();
+        input.append(&soroban_sdk::Bytes::from_slice(env, &nonce_bytes));
+
+        let hash = env.crypto().sha256(&input);
+        let hash_bytes = hash.to_array();
+
+        // Check leading zero bits
+        let required_zero_bytes = (difficulty / 8) as usize;
+        let remaining_bits = difficulty % 8;
+
+        for i in 0..required_zero_bytes {
+            if hash_bytes[i] != 0 {
+                panic_with_error!(env, ContractError::InvalidPoWNonce);
+            }
+        }
+        if remaining_bits > 0 && required_zero_bytes < 32 {
+            let mask: u8 = 0xFF << (8 - remaining_bits);
+            if hash_bytes[required_zero_bytes] & mask != 0 {
+                panic_with_error!(env, ContractError::InvalidPoWNonce);
+            }
+        }
     }
 
     /// Check rate limit for an address and update if necessary
@@ -1933,11 +2031,14 @@ impl QuorumProofContract {
         credential_type: u32,
         metadata_hash: soroban_sdk::Bytes,
         expires_at: Option<u64>,
+        nonce: u64,
     ) -> u64 {
         issuer.require_auth();
         Self::require_not_paused(&env);
         // Issue #381: Rate limiting
         Self::require_rate_limit(&env, &issuer);
+        // Issue #521: Proof of Work verification
+        Self::verify_pow(&env, &issuer, &subject, credential_type, nonce);
         // Pre-conditions
         Self::require_valid_address(&env, &issuer);
         Self::require_valid_address(&env, &subject);
@@ -7171,6 +7272,141 @@ impl QuorumProofContract {
         }
     }
 
+    // ── Issue #522: Credential holder consent tracking ────────────────────────
+
+    /// Issuer requests consent from a subject to issue a credential.
+    /// Returns the consent request ID. Expires after 7 days.
+    pub fn request_credential(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        credential_type: u32,
+        metadata_hash: soroban_sdk::Bytes,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        // Prevent duplicate pending requests
+        let pending_key = DataKey2::PendingConsent(issuer.clone(), subject.clone(), credential_type);
+        if env.storage().instance().has(&pending_key) {
+            panic_with_error!(&env, ContractError::ConsentRequestAlreadyExists);
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ConsentRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let now = env.ledger().timestamp();
+        let request = ConsentRequest {
+            id,
+            issuer: issuer.clone(),
+            subject: subject.clone(),
+            credential_type,
+            metadata_hash,
+            expires_at_ts: now + CONSENT_REQUEST_TIMEOUT,
+            approved: false,
+        };
+
+        env.storage().instance().set(&DataKey2::ConsentRequest(id), &request);
+        env.storage().instance().set(&DataKey2::ConsentRequestCount, &id);
+        env.storage().instance().set(&pending_key, &id);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit consent requested event
+        let topic = String::from_str(&env, "ConsentRequested");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, id);
+
+        id
+    }
+
+    /// Subject approves a pending consent request.
+    pub fn approve_credential_request(env: Env, subject: Address, request_id: u64) {
+        subject.require_auth();
+
+        let mut request: ConsentRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ConsentRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ConsentRequestNotFound));
+
+        assert!(request.subject == subject, "unauthorized");
+
+        let now = env.ledger().timestamp();
+        if now > request.expires_at_ts {
+            panic_with_error!(&env, ContractError::ConsentRequestExpired);
+        }
+
+        request.approved = true;
+        env.storage().instance().set(&DataKey2::ConsentRequest(request_id), &request);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit consent approved event (audit trail)
+        let topic = String::from_str(&env, "ConsentApproved");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, request_id);
+    }
+
+    /// Issue a credential after consent has been granted. Consumes the consent request.
+    pub fn issue_with_consent(
+        env: Env,
+        issuer: Address,
+        request_id: u64,
+        nonce: u64,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let request: ConsentRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ConsentRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ConsentRequestNotFound));
+
+        assert!(request.issuer == issuer, "unauthorized");
+
+        if !request.approved {
+            panic_with_error!(&env, ContractError::ConsentNotGranted);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > request.expires_at_ts {
+            panic_with_error!(&env, ContractError::ConsentRequestExpired);
+        }
+
+        // Remove pending consent marker
+        let pending_key = DataKey2::PendingConsent(
+            request.issuer.clone(),
+            request.subject.clone(),
+            request.credential_type,
+        );
+        env.storage().instance().remove(&pending_key);
+        env.storage().instance().remove(&DataKey2::ConsentRequest(request_id));
+
+        // Issue the credential
+        Self::issue_credential(
+            env,
+            request.issuer,
+            request.subject,
+            request.credential_type,
+            request.metadata_hash,
+            None,
+            nonce,
+        )
+    }
+
+    /// Get a consent request by ID.
+    pub fn get_consent_request(env: Env, request_id: u64) -> ConsentRequest {
+        env.storage()
+            .instance()
+            .get(&DataKey2::ConsentRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ConsentRequestNotFound))
+    }
+
     /// Alias for issue_credential for backward compatibility.
     pub fn issue(
         env: Env,
@@ -7180,7 +7416,9 @@ impl QuorumProofContract {
         expires_at: Option<u64>,
     ) -> u64 {
         let metadata = soroban_sdk::Bytes::from_slice(&env, b"default");
-        Self::issue_credential(env, issuer, subject, credential_type, metadata, expires_at)
+        // Backward compatibility: nonce=0 requires difficulty=0 to succeed.
+        // Callers should use issue_credential directly with a valid nonce.
+        Self::issue_credential(env, issuer, subject, credential_type, metadata, expires_at, 0)
     }
 
     /// Generate a time-limited share link token for a credential.
@@ -7331,7 +7569,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -7353,7 +7591,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
@@ -7384,7 +7622,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         assert_eq!(id, 1);
     }
 
@@ -7407,7 +7645,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let cred = client.get_credential(&id);
         assert_eq!(cred.issuer, issuer);
     }
@@ -7424,8 +7662,8 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let id_a = client.issue_credential(&issuer_a, &subject, &1u32, &metadata, &None);
-        let id_b = client.issue_credential(&issuer_b, &subject, &1u32, &metadata, &None);
+        let id_a = client.issue_credential(&issuer_a, &subject, &1u32, &metadata, &None, &0u64);
+        let id_b = client.issue_credential(&issuer_b, &subject, &1u32, &metadata, &None, &0u64);
 
         assert_eq!(client.get_credential(&id_a).issuer, issuer_a);
         assert_eq!(client.get_credential(&id_b).issuer, issuer_b);
@@ -7449,7 +7687,7 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let credential_type: u32 = 42;
 
-        let id = client.issue_credential(&issuer, &subject, &credential_type, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &credential_type, &metadata, &None, &0u64);
 
         let all_events = env.events().all();
         let expected_topic = String::from_str(&env, TOPIC_ISSUE);
@@ -7489,7 +7727,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
     }
 
     // --- credential issuance ---
@@ -7522,7 +7760,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let empty_metadata = Bytes::new(&env);
-        client.issue_credential(&issuer, &subject, &1u32, &empty_metadata, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &empty_metadata, &None, &0u64);
     }
 
     #[test]
@@ -7537,7 +7775,7 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        client.issue_credential(&issuer, &subject, &0u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &0u32, &metadata, &None, &0u64);
     }
 
     #[test]
@@ -7563,7 +7801,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.pause(&admin);
         client.revoke_credential(&issuer, &id);
@@ -7579,7 +7817,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.revoke_credential(&issuer, &id);
 
@@ -7595,7 +7833,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         assert!(!client.is_suspended(&id));
 
@@ -7618,7 +7856,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -7641,7 +7879,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -7664,7 +7902,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -7688,7 +7926,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -7708,7 +7946,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -7832,9 +8070,9 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
-        let id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None);
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+        let id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None, &0u64);
 
         let ids = client.get_credentials_by_subject(&subject, &1, &100);
         assert_eq!(ids.len(), 3);
@@ -7854,9 +8092,9 @@ mod tests {
         let subject_b = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let id_a1 = client.issue_credential(&issuer, &subject_a, &1u32, &metadata, &None);
-        let id_a2 = client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None);
-        let id_b1 = client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None);
+        let id_a1 = client.issue_credential(&issuer, &subject_a, &1u32, &metadata, &None, &0u64);
+        let id_a2 = client.issue_credential(&issuer, &subject_a, &2u32, &metadata, &None, &0u64);
+        let id_b1 = client.issue_credential(&issuer, &subject_b, &1u32, &metadata, &None, &0u64);
 
         let before_a = client.get_credentials_by_subject(&subject_a, &1, &100);
         assert_eq!(before_a.len(), 2);
@@ -7943,7 +8181,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -7965,7 +8203,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         set_ledger_timestamp(&env, 999_999_999);
         assert!(!client.is_expired(&id));
@@ -7979,7 +8217,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64));
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64), &0u64);
 
         assert!(!client.is_expired(&id));
     }
@@ -7993,7 +8231,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64));
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64), &0u64);
 
         set_ledger_timestamp(&env, 3_000);
         assert!(client.is_expired(&id));
@@ -8009,7 +8247,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64));
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64), &0u64);
         set_ledger_timestamp(&env, 3_000);
         client.get_credential(&id);
     }
@@ -8022,7 +8260,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let cred_v1 = client.get_credential(&id);
         assert_eq!(cred_v1.version, 1);
@@ -8047,7 +8285,7 @@ mod tests {
         let subject = Address::generate(&env);
         let recipient = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.initiate_transfer(&subject, &id, &recipient);
         client.accept_transfer(&recipient, &id);
@@ -8067,7 +8305,7 @@ mod tests {
         let attacker = Address::generate(&env);
         let recipient = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // attacker is not the subject — should panic with UnauthorizedTransfer
         client.initiate_transfer(&attacker, &id, &recipient);
@@ -8084,7 +8322,7 @@ mod tests {
         let recipient = Address::generate(&env);
         let other = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.initiate_transfer(&subject, &id, &recipient);
         // `other` is not the intended recipient — should panic
@@ -8100,7 +8338,7 @@ mod tests {
         let subject = Address::generate(&env);
         let recipient = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.initiate_transfer(&subject, &id, &recipient);
         client.accept_transfer(&recipient, &id);
@@ -8121,7 +8359,7 @@ mod tests {
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         set_ledger_timestamp(&env, 1_000);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64));
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64), &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -8146,7 +8384,7 @@ mod tests {
         let attestor2 = Address::generate(&env);
         let attestor3 = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -8177,8 +8415,8 @@ mod tests {
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -8212,8 +8450,8 @@ mod tests {
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -8246,7 +8484,7 @@ mod tests {
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -8353,7 +8591,7 @@ mod tests {
         initial_weights.push_back(1u32);
         let slice_id = client.create_slice(&creator, &initial, &initial_weights, &1u32);
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.attest(&attestor1, &cred_id, &slice_id, &true, &None);
         assert!(client.is_attested(&cred_id, &slice_id)); // threshold=1, met after attestor1
@@ -8387,7 +8625,7 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
@@ -8426,7 +8664,7 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let proof = Bytes::from_slice(&env, b"valid-proof");
         let result = qp.verify_engineer(
@@ -8464,7 +8702,7 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
 
@@ -8734,7 +8972,7 @@ mod tests {
 
         // Pre-issue a credential so the batch hits a duplicate
         let metadata = Bytes::from_slice(&env, b"QmExisting00000000000000000000000000");
-        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut subjects = Vec::new(&env);
         subjects.push_back(subject.clone());
@@ -8918,9 +9156,9 @@ mod tests {
 
         assert_eq!(client.get_credential_count(), 0);
 
-        let id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let _id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
-        let _id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None);
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let _id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+        let _id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None, &0u64);
 
         assert_eq!(client.get_credential_count(), 3);
 
@@ -8963,7 +9201,7 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         // Issue a credential
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Set up a quorum slice with the attestor
         let mut attestors = soroban_sdk::Vec::new(&env);
@@ -8990,7 +9228,7 @@ mod tests {
         let attestor1 = Address::generate(&env);
         let attestor2 = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -9019,7 +9257,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -9050,7 +9288,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -9080,7 +9318,7 @@ mod tests {
         let attestor1 = Address::generate(&env);
         let attestor2 = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -9107,7 +9345,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata_hash = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -9132,7 +9370,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata_hash = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -9154,7 +9392,7 @@ mod tests {
         let subject = Address::generate(&env);
         let non_attestor = Address::generate(&env);
         let metadata_hash = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
 
         let meta = Bytes::from_slice(&env, b"unauthorized");
         client.set_attestation_metadata(&non_attestor, &cred_id, &meta);
@@ -9176,10 +9414,10 @@ mod tests {
         let credential_type: u32 = 1;
 
         // Issue first credential
-        client.issue_credential(&issuer, &subject, &credential_type, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &credential_type, &metadata, &None, &0u64);
 
         // Try to issue duplicate credential of same type from same issuer to same subject
-        client.issue_credential(&issuer, &subject, &credential_type, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &credential_type, &metadata, &None, &0u64);
     }
 
     #[test]
@@ -9194,9 +9432,9 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         // Issue credentials of different types - should succeed
-        let id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
-        let id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None);
-        let id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None);
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+        let id3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &None, &0u64);
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -9217,8 +9455,8 @@ mod tests {
         let credential_type: u32 = 1;
 
         // Issue credentials of same type from different issuers - should succeed
-        let id1 = client.issue_credential(&issuer1, &subject, &credential_type, &metadata, &None);
-        let id2 = client.issue_credential(&issuer2, &subject, &credential_type, &metadata, &None);
+        let id1 = client.issue_credential(&issuer1, &subject, &credential_type, &metadata, &None, &0u64);
+        let id2 = client.issue_credential(&issuer2, &subject, &credential_type, &metadata, &None, &0u64);
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -9238,8 +9476,8 @@ mod tests {
         let credential_type: u32 = 1;
 
         // Issue credentials of same type to different subjects - should succeed
-        let id1 = client.issue_credential(&issuer, &subject1, &credential_type, &metadata, &None);
-        let id2 = client.issue_credential(&issuer, &subject2, &credential_type, &metadata, &None);
+        let id1 = client.issue_credential(&issuer, &subject1, &credential_type, &metadata, &None, &0u64);
+        let id2 = client.issue_credential(&issuer, &subject2, &credential_type, &metadata, &None, &0u64);
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -9258,7 +9496,7 @@ mod tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Subject should not be able to revoke
         client.revoke_credential(&subject, &id);
@@ -9276,7 +9514,7 @@ mod tests {
         let subject = Address::generate(&env);
         let unauthorized = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Unauthorized address should not be able to revoke
         client.revoke_credential(&unauthorized, &id);
@@ -9310,7 +9548,7 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmLifecycleTest0000000000000000000");
 
         // Step 2: Issue credential
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Assert credential state after issuance
         let cred = qp.get_credential(&cred_id);
@@ -9404,7 +9642,7 @@ mod tests {
         let attestor2 = Address::generate(&env); // not in slice
 
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Create slice with only attestor1
         let mut attestors = soroban_sdk::Vec::new(&env);
@@ -9518,7 +9756,7 @@ mod tests {
         let attestor2 = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -9550,7 +9788,7 @@ mod tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         assert!(client.credential_exists(&cred_id));
     }
 
@@ -9599,7 +9837,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -9624,7 +9862,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -9645,7 +9883,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -9666,7 +9904,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -9688,7 +9926,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -9712,7 +9950,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -9745,7 +9983,7 @@ mod tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -9767,7 +10005,7 @@ mod tests {
         let attestor = Address::generate(&env);
         let stranger = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -10026,7 +10264,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         set_ts(&env, 1_000);
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         client.set_attestation_expiry(&issuer, &cid, &5_000u64);
         assert!(!client.is_attestation_expired(&cid));
     }
@@ -10039,7 +10277,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         set_ts(&env, 1_000);
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         client.set_attestation_expiry(&issuer, &cid, &2_000u64);
         set_ts(&env, 3_000);
         assert!(client.is_attestation_expired(&cid));
@@ -10054,7 +10292,7 @@ mod feature_tests {
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         set_ts(&env, 1_000);
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = soroban_sdk::Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = soroban_sdk::Vec::new(&env);
@@ -10075,7 +10313,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         assert!(!client.is_attestation_expired(&cid));
     }
 
@@ -10096,7 +10334,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         set_ts(&env, 5_000);
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         // expires_at is in the past
         client.set_attestation_expiry(&issuer, &cid, &1_000u64);
     }
@@ -10111,7 +10349,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        client.issue_credential(&issuer, &subject, &0u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &0u32, &metadata, &None, &0u64);
     }
 
     #[test]
@@ -10122,7 +10360,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let empty = Bytes::new(&env);
-        client.issue_credential(&issuer, &subject, &1u32, &empty, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &empty, &None, &0u64);
     }
 
     #[test]
@@ -10134,7 +10372,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         // 257 bytes — exceeds 256 limit
         let long_hash = Bytes::from_slice(&env, &[b'x'; 257]);
-        client.issue_credential(&issuer, &subject, &1u32, &long_hash, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &long_hash, &None, &0u64);
     }
 
     #[test]
@@ -10161,7 +10399,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         client.attest(&attestor, &cid, &0u64, &true, &None);
     }
 
@@ -10192,7 +10430,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         // If postcondition passed, credential must exist
         assert!(client.credential_exists(&cid));
     }
@@ -10223,7 +10461,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmSnapshotHash00000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         assert_eq!(client.get_credential_count(), 1);
         assert_eq!(cid, 1);
@@ -10277,7 +10515,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmSnapshotHash00000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -10311,7 +10549,7 @@ mod feature_tests {
         let meta = Bytes::from_slice(&env, b"QmFuzzHash000000000000000000000000");
 
         for i in 1u32..=5 {
-            let cid = client.issue_credential(&issuer, &subject, &i, &meta, &None);
+            let cid = client.issue_credential(&issuer, &subject, &i, &meta, &None, &0u64);
             assert_eq!(cid, i as u64);
             assert_eq!(client.get_credential_count(), i as u64);
         }
@@ -10327,7 +10565,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmFuzzHash000000000000000000000000");
-        client.issue_credential(&issuer, &subject, &0u32, &meta, &None);
+        client.issue_credential(&issuer, &subject, &0u32, &meta, &None, &0u64);
     }
 
     /// Property: threshold > attestor count must always be rejected.
@@ -10358,7 +10596,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmFuzzHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -10380,7 +10618,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmFuzzHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
@@ -10401,7 +10639,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         client.set_attestation_window(&issuer, &cid, &1000u64, &2000u64);
 
@@ -10419,7 +10657,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -10444,7 +10682,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -10473,7 +10711,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -10502,7 +10740,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -10525,7 +10763,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         // start >= end must be rejected
         client.set_attestation_window(&issuer, &cid, &2000u64, &1000u64);
@@ -10539,7 +10777,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         assert!(client.get_attestation_window(&cid).is_none());
     }
@@ -10556,7 +10794,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10582,7 +10820,7 @@ mod feature_tests {
         let approver = Address::generate(&env);
         let attacker = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10600,7 +10838,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10619,7 +10857,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10646,7 +10884,7 @@ mod feature_tests {
         let approver = Address::generate(&env);
         let stranger = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10666,7 +10904,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10687,7 +10925,7 @@ mod feature_tests {
         let approver1 = Address::generate(&env);
         let approver2 = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver1.clone());
@@ -10713,7 +10951,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10743,7 +10981,7 @@ mod feature_tests {
         let approver1 = Address::generate(&env);
         let approver2 = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver1.clone());
@@ -10774,7 +11012,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = sbt.mint(&subject, &cid, &sbt_uri);
@@ -10804,7 +11042,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10853,7 +11091,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10879,7 +11117,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -10902,7 +11140,7 @@ mod feature_tests {
         let approver = Address::generate(&env);
         let attacker = Address::generate(&env);
         let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -11372,7 +11610,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
@@ -11412,7 +11650,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // No SBT minted — verification fails
         let proof = Bytes::from_slice(&env, b"valid-proof");
@@ -11454,7 +11692,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
-        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
 
@@ -11529,7 +11767,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
         client.initialize(&admin);
-        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let attestors = vec![&env, attestor.clone()];
         let weights = vec![&env, 1u32];
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
@@ -11566,7 +11804,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
 
         client.initialize(&admin);
-        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let attestors = vec![&env, attestor.clone()];
         let weights = vec![&env, 1u32];
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
@@ -11602,7 +11840,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.revoke_credential(&issuer, &id);
 
@@ -11634,7 +11872,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.revoke_credential(&issuer, &id);
 
@@ -11651,7 +11889,7 @@ mod feature_tests {
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.revoke_credential(&issuer, &id);
         client.revoke_credential(&issuer, &id); // must panic
@@ -11668,7 +11906,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -11692,7 +11930,7 @@ mod feature_tests {
         let new_subject = Address::generate(&env);
         let approver = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut approvers = Vec::new(&env);
         approvers.push_back(approver.clone());
@@ -11712,7 +11950,7 @@ mod feature_tests {
         let attestor1 = Address::generate(&env);
         let attestor2 = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -11739,7 +11977,7 @@ mod feature_tests {
         let attestor1 = Address::generate(&env);
         let attestor2 = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor1.clone());
@@ -11801,7 +12039,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         // First call should succeed
-        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Check rate limit state
         let state = client.get_rate_limit_state(&issuer);
@@ -11825,7 +12063,7 @@ mod feature_tests {
 
         // Multiple operations should work without overflow
         for i in 1..=5u32 {
-            client.issue_credential(&issuer, &subject, &i, &metadata, &None);
+            client.issue_credential(&issuer, &subject, &i, &metadata, &None, &0u64);
         }
     }
 
@@ -11841,7 +12079,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         // Valid credential type
-        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
     }
 
     // ── Issue #383: Enum Value Validation Tests ───────────────────────────
@@ -11935,7 +12173,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         // Issuer should be able to issue credential
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Issuer should be able to revoke
         client.revoke_credential(&issuer, &cred_id);
@@ -11952,7 +12190,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Other issuer should not be able to revoke
         client.revoke_credential(&other_issuer, &cred_id);
@@ -11983,7 +12221,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Should be able to attest before revocation
         let attestor = Address::generate(&env);
@@ -12012,7 +12250,7 @@ mod feature_tests {
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Suspend credential
         client.suspend_credential(&issuer, &cred_id);
@@ -12038,7 +12276,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         // Issue a credential
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Get credential should work
         let cred = client.get_credential(&cred_id);
@@ -12093,7 +12331,7 @@ mod doc_tests {
 
         // issue_credential(subject, credential_type, metadata_hash) -> u64
         let credential_id =
-            client.issue_credential(&issuer, &subject, &credential_type, &metadata_hash, &None);
+            client.issue_credential(&issuer, &subject, &credential_type, &metadata_hash, &None, &0u64);
         assert!(credential_id > 0, "Credential ID should be positive");
 
         // get_credential(credential_id) -> Credential
@@ -12169,6 +12407,7 @@ mod doc_tests {
             &1u32,
             &Bytes::from_slice(&env, b"QmHash"),
             &None,
+            &0u64,
         );
 
         // Setup: Create slice with attestors
@@ -12212,13 +12451,13 @@ mod doc_tests {
 
         // Test with small metadata
         let small_meta = Bytes::from_slice(&env, b"small");
-        let id1 = client.issue_credential(&issuer, &subject, &1u32, &small_meta, &None);
+        let id1 = client.issue_credential(&issuer, &subject, &1u32, &small_meta, &None, &0u64);
         assert!(id1 > 0);
 
         // Test with larger metadata (IPFS hash)
         let large_meta =
             Bytes::from_slice(&env, b"QmVeryLongIPFSHashThatRepresentsCredentialMetadata");
-        let id2 = client.issue_credential(&issuer, &subject, &2u32, &large_meta, &None);
+        let id2 = client.issue_credential(&issuer, &subject, &2u32, &large_meta, &None, &0u64);
         assert!(id2 > 0);
         assert_ne!(id1, id2, "Different credentials should have different IDs");
 
@@ -12248,7 +12487,7 @@ mod doc_tests {
 
         let mut ids = Vec::new();
         for i in 0..5 {
-            let id = client.issue_credential(&issuer, &subject, &(i as u32), &meta, &None);
+            let id = client.issue_credential(&issuer, &subject, &(i as u32), &meta, &None, &0u64);
             ids.push(id);
         }
 
@@ -12275,7 +12514,7 @@ mod doc_tests {
 
         set_ledger_timestamp(&env, 1000);
         let expiry = 2000u64;
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(expiry));
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(expiry), &0u64);
 
         // Credential should be retrievable before expiry
         let cred = client.get_credential(&cred_id);
@@ -12301,7 +12540,7 @@ mod doc_tests {
         let metadata = Bytes::from_slice(&env, b"ipfs://QmSetExpiry");
 
         set_ledger_timestamp(&env, 1000);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Set expiry to 3000
         client.set_credential_expiry(&issuer, &cred_id, &3000u64);
@@ -12331,9 +12570,9 @@ mod doc_tests {
         set_ledger_timestamp(&env, 1000);
 
         // Issue 3 credentials with different expiry times
-        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1500u64));
-        let cred2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &Some(2000u64));
-        let cred3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &Some(3000u64));
+        let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(1500u64), &0u64);
+        let cred2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &Some(2000u64), &0u64);
+        let cred3 = client.issue_credential(&issuer, &subject, &3u32, &metadata, &Some(3000u64), &0u64);
 
         // Move time to 1800 — cred1 should be expired, cred2 and cred3 should not
         set_ledger_timestamp(&env, 1800);
@@ -12384,7 +12623,7 @@ mod doc_tests {
         let holder = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
 
         let request_id = client.request_credential_revocation(
             &holder,
@@ -12403,7 +12642,7 @@ mod doc_tests {
         let holder = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let request_id = client.request_credential_revocation(
             &holder,
             &cred_id,
@@ -12425,7 +12664,7 @@ mod doc_tests {
         let holder = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let request_id = client.request_credential_revocation(
             &holder,
             &cred_id,
@@ -12450,7 +12689,7 @@ mod doc_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let evidence = Bytes::from_slice(&env, b"QmEvidenceHash0000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
 
         assert_eq!(dispute_id, 1u64);
@@ -12472,7 +12711,7 @@ mod doc_tests {
             env.storage().instance().set(&DataKey::Admin, &admin);
         });
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let _dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
 
         client.resolve_credential_dispute(
@@ -12494,7 +12733,7 @@ mod doc_tests {
 
         set_ledger_timestamp(&env, 1000);
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let _dispute_id = client.initiate_credential_dispute(&holder, &cred_id, &evidence);
 
         // Move time forward by 30 days + 1 second
@@ -12515,7 +12754,7 @@ mod doc_tests {
         let verifier = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let proof = client.generate_anonymous_proof(&holder, &cred_id, &verifier);
 
         assert!(proof.len() > 0);
@@ -12531,7 +12770,7 @@ mod doc_tests {
         let verifier = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None);
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let proof = client.generate_anonymous_proof(&holder, &cred_id, &verifier);
 
         let is_valid = client.verify_anonymous_proof(&cred_id, &verifier, &proof);

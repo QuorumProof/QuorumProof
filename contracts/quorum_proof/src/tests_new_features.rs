@@ -181,7 +181,7 @@ mod tests {
         client.initialize(&admin);
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         // Set current time to 1000
         env.ledger().with_mut(|li| {
@@ -219,7 +219,7 @@ mod tests {
         });
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         // Renew proof to expire at 5000
         let new_expiry = client.renew_proof(&issuer, &cred_id, &5000u64);
@@ -250,7 +250,7 @@ mod tests {
         });
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         // Stranger tries to renew proof - should panic
         client.renew_proof(&stranger, &cred_id, &5000u64);
@@ -280,8 +280,8 @@ mod tests {
         
         // Create credentials
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata_hash, &None);
+        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata_hash, &None, &0u64);
         
         // Create slice
         let attestors = vec![&env, attestor1.clone(), attestor2.clone()];
@@ -333,8 +333,8 @@ mod tests {
         });
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata_hash, &None);
+        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata_hash, &None, &0u64);
         
         let credential_ids = vec![&env, cred_id1, cred_id2];
         let slice_ids = vec![&env, 1u64, 1u64];
@@ -429,9 +429,9 @@ mod tests {
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         
         // Issue credentials to different subjects
-        let cred_id1 = client.issue_credential(&issuer, &subject1, &1u32, &metadata_hash, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject1, &2u32, &metadata_hash, &None);
-        let cred_id3 = client.issue_credential(&issuer, &subject2, &1u32, &metadata_hash, &None);
+        let cred_id1 = client.issue_credential(&issuer, &subject1, &1u32, &metadata_hash, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject1, &2u32, &metadata_hash, &None, &0u64);
+        let cred_id3 = client.issue_credential(&issuer, &subject2, &1u32, &metadata_hash, &None, &0u64);
         
         // Search for subject1's credentials
         let results = client.search_credentials(
@@ -467,8 +467,8 @@ mod tests {
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         
         // Issue credentials from different issuers
-        let cred_id1 = client.issue_credential(&issuer1, &subject, &1u32, &metadata_hash, &None);
-        let cred_id2 = client.issue_credential(&issuer2, &subject, &1u32, &metadata_hash, &None);
+        let cred_id1 = client.issue_credential(&issuer1, &subject, &1u32, &metadata_hash, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer2, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         // Search for issuer1's credentials
         let results = client.search_credentials(
@@ -502,9 +502,9 @@ mod tests {
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         
         // Issue credentials of different types
-        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
-        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata_hash, &None);
-        let cred_id3 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject, &2u32, &metadata_hash, &None, &0u64);
+        let cred_id3 = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         // Search for type 1 credentials
         let results = client.search_credentials(
@@ -540,7 +540,7 @@ mod tests {
         
         // Issue 5 credentials
         for i in 1..=5 {
-            client.issue_credential(&issuer, &subject, &i, &metadata_hash, &None);
+            client.issue_credential(&issuer, &subject, &i, &metadata_hash, &None, &0u64);
         }
         
         // Get first page (2 items)
@@ -598,9 +598,9 @@ mod tests {
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         
         // Issue credentials
-        client.issue_credential(&issuer, &subject1, &1u32, &metadata_hash, &None);
-        client.issue_credential(&issuer, &subject1, &2u32, &metadata_hash, &None);
-        client.issue_credential(&issuer, &subject2, &1u32, &metadata_hash, &None);
+        client.issue_credential(&issuer, &subject1, &1u32, &metadata_hash, &None, &0u64);
+        client.issue_credential(&issuer, &subject1, &2u32, &metadata_hash, &None, &0u64);
+        client.issue_credential(&issuer, &subject2, &1u32, &metadata_hash, &None, &0u64);
         
         // Count all credentials
         let total = client.count_credentials(&None, &None, &None);
@@ -633,9 +633,9 @@ mod tests {
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
         
         // Issue various credentials
-        client.issue_credential(&issuer1, &subject, &1u32, &metadata_hash, &None);
-        client.issue_credential(&issuer1, &subject, &2u32, &metadata_hash, &None);
-        client.issue_credential(&issuer2, &subject, &1u32, &metadata_hash, &None);
+        client.issue_credential(&issuer1, &subject, &1u32, &metadata_hash, &None, &0u64);
+        client.issue_credential(&issuer1, &subject, &2u32, &metadata_hash, &None, &0u64);
+        client.issue_credential(&issuer2, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         // Search for subject's type 1 credentials from issuer1
         let results = client.search_credentials(
@@ -708,7 +708,7 @@ mod tests {
         let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         // Suspend the attestor
         client.suspend_attestor(&creator, &slice_id, &attestor);
@@ -810,7 +810,7 @@ mod tests {
         client.initialize(&admin);
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         let evidence_hash = soroban_sdk::Bytes::from_array(&env, &[2u8; 32]);
         client.attach_evidence(&attestor, &cred_id, &evidence_hash);
@@ -836,7 +836,7 @@ mod tests {
         client.initialize(&admin);
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         let evidence = client.get_attestation_evidence(&cred_id, &attestor);
         assert!(evidence.is_none());
@@ -859,7 +859,7 @@ mod tests {
         client.initialize(&admin);
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         let condition_value = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
         let conditions = vec![&env, AttestationCondition {
@@ -889,7 +889,7 @@ mod tests {
         client.initialize(&admin);
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         let condition_value = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
         let conditions = vec![&env, AttestationCondition {
@@ -918,7 +918,7 @@ mod tests {
         client.initialize(&admin);
         
         let metadata_hash = soroban_sdk::Bytes::from_array(&env, &[1u8; 32]);
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None);
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata_hash, &None, &0u64);
         
         let condition_value = soroban_sdk::Bytes::from_array(&env, &[3u8; 32]);
         let wrong_value = soroban_sdk::Bytes::from_array(&env, &[4u8; 32]);
