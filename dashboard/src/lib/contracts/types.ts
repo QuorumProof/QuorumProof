@@ -12,6 +12,7 @@ export interface Credential {
   credential_type: number
   metadata_hash: string
   revoked: boolean
+  suspended: boolean
   expires_at: bigint | null
 }
 
