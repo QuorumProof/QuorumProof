@@ -200,16 +200,54 @@ function hexToBytes(hex) {
 }
 
 /**
- * Get all proof requests (verification history) for a credential.
- * Returns array of { id, credential_id, verifier, requested_at, claim_types }
+ * Generate a time-limited share link token for a credential.
+ * The caller must be the credential subject (holder).
+ * @param {string} subject  Stellar address of the credential holder
+ * @param {number|string} credentialId
+ * @param {number} expiryHours  Must be > 0
+ * @returns {Promise<Uint8Array>} 16-byte opaque token
  */
-export async function getProofRequests(credentialId) {
+export async function generateShareLink(subject, credentialId, expiryHours) {
   try {
+    const subjectVal = new Address(subject).toScVal();
     const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-    return await simulate(CONTRACT_QUORUM_PROOF, 'get_proof_requests', [credVal]);
+    const hoursVal = nativeToScVal(expiryHours, { type: 'u32' });
+    return await simulate(CONTRACT_QUORUM_PROOF, 'generate_share_link', [subjectVal, credVal, hoursVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
   }
+}
+
+/**
+ * Validate a share token and return the credential ID.
+ * Throws if the token is unknown or expired.
+ * @param {Uint8Array} token  16-byte token returned by generateShareLink
+ * @returns {Promise<bigint>} credential ID
+ */
+export async function validateShareToken(token) {
+  try {
+    const tokenVal = xdr.ScVal.scvBytes(token instanceof Uint8Array ? token : new Uint8Array(token));
+    return await simulate(CONTRACT_QUORUM_PROOF, 'validate_share_token', [tokenVal]);
+  } catch (error) {
+    throw new Error(handleContractError(error));
+  }
+}
+
+/** Utility: Uint8Array → hex string */
+export function bytesToHex(arr) {
+  return Array.from(arr instanceof Uint8Array ? arr : new Uint8Array(arr))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** Utility: hex string → Uint8Array */
+export function hexToUint8Array(hex) {
+  const clean = hex.replace(/^0x/, '');
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
+  }
+  return bytes;
 }
 
 /** Metadata hash bytes → readable string (utf8 or hex fallback) */
@@ -232,4 +270,4 @@ function uint8ArrayToHex(arr) {
 }
 
 export { STELLAR_NETWORK as NETWORK, CONTRACT_QUORUM_PROOF as CONTRACT_ID, STELLAR_RPC_URL as RPC_URL };
-export { getProofRequests };
+export { generateShareLink, validateShareToken, bytesToHex, hexToUint8Array };
