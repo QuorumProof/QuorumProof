@@ -1,0 +1,79 @@
+name: Deploy Testnet (PR)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  deploy-testnet:
+    name: Deploy to Testnet
+    runs-on: ubuntu-latest
+    environment: testnet
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+
+      - name: Build contracts
+        run: ./scripts/build.sh
+
+      - name: Run tests
+        run: ./scripts/test.sh
+
+      - name: Deploy to testnet
+        id: deploy
+        env:
+          STELLAR_NETWORK: testnet
+          STELLAR_RPC_URL: ${{ secrets.STELLAR_RPC_URL }}
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_SECRET_KEY }}
+        run: |
+          stellar keys add deployer --secret-key "$STELLAR_SECRET_KEY"
+
+          CONTRACT_QUORUM_PROOF=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/quorum_proof.wasm \
+            --source deployer \
+            --network testnet)
+
+          CONTRACT_SBT_REGISTRY=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/sbt_registry.wasm \
+            --source deployer \
+            --network testnet)
+
+          CONTRACT_ZK_VERIFIER=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/zk_verifier.wasm \
+            --source deployer \
+            --network testnet)
+
+          echo "quorum_proof=$CONTRACT_QUORUM_PROOF" >> "$GITHUB_OUTPUT"
+          echo "sbt_registry=$CONTRACT_SBT_REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "zk_verifier=$CONTRACT_ZK_VERIFIER" >> "$GITHUB_OUTPUT"
+
+      - name: Comment PR with deployment info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ Testnet Deployment Successful\n\n| Contract | ID |\n|---|---|\n| quorum_proof | \`${{ steps.deploy.outputs.quorum_proof }}\` |\n| sbt_registry | \`${{ steps.deploy.outputs.sbt_registry }}\` |\n| zk_verifier | \`${{ steps.deploy.outputs.zk_verifier }}\` |\n\nNetwork: \`testnet\` — Commit: \`${{ github.sha }}\``
+            })
