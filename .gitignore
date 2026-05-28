@@ -1,3 +1,40 @@
+# Build artifacts
 target/
+*.wasm
+
+# Node
 node_modules/
 frontend/node_modules/
+dashboard/node_modules/
+
+# Coverage
+coverage/
+frontend/coverage/
+dashboard/coverage/
+*.lcov
+.nyc_output/
+
+# Test snapshots
+**/test_snapshots/
+**/*.snap
+
+# Backup files
+*.bak
+*.bak.*
+lib.rs.bak
+
+# Build artifacts
+*.wasm
+*.d
+
+# IDE / OS
+.DS_Store
+*.swp
+*.swo
+.vscode/settings.json
+
+# Misc
+.env
+dist/
+dashboard/dist/
+frontend/dist/

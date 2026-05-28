@@ -3,11 +3,14 @@ members = [
     "contracts/quorum_proof",
     "contracts/sbt_registry",
     "contracts/zk_verifier",
+    "contracts/integration_tests",
+    "fuzz",
+    "benches",
 ]
 resolver = "2"
 
 [workspace.dependencies]
-soroban-sdk = { version = "21.0.0" }
+soroban-sdk = { version = "21.7" }
 
 [profile.release]
 opt-level = "z"

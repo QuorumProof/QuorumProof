@@ -1,0 +1,47 @@
+groups:
+  - name: quorumproof
+    rules:
+      - alert: HighErrorRate
+        expr: rate(quorumproof_api_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate on QuorumProof API"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+      - alert: APIDown
+        expr: up{job="quorumproof-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "QuorumProof exporter is down"
+          description: "The quorumproof-exporter has been unreachable for more than 1 minute."
+
+      - alert: ContractPaused
+        expr: quorumproof_contract_paused == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "QuorumProof contract is paused"
+          description: "The contract has been paused by an admin. Investigate before unpausing."
+
+      - alert: LowAttestationRate
+        expr: quorumproof_attestation_success_rate < 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low attestation success rate"
+          description: "Attestation success rate is {{ $value | humanizePercentage }}, below 50%."
+
+      - alert: RateLimitSpike
+        expr: rate(quorumproof_rate_limit_hits_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual rate-limit activity"
+          description: "Rate limit exceeded {{ $value }} times/s over the last 5 minutes."

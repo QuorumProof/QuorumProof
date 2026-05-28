@@ -1,0 +1,28 @@
+[run]
+branch = True
+source = frontend/src
+omit =
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */site-packages/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @abc.abstractmethod
+    if 0:
+    if False:
+    if not TYPE_CHECKING:
+
+precision = 2
+show_missing = True
+
+[html]
+directory = htmlcov
