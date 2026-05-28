@@ -47,6 +47,7 @@ mod contract {
             credential_type: u32,
             metadata_hash: Bytes,
             expires_at: Option<u64>,
+            _nonce: u64,
         ) -> Result<u64, ContractError> {
             // Validate inputs
             if metadata_hash.is_empty() {
@@ -126,7 +127,7 @@ fuzz_target!(|data: &[u8]| {
     let contract_id = env.register_contract(None, contract::QuorumProofContract);
     let client = contract::QuorumProofContractClient::new(&env, &contract_id);
 
-    if let Ok(id) = client.issue_credential(&issuer, &subject, &credential_type, &metadata_hash, &expires_at) {
+    if let Ok(id) = client.issue_credential(&issuer, &subject, &credential_type, &metadata_hash, &expires_at, &0u64) {
         // Verify credential was stored correctly
         if let Ok(cred) = client.get_credential(&id) {
             assert_eq!(cred.id, id);

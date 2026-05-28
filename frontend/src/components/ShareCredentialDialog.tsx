@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { generateShareLink, bytesToHex } from '../stellar';
 
 export type SharePermission = 'view' | 'verify' | 'full';
 
@@ -9,6 +10,7 @@ export interface ShareEntry {
 
 interface Props {
   credentialId: string;
+  subjectAddress?: string;
   onClose: () => void;
 }
 
@@ -18,18 +20,66 @@ const PERMISSION_LABELS: Record<SharePermission, { label: string; desc: string }
   full:   { label: 'Full',   desc: 'Full access including export' },
 };
 
+const EXPIRY_OPTIONS = [
+  { value: 1,   label: '1 hour' },
+  { value: 24,  label: '24 hours' },
+  { value: 72,  label: '3 days' },
+  { value: 168, label: '7 days' },
+];
+
 function isValidStellarAddress(addr: string): boolean {
   return addr.startsWith('G') && addr.length >= 56;
 }
 
-export function ShareCredentialDialog({ credentialId, onClose }: Props) {
+export function ShareCredentialDialog({ credentialId, subjectAddress, onClose }: Props) {
   const [shares, setShares] = useState<ShareEntry[]>([]);
   const [address, setAddress] = useState('');
   const [permission, setPermission] = useState<SharePermission>('view');
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const shareUrl = `${window.location.origin}/verify?id=${credentialId}`;
+  // Expiring share link state
+  const [expiryHours, setExpiryHours] = useState(24);
+  const [shareLink, setShareLink] = useState<string | null>(null);
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkError, setLinkError] = useState('');
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  const staticShareUrl = `${window.location.origin}/verify?id=${credentialId}`;
+
+  async function handleGenerateLink() {
+    if (!subjectAddress) {
+      setLinkError('Connect your wallet to generate an expiring share link.');
+      return;
+    }
+    setLinkLoading(true);
+    setLinkError('');
+    setShareLink(null);
+    try {
+      const token = await generateShareLink(subjectAddress, credentialId, expiryHours);
+      const hex = bytesToHex(token);
+      setShareLink(`${window.location.origin}/verify?token=${hex}`);
+    } catch (err: unknown) {
+      setLinkError(err instanceof Error ? err.message : 'Failed to generate share link.');
+    } finally {
+      setLinkLoading(false);
+    }
+  }
+
+  function handleCopyLink() {
+    navigator.clipboard.writeText(staticShareUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  function handleCopyShareLink() {
+    if (!shareLink) return;
+    navigator.clipboard.writeText(shareLink).then(() => {
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    });
+  }
 
   function handleAdd() {
     const trimmed = address.trim();
@@ -56,13 +106,6 @@ export function ShareCredentialDialog({ credentialId, onClose }: Props) {
     );
   }
 
-  function handleCopyLink() {
-    navigator.clipboard.writeText(shareUrl).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
-
   return (
     <div
       className="share-dialog-overlay"
@@ -83,11 +126,11 @@ export function ShareCredentialDialog({ credentialId, onClose }: Props) {
           </button>
         </div>
 
-        {/* Public link */}
+        {/* Static public link */}
         <div className="share-dialog__section">
           <label className="share-dialog__label">Public verification link</label>
           <div className="share-dialog__link-row">
-            <span className="share-dialog__link-url" title={shareUrl}>{shareUrl}</span>
+            <span className="share-dialog__link-url" title={staticShareUrl}>{staticShareUrl}</span>
             <button
               className="btn btn--sm btn--ghost"
               onClick={handleCopyLink}
@@ -96,6 +139,46 @@ export function ShareCredentialDialog({ credentialId, onClose }: Props) {
               {copied ? '✅ Copied' : '📋 Copy'}
             </button>
           </div>
+        </div>
+
+        {/* Expiring share link */}
+        <div className="share-dialog__section">
+          <label className="share-dialog__label">⏱ Expiring share link</label>
+          <div className="share-dialog__add-row">
+            <select
+              className="share-dialog__select"
+              value={expiryHours}
+              onChange={(e) => { setExpiryHours(Number(e.target.value)); setShareLink(null); }}
+              aria-label="Link expiry duration"
+            >
+              {EXPIRY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <button
+              className="btn btn--sm btn--primary"
+              onClick={handleGenerateLink}
+              disabled={linkLoading}
+              aria-label="Generate expiring share link"
+            >
+              {linkLoading ? '⏳ Generating…' : 'Generate link'}
+            </button>
+          </div>
+          {linkError && (
+            <p className="share-dialog__error" role="alert">{linkError}</p>
+          )}
+          {shareLink && (
+            <div className="share-dialog__link-row" style={{ marginTop: 8 }}>
+              <span className="share-dialog__link-url" title={shareLink}>{shareLink}</span>
+              <button
+                className="btn btn--sm btn--ghost"
+                onClick={handleCopyShareLink}
+                aria-label="Copy expiring share link"
+              >
+                {linkCopied ? '✅ Copied' : '📋 Copy'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Add address */}

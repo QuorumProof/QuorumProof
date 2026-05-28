@@ -38,7 +38,7 @@ fuzz_target!(|input: FuzzInput| {
 
     // issue_credential — should not panic on valid inputs
     let cid = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.issue_credential(&issuer, &subject, &ctype, &meta, &input.expires_at)
+        client.issue_credential(&issuer, &subject, &ctype, &meta, &input.expires_at, &0u64)
     })) {
         Ok(id) => id,
         Err(_) => return, // invalid input rejected by contract — expected
