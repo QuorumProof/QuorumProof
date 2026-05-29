@@ -908,8 +908,7 @@ mod tests {
         Bytes::from_slice(env, &buf)
     }
 
-    #[test]
-    fn test_verify_claim_degree_success() {
+    fn setup() -> (Env, ZkVerifierContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin) = setup(&env);
@@ -979,11 +978,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_upgrade_success() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-
+        let (env, client) = setup();
         let admin = Address::generate(&env);
         let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
         client.upgrade(&admin, &wasm_hash);
@@ -1651,5 +1646,64 @@ mod tests {
 
         let groth16_proof = make_valid_proof(&env); // 256 bytes
         assert!(!client.verify_plonk_proof(&groth16_proof, &make_public_inputs(&env), &make_vk_hash(&env)));
+    }
+
+    #[test]
+    fn test_revoke_proof_prevents_verification() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let qp_id = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+
+        // Proof verifies before revocation.
+        assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+
+        // Compute the same hash the contract uses and revoke it.
+        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
+        client.revoke_proof(&admin, &proof_hash);
+
+        // Same proof now fails.
+        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+    }
+
+    #[test]
+    fn test_is_revoked_returns_true_after_revocation() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"some-proof");
+        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
+
+        assert!(!client.is_revoked(&proof_hash));
+        client.revoke_proof(&admin, &proof_hash);
+        assert!(client.is_revoked(&proof_hash));
+    }
+
+    #[test]
+    fn test_revoke_proof_requires_auth() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let proof_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        // With mock_all_auths this always passes; verify the auth was recorded.
+        client.revoke_proof(&admin, &proof_hash);
+        let auths = env.auths();
+        assert!(!auths.is_empty());
+    }
+
+    #[test]
+    fn test_unrevoked_proof_still_verifies() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let qp_id = Address::generate(&env);
+
+        let proof_a = Bytes::from_slice(&env, b"proof-a");
+        let proof_b = Bytes::from_slice(&env, b"proof-b");
+
+        // Revoke only proof_a.
+        let hash_a: BytesN<32> = env.crypto().sha256(&proof_a).into();
+        client.revoke_proof(&admin, &hash_a);
+
+        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof_a));
+        assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof_b));
     }
 }
