@@ -438,8 +438,10 @@ pub enum DataKey2 {
     RateLimitState(Address),
     CredentialAuditTrail(u64),
     CredentialMetadataStore(u64),
-    /// Issue #517: Set of attestor addresses for a slice, enabling O(1) membership lookup.
-    AttestorSet(u64),
+    /// Issue #514: Cache for credential revocation status (credential_id -> bool)
+    RevocationCache(u64),
+    /// Issue #515: Cache for slice total weight (slice_id -> u32)
+    SliceTotalWeight(u64),
 }
 
 #[contracttype]
@@ -1587,6 +1589,8 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         Self::invalidate_verification_caches_for_credential(env, credential_id);
+        // Issue #514: Invalidate revocation cache and set it to true (revoked)
+        Self::set_revocation_cache(env, credential_id, true);
         let event_data = RevokeEventData {
             credential_id,
             subject: credential.subject.clone(),
@@ -1915,6 +1919,58 @@ impl QuorumProofContract {
                 .instance()
                 .remove(&DataKey2::AttestVerifyCache(credential_id, slice_id));
         }
+    }
+
+    // ── Issue #514: Revocation status cache helpers ───────────────────────────
+
+    /// Get cached revocation status for a credential. Returns None if not cached.
+    fn get_revocation_cache(env: &Env, credential_id: u64) -> Option<bool> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RevocationCache(credential_id))
+    }
+
+    /// Set cached revocation status for a credential.
+    fn set_revocation_cache(env: &Env, credential_id: u64, revoked: bool) {
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationCache(credential_id), &revoked);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Invalidate the revocation cache for a credential.
+    fn invalidate_revocation_cache(env: &Env, credential_id: u64) {
+        env.storage()
+            .instance()
+            .remove(&DataKey2::RevocationCache(credential_id));
+    }
+
+    // ── Issue #515: Slice total weight cache helpers ──────────────────────────
+
+    /// Get cached total weight for a slice. Returns None if not cached.
+    fn get_slice_weight_cache(env: &Env, slice_id: u64) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::SliceTotalWeight(slice_id))
+    }
+
+    /// Set cached total weight for a slice.
+    fn set_slice_weight_cache(env: &Env, slice_id: u64, total_weight: u32) {
+        env.storage()
+            .instance()
+            .set(&DataKey2::SliceTotalWeight(slice_id), &total_weight);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Invalidate the slice total weight cache.
+    fn invalidate_slice_weight_cache(env: &Env, slice_id: u64) {
+        env.storage()
+            .instance()
+            .remove(&DataKey2::SliceTotalWeight(slice_id));
     }
 
     // ── Issue #520: CredentialTypeIndex helpers ───────────────────────────────
@@ -3461,14 +3517,8 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        // Issue #517: Build attestor set for O(1) membership lookup.
-        let mut attestor_set: Map<Address, bool> = Map::new(&env);
-        for a in slice.attestors.iter() {
-            attestor_set.set(a, true);
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey2::AttestorSet(id), &attestor_set);
+        // Issue #515: Cache total weight at creation time
+        Self::set_slice_weight_cache(&env, id, total_weight);
         // Post-condition: slice must be stored
         Self::postcondition(
             env.storage().instance().has(&DataKey::Slice(id)),
@@ -3566,16 +3616,8 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        // Issue #517: Keep attestor set in sync.
-        let mut attestor_set: Map<Address, bool> = env
-            .storage()
-            .instance()
-            .get(&DataKey2::AttestorSet(slice_id))
-            .unwrap_or(Map::new(&env));
-        attestor_set.remove(attestor);
-        env.storage()
-            .instance()
-            .set(&DataKey2::AttestorSet(slice_id), &attestor_set);
+        // Issue #515: Update slice weight cache after removing attestor
+        Self::set_slice_weight_cache(&env, slice_id, total_weight);
     }
 
     /// Add a new attestor with a given weight to an existing quorum slice.
@@ -3615,16 +3657,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-        // Issue #517: Keep attestor set in sync.
-        let mut attestor_set: Map<Address, bool> = env
-            .storage()
-            .instance()
-            .get(&DataKey2::AttestorSet(slice_id))
-            .unwrap_or(Map::new(&env));
-        attestor_set.set(attestor, true);
-        env.storage()
-            .instance()
-            .set(&DataKey2::AttestorSet(slice_id), &attestor_set);
+        // Issue #515: Update slice weight cache after adding attestor
+        let new_total: u32 = slice.weights.iter().fold(0u32, |acc, w| acc.saturating_add(w));
+        Self::set_slice_weight_cache(&env, slice_id, new_total);
     }
 
     /// Update the threshold of an existing quorum slice.
@@ -4692,6 +4727,9 @@ impl QuorumProofContract {
 
         // Record consensus decision if threshold is met
         if is_sufficient {
+            // Issue #515: Use cached slice total weight to avoid recalculation
+            let cached_total_weight = Self::get_slice_weight_cache(&env, slice_id)
+                .unwrap_or_else(|| slice.weights.iter().sum());
             let decision = ConsensusDecision {
                 decision_id: env
                     .storage()
@@ -4707,7 +4745,7 @@ impl QuorumProofContract {
                 timestamp: now,
                 required_weight_threshold: slice.threshold,
                 achieved_weight: total_attested_weight,
-                total_weight: slice.weights.iter().sum(),
+                total_weight: cached_total_weight,
             };
 
             let mut history: Vec<ConsensusDecision> = env
@@ -4738,12 +4776,18 @@ impl QuorumProofContract {
     /// # Panics
     /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
     pub fn is_revoked(env: Env, credential_id: u64) -> bool {
+        // Issue #514: Check revocation cache first to avoid storage read
+        if let Some(cached) = Self::get_revocation_cache(&env, credential_id) {
+            return cached;
+        }
         let credential: Credential = env
             .storage()
             .instance()
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-        credential.revoked
+        let revoked = credential.revoked;
+        Self::set_revocation_cache(&env, credential_id, revoked);
+        revoked
     }
 
     /// Returns true if the credential has been suspended.

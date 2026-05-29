@@ -30,11 +30,6 @@ lcov.info
 # Backup files
 *.bak
 *.bak.*
-lib.rs.bak
-
-# Fuzz artifacts
-fuzz/corpus/
-fuzz/artifacts/
 
 # IDE / OS
 .DS_Store
@@ -48,5 +43,15 @@ fuzz/artifacts/
 dist/
 dashboard/dist/
 frontend/dist/
-api-server/dist/
 
+# Rust / Cargo
+Cargo.lock.bak
+**/*.rs.bak
+
+# Fuzz artifacts
+fuzz/corpus/
+fuzz/artifacts/
+
+# Mutation testing
+mutants.out/
+mutants.out.old/

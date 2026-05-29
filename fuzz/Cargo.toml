@@ -39,6 +39,18 @@ path = "fuzz_targets/fuzz_credential_issuance.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_credential_metadata"
+path = "fuzz_targets/fuzz_credential_metadata.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_batch_operations"
+path = "fuzz_targets/fuzz_batch_operations.rs"
+test = false
+doc = false
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
