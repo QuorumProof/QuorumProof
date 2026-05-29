@@ -50,6 +50,10 @@ pub enum DataKey {
     CredentialAccessLog(u64),
     Blacklist(Address),
     SbtActivityLog(u64),
+    /// Issue #512: Separate compressed metadata storage for SBT tokens.
+    /// Stores metadata_uri bytes independently from the SoulboundToken struct
+    /// to reduce per-token struct storage footprint by >30%.
+    CompressedMetadata(u64),
 }
 
 /// Weights used to compute a holder's reputation score.
@@ -247,11 +251,22 @@ impl SbtRegistryContract {
             .unwrap_or(0);
         token_count += 1;
         let token_id = token_count;
+        // Issue #512: Store metadata_uri separately to reduce SoulboundToken struct footprint.
+        // The struct stores an empty Bytes; callers retrieve metadata via get_token which
+        // transparently rehydrates metadata_uri from CompressedMetadata storage.
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompressedMetadata(token_id), &metadata_uri);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CompressedMetadata(token_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
         let token = SoulboundToken {
             id: token_id,
             owner: owner.clone(),
             credential_id,
-            metadata_uri,
+            metadata_uri: Bytes::new(&env), // stored separately in CompressedMetadata
             version: 1,
         };
         env.storage()
@@ -309,10 +324,21 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics with "token not found" if no token exists with that ID.
     pub fn get_token(env: Env, token_id: u64) -> SoulboundToken {
-        env.storage()
+        let mut token: SoulboundToken = env
+            .storage()
             .persistent()
             .get(&DataKey::Token(token_id))
-            .expect("token not found")
+            .expect("token not found");
+        // Issue #512: Rehydrate metadata_uri from separate CompressedMetadata storage.
+        // Transparent to callers — metadata_uri is always populated on return.
+        if let Some(metadata) = env
+            .storage()
+            .persistent()
+            .get::<_, Bytes>(&DataKey::CompressedMetadata(token_id))
+        {
+            token.metadata_uri = metadata;
+        }
+        token
     }
 
     /// Returns the owner address of a token.
@@ -1326,7 +1352,15 @@ impl SbtRegistryContract {
             .get(&DataKey::Token(token_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
         assert!(token.owner == owner, "not the owner");
-        token.metadata_uri = new_metadata_uri;
+        // Issue #512: Store metadata separately; keep struct metadata_uri empty.
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompressedMetadata(token_id), &new_metadata_uri);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CompressedMetadata(token_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
         token.version += 1;
         env.storage()
             .persistent()
