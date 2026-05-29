@@ -10,6 +10,10 @@ mod chaos;
 #[cfg(test)]
 mod audit_trail;
 
+// Issue #558: Contract upgrade safety tests
+#[cfg(test)]
+mod upgrade_safety;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
