@@ -9,6 +9,9 @@ import './index.css';
 // Lazy load pages
 const Dashboard = lazy(() => import('./pages/Dashboard').then(module => ({ default: module.default })));
 const Verify = lazy(() => import('./pages/Verify').then(module => ({ default: module.default })));
+const VerifierUI = lazy(() => import('./pages/VerifierUI').then(module => ({ default: module.default })));
+const IssuerManagement = lazy(() => import('./pages/IssuerManagement').then(module => ({ default: module.default })));
+const CredentialSearch = lazy(() => import('./pages/CredentialSearch').then(module => ({ default: module.default })));
 const QuorumSlice = lazy(() => import('./pages/QuorumSlice').then(module => ({ default: module.default })));
 const CredentialDetail = lazy(() => import('./pages/CredentialDetail').then(module => ({ default: module.default })));
 const IssueCredential = lazy(() => import('./pages/IssueCredential').then(module => ({ default: module.default })));
@@ -48,6 +51,9 @@ function AppContent() {
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<WalletGuard><Dashboard /></WalletGuard>} />
           <Route path="/verify" element={<Verify />} />
+          <Route path="/verifier" element={<VerifierUI />} />
+          <Route path="/issuer" element={<WalletGuard><IssuerManagement /></WalletGuard>} />
+          <Route path="/search" element={<CredentialSearch />} />
           <Route path="/help" element={<Help />} />
           <Route path="/slice/new" element={<WalletGuard><QuorumSlice /></WalletGuard>} />
           <Route path="/credential/issue" element={<WalletGuard><IssueCredential /></WalletGuard>} />
