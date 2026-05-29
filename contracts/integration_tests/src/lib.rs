@@ -22,6 +22,10 @@ mod contract_upgrade_testing;
 #[cfg(test)]
 mod incident_response;
 
+// Issue #581: Contract analytics
+#[cfg(test)]
+mod contract_analytics;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
