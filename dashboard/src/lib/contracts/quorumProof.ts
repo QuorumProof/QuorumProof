@@ -56,6 +56,40 @@ export async function revokeCredential(caller: string, credentialId: bigint): Pr
   })
 }
 
+/**
+ * Temporarily suspend a credential. Only the original issuer may call this.
+ * Unlike revocation, suspension is reversible via `resumeCredential`.
+ */
+export async function suspendCredential(issuer: string, credentialId: bigint): Promise<void> {
+  return invokeContract<void>({
+    contractId: CONTRACT_ID,
+    method: 'suspend_credential',
+    args: [issuer, credentialId],
+    source: issuer,
+  })
+}
+
+/**
+ * Resume a previously suspended credential. Only the original issuer may call this.
+ */
+export async function resumeCredential(issuer: string, credentialId: bigint): Promise<void> {
+  return invokeContract<void>({
+    contractId: CONTRACT_ID,
+    method: 'resume_credential',
+    args: [issuer, credentialId],
+    source: issuer,
+  })
+}
+
+/** Returns true if the credential is currently suspended. */
+export async function isSuspended(credentialId: bigint): Promise<boolean> {
+  return invokeContract<boolean>({
+    contractId: CONTRACT_ID,
+    method: 'is_suspended',
+    args: [credentialId],
+  })
+}
+
 // ── Quorum slices ────────────────────────────────────────────────────────────
 
 /**

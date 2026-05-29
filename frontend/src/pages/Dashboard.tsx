@@ -5,8 +5,7 @@ import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
 import { ExportCredentialsDialog } from '../components/ExportCredentialsDialog';
 import { ImportCredentialsDialog } from '../components/ImportCredentialsDialog';
-import { CredentialSearchFilter, type SearchFilters } from '../components/CredentialSearchFilter';
-import { useWallet } from '../hooks';
+import { useWallet, useRealtimeUpdates } from '../hooks';
 import {
   getCredentialsBySubject,
   getCredential,
@@ -117,6 +116,15 @@ export default function Dashboard() {
     fetchCredentials(address);
   }, [address, retryKey, fetchCredentials]);
 
+  // Real-time updates: WebSocket with polling fallback
+  const { status: realtimeStatus } = useRealtimeUpdates({
+    wsUrl: import.meta.env.VITE_WS_URL,
+    pollIntervalMs: 15_000,
+    onUpdate: () => {
+      if (address) fetchCredentials(address);
+    },
+  });
+
   const sliceIdRaw = localStorage.getItem('qp-slice-id');
   const sliceId = sliceIdRaw ? BigInt(sliceIdRaw) : null;
 
@@ -130,6 +138,13 @@ export default function Dashboard() {
             <p className="dashboard-subtitle">Your verifiable credentials on Stellar Soroban</p>
           </div>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+            <span
+              className={`badge badge--${realtimeStatus === 'connected' ? 'green' : realtimeStatus === 'polling' ? 'gray' : 'gray'}`}
+              title={`Real-time status: ${realtimeStatus}`}
+              style={{ alignSelf: 'center' }}
+            >
+              {realtimeStatus === 'connected' ? '🟢 Live' : realtimeStatus === 'polling' ? '🔄 Polling' : '⚪ Offline'}
+            </span>
             {cards.length > 0 && (
               <button
                 className="btn btn--primary btn--sm"

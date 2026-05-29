@@ -47,6 +47,15 @@ export function AppLayout({ currentPath, walletAddress, onConnectWallet, network
           <a href="/verify" className={`px-3 py-2 rounded ${isActive('/verify') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
             Verify
           </a>
+          <a href="/verifier" className={`px-3 py-2 rounded ${isActive('/verifier') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Verifier
+          </a>
+          <a href="/issuer" className={`px-3 py-2 rounded ${isActive('/issuer') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Issuer
+          </a>
+          <a href="/search" className={`px-3 py-2 rounded ${isActive('/search') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Search
+          </a>
           <a href="/slice/new" className={`px-3 py-2 rounded ${isActive('/slice/new') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
             New Slice
           </a>
