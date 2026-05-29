@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { exportToJSON, exportToCSV, downloadFile } from '../lib/exportUtils';
+import { exportToJSON, exportToCSV, downloadFile, buildQrUrl, exportToPDF } from '../lib/exportUtils';
 import type { Credential } from '../lib/contracts/quorumProof';
 
 const mockCredential: Credential = {
@@ -38,6 +38,25 @@ describe('Export Credentials', () => {
       expect(parsed[0].id).toBe('1');
       expect(parsed[1].id).toBe('2');
     });
+
+    it('includes all required metadata fields', () => {
+      const parsed = JSON.parse(exportToJSON([mockCredential]));
+      const entry = parsed[0];
+      expect(entry).toHaveProperty('id');
+      expect(entry).toHaveProperty('subject');
+      expect(entry).toHaveProperty('issuer');
+      expect(entry).toHaveProperty('type');
+      expect(entry).toHaveProperty('metadataHash');
+      expect(entry).toHaveProperty('revoked');
+      expect(entry).toHaveProperty('expiresAt');
+      expect(entry).toHaveProperty('issuedAt');
+    });
+
+    it('serialises expires_at as null when not set', () => {
+      const cred = { ...mockCredential, expires_at: null };
+      const parsed = JSON.parse(exportToJSON([cred]));
+      expect(parsed[0].expiresAt).toBeNull();
+    });
   });
 
   describe('exportToCSV', () => {
@@ -71,6 +90,58 @@ describe('Export Credentials', () => {
       expect(createElementSpy).toHaveBeenCalledWith('a');
       expect(appendChildSpy).toHaveBeenCalled();
       expect(removeChildSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('buildQrUrl', () => {
+    it('returns a URL containing the credential id', () => {
+      const url = buildQrUrl('42', 'https://example.com');
+      expect(url).toContain('42');
+      expect(url).toContain('chart.googleapis.com');
+    });
+
+    it('encodes the verify URL in the QR link', () => {
+      const url = buildQrUrl('7', 'https://app.example.com');
+      expect(url).toContain(encodeURIComponent('https://app.example.com/verify?id=7'));
+    });
+  });
+
+  describe('exportToPDF', () => {
+    it('opens a new window with credential data', () => {
+      const mockWrite = vi.fn();
+      const mockClose = vi.fn();
+      vi.spyOn(window, 'open').mockReturnValue({
+        document: { write: mockWrite, close: mockClose },
+      } as unknown as Window);
+
+      exportToPDF(mockCredential, 'https://example.com');
+
+      expect(window.open).toHaveBeenCalledWith('', '_blank');
+      expect(mockWrite).toHaveBeenCalledOnce();
+
+      const html: string = mockWrite.mock.calls[0][0];
+      expect(html).toContain(mockCredential.id.toString());
+      expect(html).toContain(mockCredential.subject);
+      expect(html).toContain(mockCredential.issuer);
+      // QR code image present
+      expect(html).toContain('chart.googleapis.com');
+      // Verify link present
+      expect(html).toContain(`/verify?id=${mockCredential.id}`);
+    });
+
+    it('does nothing when window.open returns null', () => {
+      vi.spyOn(window, 'open').mockReturnValue(null);
+      expect(() => exportToPDF(mockCredential, 'https://example.com')).not.toThrow();
+    });
+
+    it('marks revoked credentials in the PDF', () => {
+      const mockWrite = vi.fn();
+      vi.spyOn(window, 'open').mockReturnValue({
+        document: { write: mockWrite, close: vi.fn() },
+      } as unknown as Window);
+
+      exportToPDF({ ...mockCredential, revoked: true }, 'https://example.com');
+      expect(mockWrite.mock.calls[0][0]).toContain('Revoked');
     });
   });
 });
