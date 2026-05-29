@@ -18,6 +18,10 @@ mod deployment_verification;
 #[cfg(test)]
 mod contract_upgrade_testing;
 
+// Issue #580: Automated incident response
+#[cfg(test)]
+mod incident_response;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
