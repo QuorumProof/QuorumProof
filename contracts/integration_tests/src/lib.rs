@@ -1,3 +1,15 @@
+// Issue #552: Contract invariant checker
+#[cfg(test)]
+mod invariants;
+
+// Issue #554: Chaos testing for cross-contract calls
+#[cfg(test)]
+mod chaos;
+
+// Issue #555: Security audit trail verification
+#[cfg(test)]
+mod audit_trail;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
