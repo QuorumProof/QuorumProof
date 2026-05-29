@@ -39,8 +39,8 @@ const DEFAULT_REPUTATION_ATTESTATION_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_DIVISOR_SECONDS: u64 = 1_000;
 // Issue #381: Rate limiting configuration
-const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 100;
-const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 3600; // 1 hour
+foconst DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
+const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
 
@@ -436,6 +436,8 @@ pub enum DataKey2 {
     AttestConditions(u64),
     RateLimitConfig,
     RateLimitState(Address),
+    IssuerRateLimitConfig(Address),
+    RateLimitWhitelist(Address),
     CredentialAuditTrail(u64),
     CredentialMetadataStore(u64),
 }
@@ -1074,6 +1076,74 @@ impl QuorumProofContract {
         Self::get_rate_limit_config(&env)
     }
 
+    /// Set a per-issuer rate limit override. Admin only.
+    pub fn set_issuer_rate_limit_config(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        max_calls: u32,
+        window_seconds: u64,
+    ) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        assert!(max_calls > 0, "max_calls must be greater than 0");
+        assert!(window_seconds > 0, "window_seconds must be greater than 0");
+        let config = RateLimitConfig { max_calls, window_seconds };
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRateLimitConfig(issuer), &config);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Add an issuer to the rate limit whitelist (bypasses all rate limits). Admin only.
+    pub fn add_rate_limit_whitelist(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey2::RateLimitWhitelist(issuer), &true);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Remove an issuer from the rate limit whitelist. Admin only.
+    pub fn remove_rate_limit_whitelist(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .remove(&DataKey2::RateLimitWhitelist(issuer));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check if an issuer is on the rate limit whitelist.
+    pub fn is_rate_limit_whitelisted(env: Env, issuer: Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(issuer))
+            .unwrap_or(false)
+    }
+
     // ── Issue #521: Proof of Work for credential issuance ─────────────────────
 
     /// Set the PoW difficulty (number of leading zero bits). Admin only.
@@ -1157,7 +1227,23 @@ impl QuorumProofContract {
     /// Check rate limit for an address and update if necessary
     /// Returns true if within rate limit, false if limit exceeded
     fn check_rate_limit(env: &Env, address: &Address) -> bool {
-        let config = Self::get_rate_limit_config(env);
+        // Whitelisted issuers bypass rate limiting entirely
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(address.clone()))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // Use per-issuer config if set, otherwise fall back to global config
+        let config: RateLimitConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRateLimitConfig(address.clone()))
+            .unwrap_or_else(|| Self::get_rate_limit_config(env));
+
         let now = env.ledger().timestamp();
 
         let state: Option<RateLimitState> = env
