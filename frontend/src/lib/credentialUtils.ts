@@ -1,4 +1,5 @@
 import type { Credential, QuorumSlice } from './contracts/quorumProof';
+import type { SearchFilters } from '../components/CredentialSearchFilter';
 
 export type AttestationStatus = 'attested' | 'pending' | 'revoked' | 'expired';
 
@@ -65,4 +66,62 @@ export function formatTimestamp(
     month: 'short',
     day: 'numeric',
   });
+}
+
+/** Apply search query, status filter, and sort to a list of CredCardData. */
+export function filterAndSortCards(
+  cards: CredCardData[],
+  filters: SearchFilters
+): CredCardData[] {
+  const q = (filters.query ?? '').toLowerCase().trim();
+
+  let result = cards.filter((card) => {
+    const { credential, expired } = card;
+
+    // Status filter
+    if (filters.status !== 'all') {
+      const status = deriveStatus(credential.revoked, expired, card.attested);
+      if (filters.status === 'active' && status !== 'attested' && status !== 'pending') return false;
+      if (filters.status === 'expired' && status !== 'expired') return false;
+      if (filters.status === 'revoked' && status !== 'revoked') return false;
+    }
+
+    // Type filter
+    if (filters.credentialType !== undefined && credential.credential_type !== filters.credentialType) {
+      return false;
+    }
+
+    // Text search: type label, issuer, subject
+    if (q) {
+      const typeLabel = credTypeLabel(credential.credential_type).toLowerCase();
+      if (
+        !typeLabel.includes(q) &&
+        !credential.issuer.toLowerCase().includes(q) &&
+        !credential.subject.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  // Sort
+  result = [...result].sort((a, b) => {
+    let cmp = 0;
+    const { sortField, sortOrder } = filters;
+    if (sortField === 'issuer') {
+      cmp = a.credential.issuer.localeCompare(b.credential.issuer);
+    } else if (sortField === 'expiry') {
+      const aExp = Number(a.credential.expires_at ?? 0);
+      const bExp = Number(b.credential.expires_at ?? 0);
+      cmp = aExp - bExp;
+    } else {
+      // 'issued' — use credential id as proxy (higher id = issued later)
+      cmp = Number(a.credential.id) - Number(b.credential.id);
+    }
+    return sortOrder === 'asc' ? cmp : -cmp;
+  });
+
+  return result;
 }

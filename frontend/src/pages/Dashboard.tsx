@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Navbar } from '../components/Navbar';
 import { CredentialCard } from '../components/CredentialCard';
 import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
@@ -14,7 +14,14 @@ import {
   getSlice,
   isExpired,
 } from '../stellar';
-import { type CredCardData } from '../lib/credentialUtils';
+import { type CredCardData, filterAndSortCards } from '../lib/credentialUtils';
+
+const DEFAULT_FILTERS: SearchFilters = {
+  query: '',
+  status: 'all',
+  sortField: 'issued',
+  sortOrder: 'desc',
+};
 
 export default function Dashboard() {
   const { address, disconnect } = useWallet();
@@ -24,6 +31,9 @@ export default function Dashboard() {
   const [retryKey, setRetryKey] = useState(0);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
+  const [filters, setFilters] = useState<SearchFilters>(DEFAULT_FILTERS);
+
+  const visibleCards = useMemo(() => filterAndSortCards(cards, filters), [cards, filters]);
 
   const fetchCredentials = useCallback(async (walletAddress: string) => {
     setLoading(true);
@@ -168,6 +178,11 @@ export default function Dashboard() {
         </header>
 
         <div className="dashboard-content">
+          {/* Search and filter bar */}
+          {!error && (
+            <CredentialSearchFilter onSearch={setFilters} loading={loading} />
+          )}
+
           {/* Loading credentials */}
           {loading && (
             <div className="dashboard-grid">
@@ -200,10 +215,18 @@ export default function Dashboard() {
             <EmptyState address={address!} />
           )}
 
+          {/* No results after filtering */}
+          {!loading && !error && cards.length > 0 && visibleCards.length === 0 && (
+            <div className="error-card" style={{ textAlign: 'center' }}>
+              <div className="error-card__icon">🔍</div>
+              <div className="error-card__title">No credentials match your filters</div>
+            </div>
+          )}
+
           {/* Credential grid */}
-          {!loading && !error && cards.length > 0 && (
+          {!loading && !error && visibleCards.length > 0 && (
             <div className="dashboard-grid">
-              {cards.map((card: CredCardData) => (
+              {visibleCards.map((card: CredCardData) => (
                 <CredentialCard
                   key={card.credential.id.toString()}
                   data={card}
