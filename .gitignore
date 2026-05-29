@@ -7,13 +7,21 @@ target/
 node_modules/
 frontend/node_modules/
 dashboard/node_modules/
+api-server/node_modules/
+
+# Lock files (generated)
+frontend/package-lock.json
+frontend/pnpm-lock.yaml
+api-server/package-lock.json
 
 # Coverage
 coverage/
 frontend/coverage/
 dashboard/coverage/
+api-server/coverage/
 *.lcov
 .nyc_output/
+lcov.info
 
 # Test snapshots
 **/test_snapshots/
@@ -28,6 +36,7 @@ dashboard/coverage/
 *.swp
 *.swo
 .vscode/settings.json
+.idea/
 
 # Misc
 .env
