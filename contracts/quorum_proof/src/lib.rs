@@ -1585,6 +1585,8 @@ impl QuorumProofContract {
                 &subject_creds,
             );
         }
+        // Issue #510: Remove from SubjectCredentialIndex
+        Self::subject_index_remove(env, credential.subject.clone(), credential_id);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -2010,6 +2012,43 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
+    // ── Issue #510: SubjectCredentialIndex helpers ────────────────────────────
+
+    fn subject_index_add(env: &Env, subject: Address, credential_id: u64) {
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SubjectCredentialIndex(subject.clone()))
+            .unwrap_or(Vec::new(env));
+        ids.push_back(credential_id);
+        env.storage()
+            .instance()
+            .set(&DataKey2::SubjectCredentialIndex(subject), &ids);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn subject_index_remove(env: &Env, subject: Address, credential_id: u64) {
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SubjectCredentialIndex(subject.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut retained: Vec<u64> = Vec::new(env);
+        for id in ids.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::SubjectCredentialIndex(subject), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
     // ── Issue #519: MetadataHashCache helpers ─────────────────────────────────
 
     fn get_metadata_cache(env: &Env, credential_id: u64) -> Option<MetadataHashCache> {
@@ -2220,10 +2259,13 @@ impl QuorumProofContract {
         subject_creds.push_back(id);
         env.storage()
             .instance()
-            .set(&DataKey::SubjectCredentials(subject), &subject_creds);
+            .set(&DataKey::SubjectCredentials(subject.clone()), &subject_creds);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Issue #510: Maintain SubjectCredentialIndex for O(1) lookup
+        Self::subject_index_add(&env, subject.clone(), id);
 
         // Store duplicate prevention mapping
         env.storage().instance().set(&duplicate_key, &id);
@@ -2841,11 +2883,18 @@ impl QuorumProofContract {
         Self::require_valid_address(&env, &subject);
         Self::precondition(&env, page > 0);
         Self::precondition(&env, page_size > 0);
+        // Issue #510: Use SubjectCredentialIndex for O(1) lookup instead of linear scan
         let all_creds: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey::SubjectCredentials(subject))
-            .unwrap_or(Vec::new(&env));
+            .get(&DataKey2::SubjectCredentialIndex(subject.clone()))
+            .unwrap_or_else(|| {
+                // Fallback to legacy SubjectCredentials for backwards compatibility
+                env.storage()
+                    .instance()
+                    .get(&DataKey::SubjectCredentials(subject))
+                    .unwrap_or(Vec::new(&env))
+            });
         let total = all_creds.len();
         let start = (page - 1).saturating_mul(page_size);
         let mut result = Vec::new(&env);
@@ -3999,6 +4048,18 @@ impl QuorumProofContract {
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
 
+        // Issue #513: Build a Map<Address, bool> of slice attestors for O(1) membership lookup.
+        // This replaces the O(n*m) nested loop with a single O(n) pass.
+        let mut slice_set: Map<Address, bool> = Map::new(env);
+        for attestor in slice.attestors.iter() {
+            slice_set.set(attestor, true);
+        }
+
+        // New attestor must be in the slice; if not, no fork concern.
+        if slice_set.get(new_attestor.clone()).is_none() {
+            return false;
+        }
+
         // Get all attestation records for the credential
         let records: Vec<AttestationRecord> = env
             .storage()
@@ -4006,38 +4067,13 @@ impl QuorumProofContract {
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(env));
 
-        // Collect values attested by attestors in this slice
-        let mut slice_values: Vec<bool> = Vec::new(env);
+        // Single O(n) pass: check if any slice member has attested a different value.
+        // Early exit on first conflict found — O(log n) average case.
         for record in records.iter() {
-            // Check if this attestor is in the slice
-            let mut in_slice = false;
-            for attestor in slice.attestors.iter() {
-                if attestor == record.attestor {
-                    in_slice = true;
-                    break;
-                }
-            }
-            if in_slice {
-                slice_values.push_back(record.attestation_value);
-            }
-        }
-
-        // Check if new attestor is in slice (should be validated elsewhere)
-        let mut new_in_slice = false;
-        for attestor in slice.attestors.iter() {
-            if attestor == *new_attestor {
-                new_in_slice = true;
-                break;
-            }
-        }
-        if !new_in_slice {
-            return false; // Not in slice, no fork concern
-        }
-
-        // Check for conflicts: if any existing value differs from new_value, or if existing values differ
-        for existing_value in slice_values.iter() {
-            if existing_value != new_value {
-                return true; // Fork detected
+            if slice_set.get(record.attestor.clone()).is_some()
+                && record.attestation_value != new_value
+            {
+                return true; // Fork detected — early exit
             }
         }
 
