@@ -13693,3 +13693,6 @@ mod tests_new_features;
 
 #[path = "proptest_slices.rs"]
 mod proptest_slices;
+
+#[path = "proptest_credentials.rs"]
+mod proptest_credentials;
