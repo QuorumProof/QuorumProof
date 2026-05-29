@@ -1,6 +1,7 @@
 # Build artifacts
 target/
 *.wasm
+*.d
 
 # Node
 node_modules/
@@ -21,11 +22,6 @@ dashboard/coverage/
 # Backup files
 *.bak
 *.bak.*
-lib.rs.bak
-
-# Build artifacts
-*.wasm
-*.d
 
 # IDE / OS
 .DS_Store
@@ -38,3 +34,15 @@ lib.rs.bak
 dist/
 dashboard/dist/
 frontend/dist/
+
+# Rust / Cargo
+Cargo.lock.bak
+**/*.rs.bak
+
+# Fuzz artifacts
+fuzz/corpus/
+fuzz/artifacts/
+
+# Mutation testing
+mutants.out/
+mutants.out.old/
