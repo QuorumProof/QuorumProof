@@ -766,6 +766,38 @@ impl ZkVerifierContract {
         digest.to_array()[0] != 0xFF
     }
 
+    /// Verify a batch of Groth16 proofs in a single call.
+    ///
+    /// Each element at index `i` of `proofs`, `public_inputs`, and `vk_hashes`
+    /// is verified independently using the same logic as `verify_groth16_proof`.
+    /// The returned `Vec<bool>` preserves the input order.
+    ///
+    /// All three vectors must have the same length; panics otherwise.
+    pub fn verify_batch_proofs(
+        env: Env,
+        proofs: soroban_sdk::Vec<Bytes>,
+        public_inputs: soroban_sdk::Vec<Bytes>,
+        vk_hashes: soroban_sdk::Vec<BytesN<32>>,
+    ) -> soroban_sdk::Vec<bool> {
+        let len = proofs.len();
+        assert!(
+            public_inputs.len() == len && vk_hashes.len() == len,
+            "proofs, public_inputs, and vk_hashes must have the same length"
+        );
+
+        let mut results = soroban_sdk::Vec::new(&env);
+        for i in 0..len {
+            let result = Self::verify_groth16_proof(
+                env.clone(),
+                proofs.get(i).unwrap(),
+                public_inputs.get(i).unwrap(),
+                vk_hashes.get(i).unwrap(),
+            );
+            results.push_back(result);
+        }
+        results
+    }
+
     /// Verify a PLONK proof with explicit verifying-key hash and public inputs.
     ///
     /// This is the primary production entry point for PLONK verification.
@@ -908,8 +940,7 @@ mod tests {
         Bytes::from_slice(env, &buf)
     }
 
-    #[test]
-    fn test_verify_claim_degree_success() {
+    fn setup() -> (Env, ZkVerifierContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin) = setup(&env);
@@ -979,11 +1010,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_upgrade_success() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-
+        let (env, client) = setup();
         let admin = Address::generate(&env);
         let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
         client.upgrade(&admin, &wasm_hash);
@@ -1651,5 +1678,176 @@ mod tests {
 
         let groth16_proof = make_valid_proof(&env); // 256 bytes
         assert!(!client.verify_plonk_proof(&groth16_proof, &make_public_inputs(&env), &make_vk_hash(&env)));
+    }
+
+    #[test]
+    fn test_revoke_proof_prevents_verification() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let qp_id = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"valid-proof");
+
+        // Proof verifies before revocation.
+        assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+
+        // Compute the same hash the contract uses and revoke it.
+        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
+        client.revoke_proof(&admin, &proof_hash);
+
+        // Same proof now fails.
+        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+    }
+
+    #[test]
+    fn test_is_revoked_returns_true_after_revocation() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"some-proof");
+        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
+
+        assert!(!client.is_revoked(&proof_hash));
+        client.revoke_proof(&admin, &proof_hash);
+        assert!(client.is_revoked(&proof_hash));
+    }
+
+    #[test]
+    fn test_revoke_proof_requires_auth() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let proof_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        // With mock_all_auths this always passes; verify the auth was recorded.
+        client.revoke_proof(&admin, &proof_hash);
+        let auths = env.auths();
+        assert!(!auths.is_empty());
+    }
+
+    #[test]
+    fn test_unrevoked_proof_still_verifies() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let qp_id = Address::generate(&env);
+
+        let proof_a = Bytes::from_slice(&env, b"proof-a");
+        let proof_b = Bytes::from_slice(&env, b"proof-b");
+
+        // Revoke only proof_a.
+        let hash_a: BytesN<32> = env.crypto().sha256(&proof_a).into();
+        client.revoke_proof(&admin, &hash_a);
+
+        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof_a));
+        assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof_b));
+    }
+
+    // --- verify_batch_proofs tests ---
+
+    #[test]
+    fn test_verify_batch_proofs_all_valid() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let proof = make_valid_proof(&env);
+        let pi = make_public_inputs(&env);
+        let vk = make_vk_hash(&env);
+
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        let mut vks = soroban_sdk::Vec::new(&env);
+        proofs.push_back(proof.clone());
+        proofs.push_back(proof.clone());
+        pis.push_back(pi.clone());
+        pis.push_back(pi.clone());
+        vks.push_back(vk.clone());
+        vks.push_back(vk.clone());
+
+        let results = client.verify_batch_proofs(&proofs, &pis, &vks);
+        assert_eq!(results.len(), 2);
+        assert!(results.get(0).unwrap());
+        assert!(results.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_verify_batch_proofs_mixed_results() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let valid_proof = make_valid_proof(&env);
+        let invalid_proof = Bytes::from_slice(&env, b"too-short");
+        let pi = make_public_inputs(&env);
+        let vk = make_vk_hash(&env);
+
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        let mut vks = soroban_sdk::Vec::new(&env);
+        proofs.push_back(valid_proof);
+        proofs.push_back(invalid_proof);
+        pis.push_back(pi.clone());
+        pis.push_back(pi.clone());
+        vks.push_back(vk.clone());
+        vks.push_back(vk.clone());
+
+        let results = client.verify_batch_proofs(&proofs, &pis, &vks);
+        assert_eq!(results.len(), 2);
+        assert!(results.get(0).unwrap());
+        assert!(!results.get(1).unwrap());
+    }
+
+    #[test]
+    fn test_verify_batch_proofs_empty_batch() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let proofs: soroban_sdk::Vec<Bytes> = soroban_sdk::Vec::new(&env);
+        let pis: soroban_sdk::Vec<Bytes> = soroban_sdk::Vec::new(&env);
+        let vks: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env);
+
+        let results = client.verify_batch_proofs(&proofs, &pis, &vks);
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_verify_batch_proofs_preserves_order() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let valid = make_valid_proof(&env);
+        let invalid = Bytes::from_slice(&env, b"bad");
+        let pi = make_public_inputs(&env);
+        let vk = make_vk_hash(&env);
+
+        // Order: invalid, valid, invalid
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        let mut vks = soroban_sdk::Vec::new(&env);
+        for p in [invalid.clone(), valid.clone(), invalid.clone()] {
+            proofs.push_back(p);
+            pis.push_back(pi.clone());
+            vks.push_back(vk.clone());
+        }
+
+        let results = client.verify_batch_proofs(&proofs, &pis, &vks);
+        assert_eq!(results.len(), 3);
+        assert!(!results.get(0).unwrap());
+        assert!(results.get(1).unwrap());
+        assert!(!results.get(2).unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "proofs, public_inputs, and vk_hashes must have the same length")]
+    fn test_verify_batch_proofs_mismatched_lengths_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        proofs.push_back(make_valid_proof(&env));
+        let pis: soroban_sdk::Vec<Bytes> = soroban_sdk::Vec::new(&env); // empty
+        let vks: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env); // empty
+
+        client.verify_batch_proofs(&proofs, &pis, &vks);
     }
 }

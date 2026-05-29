@@ -1,3 +1,15 @@
+// Issue #552: Contract invariant checker
+#[cfg(test)]
+mod invariants;
+
+// Issue #554: Chaos testing for cross-contract calls
+#[cfg(test)]
+mod chaos;
+
+// Issue #555: Security audit trail verification
+#[cfg(test)]
+mod audit_trail;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
@@ -605,6 +617,137 @@ mod integration {
 
         let req = c.zk.generate_proof_request(&cred_id, &ClaimType::HasLicense);
         assert_eq!(req.credential_id, cred_id);
+    }
+
+    // ── Disaster recovery integration tests (#557) ───────────────────────────
+
+    /// Simulates a key loss scenario: a holder pre-configures guardians, then
+    /// loses access to their key. Guardians approve recovery to a new address,
+    /// and all SBTs transfer to the new owner with no credential data loss.
+    #[test]
+    fn test_disaster_recovery_key_loss_scenario() {
+        let env = Env::default();
+        let c = setup(&env);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        // Holder pre-configures recovery guardians while they still have key access
+        let holder = soroban_sdk::Address::generate(&env);
+        let new_owner = soroban_sdk::Address::generate(&env);
+        let guardian1 = soroban_sdk::Address::generate(&env);
+        let guardian2 = soroban_sdk::Address::generate(&env);
+
+        // Issue credentials and mint SBTs before key loss
+        let cred_id1 = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+        let cred_id2 = c.qp.issue_credential(&issuer, &holder, &2u32, &metadata(&env), &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id1 = c.sbt.mint(&holder, &cred_id1, &uri);
+        let token_id2 = c.sbt.mint(&holder, &cred_id2, &uri);
+
+        assert_eq!(c.sbt.get_tokens_by_owner(&holder).len(), 2);
+
+        // Pre-configure guardians (2-of-2 threshold) while key is still accessible
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(guardian1.clone());
+        guardians.push_back(guardian2.clone());
+        c.sbt.setup_recovery_guardians(&c.admin, &guardians, &2u32);
+
+        // --- Key loss occurs here ---
+        // Holder (or a trusted party with knowledge of old address) initiates recovery
+        let recovery_id = c.sbt.initiate_recovery(&holder, &new_owner);
+
+        // Verify recovery request is pending and not yet completed
+        let recovery = c.sbt.get_recovery_request(&recovery_id);
+        assert_eq!(recovery.initiator, holder);
+        assert_eq!(recovery.new_owner, new_owner);
+        assert!(!recovery.completed);
+        assert_eq!(recovery.approvals_count, 0);
+
+        // Both guardians independently approve the recovery
+        c.sbt.approve_recovery(&guardian1, &recovery_id);
+        let after_g1 = c.sbt.get_recovery_request(&recovery_id);
+        assert_eq!(after_g1.approvals_count, 1);
+
+        c.sbt.approve_recovery(&guardian2, &recovery_id);
+        let after_g2 = c.sbt.get_recovery_request(&recovery_id);
+        assert_eq!(after_g2.approvals_count, 2);
+
+        // Finalize recovery — all SBTs transfer to new_owner
+        c.sbt.finalize_recovery(&holder, &recovery_id);
+
+        // Verify recovery procedure worked: old owner has no tokens
+        assert_eq!(c.sbt.get_tokens_by_owner(&holder).len(), 0);
+
+        // New owner has all recovered tokens
+        assert_eq!(c.sbt.get_tokens_by_owner(&new_owner).len(), 2);
+        assert_eq!(c.sbt.owner_of(&token_id1), new_owner);
+        assert_eq!(c.sbt.owner_of(&token_id2), new_owner);
+
+        // Recovery request is marked completed
+        let completed = c.sbt.get_recovery_request(&recovery_id);
+        assert!(completed.completed);
+
+        // Credential validity is unaffected by the key change
+        assert!(c.qp.credential_exists(&cred_id1));
+        assert!(c.qp.credential_exists(&cred_id2));
+    }
+
+    /// Recovery must fail when approval threshold is not met.
+    #[test]
+    #[should_panic]
+    fn test_disaster_recovery_insufficient_approvals_blocked() {
+        let env = Env::default();
+        let c = setup(&env);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        let holder = soroban_sdk::Address::generate(&env);
+        let new_owner = soroban_sdk::Address::generate(&env);
+        let guardian1 = soroban_sdk::Address::generate(&env);
+        let guardian2 = soroban_sdk::Address::generate(&env);
+
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        c.sbt.mint(&holder, &cred_id, &uri);
+
+        // Require 2-of-2 approvals
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(guardian1.clone());
+        guardians.push_back(guardian2.clone());
+        c.sbt.setup_recovery_guardians(&c.admin, &guardians, &2u32);
+
+        let recovery_id = c.sbt.initiate_recovery(&holder, &new_owner);
+
+        // Only one guardian approves — threshold not met
+        c.sbt.approve_recovery(&guardian1, &recovery_id);
+
+        // Finalize must panic — insufficient approvals
+        c.sbt.finalize_recovery(&holder, &recovery_id);
+    }
+
+    /// An unauthorized address cannot approve a recovery request.
+    #[test]
+    #[should_panic]
+    fn test_disaster_recovery_unauthorized_approver_rejected() {
+        let env = Env::default();
+        let c = setup(&env);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        let holder = soroban_sdk::Address::generate(&env);
+        let new_owner = soroban_sdk::Address::generate(&env);
+        let guardian = soroban_sdk::Address::generate(&env);
+        let attacker = soroban_sdk::Address::generate(&env);
+
+        let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        c.sbt.mint(&holder, &cred_id, &uri);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(guardian.clone());
+        c.sbt.setup_recovery_guardians(&c.admin, &guardians, &1u32);
+
+        let recovery_id = c.sbt.initiate_recovery(&holder, &new_owner);
+
+        // Non-guardian attempts to approve — must panic
+        c.sbt.approve_recovery(&attacker, &recovery_id);
     }
 
     // ── E2E: SBT burn removes token from owner ────────────────────────────────

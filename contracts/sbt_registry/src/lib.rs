@@ -50,11 +50,24 @@ pub enum DataKey {
     CredentialAccessLog(u64),
     Blacklist(Address),
     SbtActivityLog(u64),
-    /// Issue #512: Separate compressed metadata storage for SBT tokens.
-    /// Stores metadata_uri bytes independently from the SoulboundToken struct
-    /// to reduce per-token struct storage footprint by >30%.
-    CompressedMetadata(u64),
+    /// Issue #516: Cache entry for cross-contract credential revocation check.
+    CredentialCache(u64),
 }
+
+/// Issue #516: Cached result of a cross-contract is_revoked check.
+/// Stored in persistent storage keyed by credential_id.
+/// The cache is valid while `cached_at + CREDENTIAL_CACHE_TTL_LEDGERS > current_ledger`.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialCacheEntry {
+    /// Whether the credential was revoked at the time of caching.
+    pub revoked: bool,
+    /// Ledger sequence number when this entry was written.
+    pub cached_at: u32,
+}
+
+/// Issue #516: Cache TTL in ledgers (~1 hour at 5s/ledger = 720 ledgers).
+const CREDENTIAL_CACHE_TTL_LEDGERS: u32 = 720;
 
 /// Weights used to compute a holder's reputation score.
 /// score = tokens_held * token_weight + notifications * activity_weight
@@ -218,12 +231,53 @@ impl SbtRegistryContract {
             .instance()
             .get(&DataKey::QuorumProofId)
             .expect("not initialized");
-        // is_revoked panics with CredentialNotFound if the credential doesn't exist.
-        let revoked: bool = env.invoke_contract(
-            &qp_id,
-            &Symbol::new(&env, "is_revoked"),
-            soroban_sdk::vec![&env, credential_id.into_val(&env)],
-        );
+        // Issue #516: Check credential cache before making a cross-contract call.
+        let current_ledger = env.ledger().sequence();
+        let revoked: bool = if let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<_, CredentialCacheEntry>(&DataKey::CredentialCache(credential_id))
+        {
+            if current_ledger.saturating_sub(entry.cached_at) < CREDENTIAL_CACHE_TTL_LEDGERS {
+                // Cache hit: use cached value, skip cross-contract call.
+                entry.revoked
+            } else {
+                // Cache expired: refresh via cross-contract call.
+                let r: bool = env.invoke_contract(
+                    &qp_id,
+                    &Symbol::new(&env, "is_revoked"),
+                    soroban_sdk::vec![&env, credential_id.into_val(&env)],
+                );
+                env.storage().persistent().set(
+                    &DataKey::CredentialCache(credential_id),
+                    &CredentialCacheEntry { revoked: r, cached_at: current_ledger },
+                );
+                env.storage().persistent().extend_ttl(
+                    &DataKey::CredentialCache(credential_id),
+                    STANDARD_TTL,
+                    EXTENDED_TTL,
+                );
+                r
+            }
+        } else {
+            // Cache miss: call cross-contract and populate cache.
+            // is_revoked panics with CredentialNotFound if the credential doesn't exist.
+            let r: bool = env.invoke_contract(
+                &qp_id,
+                &Symbol::new(&env, "is_revoked"),
+                soroban_sdk::vec![&env, credential_id.into_val(&env)],
+            );
+            env.storage().persistent().set(
+                &DataKey::CredentialCache(credential_id),
+                &CredentialCacheEntry { revoked: r, cached_at: current_ledger },
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::CredentialCache(credential_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+            r
+        };
         assert!(!revoked, "credential is revoked");
 
         // Check whitelist if enabled for this SBT
@@ -1928,6 +1982,117 @@ mod tests {
         let env2 = Env::from_snapshot_file(snap_path);
         assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
         assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    // ── Snapshot upgrade state tests (#556) ──────────────────────────────────
+
+    /// Snapshots contract state before a simulated upgrade, reloads the snapshot,
+    /// re-registers the contract code at the same address (upgrade), and verifies
+    /// all state is preserved with no data loss.
+    #[test]
+    fn test_snapshot_upgrade_preserves_state() {
+        let snap_path = "test_snapshots/tests/snapshot_upgrade_state.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let holder1 = Address::generate(&env);
+        let holder2 = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+
+        // Build non-trivial pre-upgrade state: two holders, three tokens
+        let cred_id1 = qp_client.issue_credential(&issuer, &holder1, &1u32, &meta, &None, &0u64);
+        let cred_id2 = qp_client.issue_credential(&issuer, &holder1, &2u32, &meta, &None, &0u64);
+        let cred_id3 = qp_client.issue_credential(&issuer, &holder2, &3u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id1 = client.mint(&holder1, &cred_id1, &uri);
+        let token_id2 = client.mint(&holder1, &cred_id2, &uri);
+        let token_id3 = client.mint(&holder2, &cred_id3, &uri);
+
+        // Configure recovery guardians so that state is present
+        let guardian = Address::generate(&env);
+        let guardians = soroban_sdk::vec![&env, guardian];
+        client.setup_recovery_guardians(&admin, &guardians, &1u32);
+
+        // Record all pre-upgrade state values
+        let pre_sbt_count = client.sbt_count();
+        let pre_owner1 = client.owner_of(&token_id1);
+        let pre_owner2 = client.owner_of(&token_id2);
+        let pre_owner3 = client.owner_of(&token_id3);
+        let pre_holder1_count = client.get_tokens_by_owner(&holder1).len();
+        let pre_holder2_count = client.get_tokens_by_owner(&holder2).len();
+        let pre_threshold = client.get_recovery_threshold();
+
+        // Capture contract address and take pre-upgrade snapshot
+        let sbt_address = client.address.clone();
+        env.to_snapshot_file(snap_path);
+
+        // Restore snapshot and re-register contract code (simulates WASM upgrade)
+        let env2 = Env::from_snapshot_file(snap_path);
+        env2.mock_all_auths();
+        env2.register_contract(Some(&sbt_address), SbtRegistryContract);
+        let client2 = SbtRegistryContractClient::new(&env2, &sbt_address);
+
+        // Ledger metadata must be identical
+        assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
+        assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+
+        // All contract state must be intact — no data loss after upgrade
+        assert_eq!(client2.sbt_count(), pre_sbt_count, "token count changed after upgrade");
+        assert_eq!(client2.owner_of(&token_id1), pre_owner1, "token 1 owner changed");
+        assert_eq!(client2.owner_of(&token_id2), pre_owner2, "token 2 owner changed");
+        assert_eq!(client2.owner_of(&token_id3), pre_owner3, "token 3 owner changed");
+        assert_eq!(
+            client2.get_tokens_by_owner(&holder1).len(),
+            pre_holder1_count,
+            "holder1 token count changed after upgrade"
+        );
+        assert_eq!(
+            client2.get_tokens_by_owner(&holder2).len(),
+            pre_holder2_count,
+            "holder2 token count changed after upgrade"
+        );
+        assert_eq!(
+            client2.get_recovery_threshold(),
+            pre_threshold,
+            "recovery threshold changed after upgrade"
+        );
+    }
+
+    /// Detects data loss: burning a token before snapshot must not silently restore it.
+    #[test]
+    fn test_snapshot_upgrade_detects_data_loss() {
+        let snap_path = "test_snapshots/tests/snapshot_upgrade_dataloss.json";
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &holder, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&holder, &cred_id, &uri);
+        client.burn_sbt(&holder, &token_id);
+
+        // Record state after burn (token no longer owned)
+        let pre_tokens = client.get_tokens_by_owner(&holder).len();
+
+        let sbt_address = client.address.clone();
+        env.to_snapshot_file(snap_path);
+
+        let env2 = Env::from_snapshot_file(snap_path);
+        env2.mock_all_auths();
+        env2.register_contract(Some(&sbt_address), SbtRegistryContract);
+        let client2 = SbtRegistryContractClient::new(&env2, &sbt_address);
+
+        // Burn must not be reversed by the upgrade — no phantom token reappearance
+        assert_eq!(
+            client2.get_tokens_by_owner(&holder).len(),
+            pre_tokens,
+            "burned token reappeared after upgrade (data loss)"
+        );
     }
 
     // ── Property-based fuzz tests ─────────────────────────────────────────────
