@@ -438,6 +438,10 @@ pub enum DataKey2 {
     RateLimitState(Address),
     CredentialAuditTrail(u64),
     CredentialMetadataStore(u64),
+    /// Issue #539: Track successful verification count for holder reputation
+    HolderSuccessfulVerifications(Address),
+    /// Issue #539: Track failed verification count for holder reputation
+    HolderFailedVerifications(Address),
 }
 
 #[contracttype]
@@ -873,14 +877,18 @@ pub struct VerificationStats {
 }
 
 /// Reputation record for a credential holder
+/// Issue #539: Enhanced with verification success rate tracking
 #[contracttype]
 #[derive(Clone)]
 pub struct HolderReputation {
     pub credentials_held: u64,
     pub successful_verifications: u64,
+    pub failed_verifications: u64,
+    pub total_verifications: u64,
+    pub verification_success_rate: u64, // 0-100 percentage
     pub attestation_count: u64,
     pub attestation_age_seconds: u64,
-    pub score: u64,
+    pub score: u64, // 0-100 score based on verification success rate
 }
 
 /// Scoring configuration for holder reputation.
@@ -7397,8 +7405,7 @@ impl QuorumProofContract {
     fn compute_holder_reputation(
         env: &Env,
         holder: Address,
-    ) -> (u64, u64, u64, u64, u64) {
-        let config = Self::get_holder_reputation_config(env.clone());
+    ) -> (u64, u64, u64, u64, u64, u64, u64) {
         let activities: Vec<ActivityRecord> = env
             .storage()
             .instance()
@@ -7420,11 +7427,32 @@ impl QuorumProofContract {
         let attestation_age_seconds = oldest_attestation_at
             .map(|attested_at| now.saturating_sub(attested_at))
             .unwrap_or(0);
-        let age_score = attestation_age_seconds
-            .saturating_div(config.age_divisor_seconds)
-            .saturating_mul(config.age_weight);
-        let count_score = attestation_count.saturating_mul(config.attestation_weight);
-        let score = count_score.saturating_add(age_score);
+        
+        // Issue #539: Get verification statistics
+        let successful_verifications: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::HolderSuccessfulVerifications(holder.clone()))
+            .unwrap_or(0);
+        let failed_verifications: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::HolderFailedVerifications(holder.clone()))
+            .unwrap_or(0);
+        let total_verifications = successful_verifications.saturating_add(failed_verifications);
+        
+        // Calculate verification success rate (0-100)
+        let verification_success_rate = if total_verifications > 0 {
+            successful_verifications
+                .saturating_mul(100)
+                .saturating_div(total_verifications)
+        } else {
+            0
+        };
+        
+        // Calculate reputation score (0-100) based on verification success rate
+        let score = core::cmp::min(verification_success_rate, 100);
+        
         let subject_credentials: Vec<u64> = env
             .storage()
             .instance()
@@ -7436,24 +7464,92 @@ impl QuorumProofContract {
 
         (
             credentials_held,
+            successful_verifications,
+            failed_verifications,
+            total_verifications,
             attestation_count,
             attestation_age_seconds,
-            count_score,
             score,
         )
     }
 
     /// Get holder reputation derived from attestation history.
+    /// Issue #539: Enhanced to include verification success rate and 0-100 score.
     pub fn get_holder_reputation(env: Env, holder: Address) -> HolderReputation {
-        let (credentials_held, attestation_count, attestation_age_seconds, _count_score, score) =
-            Self::compute_holder_reputation(&env, holder);
+        let (
+            credentials_held,
+            successful_verifications,
+            failed_verifications,
+            total_verifications,
+            attestation_count,
+            attestation_age_seconds,
+            score,
+        ) = Self::compute_holder_reputation(&env, holder);
+        
+        let verification_success_rate = if total_verifications > 0 {
+            successful_verifications
+                .saturating_mul(100)
+                .saturating_div(total_verifications)
+        } else {
+            0
+        };
+        
         HolderReputation {
             credentials_held,
-            successful_verifications: attestation_count,
+            successful_verifications,
+            failed_verifications,
+            total_verifications,
+            verification_success_rate,
             attestation_count,
             attestation_age_seconds,
             score,
         }
+    }
+
+    /// Issue #539: Record a verification attempt for reputation tracking.
+    /// Updates the holder's successful or failed verification count.
+    fn record_verification_attempt(env: &Env, holder: Address, success: bool) {
+        if success {
+            let count: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::HolderSuccessfulVerifications(holder.clone()))
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey2::HolderSuccessfulVerifications(holder),
+                &count.saturating_add(1),
+            );
+        } else {
+            let count: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::HolderFailedVerifications(holder.clone()))
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey2::HolderFailedVerifications(holder),
+                &count.saturating_add(1),
+            );
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #539: Verify a credential and update holder reputation.
+    /// This is a wrapper around is_attested that tracks verification attempts.
+    pub fn verify_credential(env: Env, credential_id: u64, slice_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        
+        let verification_result = Self::is_attested(env.clone(), credential_id, slice_id);
+        
+        // Record verification attempt for holder reputation
+        Self::record_verification_attempt(&env, credential.subject, verification_result);
+        
+        verification_result
     }
 
     // ── Issue #522: Credential holder consent tracking ────────────────────────
