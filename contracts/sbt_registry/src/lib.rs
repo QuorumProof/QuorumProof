@@ -50,7 +50,24 @@ pub enum DataKey {
     CredentialAccessLog(u64),
     Blacklist(Address),
     SbtActivityLog(u64),
+    /// Issue #516: Cache entry for cross-contract credential revocation check.
+    CredentialCache(u64),
 }
+
+/// Issue #516: Cached result of a cross-contract is_revoked check.
+/// Stored in persistent storage keyed by credential_id.
+/// The cache is valid while `cached_at + CREDENTIAL_CACHE_TTL_LEDGERS > current_ledger`.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialCacheEntry {
+    /// Whether the credential was revoked at the time of caching.
+    pub revoked: bool,
+    /// Ledger sequence number when this entry was written.
+    pub cached_at: u32,
+}
+
+/// Issue #516: Cache TTL in ledgers (~1 hour at 5s/ledger = 720 ledgers).
+const CREDENTIAL_CACHE_TTL_LEDGERS: u32 = 720;
 
 /// Weights used to compute a holder's reputation score.
 /// score = tokens_held * token_weight + notifications * activity_weight
@@ -214,12 +231,53 @@ impl SbtRegistryContract {
             .instance()
             .get(&DataKey::QuorumProofId)
             .expect("not initialized");
-        // is_revoked panics with CredentialNotFound if the credential doesn't exist.
-        let revoked: bool = env.invoke_contract(
-            &qp_id,
-            &Symbol::new(&env, "is_revoked"),
-            soroban_sdk::vec![&env, credential_id.into_val(&env)],
-        );
+        // Issue #516: Check credential cache before making a cross-contract call.
+        let current_ledger = env.ledger().sequence();
+        let revoked: bool = if let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<_, CredentialCacheEntry>(&DataKey::CredentialCache(credential_id))
+        {
+            if current_ledger.saturating_sub(entry.cached_at) < CREDENTIAL_CACHE_TTL_LEDGERS {
+                // Cache hit: use cached value, skip cross-contract call.
+                entry.revoked
+            } else {
+                // Cache expired: refresh via cross-contract call.
+                let r: bool = env.invoke_contract(
+                    &qp_id,
+                    &Symbol::new(&env, "is_revoked"),
+                    soroban_sdk::vec![&env, credential_id.into_val(&env)],
+                );
+                env.storage().persistent().set(
+                    &DataKey::CredentialCache(credential_id),
+                    &CredentialCacheEntry { revoked: r, cached_at: current_ledger },
+                );
+                env.storage().persistent().extend_ttl(
+                    &DataKey::CredentialCache(credential_id),
+                    STANDARD_TTL,
+                    EXTENDED_TTL,
+                );
+                r
+            }
+        } else {
+            // Cache miss: call cross-contract and populate cache.
+            // is_revoked panics with CredentialNotFound if the credential doesn't exist.
+            let r: bool = env.invoke_contract(
+                &qp_id,
+                &Symbol::new(&env, "is_revoked"),
+                soroban_sdk::vec![&env, credential_id.into_val(&env)],
+            );
+            env.storage().persistent().set(
+                &DataKey::CredentialCache(credential_id),
+                &CredentialCacheEntry { revoked: r, cached_at: current_ledger },
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::CredentialCache(credential_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+            r
+        };
         assert!(!revoked, "credential is revoked");
 
         // Check whitelist if enabled for this SBT

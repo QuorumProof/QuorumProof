@@ -438,6 +438,8 @@ pub enum DataKey2 {
     RateLimitState(Address),
     CredentialAuditTrail(u64),
     CredentialMetadataStore(u64),
+    /// Issue #517: Set of attestor addresses for a slice, enabling O(1) membership lookup.
+    AttestorSet(u64),
 }
 
 #[contracttype]
@@ -1428,7 +1430,14 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
-        if !slice.attestors.contains(caller) {
+        // Issue #517: O(1) membership check via attestor set.
+        let in_slice = env
+            .storage()
+            .instance()
+            .get::<_, Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+            .map(|set| set.contains_key(caller.clone()))
+            .unwrap_or_else(|| slice.attestors.contains(caller));
+        if !in_slice {
             panic_with_error!(env, ContractError::PermissionDenied);
         }
     }
@@ -3452,6 +3461,14 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #517: Build attestor set for O(1) membership lookup.
+        let mut attestor_set: Map<Address, bool> = Map::new(&env);
+        for a in slice.attestors.iter() {
+            attestor_set.set(a, true);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorSet(id), &attestor_set);
         // Post-condition: slice must be stored
         Self::postcondition(
             env.storage().instance().has(&DataKey::Slice(id)),
@@ -3549,6 +3566,16 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #517: Keep attestor set in sync.
+        let mut attestor_set: Map<Address, bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestorSet(slice_id))
+            .unwrap_or(Map::new(&env));
+        attestor_set.remove(attestor);
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorSet(slice_id), &attestor_set);
     }
 
     /// Add a new attestor with a given weight to an existing quorum slice.
@@ -3580,7 +3607,7 @@ impl QuorumProofContract {
                 panic_with_error!(&env, ContractError::DuplicateAttestor);
             }
         }
-        slice.attestors.push_back(attestor);
+        slice.attestors.push_back(attestor.clone());
         slice.weights.push_back(weight);
         env.storage()
             .instance()
@@ -3588,6 +3615,16 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #517: Keep attestor set in sync.
+        let mut attestor_set: Map<Address, bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestorSet(slice_id))
+            .unwrap_or(Map::new(&env));
+        attestor_set.set(attestor, true);
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorSet(slice_id), &attestor_set);
     }
 
     /// Update the threshold of an existing quorum slice.
@@ -4015,14 +4052,14 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
-        let mut found = false;
-        for a in slice.attestors.iter() {
-            if a == attestor {
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "attestor not in slice");
+        // Issue #517: O(1) attestor membership check via attestor set.
+        let in_slice = env
+            .storage()
+            .instance()
+            .get::<_, Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+            .map(|set| set.contains_key(attestor.clone()))
+            .unwrap_or_else(|| slice.attestors.contains(&attestor));
+        assert!(in_slice, "attestor not in slice");
 
         // Check if attestor is suspended
         if Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
