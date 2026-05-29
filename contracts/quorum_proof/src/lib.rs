@@ -1,5 +1,6 @@
 #![no_std]
 mod version;
+mod state_validation;
 
 use sbt_registry::SbtRegistryContractClient;
 use soroban_sdk::{
@@ -8,6 +9,7 @@ use soroban_sdk::{
 };
 use zk_verifier::{ClaimType, ZkVerifierContractClient};
 use version::{Version, get_contract_version, set_contract_version, add_version_to_history, check_upgrade_compatibility};
+use state_validation::{validate_state, create_checkpoint, log_validation, detect_corruption, alert_on_inconsistency, get_state_alerts};
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
@@ -1017,6 +1019,48 @@ impl QuorumProofContract {
         let from = parse_version(&env, &from_version);
         let to = parse_version(&env, &to_version);
         version::check_upgrade_compatibility(&env, &from, &to)
+    }
+
+    /// Issue #577: Validate contract state consistency
+    pub fn validate_state(env: Env) -> bool {
+        let result = validate_state(&env);
+        log_validation(&env, &result);
+        result.is_valid
+    }
+
+    /// Issue #577: Get state validation history
+    pub fn get_validation_history(env: Env) -> Vec<String> {
+        let history = state_validation::get_validation_history(&env);
+        let mut result = Vec::new(&env);
+        for entry in history.iter() {
+            let status = if entry.is_valid { "valid" } else { "invalid" };
+            result.push_back(String::from_linear(&env, status));
+        }
+        result
+    }
+
+    /// Issue #577: Create a state checkpoint for corruption detection
+    pub fn create_state_checkpoint(env: Env, admin: Address, credential_count: u64, slice_count: u64, attestation_count: u64) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        
+        let checkpoint = create_checkpoint(&env, credential_count, slice_count, attestation_count);
+        state_validation::store_checkpoint(&env, &checkpoint);
+    }
+
+    /// Issue #577: Detect state corruption
+    pub fn detect_state_corruption(env: Env, credential_count: u64, slice_count: u64, attestation_count: u64) -> bool {
+        detect_corruption(&env, credential_count, slice_count, attestation_count)
+    }
+
+    /// Issue #577: Get state alerts
+    pub fn get_state_alerts(env: Env) -> Vec<String> {
+        get_state_alerts(&env)
     }
 
     /// Pause the contract. Only admin may call this.
