@@ -12689,6 +12689,185 @@ mod feature_tests {
         client.add_rate_limit_whitelist(&non_admin, &issuer);
     }
 
+    // ── Issuance Multi-Sig Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_create_issuance_multisig_sets_policy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let policy = client.get_issuance_policy(&1u32).unwrap();
+        assert_eq!(policy.threshold, 2);
+        assert_eq!(policy.signers.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_create_issuance_multisig_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1);
+
+        client.create_issuance_multisig(&non_admin, &1u32, &signers, &1u32);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_issue_credential_blocked_when_policy_exists() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(issuer.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &1u32);
+
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        // Must panic with IssuancePolicyRequired
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_request_issuance_creates_pending_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        let req = client.get_pending_issuance(&request_id).unwrap();
+        assert_eq!(req.id, request_id);
+        assert_eq!(req.credential_type, 1);
+        assert!(!req.executed);
+        assert_eq!(req.approvals.len(), 1); // s1 auto-approves on request
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_request_issuance_non_signer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &1u32);
+
+        let outsider = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        client.request_issuance(&outsider, &subject, &1u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_approve_issuance_below_threshold_returns_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let s3 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        signers.push_back(s3.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &3u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s2 approves — still 2/3, not yet at threshold
+        let result = client.approve_issuance(&s2, &request_id);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_approve_issuance_at_threshold_issues_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s2 provides the final approval — threshold met
+        let cred_id = client.approve_issuance(&s2, &request_id).unwrap();
+        assert!(cred_id > 0);
+
+        // Credential should now exist
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.credential_type, 1);
+        assert_eq!(cred.subject, subject);
+
+        // Request should be marked executed
+        let req = client.get_pending_issuance(&request_id).unwrap();
+        assert!(req.executed);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_approve_issuance_duplicate_approval_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s1 already approved on request — duplicate should panic
+        client.approve_issuance(&s1, &request_id);
+    }
+
+    #[test]
+    fn test_no_policy_allows_direct_issue_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        // No policy for type 99 — direct issuance should succeed
+        let cred_id = client.issue_credential(&issuer, &subject, &99u32, &metadata, &None, &0u64);
+        assert!(cred_id > 0);
+    }
+
     // ── Issue #382: Numeric Overflow Protection Tests ─────────────────────
 
     #[test]
