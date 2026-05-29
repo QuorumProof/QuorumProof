@@ -10,6 +10,10 @@ mod chaos;
 #[cfg(test)]
 mod audit_trail;
 
+// Issue #578: Automated deployment verification
+#[cfg(test)]
+mod deployment_verification;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
