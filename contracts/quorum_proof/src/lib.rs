@@ -1,10 +1,13 @@
 #![no_std]
+mod version;
+
 use sbt_registry::SbtRegistryContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Bytes, Env, IntoVal, Map, String, Vec,
 };
 use zk_verifier::{ClaimType, ZkVerifierContractClient};
+use version::{Version, get_contract_version, set_contract_version, add_version_to_history, check_upgrade_compatibility};
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
@@ -916,6 +919,20 @@ pub struct ConsentRequest {
 #[contract]
 pub struct QuorumProofContract;
 
+fn parse_version(env: &Env, version_str: &String) -> Version {
+    // Parse "major.minor.patch" format
+    let parts: Vec<String> = version_str.split('.').map(|s| String::from_linear(env, s)).collect();
+    if parts.len() != 3 {
+        panic_with_error!(env, ContractError::InvalidInput);
+    }
+    
+    let major = parts.get(0).unwrap().parse::<u32>().unwrap_or(0);
+    let minor = parts.get(1).unwrap().parse::<u32>().unwrap_or(0);
+    let patch = parts.get(2).unwrap().parse::<u32>().unwrap_or(0);
+    
+    Version::new(major, minor, patch)
+}
+
 #[contractimpl]
 impl QuorumProofContract {
     /// Set the admin address once after deployment. Panics if already initialized.
@@ -976,6 +993,30 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #575: Get the semantic version of the contract
+    pub fn get_contract_version(env: Env) -> String {
+        let version = version::get_contract_version(&env);
+        version.to_string()
+    }
+
+    /// Issue #575: Get full version metadata including deployment time and history
+    pub fn get_version_metadata(env: Env) -> Vec<String> {
+        let history = version::get_version_history(&env);
+        let mut result = Vec::new(&env);
+        for metadata in history.iter() {
+            let version_str = metadata.version.to_string();
+            result.push_back(version_str);
+        }
+        result
+    }
+
+    /// Issue #575: Check if an upgrade from one version to another is compatible
+    pub fn check_upgrade_compatibility(env: Env, from_version: String, to_version: String) -> bool {
+        let from = parse_version(&env, &from_version);
+        let to = parse_version(&env, &to_version);
+        version::check_upgrade_compatibility(&env, &from, &to)
     }
 
     /// Pause the contract. Only admin may call this.
