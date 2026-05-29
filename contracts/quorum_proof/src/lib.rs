@@ -13690,3 +13690,6 @@ mod doc_tests {
 
 #[path = "tests_new_features.rs"]
 mod tests_new_features;
+
+#[path = "proptest_slices.rs"]
+mod proptest_slices;
