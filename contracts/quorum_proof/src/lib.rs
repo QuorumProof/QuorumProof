@@ -12317,6 +12317,95 @@ mod feature_tests {
         assert_eq!(state.unwrap().call_count, 1);
     }
 
+    #[test]
+    fn test_rate_limit_default_is_1000_per_day() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let config = client.get_rate_limit_config_pub();
+        assert_eq!(config.max_calls, 1000);
+        assert_eq!(config.window_seconds, 86400);
+    }
+
+    #[test]
+    fn test_set_issuer_rate_limit_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_rate_limit_config(&admin, &issuer, &5u32, &3600u64);
+
+        // Issuer-specific limit is enforced: 5 calls allowed
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        for ctype in 1u32..=5 {
+            client.issue_credential(&issuer, &subject, &ctype, &metadata, &None, &0u64);
+        }
+        let state = client.get_rate_limit_state(&issuer);
+        assert_eq!(state.unwrap().call_count, 5);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_issuer_rate_limit_config_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_rate_limit_config(&non_admin, &issuer, &5u32, &3600u64);
+    }
+
+    #[test]
+    fn test_rate_limit_whitelist_bypass() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        // Set a very tight per-issuer limit
+        client.set_issuer_rate_limit_config(&admin, &issuer, &1u32, &86400u64);
+        // Whitelist the issuer
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        // Should be able to issue more than 1 credential without hitting the limit
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &3u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_remove_rate_limit_whitelist() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        client.remove_rate_limit_whitelist(&admin, &issuer);
+        assert!(!client.is_rate_limit_whitelisted(&issuer));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_add_rate_limit_whitelist_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&non_admin, &issuer);
+    }
+
     // ── Issue #382: Numeric Overflow Protection Tests ─────────────────────
 
     #[test]
