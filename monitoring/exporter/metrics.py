@@ -76,6 +76,18 @@ contract_state_size = Gauge(
     registry=registry
 )
 
+backup_last_success_timestamp = Gauge(
+    'quorumproof_backup_last_success_timestamp',
+    'Unix timestamp of the last successful backup verification',
+    registry=registry
+)
+
+backup_verification_status = Gauge(
+    'quorumproof_backup_verification_status',
+    '1 if the most recent backup passed verification, 0 if it failed',
+    registry=registry
+)
+
 # Histograms
 api_request_duration_seconds = Histogram(
     'quorumproof_api_request_duration_seconds',

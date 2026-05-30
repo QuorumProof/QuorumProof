@@ -26,6 +26,8 @@ from metrics import (
     contract_state_size,
     api_request_duration_seconds,
     contract_invocation_duration_seconds,
+    backup_last_success_timestamp,
+    backup_verification_status,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -151,6 +153,12 @@ class QuorumProofExporter:
         elif event_type == "StateSnapshot":
             size = data.get("state_size", 0)
             contract_state_size.set(size)
+
+        elif event_type == "BackupVerified":
+            success = data.get("success", False)
+            backup_verification_status.set(1 if success else 0)
+            if success:
+                backup_last_success_timestamp.set(time.time())
 
     def _update_attestation_rate(self, event_data: Dict[str, Any]):
         """Calculate and update attestation success rate."""
