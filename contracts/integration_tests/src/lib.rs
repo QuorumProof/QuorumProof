@@ -10,6 +10,22 @@ mod chaos;
 #[cfg(test)]
 mod audit_trail;
 
+// Issue #578: Automated deployment verification
+#[cfg(test)]
+mod deployment_verification;
+
+// Issue #579: Contract upgrade testing
+#[cfg(test)]
+mod contract_upgrade_testing;
+
+// Issue #580: Automated incident response
+#[cfg(test)]
+mod incident_response;
+
+// Issue #581: Contract analytics
+#[cfg(test)]
+mod contract_analytics;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 

@@ -468,6 +468,390 @@ let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSBTMetadata");
 let token_id = sbt_client.mint(&student, &cred_id, &sbt_uri);
 ```
 
+## Credential Type Metadata Requirements
+
+### Required Fields by Type
+
+All credential types must include these core fields in their metadata:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `issuer` | string | Yes | Name or ID of the issuing organization |
+| `issue_date` | ISO 8601 | Yes | Date the credential was issued |
+| `subject_identifier` | string | Yes | Unique identifier for the credential holder |
+| `credential_version` | string | No | Version of the credential format |
+| `supporting_documents` | array | No | IPFS hashes of supporting documents |
+
+### Type-Specific Metadata
+
+#### Academic Credentials (1000-1099)
+
+**Degree (1001)**
+```json
+{
+  "issuer": "University of São Paulo",
+  "issue_date": "2020-06-15",
+  "subject_identifier": "student_id_12345",
+  "institution_code": "USP",
+  "field_of_study": "Mechanical Engineering",
+  "degree_level": "Bachelor",
+  "gpa": "3.8",
+  "graduation_date": "2020-06-15",
+  "transcript_hash": "QmXxxx...",
+  "diploma_hash": "QmYyyy..."
+}
+```
+
+**Diploma (1002)**
+```json
+{
+  "issuer": "Technical Institute",
+  "issue_date": "2021-12-10",
+  "subject_identifier": "student_id_67890",
+  "program": "Advanced Manufacturing",
+  "program_duration_months": 12,
+  "completion_date": "2021-12-10",
+  "program_hash": "QmZzzz..."
+}
+```
+
+**Certificate (1003)**
+```json
+{
+  "issuer": "Professional Association",
+  "issue_date": "2019-03-20",
+  "subject_identifier": "cert_holder_11111",
+  "certification_name": "Certified Professional Engineer",
+  "certification_body": "IEEE",
+  "expiry_date": "2024-03-20",
+  "certification_number": "CPE-2019-001",
+  "certification_hash": "QmAaaa..."
+}
+```
+
+#### Licensing Credentials (1100-1199)
+
+**Professional License (1101)**
+```json
+{
+  "issuer": "CREA",
+  "issue_date": "2019-05-10",
+  "subject_identifier": "engineer_id_22222",
+  "license_number": "PE-2019-12345",
+  "jurisdiction": "Brazil",
+  "discipline": "Mechanical Engineering",
+  "expiry_date": "2024-05-10",
+  "license_authority": "CREA",
+  "license_status": "active",
+  "license_hash": "QmBbbb..."
+}
+```
+
+**Specialty License (1102)**
+```json
+{
+  "issuer": "CREA",
+  "issue_date": "2020-01-15",
+  "subject_identifier": "engineer_id_22222",
+  "base_license_number": "PE-2019-12345",
+  "specialty": "Structural Engineering",
+  "specialty_code": "SE-001",
+  "expiry_date": "2025-01-15",
+  "specialty_hash": "QmCccc..."
+}
+```
+
+**Renewal License (1103)**
+```json
+{
+  "issuer": "CREA",
+  "issue_date": "2024-05-10",
+  "subject_identifier": "engineer_id_22222",
+  "original_license": "PE-2019-12345",
+  "renewal_date": "2024-05-10",
+  "new_expiry": "2029-05-10",
+  "renewal_number": "REN-2024-001",
+  "renewal_hash": "QmDddd..."
+}
+```
+
+#### Employment Credentials (1200-1299)
+
+**Employment History (1201)**
+```json
+{
+  "issuer": "Acme Engineering Corp",
+  "issue_date": "2023-12-31",
+  "subject_identifier": "employee_id_33333",
+  "employer": "Acme Engineering Corp",
+  "employer_code": "ACME-001",
+  "position": "Senior Mechanical Engineer",
+  "department": "Product Development",
+  "start_date": "2018-06-01",
+  "end_date": "2023-12-31",
+  "employment_type": "Full-time",
+  "employment_hash": "QmEeee..."
+}
+```
+
+**Reference (1202)**
+```json
+{
+  "issuer": "Acme Engineering Corp",
+  "issue_date": "2024-01-15",
+  "subject_identifier": "employee_id_33333",
+  "referee_name": "Dr. Jane Smith",
+  "referee_title": "VP Engineering",
+  "referee_organization": "Acme Engineering Corp",
+  "referee_email_hash": "sha256(email)",
+  "reference_date": "2024-01-15",
+  "reference_type": "professional",
+  "reference_hash": "QmFfff..."
+}
+```
+
+**Skill Certification (1203)**
+```json
+{
+  "issuer": "Dassault Systèmes",
+  "issue_date": "2022-09-20",
+  "subject_identifier": "professional_id_44444",
+  "skill": "CAD Design (CATIA)",
+  "certifying_body": "Dassault Systèmes",
+  "proficiency_level": "Advanced",
+  "certification_date": "2022-09-20",
+  "expiry_date": "2025-09-20",
+  "skill_code": "CAD-CATIA-ADV",
+  "skill_hash": "QmGggg..."
+}
+```
+
+#### Government Credentials (2000-2999)
+
+**National ID (2001)**
+```json
+{
+  "issuer": "Government Authority",
+  "issue_date": "2015-03-10",
+  "subject_identifier": "national_id_55555",
+  "id_number": "123456789",
+  "country": "Brazil",
+  "id_type": "CPF",
+  "expiry_date": "2030-03-10",
+  "id_hash": "QmHhhh..."
+}
+```
+
+**Passport (2002)**
+```json
+{
+  "issuer": "Government Authority",
+  "issue_date": "2018-06-20",
+  "subject_identifier": "passport_66666",
+  "passport_number": "AB123456",
+  "country": "Brazil",
+  "expiry_date": "2028-06-20",
+  "passport_hash": "QmIiii..."
+}
+```
+
+**Work Permit (2003)**
+```json
+{
+  "issuer": "Immigration Authority",
+  "issue_date": "2023-01-15",
+  "subject_identifier": "work_permit_77777",
+  "permit_number": "WP-2023-001",
+  "country": "Germany",
+  "employment_country": "Germany",
+  "expiry_date": "2024-01-15",
+  "permit_hash": "QmJjjj..."
+}
+```
+
+## Credential Type Validation Examples
+
+### TypeScript/JavaScript Validation
+
+```typescript
+// Validate credential metadata structure
+function validateCredentialMetadata(
+  credentialType: number,
+  metadata: Record<string, any>
+): boolean {
+  const requiredFields = ['issuer', 'issue_date', 'subject_identifier'];
+  
+  // Check required fields
+  for (const field of requiredFields) {
+    if (!metadata[field]) {
+      throw new Error(`Missing required field: ${field}`);
+    }
+  }
+  
+  // Type-specific validation
+  switch (credentialType) {
+    case 1001: // Degree
+      return validateDegreeMetadata(metadata);
+    case 1101: // Professional License
+      return validateLicenseMetadata(metadata);
+    case 1201: // Employment History
+      return validateEmploymentMetadata(metadata);
+    default:
+      return true;
+  }
+}
+
+function validateDegreeMetadata(metadata: Record<string, any>): boolean {
+  const required = ['field_of_study', 'degree_level', 'graduation_date'];
+  for (const field of required) {
+    if (!metadata[field]) {
+      throw new Error(`Degree credential missing: ${field}`);
+    }
+  }
+  
+  // Validate degree level
+  const validLevels = ['Bachelor', 'Master', 'PhD', 'Associate'];
+  if (!validLevels.includes(metadata.degree_level)) {
+    throw new Error(`Invalid degree level: ${metadata.degree_level}`);
+  }
+  
+  return true;
+}
+
+function validateLicenseMetadata(metadata: Record<string, any>): boolean {
+  const required = ['license_number', 'jurisdiction', 'discipline'];
+  for (const field of required) {
+    if (!metadata[field]) {
+      throw new Error(`License credential missing: ${field}`);
+    }
+  }
+  
+  // Validate expiry date
+  if (metadata.expiry_date) {
+    const expiryDate = new Date(metadata.expiry_date);
+    if (expiryDate < new Date()) {
+      throw new Error('License has expired');
+    }
+  }
+  
+  return true;
+}
+
+function validateEmploymentMetadata(metadata: Record<string, any>): boolean {
+  const required = ['employer', 'position', 'start_date'];
+  for (const field of required) {
+    if (!metadata[field]) {
+      throw new Error(`Employment credential missing: ${field}`);
+    }
+  }
+  
+  // Validate date range
+  const startDate = new Date(metadata.start_date);
+  const endDate = metadata.end_date ? new Date(metadata.end_date) : new Date();
+  
+  if (startDate > endDate) {
+    throw new Error('Start date cannot be after end date');
+  }
+  
+  return true;
+}
+```
+
+### Rust Validation
+
+```rust
+pub fn validate_credential_metadata(
+    credential_type: u32,
+    metadata: &str,
+) -> Result<(), Error> {
+    let metadata_obj: serde_json::Value = serde_json::from_str(metadata)
+        .map_err(|_| Error::InvalidMetadataFormat)?;
+    
+    // Check required fields
+    let required_fields = vec!["issuer", "issue_date", "subject_identifier"];
+    for field in required_fields {
+        if metadata_obj.get(field).is_none() {
+            return Err(Error::MissingRequiredField(field.to_string()));
+        }
+    }
+    
+    // Type-specific validation
+    match credential_type {
+        1001 => validate_degree_metadata(&metadata_obj),
+        1101 => validate_license_metadata(&metadata_obj),
+        1201 => validate_employment_metadata(&metadata_obj),
+        _ => Ok(()),
+    }
+}
+
+fn validate_degree_metadata(metadata: &serde_json::Value) -> Result<(), Error> {
+    let required = vec!["field_of_study", "degree_level", "graduation_date"];
+    for field in required {
+        if metadata.get(field).is_none() {
+            return Err(Error::MissingRequiredField(field.to_string()));
+        }
+    }
+    
+    // Validate degree level
+    let degree_level = metadata["degree_level"]
+        .as_str()
+        .ok_or(Error::InvalidMetadataFormat)?;
+    
+    match degree_level {
+        "Bachelor" | "Master" | "PhD" | "Associate" => Ok(()),
+        _ => Err(Error::InvalidDegreeLevel),
+    }
+}
+
+fn validate_license_metadata(metadata: &serde_json::Value) -> Result<(), Error> {
+    let required = vec!["license_number", "jurisdiction", "discipline"];
+    for field in required {
+        if metadata.get(field).is_none() {
+            return Err(Error::MissingRequiredField(field.to_string()));
+        }
+    }
+    
+    // Validate expiry date if present
+    if let Some(expiry_str) = metadata["expiry_date"].as_str() {
+        let expiry = chrono::DateTime::parse_from_rfc3339(expiry_str)
+            .map_err(|_| Error::InvalidDateFormat)?;
+        
+        if expiry < chrono::Utc::now() {
+            return Err(Error::CredentialExpired);
+        }
+    }
+    
+    Ok(())
+}
+
+fn validate_employment_metadata(metadata: &serde_json::Value) -> Result<(), Error> {
+    let required = vec!["employer", "position", "start_date"];
+    for field in required {
+        if metadata.get(field).is_none() {
+            return Err(Error::MissingRequiredField(field.to_string()));
+        }
+    }
+    
+    // Validate date range
+    let start_str = metadata["start_date"]
+        .as_str()
+        .ok_or(Error::InvalidMetadataFormat)?;
+    let start_date = chrono::DateTime::parse_from_rfc3339(start_str)
+        .map_err(|_| Error::InvalidDateFormat)?;
+    
+    if let Some(end_str) = metadata["end_date"].as_str() {
+        let end_date = chrono::DateTime::parse_from_rfc3339(end_str)
+            .map_err(|_| Error::InvalidDateFormat)?;
+        
+        if start_date > end_date {
+            return Err(Error::InvalidDateRange);
+        }
+    }
+    
+    Ok(())
+}
+```
+
 ## References
 
 - [Credential Expiry and Auto-Revocation](./credential-expiry.md)
