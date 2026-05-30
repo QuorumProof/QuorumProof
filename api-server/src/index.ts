@@ -1,10 +1,17 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
 import notificationsRouter from './routes/notifications.js';
 
 const app = express();
 app.use(express.json());
+
+// #585: track every /api/* call by route path and record errors
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const fn = `${req.method} ${req.path}`;
+  res.on('finish', () => recordCall(fn, res.statusCode >= 500));
+  next();
+});
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
