@@ -44,8 +44,8 @@ const DEFAULT_REPUTATION_ATTESTATION_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_DIVISOR_SECONDS: u64 = 1_000;
 // Issue #381: Rate limiting configuration
-const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 100;
-const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 3600; // 1 hour
+foconst DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
+const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
 
@@ -165,6 +165,58 @@ pub struct BlacklistEntry {
     pub holder: Address,
     pub reason: soroban_sdk::String,
     pub blacklisted_at: u64,
+}
+
+/// Multi-sig issuance policy for a credential type.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuancePolicy {
+    pub signers: soroban_sdk::Vec<Address>,
+    pub threshold: u32,
+}
+
+/// A pending issuance request awaiting multi-sig approval.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingIssuanceRequest {
+    pub id: u64,
+    pub issuer: Address,
+    pub subject: Address,
+    pub credential_type: u32,
+    pub metadata_hash: soroban_sdk::Bytes,
+    pub expires_at: Option<u64>,
+    pub nonce: u64,
+    pub approvals: soroban_sdk::Vec<Address>,
+    pub executed: bool,
+}
+
+/// Event emitted when an issuance policy is created or updated.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuancePolicySetEventData {
+    pub credential_type: u32,
+    pub threshold: u32,
+    pub signer_count: u32,
+}
+
+/// Event emitted when an issuance request is created.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuanceRequestedEventData {
+    pub request_id: u64,
+    pub issuer: Address,
+    pub subject: Address,
+    pub credential_type: u32,
+}
+
+/// Event emitted when a signer approves an issuance request.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuanceApprovedEventData {
+    pub request_id: u64,
+    pub signer: Address,
+    pub approvals_so_far: u32,
+    pub threshold: u32,
 }
 
 /// Event data emitted when a fork is detected.
@@ -376,6 +428,16 @@ pub enum ContractError {
     CredentialVersionNotFound = 47,
     /// Party has no decryption key entry for this credential
     DecryptionKeyNotFound = 48,
+    /// No issuance multisig policy exists for this credential type
+    IssuancePolicyNotFound = 49,
+    /// Signer is not part of the issuance multisig policy
+    NotIssuanceSigner = 50,
+    /// Pending issuance request not found
+    IssuanceRequestNotFound = 51,
+    /// Signer has already approved this issuance request
+    AlreadyApprovedIssuance = 52,
+    /// Credential type has a multisig policy; use request_issuance instead
+    IssuancePolicyRequired = 53,
 }
 
 #[contracttype]
@@ -441,6 +503,8 @@ pub enum DataKey2 {
     AttestConditions(u64),
     RateLimitConfig,
     RateLimitState(Address),
+    IssuerRateLimitConfig(Address),
+    RateLimitWhitelist(Address),
     CredentialAuditTrail(u64),
     CredentialMetadataStore(u64),
     /// Issue #514: Cache for credential revocation status (credential_id -> bool)
@@ -1167,6 +1231,74 @@ impl QuorumProofContract {
         Self::get_rate_limit_config(&env)
     }
 
+    /// Set a per-issuer rate limit override. Admin only.
+    pub fn set_issuer_rate_limit_config(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        max_calls: u32,
+        window_seconds: u64,
+    ) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        assert!(max_calls > 0, "max_calls must be greater than 0");
+        assert!(window_seconds > 0, "window_seconds must be greater than 0");
+        let config = RateLimitConfig { max_calls, window_seconds };
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRateLimitConfig(issuer), &config);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Add an issuer to the rate limit whitelist (bypasses all rate limits). Admin only.
+    pub fn add_rate_limit_whitelist(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey2::RateLimitWhitelist(issuer), &true);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Remove an issuer from the rate limit whitelist. Admin only.
+    pub fn remove_rate_limit_whitelist(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .remove(&DataKey2::RateLimitWhitelist(issuer));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check if an issuer is on the rate limit whitelist.
+    pub fn is_rate_limit_whitelisted(env: Env, issuer: Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(issuer))
+            .unwrap_or(false)
+    }
+
     // ── Issue #521: Proof of Work for credential issuance ─────────────────────
 
     /// Set the PoW difficulty (number of leading zero bits). Admin only.
@@ -1250,7 +1382,23 @@ impl QuorumProofContract {
     /// Check rate limit for an address and update if necessary
     /// Returns true if within rate limit, false if limit exceeded
     fn check_rate_limit(env: &Env, address: &Address) -> bool {
-        let config = Self::get_rate_limit_config(env);
+        // Whitelisted issuers bypass rate limiting entirely
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(address.clone()))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // Use per-issuer config if set, otherwise fall back to global config
+        let config: RateLimitConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRateLimitConfig(address.clone()))
+            .unwrap_or_else(|| Self::get_rate_limit_config(env));
+
         let now = env.ledger().timestamp();
 
         let state: Option<RateLimitState> = env
@@ -2277,6 +2425,14 @@ impl QuorumProofContract {
     ) -> u64 {
         issuer.require_auth();
         Self::require_not_paused(&env);
+        // Reject direct issuance if a multisig policy exists for this credential type
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey2::IssuancePolicy(credential_type))
+        {
+            panic_with_error!(&env, ContractError::IssuancePolicyRequired);
+        }
         // Issue #381: Rate limiting
         Self::require_rate_limit(&env, &issuer);
         // Issue #521: Proof of Work verification
@@ -4761,6 +4917,216 @@ impl QuorumProofContract {
     /// Returns true to preserve backward compatibility until full multisig is implemented.
     fn is_multisig_approved(_env: &Env, _credential_id: u64) -> bool {
         true
+    }
+
+    // ── Issuance Multi-Sig ────────────────────────────────────────────────────
+
+    /// Set a multi-sig issuance policy for a credential type. Admin only.
+    /// Once set, credentials of this type must go through `request_issuance` / `approve_issuance`.
+    pub fn create_issuance_multisig(
+        env: Env,
+        admin: Address,
+        credential_type: u32,
+        signers: soroban_sdk::Vec<Address>,
+        threshold: u32,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        assert!(credential_type > 0, "credential_type must be greater than 0");
+        assert!(!signers.is_empty(), "signers cannot be empty");
+        assert!(threshold > 0, "threshold must be greater than 0");
+        assert!(
+            threshold <= signers.len(),
+            "threshold cannot exceed signer count"
+        );
+        assert!(
+            signers.len() <= MAX_MULTISIG_SIGNERS,
+            "too many signers"
+        );
+
+        let policy = IssuancePolicy { signers: signers.clone(), threshold };
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuancePolicy(credential_type), &policy);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = IssuancePolicySetEventData {
+            credential_type,
+            threshold,
+            signer_count: signers.len(),
+        };
+        let topic = String::from_str(&env, "IssuancePolicySet");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get the issuance policy for a credential type, if one exists.
+    pub fn get_issuance_policy(env: Env, credential_type: u32) -> Option<IssuancePolicy> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::IssuancePolicy(credential_type))
+    }
+
+    /// Submit an issuance request for a credential type that has a multi-sig policy.
+    /// The caller must be one of the policy signers.
+    /// Returns the request ID.
+    pub fn request_issuance(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        credential_type: u32,
+        metadata_hash: soroban_sdk::Bytes,
+        expires_at: Option<u64>,
+        nonce: u64,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_valid_address(&env, &issuer);
+        Self::require_valid_address(&env, &subject);
+
+        let policy: IssuancePolicy = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuancePolicy(credential_type))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::IssuancePolicyNotFound));
+
+        // Issuer must be a registered signer
+        if !policy.signers.iter().any(|s| s == issuer) {
+            panic_with_error!(&env, ContractError::NotIssuanceSigner);
+        }
+
+        let request_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::PendingIssuanceCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let mut initial_approvals: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        initial_approvals.push_back(issuer.clone());
+
+        let request = PendingIssuanceRequest {
+            id: request_id,
+            issuer: issuer.clone(),
+            subject: subject.clone(),
+            credential_type,
+            metadata_hash,
+            expires_at,
+            nonce,
+            approvals: initial_approvals,
+            executed: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::PendingIssuance(request_id), &request);
+        env.storage()
+            .instance()
+            .set(&DataKey2::PendingIssuanceCount, &request_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = IssuanceRequestedEventData {
+            request_id,
+            issuer,
+            subject,
+            credential_type,
+        };
+        let topic = String::from_str(&env, "IssuanceRequested");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        request_id
+    }
+
+    /// Approve a pending issuance request. Caller must be a policy signer.
+    /// When approvals reach the threshold the credential is automatically issued.
+    /// Returns `Some(credential_id)` if the threshold was met and the credential was issued,
+    /// `None` otherwise.
+    pub fn approve_issuance(env: Env, signer: Address, request_id: u64) -> Option<u64> {
+        signer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut request: PendingIssuanceRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::PendingIssuance(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::IssuanceRequestNotFound));
+
+        assert!(!request.executed, "request already executed");
+
+        let policy: IssuancePolicy = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuancePolicy(request.credential_type))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::IssuancePolicyNotFound));
+
+        if !policy.signers.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::NotIssuanceSigner);
+        }
+        if request.approvals.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::AlreadyApprovedIssuance);
+        }
+
+        request.approvals.push_back(signer.clone());
+        let approvals_so_far = request.approvals.len();
+
+        let event_data = IssuanceApprovedEventData {
+            request_id,
+            signer,
+            approvals_so_far,
+            threshold: policy.threshold,
+        };
+        let topic = String::from_str(&env, "IssuanceApproved");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        if approvals_so_far >= policy.threshold {
+            request.executed = true;
+            env.storage()
+                .instance()
+                .set(&DataKey2::PendingIssuance(request_id), &request);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            // Issue the credential via the internal helper
+            let cred_id = Self::issue_inner(
+                &env,
+                request.issuer,
+                request.subject,
+                request.credential_type,
+                request.metadata_hash,
+                request.expires_at,
+            );
+            Some(cred_id)
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey2::PendingIssuance(request_id), &request);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            None
+        }
+    }
+
+    /// Get a pending issuance request by ID.
+    pub fn get_pending_issuance(env: Env, request_id: u64) -> Option<PendingIssuanceRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::PendingIssuance(request_id))
     }
 
     /// Check if a credential has met its quorum threshold using weighted trust.
@@ -12523,6 +12889,274 @@ mod feature_tests {
         let state = client.get_rate_limit_state(&issuer);
         assert!(state.is_some());
         assert_eq!(state.unwrap().call_count, 1);
+    }
+
+    #[test]
+    fn test_rate_limit_default_is_1000_per_day() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let config = client.get_rate_limit_config_pub();
+        assert_eq!(config.max_calls, 1000);
+        assert_eq!(config.window_seconds, 86400);
+    }
+
+    #[test]
+    fn test_set_issuer_rate_limit_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_rate_limit_config(&admin, &issuer, &5u32, &3600u64);
+
+        // Issuer-specific limit is enforced: 5 calls allowed
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        for ctype in 1u32..=5 {
+            client.issue_credential(&issuer, &subject, &ctype, &metadata, &None, &0u64);
+        }
+        let state = client.get_rate_limit_state(&issuer);
+        assert_eq!(state.unwrap().call_count, 5);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_issuer_rate_limit_config_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_rate_limit_config(&non_admin, &issuer, &5u32, &3600u64);
+    }
+
+    #[test]
+    fn test_rate_limit_whitelist_bypass() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        // Set a very tight per-issuer limit
+        client.set_issuer_rate_limit_config(&admin, &issuer, &1u32, &86400u64);
+        // Whitelist the issuer
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        // Should be able to issue more than 1 credential without hitting the limit
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &3u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_remove_rate_limit_whitelist() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        client.remove_rate_limit_whitelist(&admin, &issuer);
+        assert!(!client.is_rate_limit_whitelisted(&issuer));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_add_rate_limit_whitelist_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&non_admin, &issuer);
+    }
+
+    // ── Issuance Multi-Sig Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_create_issuance_multisig_sets_policy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let policy = client.get_issuance_policy(&1u32).unwrap();
+        assert_eq!(policy.threshold, 2);
+        assert_eq!(policy.signers.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_create_issuance_multisig_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1);
+
+        client.create_issuance_multisig(&non_admin, &1u32, &signers, &1u32);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_issue_credential_blocked_when_policy_exists() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(issuer.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &1u32);
+
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        // Must panic with IssuancePolicyRequired
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_request_issuance_creates_pending_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        let req = client.get_pending_issuance(&request_id).unwrap();
+        assert_eq!(req.id, request_id);
+        assert_eq!(req.credential_type, 1);
+        assert!(!req.executed);
+        assert_eq!(req.approvals.len(), 1); // s1 auto-approves on request
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_request_issuance_non_signer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &1u32);
+
+        let outsider = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        client.request_issuance(&outsider, &subject, &1u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_approve_issuance_below_threshold_returns_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let s3 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        signers.push_back(s3.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &3u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s2 approves — still 2/3, not yet at threshold
+        let result = client.approve_issuance(&s2, &request_id);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_approve_issuance_at_threshold_issues_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s2 provides the final approval — threshold met
+        let cred_id = client.approve_issuance(&s2, &request_id).unwrap();
+        assert!(cred_id > 0);
+
+        // Credential should now exist
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.credential_type, 1);
+        assert_eq!(cred.subject, subject);
+
+        // Request should be marked executed
+        let req = client.get_pending_issuance(&request_id).unwrap();
+        assert!(req.executed);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_approve_issuance_duplicate_approval_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s1 already approved on request — duplicate should panic
+        client.approve_issuance(&s1, &request_id);
+    }
+
+    #[test]
+    fn test_no_policy_allows_direct_issue_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        // No policy for type 99 — direct issuance should succeed
+        let cred_id = client.issue_credential(&issuer, &subject, &99u32, &metadata, &None, &0u64);
+        assert!(cred_id > 0);
     }
 
     // ── Issue #382: Numeric Overflow Protection Tests ─────────────────────
