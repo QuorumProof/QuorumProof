@@ -1,0 +1,56 @@
+name: Contract State Reconciliation
+
+# Issue #596: Automated contract state reconciliation.
+# Compares state across instances, detects inconsistencies, triggers recovery.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # Every 6 hours
+  workflow_dispatch:
+    inputs:
+      contract_id_a:
+        description: 'Primary contract ID'
+        required: true
+      contract_id_b:
+        description: 'Secondary contract ID to compare against'
+        required: true
+      tolerance:
+        description: 'Allowed counter delta before flagging inconsistency'
+        required: false
+        default: '0'
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    name: Reconcile Contract State
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /usr/local/bin stellar
+
+      - name: Run state reconciliation
+        env:
+          STELLAR_NETWORK_A: ${{ vars.STELLAR_NETWORK_A || 'testnet' }}
+          STELLAR_RPC_URL_A: ${{ vars.STELLAR_RPC_URL_A }}
+          STELLAR_NETWORK_B: ${{ vars.STELLAR_NETWORK_B || 'testnet' }}
+          STELLAR_RPC_URL_B: ${{ vars.STELLAR_RPC_URL_B }}
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+          RECONCILE_TOLERANCE: ${{ github.event.inputs.tolerance || '0' }}
+        run: |
+          ./scripts/reconcile_state.sh \
+            "${{ github.event.inputs.contract_id_a || vars.CONTRACT_QUORUM_PROOF_PRIMARY }}" \
+            "${{ github.event.inputs.contract_id_b || vars.CONTRACT_QUORUM_PROOF_SECONDARY }}"
+
+      - name: Upload reconciliation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconcile-report-${{ github.run_number }}
+          path: reconcile_report_*.json
+          retention-days: 30
