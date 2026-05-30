@@ -1,8 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
-import reportsRouter from './routes/reports.js';
-import { recordCall } from './analytics.js';
+import notificationsRouter from './routes/notifications.js';
 
 const app = express();
 app.use(express.json());
@@ -16,7 +15,7 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
-app.use('/api/reports', reportsRouter);
+app.use('/api/notifications', notificationsRouter);
 
 const PORT = process.env.PORT ?? 3000;
 app.listen(PORT, () => console.log(`QuorumProof API server listening on port ${PORT}`));
