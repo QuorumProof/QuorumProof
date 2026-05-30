@@ -1,5 +1,5 @@
 /**
- * stellar.js — Soroban RPC read-only wrapper for QuorumProof.
+ * stellar.ts — Soroban RPC read-only wrapper for QuorumProof.
  *
  * All functions simulate contract calls without a wallet (no auth needed
  * for read-only methods).  Results are parsed from XDR ScVal.
@@ -18,12 +18,13 @@ import {
   STELLAR_NETWORK,
   CONTRACT_QUORUM_PROOF,
   CONTRACT_ZK_VERIFIER,
+  STELLAR_RPC_URL,
 } from './config/env';
 import { rpcClient } from './lib/rpcClient';
 import { handleContractError } from './lib/handleContractError';
 
 /** Stellar network passphrase map */
-const PASSPHRASES = {
+const PASSPHRASES: Record<string, string> = {
   testnet: Networks.TESTNET,
   mainnet: Networks.PUBLIC,
   futurenet: Networks.FUTURENET,
@@ -33,11 +34,8 @@ const networkPassphrase = PASSPHRASES[STELLAR_NETWORK] || Networks.TESTNET;
 
 /**
  * Simulate a read-only contract call and return the parsed native JS value.
- * @param {string} contractId
- * @param {string} method
- * @param {xdr.ScVal[]} args
  */
-async function simulate(contractId, method, args = []) {
+async function simulate(contractId: string, method: string, args: any[] = []): Promise<any> {
   if (!contractId) {
     throw new Error(
       'Contract ID not configured. Set VITE_CONTRACT_QUORUM_PROOF in .env'
@@ -47,7 +45,7 @@ async function simulate(contractId, method, args = []) {
   const contract = new Contract(contractId);
 
   // Build a transaction to simulate (no source account needed for simulation)
-  const { SorobanDataBuilder, TransactionBuilder, Keypair, Account, BASE_FEE, Operation } =
+  const { TransactionBuilder, Keypair, Account, BASE_FEE } =
     await import('@stellar/stellar-sdk');
 
   // Use a dummy source account for simulation
@@ -85,10 +83,10 @@ async function simulate(contractId, method, args = []) {
  * metadata_hash, revoked, expires_at.
  * Throws if the credential does not exist.
  */
-export async function getCredential(credentialId) {
+export async function getCredential(credentialId: string | number | bigint) {
   try {
-    const idVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-    return await simulate(CONTRACT_ID, 'get_credential', [idVal]);
+    const idVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
+    return await simulate(CONTRACT_QUORUM_PROOF, 'get_credential', [idVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -98,10 +96,10 @@ export async function getCredential(credentialId) {
  * Get all credential IDs issued to a Stellar address (subject lookup).
  * Returns an array of BigInt credential IDs (may be empty).
  */
-export async function getCredentialsBySubject(stellarAddress) {
+export async function getCredentialsBySubject(stellarAddress: string) {
   try {
     const addressVal = new Address(stellarAddress).toScVal();
-    return await simulate(CONTRACT_ID, 'get_credentials_by_subject', [addressVal]);
+    return await simulate(CONTRACT_QUORUM_PROOF, 'get_credentials_by_subject', [addressVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -109,15 +107,12 @@ export async function getCredentialsBySubject(stellarAddress) {
 
 /**
  * Check whether a credential has reached its quorum threshold.
- * @param {number|string} credentialId
- * @param {number|string} sliceId
- * @returns {Promise<boolean>}
  */
-export async function isAttested(credentialId, sliceId) {
+export async function isAttested(credentialId: string | number | bigint, sliceId: string | number | bigint): Promise<boolean> {
   try {
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
-    return await simulate(CONTRACT_ID, 'is_attested', [credVal, sliceVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
+    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' }) as any;
+    return await simulate(CONTRACT_QUORUM_PROOF, 'is_attested', [credVal, sliceVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -125,12 +120,11 @@ export async function isAttested(credentialId, sliceId) {
 
 /**
  * Get all attestor addresses for a credential.
- * @returns {Promise<string[]>}
  */
-export async function getAttestors(credentialId) {
+export async function getAttestors(credentialId: string | number | bigint): Promise<string[]> {
   try {
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-    return await simulate(CONTRACT_ID, 'get_attestors', [credVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
+    return await simulate(CONTRACT_QUORUM_PROOF, 'get_attestors', [credVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -138,12 +132,11 @@ export async function getAttestors(credentialId) {
 
 /**
  * Check whether a credential is expired.
- * @returns {Promise<boolean>}
  */
-export async function isExpired(credentialId) {
+export async function isExpired(credentialId: string | number | bigint): Promise<boolean> {
   try {
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-    return await simulate(CONTRACT_ID, 'is_expired', [credVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
+    return await simulate(CONTRACT_QUORUM_PROOF, 'is_expired', [credVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -152,12 +145,11 @@ export async function isExpired(credentialId) {
 /**
  * Retrieve a quorum slice by ID.
  * Returns the QuorumSlice struct: { id, creator, attestors, threshold }
- * @returns {Promise<{id: bigint, creator: string, attestors: string[], threshold: number}>}
  */
-export async function getSlice(sliceId) {
+export async function getSlice(sliceId: string | number | bigint) {
   try {
-    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
-    return await simulate(CONTRACT_ID, 'get_slice', [sliceVal]);
+    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' }) as any;
+    return await simulate(CONTRACT_QUORUM_PROOF, 'get_slice', [sliceVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -165,21 +157,16 @@ export async function getSlice(sliceId) {
 
 /**
  * Verify a ZK claim against the ZK verifier contract.
- * @param {number|string} credentialId
- * @param {string} claimType  e.g. "has_degree"
- * @param {string} proofHex   hex-encoded proof bytes
- * @returns {Promise<boolean>}
  */
-export async function verifyClaim(credentialId, claimType, proofHex) {
+export async function verifyClaim(credentialId: string | number | bigint, claimType: string, proofHex: string): Promise<boolean> {
   try {
     if (!CONTRACT_ZK_VERIFIER) {
       throw new Error(
         'ZK Contract ID not configured. Set VITE_CONTRACT_ZK_VERIFIER in .env'
       );
     }
-    const { nativeToScVal: n, xdr: x } = await import('@stellar/stellar-sdk');
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-    const claimVal = nativeToScVal(claimType, { type: 'string' });
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
+    const claimVal = nativeToScVal(claimType, { type: 'string' }) as any;
     const proofBytes = hexToBytes(proofHex);
     const proofVal = xdr.ScVal.scvBytes(proofBytes);
     return await simulate(CONTRACT_ZK_VERIFIER, 'verify_claim', [credVal, claimVal, proofVal]);
@@ -189,29 +176,25 @@ export async function verifyClaim(credentialId, claimType, proofHex) {
 }
 
 /** Utility: hex string → Uint8Array */
-function hexToBytes(hex) {
+function hexToBytes(hex: string): Uint8Array {
   const clean = hex.replace(/^0x/, '').replace(/\s/g, '');
   if (clean.length % 2 !== 0) throw new Error('Invalid hex string');
   const bytes = new Uint8Array(clean.length / 2);
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
   }
-  return bytes;
+  return bytes as any as Uint8Array;
 }
 
 /**
  * Generate a time-limited share link token for a credential.
  * The caller must be the credential subject (holder).
- * @param {string} subject  Stellar address of the credential holder
- * @param {number|string} credentialId
- * @param {number} expiryHours  Must be > 0
- * @returns {Promise<Uint8Array>} 16-byte opaque token
  */
-export async function generateShareLink(subject, credentialId, expiryHours) {
+export async function generateShareLink(subject: string, credentialId: string | number | bigint, expiryHours: number): Promise<Uint8Array> {
   try {
     const subjectVal = new Address(subject).toScVal();
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
-    const hoursVal = nativeToScVal(expiryHours, { type: 'u32' });
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
+    const hoursVal = nativeToScVal(expiryHours, { type: 'u32' }) as any;
     return await simulate(CONTRACT_QUORUM_PROOF, 'generate_share_link', [subjectVal, credVal, hoursVal]);
   } catch (error) {
     throw new Error(handleContractError(error));
@@ -221,10 +204,8 @@ export async function generateShareLink(subject, credentialId, expiryHours) {
 /**
  * Validate a share token and return the credential ID.
  * Throws if the token is unknown or expired.
- * @param {Uint8Array} token  16-byte token returned by generateShareLink
- * @returns {Promise<bigint>} credential ID
  */
-export async function validateShareToken(token) {
+export async function validateShareToken(token: Uint8Array | ArrayLike<number>): Promise<bigint> {
   try {
     const tokenVal = xdr.ScVal.scvBytes(token instanceof Uint8Array ? token : new Uint8Array(token));
     return await simulate(CONTRACT_QUORUM_PROOF, 'validate_share_token', [tokenVal]);
@@ -234,14 +215,14 @@ export async function validateShareToken(token) {
 }
 
 /** Utility: Uint8Array → hex string */
-export function bytesToHex(arr) {
+export function bytesToHex(arr: Uint8Array | ArrayLike<number>): string {
   return Array.from(arr instanceof Uint8Array ? arr : new Uint8Array(arr))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
 /** Utility: hex string → Uint8Array */
-export function hexToUint8Array(hex) {
+export function hexToUint8Array(hex: string): Uint8Array {
   const clean = hex.replace(/^0x/, '');
   const bytes = new Uint8Array(clean.length / 2);
   for (let i = 0; i < bytes.length; i++) {
@@ -251,7 +232,7 @@ export function hexToUint8Array(hex) {
 }
 
 /** Metadata hash bytes → readable string (utf8 or hex fallback) */
-export function decodeMetadataHash(rawValue) {
+export function decodeMetadataHash(rawValue: string | Uint8Array | ArrayLike<number>): string {
   if (typeof rawValue === 'string') return rawValue;
   if (rawValue instanceof Uint8Array || Array.isArray(rawValue)) {
     try {
@@ -263,11 +244,11 @@ export function decodeMetadataHash(rawValue) {
   return String(rawValue);
 }
 
-function uint8ArrayToHex(arr) {
+function uint8ArrayToHex(arr: Uint8Array): string {
   return Array.from(arr)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
+// Export aliases for backward compatibility
 export { STELLAR_NETWORK as NETWORK, CONTRACT_QUORUM_PROOF as CONTRACT_ID, STELLAR_RPC_URL as RPC_URL };
-export { generateShareLink, validateShareToken, bytesToHex, hexToUint8Array };
