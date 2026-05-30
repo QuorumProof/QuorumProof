@@ -4,6 +4,7 @@ import { Navbar } from '../components/Navbar';
 import { ShareCredentialDialog } from '../components/ShareCredentialDialog';
 import { AuditTrail } from '../components/AuditTrail';
 import { VerificationHistory } from '../components/VerificationHistory';
+import { AttestorReputationDisplay } from '../components/AttestorReputationDisplay';
 import type { VerificationRecord } from '../components/VerificationHistory';
 import { AttestationProgress } from '../components/AttestationProgress';
 import {
@@ -242,6 +243,17 @@ export default function CredentialDetail() {
             ) : (
               <AttestationProgress attestors={attestors} slice={slice} />
             )}
+          </div>
+        </div>
+
+        {/* Attestor Reputation */}
+        <div className="detail-card" style={{ marginTop: '20px' }}>
+          <div className="detail-card__header">
+            <span className="detail-card__title">Attestor Reputation</span>
+            <span className="badge badge--gray">{attestors.length} attestor{attestors.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div className="detail-card__body">
+            <AttestorReputationDisplay attestors={attestors} />
           </div>
         </div>
 
