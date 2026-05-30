@@ -45,3 +45,13 @@ groups:
         annotations:
           summary: "Unusual rate-limit activity"
           description: "Rate limit exceeded {{ $value }} times/s over the last 5 minutes."
+
+      # #587 — Contract health dashboard alerts
+      - alert: ContractErrorBurst
+        expr: increase(quorumproof_api_errors_total[10m]) > 20
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Burst of contract errors"
+          description: "{{ $value }} errors in the last 10 minutes."

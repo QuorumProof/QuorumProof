@@ -1,0 +1,55 @@
+# QuorumProof Contract Dependency Manifest
+# #589 — Tracks all contract dependencies and version compatibility.
+#
+# Format:
+#   [[contract]]
+#   name         = contract crate name
+#   version      = current version (from Cargo.toml)
+#   [[contract.deps]]
+#   name         = dependency name
+#   version      = pinned version
+#   breaking_at  = semver range that would be a breaking change (optional)
+#   notes        = human-readable notes (optional)
+
+[[contract]]
+name    = "quorum_proof"
+version = "0.1.0"
+
+  [[contract.deps]]
+  name        = "soroban-sdk"
+  version     = "21.7"
+  breaking_at = ">=22"
+  notes       = "Upgrade requires re-audit of storage key layout and auth model."
+
+[[contract]]
+name    = "sbt_registry"
+version = "0.1.0"
+
+  [[contract.deps]]
+  name        = "soroban-sdk"
+  version     = "21.7"
+  breaking_at = ">=22"
+  notes       = "SBT non-transferability enforcement relies on SDK token interface."
+
+[[contract]]
+name    = "zk_verifier"
+version = "0.1.0"
+
+  [[contract.deps]]
+  name        = "soroban-sdk"
+  version     = "21.7"
+  breaking_at = ">=22"
+  notes       = "Stub verifier — real ZK library (Groth16/PLONK) targeted for v1.1."
+
+# Cross-contract call dependencies
+[[cross_contract]]
+caller   = "quorum_proof"
+callee   = "sbt_registry"
+method   = "mint"
+notes    = "quorum_proof calls sbt_registry.mint after threshold attestation."
+
+[[cross_contract]]
+caller   = "quorum_proof"
+callee   = "zk_verifier"
+method   = "verify_claim"
+notes    = "Admin-gated; stub only until v1.1."
