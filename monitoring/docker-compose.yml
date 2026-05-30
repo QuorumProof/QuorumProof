@@ -45,6 +45,7 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+      - loki
     restart: unless-stopped
 
   alertmanager:
@@ -53,4 +54,24 @@ services:
       - "9093:9093"
     volumes:
       - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    restart: unless-stopped
+
+  # #586 — Log aggregation
+  loki:
+    image: grafana/loki:3.0.0
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    volumes:
+      - ./loki/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/log:/var/log:ro
+    command: -config.file=/etc/promtail/promtail.yml
+    depends_on:
+      - loki
     restart: unless-stopped

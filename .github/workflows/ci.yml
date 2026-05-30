@@ -101,9 +101,11 @@ jobs:
           head: HEAD
           extra_args: --only-verified
 
-      - name: SARIF upload
-        uses: github/codeql-action/upload-sarif@v2
-        if: always()
-        with:
-          sarif_file: results.sarif
-          wait-for-processing: true
+  # #589 — Contract dependency version check
+  dep-check:
+    name: Contract Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check contract dependency versions
+        run: ./scripts/check_deps.sh
