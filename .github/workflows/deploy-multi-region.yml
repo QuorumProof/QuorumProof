@@ -1,0 +1,101 @@
+name: Multi-Region Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      networks:
+        description: 'Networks to deploy to (comma-separated)'
+        required: true
+        default: 'testnet,mainnet'
+      verify:
+        description: 'Verify deployments'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        network: [testnet, mainnet]
+      max-parallel: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Soroban CLI
+        run: |
+          curl -L https://github.com/stellar/rs-soroban-cli/releases/download/v21.0.0/soroban-cli-21.0.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv soroban /usr/local/bin/
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Contracts
+        run: ./scripts/build.sh
+
+      - name: Deploy to ${{ matrix.network }}
+        env:
+          STELLAR_NETWORK: ${{ matrix.network }}
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_SECRET_KEY }}
+        run: |
+          stellar network add --rpc-url $([ "${{ matrix.network }}" = "testnet" ] && echo "https://soroban-testnet.stellar.org" || echo "https://soroban-mainnet.stellar.org") ${{ matrix.network }}
+          ./scripts/deploy_multi_region.sh --networks ${{ matrix.network }} ${{ inputs.verify && '--verify' || '' }}
+
+      - name: Verify Deployment
+        if: inputs.verify
+        env:
+          STELLAR_NETWORK: ${{ matrix.network }}
+        run: |
+          ./scripts/failover.sh --verify
+
+      - name: Upload Deployment Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-log-${{ matrix.network }}
+          path: deployments.log
+
+      - name: Create Deployment Summary
+        if: always()
+        run: |
+          echo "## Deployment Summary - ${{ matrix.network }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Network:** ${{ matrix.network }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Log" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat deployments.log >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  consistency-check:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: inputs.verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Soroban CLI
+        run: |
+          curl -L https://github.com/stellar/rs-soroban-cli/releases/download/v21.0.0/soroban-cli-21.0.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv soroban /usr/local/bin/
+
+      - name: Verify Consistency
+        env:
+          CONTRACT_QUORUM_PROOF_TESTNET: ${{ secrets.CONTRACT_QUORUM_PROOF_TESTNET }}
+          CONTRACT_QUORUM_PROOF_MAINNET: ${{ secrets.CONTRACT_QUORUM_PROOF_MAINNET }}
+        run: |
+          ./scripts/failover.sh --verify
+
+      - name: Create Consistency Report
+        run: |
+          echo "## Consistency Verification" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✓ All regions verified" >> $GITHUB_STEP_SUMMARY

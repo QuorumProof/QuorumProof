@@ -4,7 +4,9 @@ import { Navbar } from '../components/Navbar';
 import { ShareCredentialDialog } from '../components/ShareCredentialDialog';
 import { AuditTrail } from '../components/AuditTrail';
 import { VerificationHistory } from '../components/VerificationHistory';
+import { AttestorReputationDisplay } from '../components/AttestorReputationDisplay';
 import type { VerificationRecord } from '../components/VerificationHistory';
+import { AttestationProgress } from '../components/AttestationProgress';
 import {
   getCredential,
   getAttestors,
@@ -236,61 +238,22 @@ export default function CredentialDetail() {
             </span>
           </div>
           <div className="detail-card__body">
-            {/* Threshold progress bar */}
-            {threshold > 0 && (
-              <div style={{ marginBottom: '20px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                  <span>Quorum Progress</span>
-                  <span aria-live="polite">{attestedCount}/{threshold}</span>
-                </div>
-                <div
-                  role="progressbar"
-                  aria-valuenow={attestedCount}
-                  aria-valuemin={0}
-                  aria-valuemax={threshold}
-                  aria-label={`Attestation progress: ${attestedCount} of ${threshold}`}
-                  style={{
-                    height: '6px',
-                    background: 'var(--bg-surface)',
-                    borderRadius: '3px',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{
-                    height: '100%',
-                    width: `${Math.min(100, (attestedCount / threshold) * 100)}%`,
-                    background: fullyAttested ? 'var(--green)' : 'var(--accent-primary)',
-                    borderRadius: '3px',
-                    transition: 'width 0.4s ease',
-                  }} />
-                </div>
-              </div>
-            )}
-
-            {attestors.length === 0 ? (
+            {attestors.length === 0 && !slice ? (
               <div className="attestors-empty" style={{ padding: '16px 0' }}>No attestors yet</div>
             ) : (
-              <ol className="attestor-list" aria-label="Attestor timeline" style={{ listStyle: 'none', padding: 0 }}>
-                {attestors.map((addr, idx) => (
-                  <li key={addr} className="attestor-item">
-                    <div className="attestor-item__avatar" aria-hidden="true">{idx + 1}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="attestor-item__addr" title={addr}>{formatAddress(addr)}</div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                        {attestorRole(idx)}
-                      </div>
-                    </div>
-                    <span
-                      className="attestor-item__badge"
-                      role="status"
-                      aria-label={`${attestorRole(idx)} attestation confirmed`}
-                    >
-                      ✓ Attested
-                    </span>
-                  </li>
-                ))}
-              </ol>
+              <AttestationProgress attestors={attestors} slice={slice} />
             )}
+          </div>
+        </div>
+
+        {/* Attestor Reputation */}
+        <div className="detail-card" style={{ marginTop: '20px' }}>
+          <div className="detail-card__header">
+            <span className="detail-card__title">Attestor Reputation</span>
+            <span className="badge badge--gray">{attestors.length} attestor{attestors.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div className="detail-card__body">
+            <AttestorReputationDisplay attestors={attestors} />
           </div>
         </div>
 

@@ -84,6 +84,15 @@ jobs:
       - name: Audit Rust dependencies
         run: cargo audit
 
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check dependencies with cargo-deny
+        run: cargo deny check
+
+      - name: Run clippy for code quality
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Check for hardcoded secrets
         uses: trufflesecurity/trufflehog@main
         with:

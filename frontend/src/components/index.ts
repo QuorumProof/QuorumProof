@@ -19,3 +19,5 @@ export type { SliceMember } from './SliceMemberManager';
 export { SliceThresholdVisualizer, getSliceHealth } from './SliceThresholdVisualizer';
 export type { SliceHealth, SliceThresholdVisualizerProps } from './SliceThresholdVisualizer';
 export { SliceRecommendationPanel } from './SliceRecommendationPanel';
+export { AttestorReputationDisplay } from './AttestorReputationDisplay';
+export type { AttestorReputation } from './AttestorReputationDisplay';

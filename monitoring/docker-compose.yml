@@ -1,6 +1,26 @@
 version: "3.8"
 
 services:
+  quorumproof-exporter:
+    build:
+      context: ./exporter
+      dockerfile: Dockerfile
+    ports:
+      - "9101:9101"
+    environment:
+      STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      CONTRACT_QUORUM_PROOF: ${CONTRACT_QUORUM_PROOF}
+      SCRAPE_INTERVAL_SECONDS: ${SCRAPE_INTERVAL_SECONDS:-15}
+      EXPORTER_PORT: 9101
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9101/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   prometheus:
     image: prom/prometheus:v2.51.0
     ports:

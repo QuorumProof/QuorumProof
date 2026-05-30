@@ -1,7 +1,10 @@
 import { Navbar } from '../components/Navbar';
 import { WalletGuard } from '../components/WalletGate';
 import { QuorumSliceBuilder } from '../components/QuorumSliceBuilder';
+import { SliceBackupRestore } from '../components/SliceBackupRestore';
 import { useWallet } from '../hooks';
+import type { SliceBackupData } from '../lib/sliceBackup';
+import { useState } from 'react';
 
 function formatAddress(addr: string) {
   if (!addr || addr.length < 10) return addr;
@@ -10,6 +13,19 @@ function formatAddress(addr: string) {
 
 export default function QuorumSlice() {
   const { address } = useWallet();
+  const [restoredSlice, setRestoredSlice] = useState<SliceBackupData | null>(null);
+
+  // Build backup data from localStorage slice if available
+  const sliceIdRaw = localStorage.getItem('qp-slice-id');
+  const currentSliceData: SliceBackupData | null = sliceIdRaw
+    ? {
+        version: 1,
+        creator: address ?? '',
+        attestors: [],
+        threshold: 1,
+        createdAt: new Date().toISOString(),
+      }
+    : null;
 
   return (
     <div id="app">
@@ -33,7 +49,18 @@ export default function QuorumSlice() {
                 {formatAddress(address!)}
               </span>
             </div>
-            <QuorumSliceBuilder creatorAddress={address!} />
+            <QuorumSliceBuilder
+              creatorAddress={address!}
+              initialAttestors={restoredSlice?.attestors}
+              initialThreshold={restoredSlice?.threshold}
+            />
+          </div>
+
+          <div className="search-card" style={{ marginTop: 24 }}>
+            <SliceBackupRestore
+              sliceData={currentSliceData}
+              onRestore={(data) => setRestoredSlice(data)}
+            />
           </div>
         </div>
       </main>

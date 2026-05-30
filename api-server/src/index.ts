@@ -1,6 +1,7 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
+import notificationsRouter from './routes/notifications.js';
 
 const app = express();
 app.use(express.json());
@@ -19,6 +20,7 @@ app.use((req, _res, next) => {
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
+app.use('/api/notifications', notificationsRouter);
 
 // #587 — Health endpoint for contract health dashboard
 app.get('/health', (_req, res) => {

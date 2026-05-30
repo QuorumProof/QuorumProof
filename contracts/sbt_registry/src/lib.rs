@@ -50,7 +50,24 @@ pub enum DataKey {
     CredentialAccessLog(u64),
     Blacklist(Address),
     SbtActivityLog(u64),
+    /// Issue #516: Cache entry for cross-contract credential revocation check.
+    CredentialCache(u64),
 }
+
+/// Issue #516: Cached result of a cross-contract is_revoked check.
+/// Stored in persistent storage keyed by credential_id.
+/// The cache is valid while `cached_at + CREDENTIAL_CACHE_TTL_LEDGERS > current_ledger`.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialCacheEntry {
+    /// Whether the credential was revoked at the time of caching.
+    pub revoked: bool,
+    /// Ledger sequence number when this entry was written.
+    pub cached_at: u32,
+}
+
+/// Issue #516: Cache TTL in ledgers (~1 hour at 5s/ledger = 720 ledgers).
+const CREDENTIAL_CACHE_TTL_LEDGERS: u32 = 720;
 
 /// Weights used to compute a holder's reputation score.
 /// score = tokens_held * token_weight + notifications * activity_weight
@@ -214,12 +231,53 @@ impl SbtRegistryContract {
             .instance()
             .get(&DataKey::QuorumProofId)
             .expect("not initialized");
-        // is_revoked panics with CredentialNotFound if the credential doesn't exist.
-        let revoked: bool = env.invoke_contract(
-            &qp_id,
-            &Symbol::new(&env, "is_revoked"),
-            soroban_sdk::vec![&env, credential_id.into_val(&env)],
-        );
+        // Issue #516: Check credential cache before making a cross-contract call.
+        let current_ledger = env.ledger().sequence();
+        let revoked: bool = if let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<_, CredentialCacheEntry>(&DataKey::CredentialCache(credential_id))
+        {
+            if current_ledger.saturating_sub(entry.cached_at) < CREDENTIAL_CACHE_TTL_LEDGERS {
+                // Cache hit: use cached value, skip cross-contract call.
+                entry.revoked
+            } else {
+                // Cache expired: refresh via cross-contract call.
+                let r: bool = env.invoke_contract(
+                    &qp_id,
+                    &Symbol::new(&env, "is_revoked"),
+                    soroban_sdk::vec![&env, credential_id.into_val(&env)],
+                );
+                env.storage().persistent().set(
+                    &DataKey::CredentialCache(credential_id),
+                    &CredentialCacheEntry { revoked: r, cached_at: current_ledger },
+                );
+                env.storage().persistent().extend_ttl(
+                    &DataKey::CredentialCache(credential_id),
+                    STANDARD_TTL,
+                    EXTENDED_TTL,
+                );
+                r
+            }
+        } else {
+            // Cache miss: call cross-contract and populate cache.
+            // is_revoked panics with CredentialNotFound if the credential doesn't exist.
+            let r: bool = env.invoke_contract(
+                &qp_id,
+                &Symbol::new(&env, "is_revoked"),
+                soroban_sdk::vec![&env, credential_id.into_val(&env)],
+            );
+            env.storage().persistent().set(
+                &DataKey::CredentialCache(credential_id),
+                &CredentialCacheEntry { revoked: r, cached_at: current_ledger },
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::CredentialCache(credential_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+            r
+        };
         assert!(!revoked, "credential is revoked");
 
         // Check whitelist if enabled for this SBT
@@ -247,11 +305,22 @@ impl SbtRegistryContract {
             .unwrap_or(0);
         token_count += 1;
         let token_id = token_count;
+        // Issue #512: Store metadata_uri separately to reduce SoulboundToken struct footprint.
+        // The struct stores an empty Bytes; callers retrieve metadata via get_token which
+        // transparently rehydrates metadata_uri from CompressedMetadata storage.
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompressedMetadata(token_id), &metadata_uri);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CompressedMetadata(token_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
         let token = SoulboundToken {
             id: token_id,
             owner: owner.clone(),
             credential_id,
-            metadata_uri,
+            metadata_uri: Bytes::new(&env), // stored separately in CompressedMetadata
             version: 1,
         };
         env.storage()
@@ -309,10 +378,21 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics with "token not found" if no token exists with that ID.
     pub fn get_token(env: Env, token_id: u64) -> SoulboundToken {
-        env.storage()
+        let mut token: SoulboundToken = env
+            .storage()
             .persistent()
             .get(&DataKey::Token(token_id))
-            .expect("token not found")
+            .expect("token not found");
+        // Issue #512: Rehydrate metadata_uri from separate CompressedMetadata storage.
+        // Transparent to callers — metadata_uri is always populated on return.
+        if let Some(metadata) = env
+            .storage()
+            .persistent()
+            .get::<_, Bytes>(&DataKey::CompressedMetadata(token_id))
+        {
+            token.metadata_uri = metadata;
+        }
+        token
     }
 
     /// Returns the owner address of a token.
@@ -1326,7 +1406,15 @@ impl SbtRegistryContract {
             .get(&DataKey::Token(token_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
         assert!(token.owner == owner, "not the owner");
-        token.metadata_uri = new_metadata_uri;
+        // Issue #512: Store metadata separately; keep struct metadata_uri empty.
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompressedMetadata(token_id), &new_metadata_uri);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CompressedMetadata(token_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
         token.version += 1;
         env.storage()
             .persistent()

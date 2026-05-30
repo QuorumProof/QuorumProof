@@ -1,10 +1,15 @@
 #![no_std]
+mod version;
+mod state_validation;
+
 use sbt_registry::SbtRegistryContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Bytes, Env, IntoVal, Map, String, Vec,
 };
 use zk_verifier::{ClaimType, ZkVerifierContractClient};
+use version::{Version, get_contract_version, set_contract_version, add_version_to_history, check_upgrade_compatibility};
+use state_validation::{validate_state, create_checkpoint, log_validation, detect_corruption, alert_on_inconsistency, get_state_alerts};
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
@@ -39,8 +44,8 @@ const DEFAULT_REPUTATION_ATTESTATION_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_DIVISOR_SECONDS: u64 = 1_000;
 // Issue #381: Rate limiting configuration
-const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 100;
-const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 3600; // 1 hour
+foconst DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
+const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
 
@@ -160,6 +165,58 @@ pub struct BlacklistEntry {
     pub holder: Address,
     pub reason: soroban_sdk::String,
     pub blacklisted_at: u64,
+}
+
+/// Multi-sig issuance policy for a credential type.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuancePolicy {
+    pub signers: soroban_sdk::Vec<Address>,
+    pub threshold: u32,
+}
+
+/// A pending issuance request awaiting multi-sig approval.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingIssuanceRequest {
+    pub id: u64,
+    pub issuer: Address,
+    pub subject: Address,
+    pub credential_type: u32,
+    pub metadata_hash: soroban_sdk::Bytes,
+    pub expires_at: Option<u64>,
+    pub nonce: u64,
+    pub approvals: soroban_sdk::Vec<Address>,
+    pub executed: bool,
+}
+
+/// Event emitted when an issuance policy is created or updated.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuancePolicySetEventData {
+    pub credential_type: u32,
+    pub threshold: u32,
+    pub signer_count: u32,
+}
+
+/// Event emitted when an issuance request is created.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuanceRequestedEventData {
+    pub request_id: u64,
+    pub issuer: Address,
+    pub subject: Address,
+    pub credential_type: u32,
+}
+
+/// Event emitted when a signer approves an issuance request.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuanceApprovedEventData {
+    pub request_id: u64,
+    pub signer: Address,
+    pub approvals_so_far: u32,
+    pub threshold: u32,
 }
 
 /// Event data emitted when a fork is detected.
@@ -371,6 +428,16 @@ pub enum ContractError {
     CredentialVersionNotFound = 47,
     /// Party has no decryption key entry for this credential
     DecryptionKeyNotFound = 48,
+    /// No issuance multisig policy exists for this credential type
+    IssuancePolicyNotFound = 49,
+    /// Signer is not part of the issuance multisig policy
+    NotIssuanceSigner = 50,
+    /// Pending issuance request not found
+    IssuanceRequestNotFound = 51,
+    /// Signer has already approved this issuance request
+    AlreadyApprovedIssuance = 52,
+    /// Credential type has a multisig policy; use request_issuance instead
+    IssuancePolicyRequired = 53,
 }
 
 #[contracttype]
@@ -436,8 +503,14 @@ pub enum DataKey2 {
     AttestConditions(u64),
     RateLimitConfig,
     RateLimitState(Address),
+    IssuerRateLimitConfig(Address),
+    RateLimitWhitelist(Address),
     CredentialAuditTrail(u64),
     CredentialMetadataStore(u64),
+    /// Issue #514: Cache for credential revocation status (credential_id -> bool)
+    RevocationCache(u64),
+    /// Issue #515: Cache for slice total weight (slice_id -> u32)
+    SliceTotalWeight(u64),
 }
 
 #[contracttype]
@@ -873,14 +946,18 @@ pub struct VerificationStats {
 }
 
 /// Reputation record for a credential holder
+/// Issue #539: Enhanced with verification success rate tracking
 #[contracttype]
 #[derive(Clone)]
 pub struct HolderReputation {
     pub credentials_held: u64,
     pub successful_verifications: u64,
+    pub failed_verifications: u64,
+    pub total_verifications: u64,
+    pub verification_success_rate: u64, // 0-100 percentage
     pub attestation_count: u64,
     pub attestation_age_seconds: u64,
-    pub score: u64,
+    pub score: u64, // 0-100 score based on verification success rate
 }
 
 /// Scoring configuration for holder reputation.
@@ -915,6 +992,20 @@ pub struct ConsentRequest {
 
 #[contract]
 pub struct QuorumProofContract;
+
+fn parse_version(env: &Env, version_str: &String) -> Version {
+    // Parse "major.minor.patch" format
+    let parts: Vec<String> = version_str.split('.').map(|s| String::from_linear(env, s)).collect();
+    if parts.len() != 3 {
+        panic_with_error!(env, ContractError::InvalidInput);
+    }
+    
+    let major = parts.get(0).unwrap().parse::<u32>().unwrap_or(0);
+    let minor = parts.get(1).unwrap().parse::<u32>().unwrap_or(0);
+    let patch = parts.get(2).unwrap().parse::<u32>().unwrap_or(0);
+    
+    Version::new(major, minor, patch)
+}
 
 #[contractimpl]
 impl QuorumProofContract {
@@ -976,6 +1067,72 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #575: Get the semantic version of the contract
+    pub fn get_contract_version(env: Env) -> String {
+        let version = version::get_contract_version(&env);
+        version.to_string()
+    }
+
+    /// Issue #575: Get full version metadata including deployment time and history
+    pub fn get_version_metadata(env: Env) -> Vec<String> {
+        let history = version::get_version_history(&env);
+        let mut result = Vec::new(&env);
+        for metadata in history.iter() {
+            let version_str = metadata.version.to_string();
+            result.push_back(version_str);
+        }
+        result
+    }
+
+    /// Issue #575: Check if an upgrade from one version to another is compatible
+    pub fn check_upgrade_compatibility(env: Env, from_version: String, to_version: String) -> bool {
+        let from = parse_version(&env, &from_version);
+        let to = parse_version(&env, &to_version);
+        version::check_upgrade_compatibility(&env, &from, &to)
+    }
+
+    /// Issue #577: Validate contract state consistency
+    pub fn validate_state(env: Env) -> bool {
+        let result = validate_state(&env);
+        log_validation(&env, &result);
+        result.is_valid
+    }
+
+    /// Issue #577: Get state validation history
+    pub fn get_validation_history(env: Env) -> Vec<String> {
+        let history = state_validation::get_validation_history(&env);
+        let mut result = Vec::new(&env);
+        for entry in history.iter() {
+            let status = if entry.is_valid { "valid" } else { "invalid" };
+            result.push_back(String::from_linear(&env, status));
+        }
+        result
+    }
+
+    /// Issue #577: Create a state checkpoint for corruption detection
+    pub fn create_state_checkpoint(env: Env, admin: Address, credential_count: u64, slice_count: u64, attestation_count: u64) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        
+        let checkpoint = create_checkpoint(&env, credential_count, slice_count, attestation_count);
+        state_validation::store_checkpoint(&env, &checkpoint);
+    }
+
+    /// Issue #577: Detect state corruption
+    pub fn detect_state_corruption(env: Env, credential_count: u64, slice_count: u64, attestation_count: u64) -> bool {
+        detect_corruption(&env, credential_count, slice_count, attestation_count)
+    }
+
+    /// Issue #577: Get state alerts
+    pub fn get_state_alerts(env: Env) -> Vec<String> {
+        get_state_alerts(&env)
     }
 
     /// Pause the contract. Only admin may call this.
@@ -1074,6 +1231,74 @@ impl QuorumProofContract {
         Self::get_rate_limit_config(&env)
     }
 
+    /// Set a per-issuer rate limit override. Admin only.
+    pub fn set_issuer_rate_limit_config(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        max_calls: u32,
+        window_seconds: u64,
+    ) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        assert!(max_calls > 0, "max_calls must be greater than 0");
+        assert!(window_seconds > 0, "window_seconds must be greater than 0");
+        let config = RateLimitConfig { max_calls, window_seconds };
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRateLimitConfig(issuer), &config);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Add an issuer to the rate limit whitelist (bypasses all rate limits). Admin only.
+    pub fn add_rate_limit_whitelist(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey2::RateLimitWhitelist(issuer), &true);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Remove an issuer from the rate limit whitelist. Admin only.
+    pub fn remove_rate_limit_whitelist(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .remove(&DataKey2::RateLimitWhitelist(issuer));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check if an issuer is on the rate limit whitelist.
+    pub fn is_rate_limit_whitelisted(env: Env, issuer: Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(issuer))
+            .unwrap_or(false)
+    }
+
     // ── Issue #521: Proof of Work for credential issuance ─────────────────────
 
     /// Set the PoW difficulty (number of leading zero bits). Admin only.
@@ -1157,7 +1382,23 @@ impl QuorumProofContract {
     /// Check rate limit for an address and update if necessary
     /// Returns true if within rate limit, false if limit exceeded
     fn check_rate_limit(env: &Env, address: &Address) -> bool {
-        let config = Self::get_rate_limit_config(env);
+        // Whitelisted issuers bypass rate limiting entirely
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(address.clone()))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // Use per-issuer config if set, otherwise fall back to global config
+        let config: RateLimitConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRateLimitConfig(address.clone()))
+            .unwrap_or_else(|| Self::get_rate_limit_config(env));
+
         let now = env.ledger().timestamp();
 
         let state: Option<RateLimitState> = env
@@ -1428,7 +1669,14 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
-        if !slice.attestors.contains(caller) {
+        // Issue #517: O(1) membership check via attestor set.
+        let in_slice = env
+            .storage()
+            .instance()
+            .get::<_, Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+            .map(|set| set.contains_key(caller.clone()))
+            .unwrap_or_else(|| slice.attestors.contains(caller));
+        if !in_slice {
             panic_with_error!(env, ContractError::PermissionDenied);
         }
     }
@@ -1574,10 +1822,14 @@ impl QuorumProofContract {
                 &subject_creds,
             );
         }
+        // Issue #510: Remove from SubjectCredentialIndex
+        Self::subject_index_remove(env, credential.subject.clone(), credential_id);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         Self::invalidate_verification_caches_for_credential(env, credential_id);
+        // Issue #514: Invalidate revocation cache and set it to true (revoked)
+        Self::set_revocation_cache(env, credential_id, true);
         let event_data = RevokeEventData {
             credential_id,
             subject: credential.subject.clone(),
@@ -1908,6 +2160,58 @@ impl QuorumProofContract {
         }
     }
 
+    // ── Issue #514: Revocation status cache helpers ───────────────────────────
+
+    /// Get cached revocation status for a credential. Returns None if not cached.
+    fn get_revocation_cache(env: &Env, credential_id: u64) -> Option<bool> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RevocationCache(credential_id))
+    }
+
+    /// Set cached revocation status for a credential.
+    fn set_revocation_cache(env: &Env, credential_id: u64, revoked: bool) {
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationCache(credential_id), &revoked);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Invalidate the revocation cache for a credential.
+    fn invalidate_revocation_cache(env: &Env, credential_id: u64) {
+        env.storage()
+            .instance()
+            .remove(&DataKey2::RevocationCache(credential_id));
+    }
+
+    // ── Issue #515: Slice total weight cache helpers ──────────────────────────
+
+    /// Get cached total weight for a slice. Returns None if not cached.
+    fn get_slice_weight_cache(env: &Env, slice_id: u64) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::SliceTotalWeight(slice_id))
+    }
+
+    /// Set cached total weight for a slice.
+    fn set_slice_weight_cache(env: &Env, slice_id: u64, total_weight: u32) {
+        env.storage()
+            .instance()
+            .set(&DataKey2::SliceTotalWeight(slice_id), &total_weight);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Invalidate the slice total weight cache.
+    fn invalidate_slice_weight_cache(env: &Env, slice_id: u64) {
+        env.storage()
+            .instance()
+            .remove(&DataKey2::SliceTotalWeight(slice_id));
+    }
+
     // ── Issue #520: CredentialTypeIndex helpers ───────────────────────────────
 
     fn type_index_add(env: &Env, credential_type: u32, credential_id: u64) {
@@ -1940,6 +2244,43 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey2::CredentialTypeIndex(credential_type), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ── Issue #510: SubjectCredentialIndex helpers ────────────────────────────
+
+    fn subject_index_add(env: &Env, subject: Address, credential_id: u64) {
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SubjectCredentialIndex(subject.clone()))
+            .unwrap_or(Vec::new(env));
+        ids.push_back(credential_id);
+        env.storage()
+            .instance()
+            .set(&DataKey2::SubjectCredentialIndex(subject), &ids);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn subject_index_remove(env: &Env, subject: Address, credential_id: u64) {
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SubjectCredentialIndex(subject.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut retained: Vec<u64> = Vec::new(env);
+        for id in ids.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::SubjectCredentialIndex(subject), &retained);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -2084,6 +2425,14 @@ impl QuorumProofContract {
     ) -> u64 {
         issuer.require_auth();
         Self::require_not_paused(&env);
+        // Reject direct issuance if a multisig policy exists for this credential type
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey2::IssuancePolicy(credential_type))
+        {
+            panic_with_error!(&env, ContractError::IssuancePolicyRequired);
+        }
         // Issue #381: Rate limiting
         Self::require_rate_limit(&env, &issuer);
         // Issue #521: Proof of Work verification
@@ -2155,10 +2504,13 @@ impl QuorumProofContract {
         subject_creds.push_back(id);
         env.storage()
             .instance()
-            .set(&DataKey::SubjectCredentials(subject), &subject_creds);
+            .set(&DataKey::SubjectCredentials(subject.clone()), &subject_creds);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Issue #510: Maintain SubjectCredentialIndex for O(1) lookup
+        Self::subject_index_add(&env, subject.clone(), id);
 
         // Store duplicate prevention mapping
         env.storage().instance().set(&duplicate_key, &id);
@@ -2776,11 +3128,18 @@ impl QuorumProofContract {
         Self::require_valid_address(&env, &subject);
         Self::precondition(&env, page > 0);
         Self::precondition(&env, page_size > 0);
+        // Issue #510: Use SubjectCredentialIndex for O(1) lookup instead of linear scan
         let all_creds: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey::SubjectCredentials(subject))
-            .unwrap_or(Vec::new(&env));
+            .get(&DataKey2::SubjectCredentialIndex(subject.clone()))
+            .unwrap_or_else(|| {
+                // Fallback to legacy SubjectCredentials for backwards compatibility
+                env.storage()
+                    .instance()
+                    .get(&DataKey::SubjectCredentials(subject))
+                    .unwrap_or(Vec::new(&env))
+            });
         let total = all_creds.len();
         let start = (page - 1).saturating_mul(page_size);
         let mut result = Vec::new(&env);
@@ -3452,6 +3811,8 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #515: Cache total weight at creation time
+        Self::set_slice_weight_cache(&env, id, total_weight);
         // Post-condition: slice must be stored
         Self::postcondition(
             env.storage().instance().has(&DataKey::Slice(id)),
@@ -3549,6 +3910,8 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #515: Update slice weight cache after removing attestor
+        Self::set_slice_weight_cache(&env, slice_id, total_weight);
     }
 
     /// Add a new attestor with a given weight to an existing quorum slice.
@@ -3580,7 +3943,7 @@ impl QuorumProofContract {
                 panic_with_error!(&env, ContractError::DuplicateAttestor);
             }
         }
-        slice.attestors.push_back(attestor);
+        slice.attestors.push_back(attestor.clone());
         slice.weights.push_back(weight);
         env.storage()
             .instance()
@@ -3588,6 +3951,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #515: Update slice weight cache after adding attestor
+        let new_total: u32 = slice.weights.iter().fold(0u32, |acc, w| acc.saturating_add(w));
+        Self::set_slice_weight_cache(&env, slice_id, new_total);
     }
 
     /// Update the threshold of an existing quorum slice.
@@ -3927,6 +4293,18 @@ impl QuorumProofContract {
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
 
+        // Issue #513: Build a Map<Address, bool> of slice attestors for O(1) membership lookup.
+        // This replaces the O(n*m) nested loop with a single O(n) pass.
+        let mut slice_set: Map<Address, bool> = Map::new(env);
+        for attestor in slice.attestors.iter() {
+            slice_set.set(attestor, true);
+        }
+
+        // New attestor must be in the slice; if not, no fork concern.
+        if slice_set.get(new_attestor.clone()).is_none() {
+            return false;
+        }
+
         // Get all attestation records for the credential
         let records: Vec<AttestationRecord> = env
             .storage()
@@ -3934,38 +4312,13 @@ impl QuorumProofContract {
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(env));
 
-        // Collect values attested by attestors in this slice
-        let mut slice_values: Vec<bool> = Vec::new(env);
+        // Single O(n) pass: check if any slice member has attested a different value.
+        // Early exit on first conflict found — O(log n) average case.
         for record in records.iter() {
-            // Check if this attestor is in the slice
-            let mut in_slice = false;
-            for attestor in slice.attestors.iter() {
-                if attestor == record.attestor {
-                    in_slice = true;
-                    break;
-                }
-            }
-            if in_slice {
-                slice_values.push_back(record.attestation_value);
-            }
-        }
-
-        // Check if new attestor is in slice (should be validated elsewhere)
-        let mut new_in_slice = false;
-        for attestor in slice.attestors.iter() {
-            if attestor == *new_attestor {
-                new_in_slice = true;
-                break;
-            }
-        }
-        if !new_in_slice {
-            return false; // Not in slice, no fork concern
-        }
-
-        // Check for conflicts: if any existing value differs from new_value, or if existing values differ
-        for existing_value in slice_values.iter() {
-            if existing_value != new_value {
-                return true; // Fork detected
+            if slice_set.get(record.attestor.clone()).is_some()
+                && record.attestation_value != new_value
+            {
+                return true; // Fork detected — early exit
             }
         }
 
@@ -4015,14 +4368,14 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
-        let mut found = false;
-        for a in slice.attestors.iter() {
-            if a == attestor {
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "attestor not in slice");
+        // Issue #517: O(1) attestor membership check via attestor set.
+        let in_slice = env
+            .storage()
+            .instance()
+            .get::<_, Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+            .map(|set| set.contains_key(attestor.clone()))
+            .unwrap_or_else(|| slice.attestors.contains(&attestor));
+        assert!(in_slice, "attestor not in slice");
 
         // Check if attestor is suspended
         if Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
@@ -4566,6 +4919,216 @@ impl QuorumProofContract {
         true
     }
 
+    // ── Issuance Multi-Sig ────────────────────────────────────────────────────
+
+    /// Set a multi-sig issuance policy for a credential type. Admin only.
+    /// Once set, credentials of this type must go through `request_issuance` / `approve_issuance`.
+    pub fn create_issuance_multisig(
+        env: Env,
+        admin: Address,
+        credential_type: u32,
+        signers: soroban_sdk::Vec<Address>,
+        threshold: u32,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        assert!(credential_type > 0, "credential_type must be greater than 0");
+        assert!(!signers.is_empty(), "signers cannot be empty");
+        assert!(threshold > 0, "threshold must be greater than 0");
+        assert!(
+            threshold <= signers.len(),
+            "threshold cannot exceed signer count"
+        );
+        assert!(
+            signers.len() <= MAX_MULTISIG_SIGNERS,
+            "too many signers"
+        );
+
+        let policy = IssuancePolicy { signers: signers.clone(), threshold };
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuancePolicy(credential_type), &policy);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = IssuancePolicySetEventData {
+            credential_type,
+            threshold,
+            signer_count: signers.len(),
+        };
+        let topic = String::from_str(&env, "IssuancePolicySet");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get the issuance policy for a credential type, if one exists.
+    pub fn get_issuance_policy(env: Env, credential_type: u32) -> Option<IssuancePolicy> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::IssuancePolicy(credential_type))
+    }
+
+    /// Submit an issuance request for a credential type that has a multi-sig policy.
+    /// The caller must be one of the policy signers.
+    /// Returns the request ID.
+    pub fn request_issuance(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        credential_type: u32,
+        metadata_hash: soroban_sdk::Bytes,
+        expires_at: Option<u64>,
+        nonce: u64,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_valid_address(&env, &issuer);
+        Self::require_valid_address(&env, &subject);
+
+        let policy: IssuancePolicy = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuancePolicy(credential_type))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::IssuancePolicyNotFound));
+
+        // Issuer must be a registered signer
+        if !policy.signers.iter().any(|s| s == issuer) {
+            panic_with_error!(&env, ContractError::NotIssuanceSigner);
+        }
+
+        let request_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::PendingIssuanceCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let mut initial_approvals: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        initial_approvals.push_back(issuer.clone());
+
+        let request = PendingIssuanceRequest {
+            id: request_id,
+            issuer: issuer.clone(),
+            subject: subject.clone(),
+            credential_type,
+            metadata_hash,
+            expires_at,
+            nonce,
+            approvals: initial_approvals,
+            executed: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::PendingIssuance(request_id), &request);
+        env.storage()
+            .instance()
+            .set(&DataKey2::PendingIssuanceCount, &request_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = IssuanceRequestedEventData {
+            request_id,
+            issuer,
+            subject,
+            credential_type,
+        };
+        let topic = String::from_str(&env, "IssuanceRequested");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        request_id
+    }
+
+    /// Approve a pending issuance request. Caller must be a policy signer.
+    /// When approvals reach the threshold the credential is automatically issued.
+    /// Returns `Some(credential_id)` if the threshold was met and the credential was issued,
+    /// `None` otherwise.
+    pub fn approve_issuance(env: Env, signer: Address, request_id: u64) -> Option<u64> {
+        signer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut request: PendingIssuanceRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::PendingIssuance(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::IssuanceRequestNotFound));
+
+        assert!(!request.executed, "request already executed");
+
+        let policy: IssuancePolicy = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuancePolicy(request.credential_type))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::IssuancePolicyNotFound));
+
+        if !policy.signers.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::NotIssuanceSigner);
+        }
+        if request.approvals.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::AlreadyApprovedIssuance);
+        }
+
+        request.approvals.push_back(signer.clone());
+        let approvals_so_far = request.approvals.len();
+
+        let event_data = IssuanceApprovedEventData {
+            request_id,
+            signer,
+            approvals_so_far,
+            threshold: policy.threshold,
+        };
+        let topic = String::from_str(&env, "IssuanceApproved");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        if approvals_so_far >= policy.threshold {
+            request.executed = true;
+            env.storage()
+                .instance()
+                .set(&DataKey2::PendingIssuance(request_id), &request);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            // Issue the credential via the internal helper
+            let cred_id = Self::issue_inner(
+                &env,
+                request.issuer,
+                request.subject,
+                request.credential_type,
+                request.metadata_hash,
+                request.expires_at,
+            );
+            Some(cred_id)
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey2::PendingIssuance(request_id), &request);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            None
+        }
+    }
+
+    /// Get a pending issuance request by ID.
+    pub fn get_pending_issuance(env: Env, request_id: u64) -> Option<PendingIssuanceRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::PendingIssuance(request_id))
+    }
+
     /// Check if a credential has met its quorum threshold using weighted trust.
     ///
     /// # FBA Weighted Trust Model
@@ -4655,6 +5218,9 @@ impl QuorumProofContract {
 
         // Record consensus decision if threshold is met
         if is_sufficient {
+            // Issue #515: Use cached slice total weight to avoid recalculation
+            let cached_total_weight = Self::get_slice_weight_cache(&env, slice_id)
+                .unwrap_or_else(|| slice.weights.iter().sum());
             let decision = ConsensusDecision {
                 decision_id: env
                     .storage()
@@ -4670,7 +5236,7 @@ impl QuorumProofContract {
                 timestamp: now,
                 required_weight_threshold: slice.threshold,
                 achieved_weight: total_attested_weight,
-                total_weight: slice.weights.iter().sum(),
+                total_weight: cached_total_weight,
             };
 
             let mut history: Vec<ConsensusDecision> = env
@@ -4701,12 +5267,18 @@ impl QuorumProofContract {
     /// # Panics
     /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
     pub fn is_revoked(env: Env, credential_id: u64) -> bool {
+        // Issue #514: Check revocation cache first to avoid storage read
+        if let Some(cached) = Self::get_revocation_cache(&env, credential_id) {
+            return cached;
+        }
         let credential: Credential = env
             .storage()
             .instance()
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-        credential.revoked
+        let revoked = credential.revoked;
+        Self::set_revocation_cache(&env, credential_id, revoked);
+        revoked
     }
 
     /// Returns true if the credential has been suspended.
@@ -7397,8 +7969,7 @@ impl QuorumProofContract {
     fn compute_holder_reputation(
         env: &Env,
         holder: Address,
-    ) -> (u64, u64, u64, u64, u64) {
-        let config = Self::get_holder_reputation_config(env.clone());
+    ) -> (u64, u64, u64, u64, u64, u64, u64) {
         let activities: Vec<ActivityRecord> = env
             .storage()
             .instance()
@@ -7420,11 +7991,32 @@ impl QuorumProofContract {
         let attestation_age_seconds = oldest_attestation_at
             .map(|attested_at| now.saturating_sub(attested_at))
             .unwrap_or(0);
-        let age_score = attestation_age_seconds
-            .saturating_div(config.age_divisor_seconds)
-            .saturating_mul(config.age_weight);
-        let count_score = attestation_count.saturating_mul(config.attestation_weight);
-        let score = count_score.saturating_add(age_score);
+        
+        // Issue #539: Get verification statistics
+        let successful_verifications: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::HolderSuccessfulVerifications(holder.clone()))
+            .unwrap_or(0);
+        let failed_verifications: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::HolderFailedVerifications(holder.clone()))
+            .unwrap_or(0);
+        let total_verifications = successful_verifications.saturating_add(failed_verifications);
+        
+        // Calculate verification success rate (0-100)
+        let verification_success_rate = if total_verifications > 0 {
+            successful_verifications
+                .saturating_mul(100)
+                .saturating_div(total_verifications)
+        } else {
+            0
+        };
+        
+        // Calculate reputation score (0-100) based on verification success rate
+        let score = core::cmp::min(verification_success_rate, 100);
+        
         let subject_credentials: Vec<u64> = env
             .storage()
             .instance()
@@ -7436,24 +8028,92 @@ impl QuorumProofContract {
 
         (
             credentials_held,
+            successful_verifications,
+            failed_verifications,
+            total_verifications,
             attestation_count,
             attestation_age_seconds,
-            count_score,
             score,
         )
     }
 
     /// Get holder reputation derived from attestation history.
+    /// Issue #539: Enhanced to include verification success rate and 0-100 score.
     pub fn get_holder_reputation(env: Env, holder: Address) -> HolderReputation {
-        let (credentials_held, attestation_count, attestation_age_seconds, _count_score, score) =
-            Self::compute_holder_reputation(&env, holder);
+        let (
+            credentials_held,
+            successful_verifications,
+            failed_verifications,
+            total_verifications,
+            attestation_count,
+            attestation_age_seconds,
+            score,
+        ) = Self::compute_holder_reputation(&env, holder);
+        
+        let verification_success_rate = if total_verifications > 0 {
+            successful_verifications
+                .saturating_mul(100)
+                .saturating_div(total_verifications)
+        } else {
+            0
+        };
+        
         HolderReputation {
             credentials_held,
-            successful_verifications: attestation_count,
+            successful_verifications,
+            failed_verifications,
+            total_verifications,
+            verification_success_rate,
             attestation_count,
             attestation_age_seconds,
             score,
         }
+    }
+
+    /// Issue #539: Record a verification attempt for reputation tracking.
+    /// Updates the holder's successful or failed verification count.
+    fn record_verification_attempt(env: &Env, holder: Address, success: bool) {
+        if success {
+            let count: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::HolderSuccessfulVerifications(holder.clone()))
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey2::HolderSuccessfulVerifications(holder),
+                &count.saturating_add(1),
+            );
+        } else {
+            let count: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::HolderFailedVerifications(holder.clone()))
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey2::HolderFailedVerifications(holder),
+                &count.saturating_add(1),
+            );
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #539: Verify a credential and update holder reputation.
+    /// This is a wrapper around is_attested that tracks verification attempts.
+    pub fn verify_credential(env: Env, credential_id: u64, slice_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        
+        let verification_result = Self::is_attested(env.clone(), credential_id, slice_id);
+        
+        // Record verification attempt for holder reputation
+        Self::record_verification_attempt(&env, credential.subject, verification_result);
+        
+        verification_result
     }
 
     // ── Issue #522: Credential holder consent tracking ────────────────────────
@@ -12231,6 +12891,274 @@ mod feature_tests {
         assert_eq!(state.unwrap().call_count, 1);
     }
 
+    #[test]
+    fn test_rate_limit_default_is_1000_per_day() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let config = client.get_rate_limit_config_pub();
+        assert_eq!(config.max_calls, 1000);
+        assert_eq!(config.window_seconds, 86400);
+    }
+
+    #[test]
+    fn test_set_issuer_rate_limit_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_rate_limit_config(&admin, &issuer, &5u32, &3600u64);
+
+        // Issuer-specific limit is enforced: 5 calls allowed
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        for ctype in 1u32..=5 {
+            client.issue_credential(&issuer, &subject, &ctype, &metadata, &None, &0u64);
+        }
+        let state = client.get_rate_limit_state(&issuer);
+        assert_eq!(state.unwrap().call_count, 5);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_issuer_rate_limit_config_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_rate_limit_config(&non_admin, &issuer, &5u32, &3600u64);
+    }
+
+    #[test]
+    fn test_rate_limit_whitelist_bypass() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        // Set a very tight per-issuer limit
+        client.set_issuer_rate_limit_config(&admin, &issuer, &1u32, &86400u64);
+        // Whitelist the issuer
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        // Should be able to issue more than 1 credential without hitting the limit
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &3u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_remove_rate_limit_whitelist() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        client.remove_rate_limit_whitelist(&admin, &issuer);
+        assert!(!client.is_rate_limit_whitelisted(&issuer));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_add_rate_limit_whitelist_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&non_admin, &issuer);
+    }
+
+    // ── Issuance Multi-Sig Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_create_issuance_multisig_sets_policy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let policy = client.get_issuance_policy(&1u32).unwrap();
+        assert_eq!(policy.threshold, 2);
+        assert_eq!(policy.signers.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_create_issuance_multisig_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1);
+
+        client.create_issuance_multisig(&non_admin, &1u32, &signers, &1u32);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_issue_credential_blocked_when_policy_exists() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(issuer.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &1u32);
+
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        // Must panic with IssuancePolicyRequired
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_request_issuance_creates_pending_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        let req = client.get_pending_issuance(&request_id).unwrap();
+        assert_eq!(req.id, request_id);
+        assert_eq!(req.credential_type, 1);
+        assert!(!req.executed);
+        assert_eq!(req.approvals.len(), 1); // s1 auto-approves on request
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_request_issuance_non_signer_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &1u32);
+
+        let outsider = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        client.request_issuance(&outsider, &subject, &1u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_approve_issuance_below_threshold_returns_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let s3 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        signers.push_back(s3.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &3u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s2 approves — still 2/3, not yet at threshold
+        let result = client.approve_issuance(&s2, &request_id);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_approve_issuance_at_threshold_issues_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s2 provides the final approval — threshold met
+        let cred_id = client.approve_issuance(&s2, &request_id).unwrap();
+        assert!(cred_id > 0);
+
+        // Credential should now exist
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.credential_type, 1);
+        assert_eq!(cred.subject, subject);
+
+        // Request should be marked executed
+        let req = client.get_pending_issuance(&request_id).unwrap();
+        assert!(req.executed);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_approve_issuance_duplicate_approval_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.create_issuance_multisig(&admin, &1u32, &signers, &2u32);
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let request_id = client.request_issuance(&s1, &subject, &1u32, &metadata, &None, &0u64);
+
+        // s1 already approved on request — duplicate should panic
+        client.approve_issuance(&s1, &request_id);
+    }
+
+    #[test]
+    fn test_no_policy_allows_direct_issue_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        // No policy for type 99 — direct issuance should succeed
+        let cred_id = client.issue_credential(&issuer, &subject, &99u32, &metadata, &None, &0u64);
+        assert!(cred_id > 0);
+    }
+
     // ── Issue #382: Numeric Overflow Protection Tests ─────────────────────
 
     #[test]
@@ -13693,3 +14621,6 @@ mod tests_new_features;
 
 #[path = "proptest_slices.rs"]
 mod proptest_slices;
+
+#[path = "proptest_credentials.rs"]
+mod proptest_credentials;

@@ -6,7 +6,7 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 **Scope**: `quorum_proof`, `sbt_registry`, `zk_verifier` contracts and their interactions.
 
-**Last Updated**: May 27, 2026
+**Last Updated**: May 29, 2026
 
 ---
 
@@ -405,7 +405,244 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 ---
 
-## 5. Operational Security
+## 5. Recent Features Threat Analysis (v1.0+)
+
+### 5.1 Weighted Attestation Threshold
+
+**Feature**: Quorum slices now support weighted voting where each attestor has a configurable weight, and a threshold must be met by the sum of weights.
+
+**New Attack Vectors**:
+
+#### 5.1.1 Weight Manipulation
+
+**Attack**: Attacker creates slice with unbalanced weights to bypass threshold.
+
+**Vector**:
+- Create slice with 10 attestors, each weight=1, threshold=1
+- Single attestor can attest credential
+- Defeats purpose of multi-party consensus
+
+**Mitigation**:
+- ✅ Threshold validation: `threshold <= sum(weights)` enforced
+- ✅ Threshold must be > 0 (prevents zero-threshold slices)
+- ✅ `MAX_ATTESTORS_PER_SLICE = 20` prevents unbounded slices
+- ✅ Slice creator is responsible for threshold design
+- ✅ Slice configuration is immutable after creation
+
+**Residual Risk**: Low. Requires slice creator to intentionally misconfigure (detectable via audit).
+
+**Recommendation**: Document best practices for threshold selection (e.g., require 2-of-3 or 3-of-5 minimum).
+
+---
+
+#### 5.1.2 Attestor Weight Overflow
+
+**Attack**: Attacker supplies weights that overflow u32, causing incorrect threshold calculation.
+
+**Vector**:
+- Create slice with weights summing to > u32::MAX
+- Threshold calculation wraps around
+- Threshold becomes achievable with fewer attestors
+
+**Mitigation**:
+- ✅ Weights are u32 (max 4,294,967,295 per attestor)
+- ✅ Sum of weights checked against threshold (u32)
+- ✅ Rust type system prevents overflow in safe code
+- ✅ Test suite includes overflow edge cases
+
+**Residual Risk**: None. Type system prevents overflow.
+
+---
+
+### 5.2 Credential Metadata Hashing
+
+**Feature**: Credentials now store metadata as immutable hashes (IPFS CID or SHA-256).
+
+**New Attack Vectors**:
+
+#### 5.2.1 Hash Collision
+
+**Attack**: Attacker finds two different metadata documents with the same hash.
+
+**Vector**:
+- Issue credential with metadata hash H
+- Attacker finds different metadata with hash H
+- Credential appears to have different content
+
+**Mitigation**:
+- ✅ SHA-256 used (collision resistance: 2^128 operations)
+- ✅ IPFS CID uses SHA-256 by default
+- ✅ Collision probability negligible for practical purposes
+- ✅ Metadata stored off-chain (IPFS) — on-chain only stores hash
+
+**Residual Risk**: Negligible (cryptographic guarantee).
+
+---
+
+#### 5.2.2 Metadata Availability Loss
+
+**Attack**: Attacker deletes metadata from IPFS, making credential unverifiable.
+
+**Vector**:
+- Issue credential with IPFS CID
+- Attacker removes file from IPFS
+- Credential hash exists but metadata is gone
+
+**Mitigation**:
+- ✅ Metadata stored on IPFS (distributed, replicated)
+- ✅ Issuer responsible for pinning metadata
+- ✅ Credential holder can re-pin metadata
+- ✅ Hash verification ensures integrity (cannot be replaced with different content)
+- 🔄 **Planned (v2.0)**: Mandatory metadata pinning service
+
+**Residual Risk**: Medium. Requires IPFS infrastructure maintenance.
+
+**Recommendation**: Operators should run IPFS pinning service or use Pinata/Filecoin for redundancy.
+
+---
+
+### 5.3 Dispute Resolution System
+
+**Feature**: Credentials can now be disputed by holders, with evidence-based resolution.
+
+**New Attack Vectors**:
+
+#### 5.3.1 Dispute Spam
+
+**Attack**: Attacker files many disputes to overwhelm slice members.
+
+**Vector**:
+- File 100 disputes in rapid succession
+- Slice members cannot review all evidence
+- Valid disputes get lost in noise
+
+**Mitigation**:
+- ✅ Dispute filing requires `require_auth()` from credential holder
+- ✅ One active dispute per credential at a time
+- ✅ Dispute TTL (30 days) prevents indefinite accumulation
+- ✅ Dispute evidence is required at filing time
+- ✅ Slice members can reject disputes with insufficient evidence
+
+**Residual Risk**: Low. Rate limiting and evidence requirements deter spam.
+
+**Recommendation**: Implement application-level rate limiting (e.g., max 5 disputes per holder per month).
+
+---
+
+#### 5.3.2 Dispute Resolution Collusion
+
+**Attack**: Slice members collude to invalidate valid credentials.
+
+**Vector**:
+- Multiple slice members vote to resolve dispute as INVALID
+- Valid credential is revoked
+- Credential holder has no recourse
+
+**Mitigation**:
+- ✅ Dispute resolution requires threshold-based voting
+- ✅ Dispute evidence is public and auditable
+- ✅ Revocation event is emitted (can be monitored)
+- ✅ Credential holder can appeal via new slice
+- ✅ Voting history is on-chain (detectable pattern)
+- ⚠️ **Partial**: Multi-sig admin enforcement planned for v2.0
+
+**Residual Risk**: Medium. Requires collusion of multiple slice members.
+
+**Recommendation**: Implement monitoring for unusual voting patterns (e.g., same members voting together repeatedly).
+
+---
+
+#### 5.3.3 Evidence Forgery
+
+**Attack**: Attacker submits forged evidence to support dispute.
+
+**Vector**:
+- File dispute with fake evidence hash
+- Slice members cannot verify authenticity
+- Dispute resolution based on false evidence
+
+**Mitigation**:
+- ✅ Evidence stored off-chain (IPFS) with hash verification
+- ✅ Hash mismatch causes `InvalidEvidence` error
+- ✅ Evidence is immutable (cannot be changed after filing)
+- ✅ Slice members responsible for evidence verification
+- ✅ Audit trail shows evidence hash and resolution
+
+**Residual Risk**: Low. Cryptographic hashing prevents tampering; social engineering remains possible.
+
+**Recommendation**: Require slice members to document evidence review process.
+
+---
+
+### 5.4 SBT Minting & Burning
+
+**Feature**: Credential holders can now mint Soulbound Tokens (SBTs) representing credentials.
+
+**New Attack Vectors**:
+
+#### 5.4.1 SBT Minting Without Attestation
+
+**Attack**: Attacker mints SBT for credential that hasn't been attested.
+
+**Vector**:
+- Issue credential
+- Mint SBT before attestation threshold is met
+- SBT appears to represent verified credential
+
+**Mitigation**:
+- ✅ `mint` checks that credential exists
+- ✅ `mint` checks that credential is not revoked
+- ✅ Application layer should verify attestation before minting (recommended)
+- ✅ SBT metadata can indicate attestation status
+
+**Residual Risk**: Low. Application layer should enforce attestation requirement.
+
+**Recommendation**: Document that SBT minting does not imply attestation; verifiers should check `is_attested()` separately.
+
+---
+
+#### 5.4.2 SBT Metadata Manipulation
+
+**Attack**: Attacker mints SBT with misleading metadata.
+
+**Vector**:
+- Mint SBT with metadata claiming higher qualification than credential
+- Verifier trusts SBT metadata without checking credential
+- Credential holder appears overqualified
+
+**Mitigation**:
+- ✅ SBT metadata is immutable after minting
+- ✅ SBT metadata hash is stored on-chain
+- ✅ Verifiers should check both SBT and credential metadata
+- ✅ Metadata mismatch is detectable
+
+**Residual Risk**: Low. Requires verifier to trust SBT metadata without verification.
+
+**Recommendation**: Verifiers should always check underlying credential, not just SBT metadata.
+
+---
+
+#### 5.4.3 SBT Burning & Re-minting
+
+**Attack**: Attacker burns SBT and re-mints with different metadata.
+
+**Vector**:
+- Mint SBT with accurate metadata
+- Burn SBT
+- Re-mint SBT with modified metadata
+- Credential appears to have changed
+
+**Mitigation**:
+- ✅ Burn is irreversible (SBT destroyed)
+- ✅ Re-minting creates new token ID
+- ✅ Token ID history is on-chain (can be audited)
+- ✅ Credential metadata is immutable (cannot be changed)
+
+**Residual Risk**: Low. Credential metadata is immutable; SBT metadata changes are auditable.
+
+---
+
+## 6. Operational Security
 
 ### 5.1 Key Management
 
@@ -481,27 +718,41 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 | Dispute Timeout Abuse | Low | Medium | TTL enforcement | ✅ Mitigated |
 | Evidence Tampering | None | High | Cryptographic hashing | ✅ Mitigated |
 | Slice Member Bribery | Medium | High | Monitoring, reputation (planned) | ⚠️ Partial |
+| **Weight Manipulation** | **Low** | **High** | **Threshold validation, immutable config** | **✅ Mitigated** |
+| **Hash Collision** | **Negligible** | **High** | **SHA-256 cryptographic guarantee** | **✅ Mitigated** |
+| **Metadata Availability Loss** | **Medium** | **Medium** | **IPFS replication, pinning service** | **⚠️ Partial** |
+| **Dispute Spam** | **Low** | **Medium** | **Rate limiting, evidence requirements** | **✅ Mitigated** |
+| **Dispute Resolution Collusion** | **Medium** | **Critical** | **Voting threshold, audit trail** | **⚠️ Partial** |
+| **Evidence Forgery** | **Low** | **High** | **Cryptographic hashing, audit trail** | **✅ Mitigated** |
+| **SBT Minting Without Attestation** | **Low** | **Medium** | **Application-layer verification** | **⚠️ Partial** |
+| **SBT Metadata Manipulation** | **Low** | **Medium** | **Immutable metadata, verifier diligence** | **⚠️ Partial** |
+| **SBT Burning & Re-minting** | **Low** | **Low** | **Immutable credential, auditable history** | **✅ Mitigated** |
 
 ---
 
 ## 8. Future Enhancements
 
-### v1.1 (ZK Implementation)
+### v1.1 (ZK Implementation & Metadata Pinning)
 - [ ] Real Groth16/PLONK proof verification
 - [ ] Claim-specific privacy (selective disclosure)
 - [ ] Proof generation framework
+- [ ] Mandatory metadata pinning service
+- [ ] Metadata availability monitoring
 
-### v2.0 (Dispute Resolution)
+### v2.0 (Dispute Resolution & Governance)
 - [ ] Multi-sig admin requirement (2-of-3)
 - [ ] Reputation system for slice members
 - [ ] Appeal process for disputed credentials
 - [ ] Automated evidence verification
+- [ ] Dispute voting audit trail
+- [ ] Collusion detection algorithms
 
-### v3.0 (Governance)
+### v3.0 (Advanced Governance)
 - [ ] DAO-based dispute resolution
 - [ ] Credential expiry and renewal
 - [ ] Institutional rating system
 - [ ] Revocation registry
+- [ ] Cross-chain credential bridging
 
 ---
 
@@ -522,5 +773,5 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 | Contract Author | | | |
 | Compliance Officer | | | |
 
-**Last Reviewed**: April 26, 2026
-**Next Review**: October 26, 2026 (6-month cycle)
+**Last Reviewed**: May 29, 2026
+**Next Review**: November 29, 2026 (6-month cycle)
