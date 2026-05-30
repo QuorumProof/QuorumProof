@@ -44,7 +44,7 @@ const DEFAULT_REPUTATION_ATTESTATION_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_WEIGHT: u64 = 1;
 const DEFAULT_REPUTATION_AGE_DIVISOR_SECONDS: u64 = 1_000;
 // Issue #381: Rate limiting configuration
-foconst DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
+const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
@@ -438,6 +438,10 @@ pub enum ContractError {
     AlreadyApprovedIssuance = 52,
     /// Credential type has a multisig policy; use request_issuance instead
     IssuancePolicyRequired = 53,
+    /// Issue #597: Issuer has exceeded their credential issuance quota
+    QuotaExceeded = 54,
+    /// Issue #597: No quota configured for this issuer
+    QuotaNotFound = 55,
 }
 
 #[contracttype]
@@ -511,6 +515,10 @@ pub enum DataKey2 {
     RevocationCache(u64),
     /// Issue #515: Cache for slice total weight (slice_id -> u32)
     SliceTotalWeight(u64),
+    /// Issue #597: Per-issuer usage quota configuration
+    IssuerQuota(Address),
+    /// Issue #597: Per-issuer usage counter within the current quota window
+    IssuerQuotaUsage(Address),
 }
 
 #[contracttype]
@@ -936,6 +944,27 @@ pub struct RateLimitState {
     pub window_start: u64,
 }
 
+/// Issue #597: Per-issuer credential issuance quota
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuerQuota {
+    /// Maximum credentials the issuer may issue within `window_seconds`.
+    pub max_credentials: u32,
+    /// Rolling window duration in seconds.
+    pub window_seconds: u64,
+    /// Optional alert threshold (0 = no alert). When usage reaches this
+    /// percentage (0–100) of max_credentials, an event is emitted.
+    pub alert_threshold_pct: u32,
+}
+
+/// Issue #597: Tracks an issuer's quota consumption within the current window.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuerQuotaUsage {
+    pub issued_count: u32,
+    pub window_start: u64,
+}
+
 /// Verification statistics for the contract
 #[contracttype]
 #[derive(Clone)]
@@ -1297,6 +1326,138 @@ impl QuorumProofContract {
             .instance()
             .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(issuer))
             .unwrap_or(false)
+    }
+
+    // ── Issue #597: Per-issuer usage quota ────────────────────────────────────
+
+    /// Set a credential issuance quota for an issuer. Admin only.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address to configure.
+    /// - `max_credentials`: Maximum credentials allowed per window.
+    /// - `window_seconds`: Rolling window duration in seconds.
+    /// - `alert_threshold_pct`: Emit a `QuotaAlert` event when usage reaches
+    ///   this percentage (0–100) of `max_credentials`. Pass 0 to disable.
+    pub fn set_issuer_quota(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        max_credentials: u32,
+        window_seconds: u64,
+        alert_threshold_pct: u32,
+    ) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        assert!(max_credentials > 0, "max_credentials must be > 0");
+        assert!(window_seconds > 0, "window_seconds must be > 0");
+        assert!(alert_threshold_pct <= 100, "alert_threshold_pct must be 0-100");
+
+        let quota = IssuerQuota { max_credentials, window_seconds, alert_threshold_pct };
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerQuota(issuer), &quota);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the quota configuration for an issuer. Returns None if not set.
+    pub fn get_issuer_quota(env: Env, issuer: Address) -> Option<IssuerQuota> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::IssuerQuota(issuer))
+    }
+
+    /// Get the current quota usage for an issuer within the active window.
+    pub fn get_issuer_quota_usage(env: Env, issuer: Address) -> IssuerQuotaUsage {
+        env.storage()
+            .instance()
+            .get(&DataKey2::IssuerQuotaUsage(issuer.clone()))
+            .unwrap_or(IssuerQuotaUsage { issued_count: 0, window_start: 0 })
+    }
+
+    /// Remove a quota configuration for an issuer. Admin only.
+    pub fn remove_issuer_quota(env: Env, admin: Address, issuer: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .remove(&DataKey2::IssuerQuota(issuer.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey2::IssuerQuotaUsage(issuer));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check and increment quota usage for an issuer.
+    /// Panics with `QuotaExceeded` if the issuer has exhausted their quota.
+    /// Emits a `QuotaAlert` event when usage crosses the alert threshold.
+    /// No-op if no quota is configured for the issuer.
+    fn enforce_quota(env: &Env, issuer: &Address) {
+        let quota: IssuerQuota = match env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerQuota(issuer.clone()))
+        {
+            Some(q) => q,
+            None => return, // no quota configured — allow
+        };
+
+        let now = env.ledger().timestamp();
+        let usage: IssuerQuotaUsage = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerQuotaUsage(issuer.clone()))
+            .unwrap_or(IssuerQuotaUsage { issued_count: 0, window_start: now });
+
+        // Determine effective usage within the current window
+        let (count, window_start) = if now.saturating_sub(usage.window_start) < quota.window_seconds {
+            (usage.issued_count, usage.window_start)
+        } else {
+            // Window has expired — reset
+            (0u32, now)
+        };
+
+        if count >= quota.max_credentials {
+            panic_with_error!(env, ContractError::QuotaExceeded);
+        }
+
+        let new_count = count.saturating_add(1);
+
+        // Emit alert event if threshold crossed
+        if quota.alert_threshold_pct > 0 {
+            let threshold = (quota.max_credentials as u64)
+                .saturating_mul(quota.alert_threshold_pct as u64)
+                / 100;
+            if new_count as u64 >= threshold {
+                let topic = soroban_sdk::String::from_str(env, "QuotaAlert");
+                let mut topics: Vec<soroban_sdk::String> = Vec::new(env);
+                topics.push_back(topic);
+                env.events().publish(topics, (issuer.clone(), new_count, quota.max_credentials));
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerQuotaUsage(issuer.clone()), &IssuerQuotaUsage {
+                issued_count: new_count,
+                window_start,
+            });
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     // ── Issue #521: Proof of Work for credential issuance ─────────────────────
@@ -2435,6 +2596,8 @@ impl QuorumProofContract {
         }
         // Issue #381: Rate limiting
         Self::require_rate_limit(&env, &issuer);
+        // Issue #597: Quota enforcement
+        Self::enforce_quota(&env, &issuer);
         // Issue #521: Proof of Work verification
         Self::verify_pow(&env, &issuer, &subject, credential_type, nonce);
         // Pre-conditions
@@ -12978,6 +13141,87 @@ mod feature_tests {
         let issuer = Address::generate(&env);
 
         client.add_rate_limit_whitelist(&non_admin, &issuer);
+    }
+
+    // ── Issue #597: Issuer Quota Tests ────────────────────────────────────────
+
+    #[test]
+    fn test_set_and_get_issuer_quota() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_quota(&admin, &issuer, &10u32, &86400u64, &80u32);
+        let quota = client.get_issuer_quota(&issuer).expect("quota should be set");
+        assert_eq!(quota.max_credentials, 10);
+        assert_eq!(quota.window_seconds, 86400);
+        assert_eq!(quota.alert_threshold_pct, 80);
+    }
+
+    #[test]
+    fn test_quota_usage_increments_on_issue() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        client.set_issuer_quota(&admin, &issuer, &5u32, &86400u64, &0u32);
+
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+
+        let usage = client.get_issuer_quota_usage(&issuer);
+        assert_eq!(usage.issued_count, 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_quota_exceeded_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        // Quota of 1
+        client.set_issuer_quota(&admin, &issuer, &1u32, &86400u64, &0u32);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        // Second issuance should panic with QuotaExceeded
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+    }
+
+    #[test]
+    fn test_no_quota_allows_issuance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        // No quota set — issuance should succeed freely
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+        let usage = client.get_issuer_quota_usage(&issuer);
+        assert_eq!(usage.issued_count, 0); // no quota tracking without a quota
+    }
+
+    #[test]
+    fn test_remove_issuer_quota() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.set_issuer_quota(&admin, &issuer, &3u32, &86400u64, &0u32);
+        assert!(client.get_issuer_quota(&issuer).is_some());
+
+        client.remove_issuer_quota(&admin, &issuer);
+        assert!(client.get_issuer_quota(&issuer).is_none());
     }
 
     // ── Issuance Multi-Sig Tests ──────────────────────────────────────────────
