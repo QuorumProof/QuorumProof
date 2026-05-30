@@ -1,0 +1,84 @@
+name: Mainnet Canary
+
+# Issue #592: Canary deployments with gradual rollout and automatic rollback.
+# Triggered manually or on a schedule after a successful mainnet deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      rollout_pct:
+        description: "Traffic percentage for canary (1-100)"
+        required: true
+        default: "10"
+  workflow_run:
+    workflows: ["Deploy Mainnet"]
+    types: [completed]
+
+jobs:
+  canary-smoke:
+    name: Canary Smoke Tests
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: mainnet
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-canary-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+
+      - name: Run canary smoke tests against mainnet
+        id: smoke
+        env:
+          STELLAR_NETWORK: mainnet
+          STELLAR_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+          STELLAR_SECRET_KEY: ${{ secrets.MAINNET_CANARY_KEY }}
+          CONTRACT_QUORUM_PROOF: ${{ secrets.MAINNET_CONTRACT_QUORUM_PROOF }}
+          CONTRACT_SBT_REGISTRY: ${{ secrets.MAINNET_CONTRACT_SBT_REGISTRY }}
+          CONTRACT_ZK_VERIFIER: ${{ secrets.MAINNET_CONTRACT_ZK_VERIFIER }}
+          ROLLOUT_PCT: ${{ github.event.inputs.rollout_pct || '10' }}
+        run: |
+          chmod +x scripts/canary_test.sh
+          ./scripts/canary_test.sh
+
+      - name: Rollback on failure
+        if: failure() && steps.smoke.outcome == 'failure'
+        env:
+          STELLAR_NETWORK: mainnet
+          STELLAR_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+          STELLAR_SECRET_KEY: ${{ secrets.MAINNET_SECRET_KEY }}
+          PREVIOUS_WASM_HASH: ${{ secrets.MAINNET_PREVIOUS_WASM_HASH }}
+          CONTRACT_QUORUM_PROOF: ${{ secrets.MAINNET_CONTRACT_QUORUM_PROOF }}
+        run: |
+          echo "Canary failed — rolling back to previous WASM hash $PREVIOUS_WASM_HASH"
+          stellar keys add deployer --secret-key "$STELLAR_SECRET_KEY"
+          stellar contract install \
+            --wasm-hash "$PREVIOUS_WASM_HASH" \
+            --source deployer \
+            --network mainnet
+          echo "::error::Canary smoke tests failed. Rollback initiated."
+          exit 1
+
+      - name: Report canary status
+        if: always()
+        run: |
+          STATUS="${{ steps.smoke.outcome }}"
+          echo "### Canary Result: ${STATUS^^}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Rollout: ${{ github.event.inputs.rollout_pct || '10' }}%" >> "$GITHUB_STEP_SUMMARY"

@@ -31,6 +31,18 @@ jobs:
         run: cargo test -p quorum-proof-benches --test benchmarks -- --nocapture
         continue-on-error: false
 
+      - name: Profile hot paths  # Issue #593
+        run: |
+          chmod +x scripts/profile_contracts.sh
+          ./scripts/profile_contracts.sh
+
+      - name: Upload profile report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contract-profile-report
+          path: target/profile_report.md
+
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
