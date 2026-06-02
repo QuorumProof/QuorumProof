@@ -200,6 +200,7 @@ pub struct SbtActivityEntry {
 pub struct SbtRegistryContract;
 
 #[contractimpl]
+#[allow(dead_code)]
 impl SbtRegistryContract {
     /// Mint a soulbound token linked to a credential_id.
     ///
