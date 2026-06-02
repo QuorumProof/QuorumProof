@@ -40,7 +40,10 @@ jobs:
 
       - name: Verify Backups
         run: |
-          ./scripts/verify_snapshot.sh backups/daily/quorumproof-*.json || true
+          for f in backups/daily/quorumproof-*.json; do
+            echo "==> Verifying $f"
+            ./scripts/verify_backup.sh "$f" --dry-run-restore
+          done
 
       - name: Upload Backup Artifacts
         if: always()

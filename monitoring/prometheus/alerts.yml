@@ -55,3 +55,22 @@ groups:
         annotations:
           summary: "Burst of contract errors"
           description: "{{ $value }} errors in the last 10 minutes."
+
+      # #599 — Backup verification alerts
+      - alert: BackupMissing
+        expr: time() - quorumproof_backup_last_success_timestamp > 90000
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful backup in 25 hours"
+          description: "Last successful backup was {{ $value | humanizeDuration }} ago. Expected every 24h."
+
+      - alert: BackupVerificationFailed
+        expr: quorumproof_backup_verification_status == 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backup integrity verification failed"
+          description: "The most recent backup failed integrity checks. Restore may not be possible."
