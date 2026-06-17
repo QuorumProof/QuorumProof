@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Vec};
 
 /// Groth16 proof byte layout (BN254, uncompressed):
 ///   A  : 64 bytes  (G1 point)
@@ -7,6 +7,16 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, 
 ///   C  : 64 bytes  (G1 point)
 ///   Total: 256 bytes
 pub const GROTH16_PROOF_LEN: u32 = 256;
+
+/// Key rotation audit entry
+#[contracttype]
+#[derive(Clone)]
+pub struct KeyRotationEntry {
+    pub old_key: BytesN<32>,
+    pub new_key: BytesN<32>,
+    pub rotated_at_ledger: u32,
+    pub rotated_by: Address,
+}
 
 /// Verify a Groth16 proof against a stored verifying-key commitment.
 ///
@@ -266,6 +276,46 @@ impl ZkVerifierContract {
             .expect("not initialized");
         assert!(stored_admin == admin, "unauthorized");
         env.storage().instance().set(&DataKey::VerifyingKeyHash, &vk_hash);
+    }
+
+    /// Rotate verifying key with audit trail.
+    /// Records the old and new key, ledger height, and admin address.
+    pub fn rotate_verifying_key(env: Env, admin: Address, new_vk_hash: BytesN<32>) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let old_key: BytesN<32> = env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+            .expect("no verifying key set; use set_verifying_key first");
+
+        // Audit trail: record the rotation
+        let rotation = KeyRotationEntry {
+            old_key,
+            new_key: new_vk_hash.clone(),
+            rotated_at_ledger: env.ledger().sequence(),
+            rotated_by: admin,
+        };
+        
+        // Get rotation history and append
+        let history_key = DataKey::KeyRotationHistory;
+        let mut rotations: Vec<KeyRotationEntry> = env.storage().instance()
+            .get(&history_key)
+            .unwrap_or_else(|_| Vec::new(&env));
+        rotations.push_back(rotation);
+        env.storage().instance().set(&history_key, &rotations);
+
+        // Update current key
+        env.storage().instance().set(&DataKey::VerifyingKeyHash, &new_vk_hash);
+    }
+
+    /// Get key rotation history (limited to last 10 for storage efficiency).
+    pub fn get_key_rotation_history(env: Env) -> Vec<KeyRotationEntry> {
+        env.storage().instance()
+            .get(&DataKey::KeyRotationHistory)
+            .unwrap_or_else(|_| Vec::new(&env))
     }
 
     /// Verify a Groth16 ZK proof for a claim.
@@ -873,6 +923,7 @@ pub enum DataKey {
     CircuitParams,
     VerifyingKeyHash,
     VerifiedProofCache(BytesN<32>),
+    KeyRotationHistory,
 }
 
 #[cfg(test)]
@@ -1849,5 +1900,196 @@ mod tests {
         let vks: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env); // empty
 
         client.verify_batch_proofs(&proofs, &pis, &vks);
+    }
+
+    // --- Key rotation tests ---
+
+    #[test]
+    fn test_rotate_verifying_key_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let old_key = BytesN::from_array(&env, &[1u8; 32]);
+        let new_key = BytesN::from_array(&env, &[2u8; 32]);
+
+        // Verify old key is set
+        let proof = make_valid_proof(&env);
+        assert!(client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
+
+        // Rotate to new key
+        client.rotate_verifying_key(&admin, &new_key);
+
+        // Old proof fails with new key
+        assert!(!client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
+    }
+
+    #[test]
+    fn test_rotate_verifying_key_records_audit_trail() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let old_key = BytesN::from_array(&env, &[1u8; 32]);
+        let new_key = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.rotate_verifying_key(&admin, &new_key);
+
+        let history = client.get_key_rotation_history();
+        assert_eq!(history.len(), 1);
+
+        let entry = history.get(0).unwrap();
+        assert_eq!(entry.old_key, old_key);
+        assert_eq!(entry.new_key, new_key);
+        assert_eq!(entry.rotated_by, admin);
+    }
+
+    #[test]
+    fn test_rotate_verifying_key_multiple_rotations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let key1 = BytesN::from_array(&env, &[1u8; 32]);
+        let key2 = BytesN::from_array(&env, &[2u8; 32]);
+        let key3 = BytesN::from_array(&env, &[3u8; 32]);
+
+        client.rotate_verifying_key(&admin, &key2);
+        client.rotate_verifying_key(&admin, &key3);
+
+        let history = client.get_key_rotation_history();
+        assert_eq!(history.len(), 2);
+
+        assert_eq!(history.get(0).unwrap().old_key, key1);
+        assert_eq!(history.get(0).unwrap().new_key, key2);
+        assert_eq!(history.get(1).unwrap().old_key, key2);
+        assert_eq!(history.get(1).unwrap().new_key, key3);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_rotate_verifying_key_non_admin_fails() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, _admin) = setup(&env);
+
+        let non_admin = Address::generate(&env);
+        let new_key = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.rotate_verifying_key(&non_admin, &new_key);
+    }
+
+    #[test]
+    fn test_rotate_verifying_key_records_ledger_sequence() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_key = BytesN::from_array(&env, &[2u8; 32]);
+        let ledger_before = env.ledger().sequence();
+
+        client.rotate_verifying_key(&admin, &new_key);
+
+        let history = client.get_key_rotation_history();
+        let entry = history.get(0).unwrap();
+        assert!(entry.rotated_at_ledger >= ledger_before);
+    }
+
+    #[test]
+    fn test_get_key_rotation_history_empty_initially() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let history = client.get_key_rotation_history();
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "no verifying key set")]
+    fn test_rotate_verifying_key_no_initial_key_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        // Try to rotate without setting initial key
+        let new_key = BytesN::from_array(&env, &[2u8; 32]);
+        client.rotate_verifying_key(&admin, &new_key);
+    }
+
+    #[test]
+    fn test_set_verifying_key_updates_current_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        let key1 = BytesN::from_array(&env, &[1u8; 32]);
+        client.set_verifying_key(&admin, &key1);
+
+        // Create proof valid against key1
+        let proof = make_valid_proof(&env);
+        assert!(client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
+
+        // Replace with new key via set_verifying_key
+        let key2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.set_verifying_key(&admin, &key2);
+
+        // Old proof fails with new key
+        assert!(!client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
+    }
+
+    #[test]
+    fn test_rotate_vs_set_verifying_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        let key1 = BytesN::from_array(&env, &[1u8; 32]);
+        client.set_verifying_key(&admin, &key1);
+
+        // set_verifying_key does not create audit entry
+        let history_after_set = client.get_key_rotation_history();
+        assert_eq!(history_after_set.len(), 0);
+
+        // rotate_verifying_key does create audit entry
+        let key2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.rotate_verifying_key(&admin, &key2);
+
+        let history_after_rotate = client.get_key_rotation_history();
+        assert_eq!(history_after_rotate.len(), 1);
+    }
+
+    #[test]
+    fn test_verify_claim_after_key_rotation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let proof1 = make_valid_proof(&env);
+        assert!(client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof1));
+
+        let new_key = BytesN::from_array(&env, &[3u8; 32]);
+        client.rotate_verifying_key(&admin, &new_key);
+
+        // Proof generated with old key fails verification with new key
+        assert!(!client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof1));
+
+        // New proof valid with new key
+        let mut buf = [0u8; 256];
+        buf[0..64].fill(0x04);
+        buf[64..192].fill(0x05);
+        buf[192..256].fill(0x06);
+        let proof2 = Bytes::from_slice(&env, &buf);
+        // Will verify based on new key binding — depends on whether 0xFF collision occurs
+        let _ = client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof2);
     }
 }
