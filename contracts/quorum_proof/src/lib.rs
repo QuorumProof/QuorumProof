@@ -523,6 +523,12 @@ pub enum DataKey2 {
     IssuerQuota(Address),
     /// Issue #597: Per-issuer usage counter within the current quota window
     IssuerQuotaUsage(Address),
+    /// Pending issuer-initiated revocation request (credential_id -> IssuerRevocationRequest)
+    IssuerRevocationRequest(u64),
+    /// Audit trail for revocations (credential_id -> Vec<RevocationAuditEntry>)
+    RevocationAuditTrail(u64),
+    /// Per-issuer list of delegated revocation agents
+    IssuerRevocationAgents(Address),
 }
 
 #[contracttype]
@@ -574,6 +580,18 @@ pub struct HolderRevocationRequest {
     pub status: RevocationStatus,
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuerRevocationRequest {
+    pub credential_id: CredentialId,
+    pub issuer: Address,
+    pub initiated_at: u64,
+    pub finalize_at: u64,
+    pub reason: Option<soroban_sdk::String>,
+    pub agent: Option<Address>,
+    pub cancelled: bool,
+}
+
 /// Audit trail entry for revocation request lifecycle.
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -582,6 +600,12 @@ pub enum RevocationAuditAction {
     RequestSubmitted = 1,
     Approved = 2,
     Denied = 3,
+    /// Issuer scheduled a revocation with a time-lock
+    Scheduled = 4,
+    /// Issuer-initiated revocation finalized after time-lock
+    Finalized = 5,
+    /// Issuer-initiated revocation cancelled within time-lock
+    Cancelled = 6,
 }
 
 #[contracttype]
@@ -1735,6 +1759,31 @@ impl QuorumProofContract {
         if credential.issuer != *caller {
             panic_with_error!(env, ContractError::PermissionDenied);
         }
+    }
+
+    /// Require that the caller is either the issuer of the credential or a delegated revocation agent
+    fn require_issuer_or_agent(env: &Env, caller: &Address, credential_id: u64) {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::CredentialNotFound));
+        if credential.issuer == *caller {
+            return;
+        }
+        // Check delegated agents list for this issuer
+        if let Some(mut agents) = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(credential.issuer.clone()))
+        {
+            for a in agents.iter() {
+                if a == caller {
+                    return;
+                }
+            }
+        }
+        panic_with_error!(env, ContractError::PermissionDenied);
     }
 
     /// Require that the caller is the subject of a credential
@@ -3478,6 +3527,221 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey2::RevocationAuditTrail(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Schedule an issuer-initiated revocation with a configurable time-lock.
+    /// The caller must be the issuer or a delegated revocation agent.
+    pub fn schedule_revocation(
+        env: Env,
+        caller: Address,
+        credential_id: CredentialId,
+        timelock_seconds: Option<u64>,
+        reason: Option<soroban_sdk::String>,
+    ) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        // Ensure caller is issuer or delegated agent
+        Self::require_issuer_or_agent(&env, &caller, credential_id);
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(!credential.revoked, "credential already revoked");
+
+        let now = env.ledger().timestamp();
+        let delay = timelock_seconds.unwrap_or(48 * 3600); // default 48 hours
+        let finalize_at = now + delay;
+
+        let request = IssuerRevocationRequest {
+            credential_id,
+            issuer: credential.issuer.clone(),
+            initiated_at: now,
+            finalize_at,
+            reason,
+            agent: if credential.issuer == caller { None } else { Some(caller.clone()) },
+            cancelled: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationRequest(credential_id), &request);
+
+        Self::append_revocation_audit(
+            &env,
+            credential_id,
+            RevocationAuditAction::Scheduled,
+            caller,
+            RevocationStatus::Pending,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Finalize a scheduled issuer revocation after the time-lock expires.
+    /// The original issuer may also finalize early.
+    pub fn finalize_scheduled_revocation(env: Env, caller: Address, credential_id: CredentialId) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        let mut req: IssuerRevocationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationRequest(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
+        if req.cancelled {
+            panic_with_error!(&env, ContractError::RevocationNotPending);
+        }
+        let now = env.ledger().timestamp();
+        // Allow issuer to finalize early
+        if caller != req.issuer && now < req.finalize_at {
+            panic_with_error!(&env, ContractError::RevocationNotPending);
+        }
+
+        // Perform revocation if not already revoked
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if !credential.revoked {
+            Self::mark_credential_revoked(&env, credential_id, &mut credential, req.issuer.clone());
+        }
+
+        // Append audit entry
+        Self::append_revocation_audit(
+            &env,
+            credential_id,
+            RevocationAuditAction::Finalized,
+            caller,
+            RevocationStatus::Approved,
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationRequest(credential_id), &req);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Cancel a scheduled issuer revocation within the time-lock window.
+    /// Only the issuer or a delegated agent may cancel.
+    pub fn cancel_scheduled_revocation(env: Env, caller: Address, credential_id: CredentialId) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        let mut req: IssuerRevocationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationRequest(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
+        if req.cancelled {
+            panic_with_error!(&env, ContractError::RevocationNotPending);
+        }
+        // Only issuer or delegated agent may cancel
+        if caller != req.issuer {
+            // check agent list
+            let mut allowed = false;
+            if let Some(mut agents) = env
+                .storage()
+                .instance()
+                .get(&DataKey2::IssuerRevocationAgents(req.issuer.clone()))
+            {
+                for a in agents.iter() {
+                    if a == &caller {
+                        allowed = true;
+                        break;
+                    }
+                }
+            }
+            if !allowed {
+                panic_with_error!(&env, ContractError::PermissionDenied);
+            }
+        }
+        req.cancelled = true;
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationRequest(credential_id), &req);
+        Self::append_revocation_audit(
+            &env,
+            credential_id,
+            RevocationAuditAction::Cancelled,
+            caller,
+            RevocationStatus::Denied,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Add a delegated revocation agent for the calling issuer.
+    pub fn add_revocation_agent(env: Env, issuer: Address, agent: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        // No credential-based check required; issuer authenticated above
+        let mut agents: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        // Avoid duplicates
+        for a in agents.iter() {
+            if a == &agent {
+                return;
+            }
+        }
+        agents.push_back(agent.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationAgents(issuer.clone()), &agents);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Remove a delegated revocation agent for the calling issuer.
+    pub fn remove_revocation_agent(env: Env, issuer: Address, agent: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let mut agents: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<Address> = Vec::new(&env);
+        for a in agents.iter() {
+            if a != &agent {
+                retained.push_back(a.clone());
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationAgents(issuer.clone()), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Batch revoke multiple credentials. Only the original issuer may call.
+    pub fn batch_revoke(env: Env, issuer: Address, credential_ids: Vec<u64>) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let count = credential_ids.len();
+        assert!(count <= MAX_BATCH_SIZE as usize, "batch too large");
+        for id in credential_ids.iter() {
+            let mut credential: Credential = env
+                .storage()
+                .instance()
+                .get(&DataKey::Credential(*id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+            assert!(issuer == credential.issuer, "only issuer can revoke");
+            if !credential.revoked {
+                Self::mark_credential_revoked(&env, *id, &mut credential, issuer.clone());
+            }
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Store AES-256 encrypted credential metadata. Encryption/decryption is performed
