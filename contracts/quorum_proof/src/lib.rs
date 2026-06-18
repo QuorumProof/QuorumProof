@@ -44,6 +44,8 @@ const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
+const DEFAULT_REVOCATION_TIME_LOCK_SECONDS: u64 = 172_800; // 48 hours
+const MAX_REVOCATION_BATCH_SIZE: u32 = 128;
 
 #[contracttype]
 #[derive(Clone)]
@@ -446,6 +448,12 @@ pub enum ContractError {
     QuotaExceeded = 54,
     /// Issue #597: No quota configured for this issuer
     QuotaNotFound = 55,
+    /// Revocation request is still inside its time-lock window
+    RevocationTimeLockActive = 56,
+    /// Revocation request cannot be changed from its current state
+    InvalidRevocationState = 57,
+    /// Revocation batch exceeds the registry limit
+    RevocationBatchTooLarge = 58,
 }
 
 #[contracttype]
@@ -523,6 +531,14 @@ pub enum DataKey2 {
     IssuerQuota(Address),
     /// Issue #597: Per-issuer usage counter within the current quota window
     IssuerQuotaUsage(Address),
+    RevocationRegistryRequest(u64),
+    RevocationRegistryRequestCount,
+    CredentialRevocationRegistryRequest(u64),
+    RevocationRegistryAuditTrail(u64),
+    RevocationAgent(Address, Address),
+    IssuerRevocationAgents(Address),
+    RevocationTimeLockSeconds,
+    RevocationMetrics,
 }
 
 #[contracttype]
@@ -592,6 +608,78 @@ pub struct RevocationAuditEntry {
     pub timestamp: u64,
     pub ledger_sequence: u32,
     pub status: RevocationStatus,
+}
+
+/// State for issuer/agent initiated credential revocation requests.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum RegistryRevocationStatus {
+    Pending = 1,
+    Finalized = 2,
+    Active = 3,
+    Cancelled = 4,
+}
+
+/// Action recorded in the immutable issuer revocation registry audit trail.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum RegistryRevocationAuditAction {
+    Requested = 1,
+    Cancelled = 2,
+    Finalized = 3,
+    Activated = 4,
+    EmergencyActivated = 5,
+}
+
+/// Issuer-side revocation request with a ledger timestamp based time-lock.
+#[contracttype]
+#[derive(Clone)]
+pub struct RevocationRequest {
+    pub id: u64,
+    pub credential_id: CredentialId,
+    pub issuer: Address,
+    pub requested_by: Address,
+    pub timestamp: u64,
+    pub unlocks_at: u64,
+    pub reason: String,
+    pub status: RegistryRevocationStatus,
+    pub finalized_at: Option<u64>,
+    pub activated_at: Option<u64>,
+}
+
+/// Batch input for issuer/agent revocation requests.
+#[contracttype]
+#[derive(Clone)]
+pub struct RevocationInput {
+    pub credential_id: CredentialId,
+    pub reason: String,
+}
+
+/// Immutable issuer revocation registry audit entry.
+#[contracttype]
+#[derive(Clone)]
+pub struct RegistryRevocationAuditEntry {
+    pub request_id: u64,
+    pub credential_id: CredentialId,
+    pub actor: Address,
+    pub action: RegistryRevocationAuditAction,
+    pub status: RegistryRevocationStatus,
+    pub timestamp: u64,
+    pub ledger_sequence: u32,
+    pub reason: String,
+}
+
+/// Aggregate operational metrics for issuer-side revocation requests.
+#[contracttype]
+#[derive(Clone)]
+pub struct RevocationMetrics {
+    pub request_count: u64,
+    pub finalized_count: u64,
+    pub active_count: u64,
+    pub cancelled_count: u64,
+    pub emergency_count: u64,
 }
 
 /// Encrypted credential metadata stored on-chain (ciphertext only).
@@ -1890,6 +1978,221 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn default_revocation_time_lock(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RevocationTimeLockSeconds)
+            .unwrap_or(DEFAULT_REVOCATION_TIME_LOCK_SECONDS)
+    }
+
+    fn require_revocation_actor(env: &Env, actor: &Address, credential: &Credential) {
+        if actor == &credential.issuer {
+            return;
+        }
+        let delegated = env
+            .storage()
+            .instance()
+            .get::<DataKey2, bool>(&DataKey2::RevocationAgent(
+                credential.issuer.clone(),
+                actor.clone(),
+            ))
+            .unwrap_or(false);
+        if !delegated {
+            panic_with_error!(env, ContractError::UnauthorizedAction);
+        }
+    }
+
+    fn append_registry_revocation_audit(
+        env: &Env,
+        request: &RevocationRequest,
+        actor: Address,
+        action: RegistryRevocationAuditAction,
+        reason: String,
+    ) {
+        let entry = RegistryRevocationAuditEntry {
+            request_id: request.id,
+            credential_id: request.credential_id,
+            actor,
+            action,
+            status: request.status,
+            timestamp: env.ledger().timestamp(),
+            ledger_sequence: env.ledger().sequence(),
+            reason,
+        };
+        let mut trail: Vec<RegistryRevocationAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::RevocationRegistryAuditTrail(request.id))
+            .unwrap_or(Vec::new(env));
+        trail.push_back(entry);
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationRegistryAuditTrail(request.id), &trail);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn get_revocation_metrics_internal(env: &Env) -> RevocationMetrics {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RevocationMetrics)
+            .unwrap_or(RevocationMetrics {
+                request_count: 0,
+                finalized_count: 0,
+                active_count: 0,
+                cancelled_count: 0,
+                emergency_count: 0,
+            })
+    }
+
+    fn set_revocation_metrics_internal(env: &Env, metrics: &RevocationMetrics) {
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationMetrics, metrics);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn next_revocation_registry_request_id(env: &Env) -> u64 {
+        let next = env
+            .storage()
+            .instance()
+            .get(&DataKey2::RevocationRegistryRequestCount)
+            .unwrap_or(0u64)
+            .saturating_add(1);
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationRegistryRequestCount, &next);
+        next
+    }
+
+    fn create_revocation_registry_request(
+        env: &Env,
+        actor: Address,
+        credential_id: CredentialId,
+        reason: String,
+        time_lock_seconds: u64,
+    ) -> u64 {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::CredentialNotFound));
+        assert!(!credential.revoked, "credential already revoked");
+        Self::require_revocation_actor(env, &actor, &credential);
+        if let Some(existing_id) = env
+            .storage()
+            .instance()
+            .get::<DataKey2, u64>(&DataKey2::CredentialRevocationRegistryRequest(credential_id))
+        {
+            let existing: RevocationRequest = env
+                .storage()
+                .instance()
+                .get(&DataKey2::RevocationRegistryRequest(existing_id))
+                .unwrap_or_else(|| panic_with_error!(env, ContractError::RevocationRequestNotFound));
+            if existing.status == RegistryRevocationStatus::Pending {
+                panic_with_error!(env, ContractError::RevocationNotPending);
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let lock_seconds = if time_lock_seconds == 0 {
+            Self::default_revocation_time_lock(env)
+        } else {
+            time_lock_seconds
+        };
+        let request = RevocationRequest {
+            id: Self::next_revocation_registry_request_id(env),
+            credential_id,
+            issuer: credential.issuer.clone(),
+            requested_by: actor.clone(),
+            timestamp: now,
+            unlocks_at: now.saturating_add(lock_seconds),
+            reason: reason.clone(),
+            status: RegistryRevocationStatus::Pending,
+            finalized_at: None,
+            activated_at: None,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+        env.storage().instance().set(
+            &DataKey2::CredentialRevocationRegistryRequest(credential_id),
+            &request.id,
+        );
+        let mut metrics = Self::get_revocation_metrics_internal(env);
+        metrics.request_count = metrics.request_count.saturating_add(1);
+        Self::set_revocation_metrics_internal(env, &metrics);
+        Self::append_registry_revocation_audit(
+            env,
+            &request,
+            actor,
+            RegistryRevocationAuditAction::Requested,
+            reason,
+        );
+        request.id
+    }
+
+    fn activate_revocation_request(
+        env: &Env,
+        actor: Address,
+        request_id: u64,
+    ) -> RevocationRequest {
+        let mut request: RevocationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::RevocationRegistryRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::RevocationRequestNotFound));
+        if request.status != RegistryRevocationStatus::Pending {
+            panic_with_error!(env, ContractError::InvalidRevocationState);
+        }
+        if env.ledger().timestamp() < request.unlocks_at {
+            panic_with_error!(env, ContractError::RevocationTimeLockActive);
+        }
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(request.credential_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::CredentialNotFound));
+        Self::require_revocation_actor(env, &actor, &credential);
+        let now = env.ledger().timestamp();
+        request.status = RegistryRevocationStatus::Finalized;
+        request.finalized_at = Some(now);
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+        Self::append_registry_revocation_audit(
+            env,
+            &request,
+            actor.clone(),
+            RegistryRevocationAuditAction::Finalized,
+            request.reason.clone(),
+        );
+
+        if !credential.revoked {
+            Self::mark_credential_revoked(env, request.credential_id, &mut credential, actor.clone());
+        }
+        request.status = RegistryRevocationStatus::Active;
+        request.activated_at = Some(now);
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+        Self::append_registry_revocation_audit(
+            env,
+            &request,
+            actor,
+            RegistryRevocationAuditAction::Activated,
+            request.reason.clone(),
+        );
+        let mut metrics = Self::get_revocation_metrics_internal(env);
+        metrics.finalized_count = metrics.finalized_count.saturating_add(1);
+        metrics.active_count = metrics.active_count.saturating_add(1);
+        Self::set_revocation_metrics_internal(env, &metrics);
+        request
     }
 
     fn mark_credential_revoked(
@@ -3478,6 +3781,330 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey2::RevocationAuditTrail(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Configure the default issuer revocation time-lock. Admin only.
+    pub fn set_revocation_time_lock(env: Env, admin: Address, seconds: u64) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationTimeLockSeconds, &seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the configured issuer revocation time-lock, defaulting to 48 hours.
+    pub fn get_revocation_time_lock(env: Env) -> u64 {
+        Self::default_revocation_time_lock(&env)
+    }
+
+    /// Delegate issuer revocation authority to an operational agent.
+    pub fn add_revocation_agent(env: Env, issuer: Address, agent: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        env.storage().instance().set(
+            &DataKey2::RevocationAgent(issuer.clone(), agent.clone()),
+            &true,
+        );
+        let mut agents: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut exists = false;
+        for existing in agents.iter() {
+            if existing == agent {
+                exists = true;
+                break;
+            }
+        }
+        if !exists {
+            agents.push_back(agent);
+            env.storage()
+                .instance()
+                .set(&DataKey2::IssuerRevocationAgents(issuer), &agents);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Revoke an operational agent's issuer revocation authority.
+    pub fn remove_revocation_agent(env: Env, issuer: Address, agent: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        env.storage()
+            .instance()
+            .remove(&DataKey2::RevocationAgent(issuer.clone(), agent.clone()));
+        let agents: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<Address> = Vec::new(&env);
+        for existing in agents.iter() {
+            if existing != agent {
+                retained.push_back(existing);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationAgents(issuer), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check whether an address is delegated to initiate issuer revocations.
+    pub fn is_revocation_agent(env: Env, issuer: Address, agent: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RevocationAgent(issuer, agent))
+            .unwrap_or(false)
+    }
+
+    /// List currently delegated revocation agents for an issuer.
+    pub fn get_revocation_agents(env: Env, issuer: Address) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(issuer))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Initiate an issuer-side revocation request with the default 48-hour time-lock.
+    pub fn initiate_revocation(
+        env: Env,
+        actor: Address,
+        credential_id: CredentialId,
+        reason: String,
+    ) -> u64 {
+        actor.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &actor);
+        Self::create_revocation_registry_request(&env, actor, credential_id, reason, 0)
+    }
+
+    /// Initiate an issuer-side revocation request with a custom time-lock.
+    pub fn initiate_revocation_with_lock(
+        env: Env,
+        actor: Address,
+        credential_id: CredentialId,
+        reason: String,
+        time_lock_seconds: u64,
+    ) -> u64 {
+        actor.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &actor);
+        Self::create_revocation_registry_request(
+            &env,
+            actor,
+            credential_id,
+            reason,
+            time_lock_seconds,
+        )
+    }
+
+    /// Initiate many issuer-side revocation requests in one authorized call.
+    pub fn batch_initiate_revocations(
+        env: Env,
+        actor: Address,
+        requests: Vec<RevocationInput>,
+        time_lock_seconds: u64,
+    ) -> Vec<u64> {
+        actor.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &actor);
+        if requests.len() > MAX_REVOCATION_BATCH_SIZE {
+            panic_with_error!(&env, ContractError::RevocationBatchTooLarge);
+        }
+        let mut ids: Vec<u64> = Vec::new(&env);
+        for input in requests.iter() {
+            let id = Self::create_revocation_registry_request(
+                &env,
+                actor.clone(),
+                input.credential_id,
+                input.reason,
+                time_lock_seconds,
+            );
+            ids.push_back(id);
+        }
+        ids
+    }
+
+    /// Cancel a pending issuer-side revocation while it is still reversible.
+    pub fn cancel_revocation_request(env: Env, actor: Address, request_id: u64, reason: String) {
+        actor.require_auth();
+        Self::require_not_paused(&env);
+        let mut request: RevocationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::RevocationRegistryRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
+        if request.status != RegistryRevocationStatus::Pending {
+            panic_with_error!(&env, ContractError::InvalidRevocationState);
+        }
+        if env.ledger().timestamp() >= request.unlocks_at {
+            panic_with_error!(&env, ContractError::RevocationTimeLockActive);
+        }
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(request.credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        Self::require_revocation_actor(&env, &actor, &credential);
+        request.status = RegistryRevocationStatus::Cancelled;
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+        Self::append_registry_revocation_audit(
+            &env,
+            &request,
+            actor,
+            RegistryRevocationAuditAction::Cancelled,
+            reason,
+        );
+        let mut metrics = Self::get_revocation_metrics_internal(&env);
+        metrics.cancelled_count = metrics.cancelled_count.saturating_add(1);
+        Self::set_revocation_metrics_internal(&env, &metrics);
+    }
+
+    /// Finalize a pending issuer-side revocation after its time-lock expires.
+    pub fn finalize_revocation_request(
+        env: Env,
+        actor: Address,
+        request_id: u64,
+    ) -> RevocationRequest {
+        actor.require_auth();
+        Self::require_not_paused(&env);
+        Self::activate_revocation_request(&env, actor, request_id)
+    }
+
+    /// Finalize many expired revocation requests in one call.
+    pub fn batch_finalize_revocations(
+        env: Env,
+        actor: Address,
+        request_ids: Vec<u64>,
+    ) -> u32 {
+        actor.require_auth();
+        Self::require_not_paused(&env);
+        if request_ids.len() > MAX_REVOCATION_BATCH_SIZE {
+            panic_with_error!(&env, ContractError::RevocationBatchTooLarge);
+        }
+        let mut finalized = 0u32;
+        for request_id in request_ids.iter() {
+            Self::activate_revocation_request(&env, actor.clone(), request_id);
+            finalized = finalized.saturating_add(1);
+        }
+        finalized
+    }
+
+    /// Admin-only immediate revocation for active security incidents.
+    pub fn emergency_revoke_credential(
+        env: Env,
+        admin: Address,
+        credential_id: CredentialId,
+        reason: String,
+    ) -> u64 {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(!credential.revoked, "credential already revoked");
+        let now = env.ledger().timestamp();
+        let request = RevocationRequest {
+            id: Self::next_revocation_registry_request_id(&env),
+            credential_id,
+            issuer: credential.issuer.clone(),
+            requested_by: admin.clone(),
+            timestamp: now,
+            unlocks_at: now,
+            reason: reason.clone(),
+            status: RegistryRevocationStatus::Active,
+            finalized_at: Some(now),
+            activated_at: Some(now),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+        env.storage().instance().set(
+            &DataKey2::CredentialRevocationRegistryRequest(credential_id),
+            &request.id,
+        );
+        Self::mark_credential_revoked(&env, credential_id, &mut credential, admin.clone());
+        Self::append_registry_revocation_audit(
+            &env,
+            &request,
+            admin,
+            RegistryRevocationAuditAction::EmergencyActivated,
+            reason,
+        );
+        let mut metrics = Self::get_revocation_metrics_internal(&env);
+        metrics.request_count = metrics.request_count.saturating_add(1);
+        metrics.finalized_count = metrics.finalized_count.saturating_add(1);
+        metrics.active_count = metrics.active_count.saturating_add(1);
+        metrics.emergency_count = metrics.emergency_count.saturating_add(1);
+        Self::set_revocation_metrics_internal(&env, &metrics);
+        request.id
+    }
+
+    /// Return an issuer-side revocation registry request by ID.
+    pub fn get_revocation_registry_request(
+        env: Env,
+        request_id: u64,
+    ) -> Option<RevocationRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RevocationRegistryRequest(request_id))
+    }
+
+    /// Return the latest issuer-side revocation request for a credential, if any.
+    pub fn get_credential_revocation_registry_request(
+        env: Env,
+        credential_id: CredentialId,
+    ) -> Option<RevocationRequest> {
+        let request_id: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialRevocationRegistryRequest(credential_id));
+        match request_id {
+            Some(id) => env
+                .storage()
+                .instance()
+                .get(&DataKey2::RevocationRegistryRequest(id)),
+            None => None,
+        }
+    }
+
+    /// Return the immutable audit trail for an issuer-side revocation request.
+    pub fn get_revocation_registry_audit(
+        env: Env,
+        request_id: u64,
+    ) -> Vec<RegistryRevocationAuditEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RevocationRegistryAuditTrail(request_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Return aggregate revocation registry metrics.
+    pub fn get_revocation_metrics(env: Env) -> RevocationMetrics {
+        Self::get_revocation_metrics_internal(&env)
     }
 
     /// Store AES-256 encrypted credential metadata. Encryption/decryption is performed
@@ -8495,6 +9122,187 @@ mod tests {
             min_temp_entry_ttl: 16,
             max_entry_ttl: 6_312_000,
         });
+    }
+
+    fn issue_test_credential(
+        env: &Env,
+        client: &QuorumProofContractClient<'_>,
+        issuer: &Address,
+        subject: &Address,
+        credential_type: u32,
+    ) -> u64 {
+        let metadata = Bytes::from_slice(env, b"QmRevocationRegistryTestHash000000");
+        client.issue_credential(issuer, subject, &credential_type, &metadata, &None, &0u64)
+    }
+
+    #[test]
+    fn test_revocation_registry_time_lock_window_behavior() {
+        let env = Env::default();
+        let (client, _) = setup(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
+
+        let request_id = client.initiate_revocation_with_lock(
+            &issuer,
+            &cred_id,
+            &String::from_str(&env, "key compromise investigation"),
+            &100u64,
+        );
+        let request = client.get_revocation_registry_request(&request_id).unwrap();
+        assert_eq!(request.status, RegistryRevocationStatus::Pending);
+        assert_eq!(request.timestamp, 1_000);
+        assert_eq!(request.unlocks_at, 1_100);
+        assert!(!client.is_revoked(&cred_id));
+
+        set_ledger_timestamp(&env, 1_050);
+        let early = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.finalize_revocation_request(&issuer, &request_id);
+        }));
+        assert!(early.is_err(), "request should not finalize before unlock");
+        assert!(!client.is_revoked(&cred_id));
+
+        client.cancel_revocation_request(
+            &issuer,
+            &request_id,
+            &String::from_str(&env, "incident cleared"),
+        );
+        let cancelled = client.get_revocation_registry_request(&request_id).unwrap();
+        assert_eq!(cancelled.status, RegistryRevocationStatus::Cancelled);
+        assert!(!client.is_revoked(&cred_id));
+
+        let second_id = client.initiate_revocation_with_lock(
+            &issuer,
+            &cred_id,
+            &String::from_str(&env, "confirmed compromise"),
+            &100u64,
+        );
+        set_ledger_timestamp(&env, 1_200);
+        let active = client.finalize_revocation_request(&issuer, &second_id);
+        assert_eq!(active.status, RegistryRevocationStatus::Active);
+        assert!(client.is_revoked(&cred_id));
+        let audit = client.get_revocation_registry_audit(&second_id);
+        assert_eq!(audit.len(), 3);
+    }
+
+    #[test]
+    fn test_revocation_registry_permissions_for_issuer_and_agents() {
+        let env = Env::default();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let agent = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
+
+        let unauthorized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.initiate_revocation(
+                &stranger,
+                &cred_id,
+                &String::from_str(&env, "not authorized"),
+            );
+        }));
+        assert!(unauthorized.is_err(), "stranger must not initiate revocation");
+
+        client.add_revocation_agent(&issuer, &agent);
+        assert!(client.is_revocation_agent(&issuer, &agent));
+        let request_id = client.initiate_revocation_with_lock(
+            &agent,
+            &cred_id,
+            &String::from_str(&env, "agent detected compromise"),
+            &1u64,
+        );
+        set_ledger_timestamp(&env, 2);
+        client.finalize_revocation_request(&agent, &request_id);
+        assert!(client.is_revoked(&cred_id));
+    }
+
+    #[test]
+    fn test_revocation_registry_batch_operations_over_100_requests() {
+        let env = Env::default();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let mut inputs: Vec<RevocationInput> = Vec::new(&env);
+        let mut request_ids_for_finalize: Vec<u64> = Vec::new(&env);
+        let reason = String::from_str(&env, "issuer key rotation");
+
+        for i in 0..101u32 {
+            let holder = Address::generate(&env);
+            let cred_id = issue_test_credential(&env, &client, &issuer, &holder, i + 1);
+            inputs.push_back(RevocationInput {
+                credential_id: cred_id,
+                reason: reason.clone(),
+            });
+        }
+
+        let request_ids = client.batch_initiate_revocations(&issuer, &inputs, &10u64);
+        assert_eq!(request_ids.len(), 101);
+        for request_id in request_ids.iter() {
+            request_ids_for_finalize.push_back(request_id);
+        }
+
+        set_ledger_timestamp(&env, 11);
+        let finalized = client.batch_finalize_revocations(&issuer, &request_ids_for_finalize);
+        assert_eq!(finalized, 101u32);
+        let metrics = client.get_revocation_metrics();
+        assert_eq!(metrics.request_count, 101);
+        assert_eq!(metrics.active_count, 101);
+    }
+
+    #[test]
+    fn test_revocation_registry_emergency_fast_track_is_admin_only() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
+
+        let unauthorized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.emergency_revoke_credential(
+                &stranger,
+                &cred_id,
+                &String::from_str(&env, "security incident"),
+            );
+        }));
+        assert!(unauthorized.is_err(), "only admin can emergency revoke");
+
+        let request_id = client.emergency_revoke_credential(
+            &admin,
+            &cred_id,
+            &String::from_str(&env, "security incident"),
+        );
+        let request = client.get_revocation_registry_request(&request_id).unwrap();
+        assert_eq!(request.status, RegistryRevocationStatus::Active);
+        assert!(client.is_revoked(&cred_id));
+        let metrics = client.get_revocation_metrics();
+        assert_eq!(metrics.emergency_count, 1);
+    }
+
+    #[test]
+    fn test_revocation_registry_updates_credential_verification_workflow() {
+        let env = Env::default();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 1u32];
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+        assert!(client.verify_credential(&cred_id, &slice_id));
+
+        let request_id = client.initiate_revocation_with_lock(
+            &issuer,
+            &cred_id,
+            &String::from_str(&env, "verification should fail after revoke"),
+            &1u64,
+        );
+        set_ledger_timestamp(&env, 2);
+        client.finalize_revocation_request(&issuer, &request_id);
+        assert!(!client.verify_credential(&cred_id, &slice_id));
     }
 
     #[test]

@@ -510,8 +510,115 @@ Completes a pending transfer. The intended recipient accepts and becomes the new
 
 ## 7. Credential Revocation
 
-There are three revocation paths: issuer-initiated, holder-initiated (consent withdrawal),
-and a holder-request workflow where the issuer approves or denies.
+There are four revocation paths: issuer registry requests with a time-lock, legacy immediate
+issuer revocation, holder-initiated consent withdrawal, and a holder-request workflow where the
+issuer approves or denies.
+
+### Issuer Revocation Registry Workflow
+
+The registry path is recommended for issuer operational revocations. Requests are reversible
+during the configured time-lock window and become effective only after finalization.
+
+State transition:
+
+```text
+pending -> finalized -> active
+```
+
+The default time-lock is **48 hours**. Admins may configure a different default with
+`set_revocation_time_lock`. Callers may provide a per-request lock with
+`initiate_revocation_with_lock` or `batch_initiate_revocations`; passing `0` uses the default.
+
+Only the original credential issuer or an issuer-delegated revocation agent may initiate,
+cancel, or finalize registry revocations. Emergency fast-track revocation bypasses the time-lock
+and is admin-only.
+
+### `set_revocation_time_lock(env, admin, seconds)`
+
+Configures the default registry time-lock in seconds. Admin only.
+
+### `get_revocation_time_lock(env) -> u64`
+
+Returns the configured registry time-lock, or `172800` when unset.
+
+### `add_revocation_agent(env, issuer, agent)`
+
+Delegates revocation authority from an issuer to an operational agent.
+
+### `remove_revocation_agent(env, issuer, agent)`
+
+Removes delegated revocation authority for an agent.
+
+### `is_revocation_agent(env, issuer, agent) -> bool`
+
+Returns whether `agent` currently has issuer-delegated revocation authority.
+
+### `get_revocation_agents(env, issuer) -> Vec<Address>`
+
+Lists delegated revocation agents for an issuer.
+
+### `initiate_revocation(env, actor, credential_id, reason) -> u64`
+
+Creates a pending issuer-side revocation request using the default time-lock.
+
+| Parameter       | Type      | Description                                         |
+|-----------------|-----------|-----------------------------------------------------|
+| `actor`         | `Address` | Credential issuer or delegated revocation agent.    |
+| `credential_id` | `u64`     | Credential to revoke after the time-lock expires.   |
+| `reason`        | `String`  | Immutable reason stored in the request audit trail. |
+
+### `initiate_revocation_with_lock(env, actor, credential_id, reason, time_lock_seconds) -> u64`
+
+Creates a pending issuer-side revocation request with a custom time-lock. A value of `0`
+uses the configured default.
+
+### `batch_initiate_revocations(env, actor, requests, time_lock_seconds) -> Vec<u64>`
+
+Creates up to **128** pending revocation requests in one authorized call.
+
+`RevocationInput` fields:
+
+| Field           | Type     | Description                         |
+|-----------------|----------|-------------------------------------|
+| `credential_id` | `u64`    | Credential to revoke.               |
+| `reason`        | `String` | Reason attached to the audit trail. |
+
+### `cancel_revocation_request(env, actor, request_id, reason)`
+
+Cancels a pending revocation request before its `unlocks_at` timestamp. This is the reversible
+time-lock action. Once the lock has expired or the request is active, cancellation is rejected.
+
+### `finalize_revocation_request(env, actor, request_id) -> RevocationRequest`
+
+Finalizes an expired pending request and activates the credential revocation. The audit trail
+records both `Finalized` and `Activated` actions.
+
+### `batch_finalize_revocations(env, actor, request_ids) -> u32`
+
+Finalizes up to **128** expired revocation requests in one call. Returns the number finalized.
+
+### `emergency_revoke_credential(env, admin, credential_id, reason) -> u64`
+
+Admin-only fast-track revocation for active security incidents. Creates an active registry
+request immediately and records an `EmergencyActivated` audit action.
+
+### `get_revocation_registry_request(env, request_id) -> Option<RevocationRequest>`
+
+Returns a registry request by ID.
+
+**Returns:** `Option<RevocationRequest { id, credential_id, issuer, requested_by, timestamp, unlocks_at, reason, status, finalized_at, activated_at }>`
+
+### `get_credential_revocation_registry_request(env, credential_id) -> Option<RevocationRequest>`
+
+Returns the latest registry request associated with a credential, if any.
+
+### `get_revocation_registry_audit(env, request_id) -> Vec<RegistryRevocationAuditEntry>`
+
+Returns the immutable audit trail for a registry request.
+
+### `get_revocation_metrics(env) -> RevocationMetrics`
+
+Returns aggregate registry counters: request, finalized, active, cancelled, and emergency counts.
 
 ### `revoke_credential(env, issuer, credential_id)`
 
