@@ -3,6 +3,8 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{vec, Env};
+    // Expiry system types used in tests below.
+    use crate::CredentialStatus;
 
     // ── Upgrade Validation Tests ──────────────────────────────────────────────
 
@@ -1470,5 +1472,468 @@ mod tests {
 
         let metadata = soroban_sdk::Bytes::from_slice(&env, b"test");
         client.set_credential_metadata(&issuer, &999u64, &metadata, &CompressionType::None);
+    }
+
+    // ── Credential Expiry System Tests ───────────────────────────────────────
+
+    fn setup_expiry_contract() -> (Env, QuorumProofContractClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        // SAFETY: the Env lives as long as the returned references in tests.
+        let contract_id: soroban_sdk::Address = contract_id;
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        (env, client, admin, issuer, subject)
+    }
+
+    // Helper: set ledger timestamp
+    fn set_time(env: &Env, ts: u64) {
+        env.ledger().set(LedgerInfo {
+            timestamp: ts,
+            protocol_version: 20,
+            sequence_number: env.ledger().sequence(),
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 16,
+            max_entry_ttl: 6_312_960,
+        });
+    }
+
+    // ── Status filter: Active ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_credential_status_active_no_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Active);
+    }
+
+    #[test]
+    fn test_credential_status_active_far_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Expires in 1 year, renewal window only 30 days — not yet expiring soon.
+        let expires_at = 1_000_000u64 + 365 * 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        // Set policy: renewable with 30-day window.
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
+
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Active);
+    }
+
+    // ── Status filter: ExpiringSoon ───────────────────────────────────────────
+
+    #[test]
+    fn test_credential_status_expiring_soon() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Expires in 10 days; renewal window is 30 days → should be ExpiringSoon.
+        let expires_at = 1_000_000u64 + 10 * 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
+
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::ExpiringSoon);
+    }
+
+    #[test]
+    fn test_credential_status_expiring_soon_boundary() {
+        // Exactly at the boundary of the renewal window.
+        let env = Env::default();
+        env.mock_all_auths();
+        // now = 0, expires_at = 30 days, window = 30 days → remaining == window → ExpiringSoon
+        set_time(&env, 0);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 30 * 86400u64;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
+
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::ExpiringSoon);
+    }
+
+    // ── Status filter: Expired ────────────────────────────────────────────────
+
+    #[test]
+    fn test_credential_status_expired() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // expires_at is in the past.
+        let expires_at = 1_000_000u64 - 1;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Expired);
+    }
+
+    #[test]
+    fn test_credential_status_expired_exact_boundary() {
+        // now == expires_at → Expired.
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 5_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(5_001u64));
+
+        set_time(&env, 5_001);
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Expired);
+    }
+
+    // ── Renewal eligibility ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_renewal_eligibility_true() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64 + 5 * 86400; // 5 days away
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        // Window = 30 days → eligible.
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
+
+        assert!(client.check_renewal_eligibility(&cred_id));
+    }
+
+    #[test]
+    fn test_renewal_eligibility_false_no_policy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64 + 5 * 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        // No policy set → not eligible.
+        assert!(!client.check_renewal_eligibility(&cred_id));
+    }
+
+    #[test]
+    fn test_renewal_eligibility_false_not_renewable() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64 + 5 * 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        // renewable = false
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &false);
+
+        assert!(!client.check_renewal_eligibility(&cred_id));
+    }
+
+    #[test]
+    fn test_renewal_eligibility_false_outside_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Expires in 60 days, window is only 30 days → outside window.
+        let expires_at = 1_000_000u64 + 60 * 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
+
+        assert!(!client.check_renewal_eligibility(&cred_id));
+    }
+
+    #[test]
+    fn test_renewal_eligibility_false_already_expired() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 2_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64; // already expired
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
+
+        assert!(!client.check_renewal_eligibility(&cred_id));
+    }
+
+    #[test]
+    fn test_renewal_eligibility_revoked_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64 + 5 * 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
+        client.revoke_credential(&issuer, &cred_id);
+
+        assert!(!client.check_renewal_eligibility(&cred_id));
+    }
+
+    // ── Notification metadata ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_create_expiry_notification_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64 + 10 * 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        let notif = client.create_expiry_notification(&issuer, &cred_id);
+
+        assert_eq!(notif.credential_id, cred_id);
+        assert_eq!(notif.expires_at, expires_at);
+        assert_eq!(notif.created_at, 1_000_000u64);
+        assert_eq!(notif.seconds_until_expiry, 10 * 86400u64);
+        assert_eq!(notif.issuer, issuer);
+        assert_eq!(notif.subject, subject);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the issuer can create expiry notifications")]
+    fn test_create_expiry_notification_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64 + 86400;
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        // stranger is not the issuer
+        client.create_expiry_notification(&stranger, &cred_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential is already expired")]
+    fn test_create_expiry_notification_already_expired() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 2_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let expires_at = 1_000_000u64; // already expired
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+
+        client.create_expiry_notification(&issuer, &cred_id);
+    }
+
+    // ── get_expiring_credentials ─────────────────────────────────────────────
+
+    #[test]
+    fn test_get_expiring_credentials_mixed_states() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+
+        // Credential 1: expires in 5 days → in window.
+        let c1 = client.issue_credential(
+            &issuer, &subject, &1u32, &meta, &Some(1_000_000 + 5 * 86400),
+        );
+        // Credential 2: expires in 40 days → outside 30-day window.
+        let c2 = client.issue_credential(
+            &issuer, &subject, &1u32, &meta, &Some(1_000_000 + 40 * 86400),
+        );
+        // Credential 3: no expiry → not included.
+        let c3 = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
+        // Credential 4: already expired → not included.
+        let c4 = client.issue_credential(
+            &issuer, &subject, &1u32, &meta, &Some(1_000_000 - 1),
+        );
+        let _ = (c2, c3, c4);
+
+        let within = 30u64 * 86400;
+        let expiring = client.get_expiring_credentials(&subject, &within);
+
+        // Only c1 should be returned.
+        assert_eq!(expiring.len(), 1);
+        assert_eq!(expiring.get(0).unwrap(), c1);
+    }
+
+    #[test]
+    fn test_get_expiring_credentials_revoked_excluded() {
+        let env = Env::default();
+        env.mock_all_auths();
+        set_time(&env, 1_000_000);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
+        let expires_at = 1_000_000u64 + 5 * 86400;
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
+        client.revoke_credential(&issuer, &cred_id);
+
+        let expiring = client.get_expiring_credentials(&subject, &(30 * 86400u64));
+        assert_eq!(expiring.len(), 0);
+    }
+
+    // ── get_renewal_policy round-trip ─────────────────────────────────────────
+
+    #[test]
+    fn test_set_and_get_renewal_policy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.set_renewal_policy(&issuer, &2u32, &(14 * 86400u64), &(3 * 86400u64), &true);
+
+        let policy = client.get_renewal_policy(&issuer, &2u32).unwrap();
+        assert_eq!(policy.renewal_window_secs, 14 * 86400u64);
+        assert_eq!(policy.notify_before_secs, 3 * 86400u64);
+        assert!(policy.renewable);
+    }
+
+    #[test]
+    fn test_get_renewal_policy_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        client.initialize(&admin);
+
+        let policy = client.get_renewal_policy(&issuer, &99u32);
+        assert!(policy.is_none());
     }
 }

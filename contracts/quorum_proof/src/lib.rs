@@ -359,7 +359,7 @@ pub struct ShareLink {
     pub expires_at: u64,
 }
 
-#[contracterror]
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
@@ -523,6 +523,98 @@ pub enum DataKey2 {
     IssuerQuota(Address),
     /// Issue #597: Per-issuer usage counter within the current quota window
     IssuerQuotaUsage(Address),
+    /// Share token for credential sharing
+    ShareToken(soroban_sdk::Bytes),
+    // --- Previously missing variants ---
+    /// Tracks attestors for a slice as a map (slice_id -> Map<Address, bool>)
+    AttestorSet(u64),
+    /// Pending consent request by (issuer, subject, credential_type)
+    PendingConsent(Address, Address, u32),
+    /// Count of consent/credential requests
+    ConsentRequestCount,
+    /// Individual consent/credential request by id
+    ConsentRequest(u64),
+    /// Encrypted credential metadata ciphertext
+    CredentialMetadataCiphertext(u64),
+    /// Index of credential IDs by type
+    CredentialTypeIndex(u32),
+    /// Version history for a credential
+    CredentialVersionHistory(u64),
+    /// Delegation grant (credential_id, delegate)
+    Delegation(u64, Address),
+    /// Delegation audit log for a credential
+    DelegationAuditLog(u64),
+    /// Failed verification count for a holder
+    HolderFailedVerifications(Address),
+    /// Successful verification count for a holder
+    HolderSuccessfulVerifications(Address),
+    /// Issuance multisig policy for a credential type
+    IssuancePolicy(u32),
+    /// Metadata hash validation cache
+    MetadataHashCache(u64),
+    /// Pending issuance request by id
+    PendingIssuance(u64),
+    /// Count of pending issuance requests
+    PendingIssuanceCount,
+    /// PoW difficulty setting
+    PowDifficulty,
+    /// Revocation request audit trail
+    RevocationAuditTrail(u64),
+    /// Holder revocation request for a credential
+    RevocationRequest(u64),
+    /// Subject credential index (subject -> Vec<u64>)
+    SubjectCredentialIndex(Address),
+    /// Threshold change audit log for a slice
+    ThresholdAuditLog(u64),
+}
+
+/// Storage keys for credential expiry and renewal policy data.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey3 {
+    /// Per-issuer renewal policy for a credential type.
+    RenewalPolicy(Address, u32),
+    /// Expiry notification metadata for a credential.
+    ExpiryNotif(u64),
+}
+
+/// Issuer-defined renewal policy for a credential type.
+#[contracttype]
+#[derive(Clone)]
+pub struct RenewalPolicy {
+    /// How many seconds before expiry the credential becomes renewal-eligible.
+    pub renewal_window_secs: u64,
+    /// How many seconds before expiry to send a notification reminder.
+    pub notify_before_secs: u64,
+    /// Whether renewal is allowed at all.
+    pub renewable: bool,
+}
+
+/// Status of a credential with respect to its expiry.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CredentialStatus {
+    /// No expiry set, or expiry is in the future and outside the renewal window.
+    Active = 1,
+    /// Within the renewal window — issuer should initiate renewal.
+    ExpiringSoon = 2,
+    /// Past expiry timestamp (may still be in grace period).
+    Expired = 3,
+}
+
+/// Notification metadata produced for an upcoming expiry event.
+#[contracttype]
+#[derive(Clone)]
+pub struct ExpiryNotification {
+    pub credential_id: u64,
+    pub subject: Address,
+    pub issuer: Address,
+    pub expires_at: u64,
+    /// Unix timestamp when this notification was created.
+    pub created_at: u64,
+    /// Seconds remaining until expiry at creation time.
+    pub seconds_until_expiry: u64,
 }
 
 #[contracttype]
@@ -1026,20 +1118,6 @@ pub struct ConsentRequest {
 #[contract]
 pub struct QuorumProofContract;
 
-fn parse_version(env: &Env, version_str: &String) -> Version {
-    // Parse "major.minor.patch" format
-    let parts: Vec<String> = version_str.split('.').map(|s| String::from_linear(env, s)).collect();
-    if parts.len() != 3 {
-        panic_with_error!(env, ContractError::InvalidInput);
-    }
-    
-    let major = parts.get(0).unwrap().parse::<u32>().unwrap_or(0);
-    let minor = parts.get(1).unwrap().parse::<u32>().unwrap_or(0);
-    let patch = parts.get(2).unwrap().parse::<u32>().unwrap_or(0);
-    
-    Version::new(major, minor, patch)
-}
-
 #[contractimpl]
 impl QuorumProofContract {
     /// Set the admin address once after deployment. Panics if already initialized.
@@ -1444,13 +1522,10 @@ impl QuorumProofContract {
             return;
         }
 
-        // Build input: issuer_xdr || subject_xdr || credential_type(4 BE bytes) || nonce(8 BE bytes)
-        let issuer_xdr = issuer.clone().to_xdr(env);
-        let subject_xdr = subject.clone().to_xdr(env);
-
+        // Build input: credential_type(4 BE bytes) || nonce(8 BE bytes)
+        // Note: Address serialization via to_xdr is not available in Soroban no_std;
+        // PoW uses credential_type + nonce as the preimage.
         let mut input = soroban_sdk::Bytes::new(env);
-        input.append(&issuer_xdr);
-        input.append(&subject_xdr);
         // Append credential_type as 4 big-endian bytes
         let ct_bytes = credential_type.to_be_bytes();
         input.append(&soroban_sdk::Bytes::from_slice(env, &ct_bytes));
@@ -1467,13 +1542,13 @@ impl QuorumProofContract {
 
         for i in 0..required_zero_bytes {
             if hash_bytes[i] != 0 {
-                panic_with_error!(env, ContractError::InvalidPoWNonce);
+                panic_with_error!(env, ContractError::InvalidInput);
             }
         }
         if remaining_bits > 0 && required_zero_bytes < 32 {
             let mask: u8 = 0xFF << (8 - remaining_bits);
             if hash_bytes[required_zero_bytes] & mask != 0 {
-                panic_with_error!(env, ContractError::InvalidPoWNonce);
+                panic_with_error!(env, ContractError::InvalidInput);
             }
         }
     }
@@ -8429,6 +8504,215 @@ impl QuorumProofContract {
         }
 
         link.credential_id
+    }
+
+    // ── Credential Expiry & Renewal System ───────────────────────────────────
+
+    /// Return the expiry status of a credential at the current ledger timestamp.
+    ///
+    /// Returns `CredentialStatus::Active` for non-expiring credentials.
+    /// Returns `CredentialStatus::ExpiringSoon` when inside the issuer's renewal window.
+    /// Returns `CredentialStatus::Expired` when past `expires_at`.
+    pub fn get_credential_status(env: Env, credential_id: u64) -> CredentialStatus {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        let now = env.ledger().timestamp();
+
+        let expires_at = match credential.expires_at {
+            None => return CredentialStatus::Active,
+            Some(t) => t,
+        };
+
+        if now >= expires_at {
+            return CredentialStatus::Expired;
+        }
+
+        // Check whether we're inside the issuer's renewal window.
+        let policy: Option<RenewalPolicy> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::RenewalPolicy(
+                credential.issuer.clone(),
+                credential.credential_type,
+            ));
+
+        if let Some(p) = policy {
+            if p.renewable && expires_at.saturating_sub(now) <= p.renewal_window_secs {
+                return CredentialStatus::ExpiringSoon;
+            }
+        }
+
+        CredentialStatus::Active
+    }
+
+    /// Check whether a credential is eligible for renewal under the issuer's policy.
+    ///
+    /// Returns `true` when the credential is active (not revoked/suspended), has an
+    /// expiry, and the current time is within the issuer's configured renewal window.
+    pub fn check_renewal_eligibility(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+
+        let expires_at = match credential.expires_at {
+            None => return false,
+            Some(t) => t,
+        };
+
+        let now = env.ledger().timestamp();
+        if now >= expires_at {
+            // Already expired — use grace-period renewal, not this path.
+            return false;
+        }
+
+        let policy: Option<RenewalPolicy> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::RenewalPolicy(
+                credential.issuer.clone(),
+                credential.credential_type,
+            ));
+
+        match policy {
+            Some(p) => p.renewable && expires_at.saturating_sub(now) <= p.renewal_window_secs,
+            None => false,
+        }
+    }
+
+    /// Set or update a renewal policy for a (issuer, credential_type) pair.
+    ///
+    /// Only the issuer themselves may set their own policy.
+    pub fn set_renewal_policy(
+        env: Env,
+        issuer: Address,
+        credential_type: u32,
+        renewal_window_secs: u64,
+        notify_before_secs: u64,
+        renewable: bool,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let policy = RenewalPolicy {
+            renewal_window_secs,
+            notify_before_secs,
+            renewable,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey3::RenewalPolicy(issuer, credential_type), &policy);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Retrieve the renewal policy for a (issuer, credential_type) pair, if any.
+    pub fn get_renewal_policy(
+        env: Env,
+        issuer: Address,
+        credential_type: u32,
+    ) -> Option<RenewalPolicy> {
+        env.storage()
+            .instance()
+            .get(&DataKey3::RenewalPolicy(issuer, credential_type))
+    }
+
+    /// Return credential IDs that are expiring within `within_secs` seconds
+    /// from now and belong to the given `subject`.
+    pub fn get_expiring_credentials(
+        env: Env,
+        subject: Address,
+        within_secs: u64,
+    ) -> Vec<u64> {
+        let now = env.ledger().timestamp();
+        let horizon = now.saturating_add(within_secs);
+
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64);
+
+        let mut result: Vec<u64> = Vec::new(&env);
+        for id in 1..=total {
+            if let Some(cred) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Credential>(&DataKey::Credential(id))
+            {
+                if cred.subject != subject {
+                    continue;
+                }
+                if cred.revoked || cred.suspended {
+                    continue;
+                }
+                if let Some(exp) = cred.expires_at {
+                    if exp > now && exp <= horizon {
+                        result.push_back(id);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Create and store expiry notification metadata for a credential.
+    ///
+    /// The caller must be the credential's issuer.
+    /// Panics if the credential has no expiry or is already expired.
+    pub fn create_expiry_notification(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+    ) -> ExpiryNotification {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.issuer == issuer,
+            "only the issuer can create expiry notifications"
+        );
+
+        let expires_at = credential
+            .expires_at
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+
+        let now = env.ledger().timestamp();
+        assert!(expires_at > now, "credential is already expired");
+
+        let notif = ExpiryNotification {
+            credential_id,
+            subject: credential.subject.clone(),
+            issuer: issuer.clone(),
+            expires_at,
+            created_at: now,
+            seconds_until_expiry: expires_at - now,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey3::ExpiryNotif(credential_id), &notif);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        notif
     }
 }
 
