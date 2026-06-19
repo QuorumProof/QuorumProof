@@ -597,6 +597,9 @@ Returns the full audit trail of revocation lifecycle events for a credential.
 ## 8. Quorum Slices
 
 A **QuorumSlice** is a named set of weighted attestors that collectively endorse credentials.
+Every weight must be between 1 and 100. See the
+[weighted voting specification](../../docs/weighted-voting.md) for threshold math, snapshot
+semantics, metrics, and weight-assignment guidance.
 This implements the Stellar FBA model: trust is proportional to weight, not headcount.
 
 ### `create_slice(env, creator, attestors, weights, threshold) → u64`
@@ -620,6 +623,7 @@ With weights `[50, 30, 20]` and threshold `50`:
 - `attestors` is empty or exceeds 20
 - `weights` length does not match `attestors` length
 - `threshold` is 0 or exceeds the total weight sum
+- any weight is outside 1-100
 
 **Example:**
 ```rust

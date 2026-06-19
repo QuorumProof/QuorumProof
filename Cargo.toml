@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "contracts/quorum_proof",
     "contracts/sbt_registry",
     "contracts/zk_verifier",
 ]
