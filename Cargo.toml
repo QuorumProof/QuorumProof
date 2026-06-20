@@ -2,6 +2,8 @@
 members = [
     "contracts/sbt_registry",
     "contracts/zk_verifier",
+    "contracts/quorum_proof",
+    "contracts/integration_tests",
 ]
 resolver = "2"
 
