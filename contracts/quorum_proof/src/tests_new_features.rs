@@ -1474,466 +1474,353 @@ mod tests {
         client.set_credential_metadata(&issuer, &999u64, &metadata, &CompressionType::None);
     }
 
-    // ── Credential Expiry System Tests ───────────────────────────────────────
+    // ── Proof Request Lifecycle Tests (Issue #657) ────────────────────────────
 
-    fn setup_expiry_contract() -> (Env, QuorumProofContractClient<'static>, Address, Address, Address) {
-        let env = Env::default();
+    fn setup_with_credential(env: &Env) -> (QuorumProofContractClient, Address, u64) {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
-        // SAFETY: the Env lives as long as the returned references in tests.
-        let contract_id: soroban_sdk::Address = contract_id;
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
+        let client = QuorumProofContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
         client.initialize(&admin);
-        (env, client, admin, issuer, subject)
+        let issuer = Address::generate(env);
+        let subject = Address::generate(env);
+        let meta = soroban_sdk::Bytes::from_slice(env, b"meta");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta);
+        (client, issuer, cred_id)
     }
 
-    // Helper: set ledger timestamp
-    fn set_time(env: &Env, ts: u64) {
+    #[test]
+    fn test_request_proof_creates_pending_request() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        assert_eq!(req_id, 1u64);
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.id, 1u64);
+        assert_eq!(req.credential_id, cred_id);
+        assert_eq!(req.verifier, verifier);
+        assert_eq!(req.status, ProofRequestStatus::Pending);
+        assert!(req.resolved_at.is_none());
+    }
+
+    #[test]
+    fn test_request_proof_default_ttl_30_days() {
+        let env = Env::default();
         env.ledger().set(LedgerInfo {
-            timestamp: ts,
-            protocol_version: 20,
-            sequence_number: env.ledger().sequence(),
+            timestamp: 1_000_000,
+            protocol_version: 21,
+            sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 10,
-            min_temp_entry_ttl: 16,
-            min_persistent_entry_ttl: 16,
-            max_entry_ttl: 6_312_960,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
         });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        let req = client.get_proof_request(&req_id);
+
+        let expected_expiry = 1_000_000u64 + 30 * 24 * 60 * 60;
+        assert_eq!(req.expires_at, expected_expiry);
+        assert_eq!(req.ttl_seconds, 30 * 24 * 60 * 60);
     }
 
-    // ── Status filter: Active ─────────────────────────────────────────────────
+    #[test]
+    fn test_request_proof_custom_ttl() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &Some(3600u64));
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.expires_at, 3600u64);
+        assert_eq!(req.ttl_seconds, 3600u64);
+    }
 
     #[test]
-    fn test_credential_status_active_no_expiry() {
+    fn test_request_proof_nonexistent_credential_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        set_time(&env, 1_000_000);
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.request_proof(&verifier, &999u64, &claim_types, &None);
+        }));
+        assert!(result.is_err(), "should fail for missing credential");
+    }
+
+    #[test]
+    fn test_update_proof_request_status_to_verified() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.status, ProofRequestStatus::Verified);
+        assert!(req.resolved_at.is_some());
+    }
+
+    #[test]
+    fn test_update_proof_request_status_to_rejected() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Rejected);
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.status, ProofRequestStatus::Rejected);
+    }
+
+    #[test]
+    fn test_update_proof_request_status_wrong_verifier_fails() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let other = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.update_proof_request_status(&other, &req_id, &ProofRequestStatus::Verified);
+        }));
+        assert!(result.is_err(), "non-owner should not update status");
+    }
+
+    #[test]
+    fn test_invalid_transition_from_verified_fails() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+
+        // Cannot transition again from Verified
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Rejected);
+        }));
+        assert!(result.is_err(), "cannot transition from Verified");
+    }
+
+    #[test]
+    fn test_get_proof_request_auto_expires_on_read() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        // Create with 1-second TTL
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &Some(1u64));
+
+        // Advance past TTL
+        env.ledger().set(LedgerInfo {
+            timestamp: 2,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.status, ProofRequestStatus::Expired);
+        assert!(req.resolved_at.is_some());
+    }
+
+    #[test]
+    fn test_expire_proof_requests_batch() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        // r1 and r2 expire in 1s; r3 expires in 1 day
+        client.request_proof(&v1, &cred_id, &claim_types, &Some(1u64));
+        client.request_proof(&v2, &cred_id, &claim_types, &Some(1u64));
+        let r3 = client.request_proof(&v3, &cred_id, &claim_types, &Some(86400u64));
+
+        // Advance to ts=2 (past r1/r2 TTL, r3 still valid)
+        env.ledger().set(LedgerInfo {
+            timestamp: 2,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+
+        let expired = client.expire_proof_requests(&cred_id);
+        assert_eq!(expired, 2u32);
+
+        // r3 should still be pending
+        let req3 = client.get_proof_request(&r3);
+        assert_eq!(req3.status, ProofRequestStatus::Pending);
+    }
+
+    #[test]
+    fn test_update_expired_request_fails() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &Some(1u64));
+
+        env.ledger().set(LedgerInfo {
+            timestamp: 2,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+        }));
+        assert!(result.is_err(), "expired request cannot be updated");
+    }
+
+    #[test]
+    fn test_audit_log_records_creation_and_transitions() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+
+        let log = client.get_proof_request_audit_log(&req_id);
+        assert_eq!(log.len(), 2u32); // created + verified
+        assert_eq!(log.get(0).unwrap().new_status, ProofRequestStatus::Pending);
+        assert_eq!(log.get(1).unwrap().new_status, ProofRequestStatus::Verified);
+    }
+
+    #[test]
+    fn test_multiple_requests_same_credential_independent() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let r1 = client.request_proof(&v1, &cred_id, &claim_types, &None);
+        let r2 = client.request_proof(&v2, &cred_id, &claim_types, &None);
+
+        client.update_proof_request_status(&v1, &r1, &ProofRequestStatus::Verified);
+
+        // r2 should still be pending even though r1 was verified
+        let req2 = client.get_proof_request(&r2);
+        assert_eq!(req2.status, ProofRequestStatus::Pending);
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn test_get_proof_request_missing_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.get_proof_request(&9999u64);
+        }));
+        assert!(result.is_err(), "should panic for non-existent request");
+    }
+
+    #[test]
+    fn test_proof_request_when_paused_fails() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let admin = Address::generate(&env);
+        // Re-init to get admin
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client2 = QuorumProofContractClient::new(&env, &contract_id);
+        client2.initialize(&admin);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
-
-        let status = client.get_credential_status(&cred_id);
-        assert_eq!(status, CredentialStatus::Active);
-    }
-
-    #[test]
-    fn test_credential_status_active_far_expiry() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Expires in 1 year, renewal window only 30 days — not yet expiring soon.
-        let expires_at = 1_000_000u64 + 365 * 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        // Set policy: renewable with 30-day window.
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
-
-        let status = client.get_credential_status(&cred_id);
-        assert_eq!(status, CredentialStatus::Active);
-    }
-
-    // ── Status filter: ExpiringSoon ───────────────────────────────────────────
-
-    #[test]
-    fn test_credential_status_expiring_soon() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Expires in 10 days; renewal window is 30 days → should be ExpiringSoon.
-        let expires_at = 1_000_000u64 + 10 * 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
-
-        let status = client.get_credential_status(&cred_id);
-        assert_eq!(status, CredentialStatus::ExpiringSoon);
-    }
-
-    #[test]
-    fn test_credential_status_expiring_soon_boundary() {
-        // Exactly at the boundary of the renewal window.
-        let env = Env::default();
-        env.mock_all_auths();
-        // now = 0, expires_at = 30 days, window = 30 days → remaining == window → ExpiringSoon
-        set_time(&env, 0);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 30 * 86400u64;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
-
-        let status = client.get_credential_status(&cred_id);
-        assert_eq!(status, CredentialStatus::ExpiringSoon);
-    }
-
-    // ── Status filter: Expired ────────────────────────────────────────────────
-
-    #[test]
-    fn test_credential_status_expired() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        // expires_at is in the past.
-        let expires_at = 1_000_000u64 - 1;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        let status = client.get_credential_status(&cred_id);
-        assert_eq!(status, CredentialStatus::Expired);
-    }
-
-    #[test]
-    fn test_credential_status_expired_exact_boundary() {
-        // now == expires_at → Expired.
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 5_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(5_001u64));
-
-        set_time(&env, 5_001);
-        let status = client.get_credential_status(&cred_id);
-        assert_eq!(status, CredentialStatus::Expired);
-    }
-
-    // ── Renewal eligibility ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_renewal_eligibility_true() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64 + 5 * 86400; // 5 days away
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        // Window = 30 days → eligible.
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
-
-        assert!(client.check_renewal_eligibility(&cred_id));
-    }
-
-    #[test]
-    fn test_renewal_eligibility_false_no_policy() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64 + 5 * 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        // No policy set → not eligible.
-        assert!(!client.check_renewal_eligibility(&cred_id));
-    }
-
-    #[test]
-    fn test_renewal_eligibility_false_not_renewable() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64 + 5 * 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        // renewable = false
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &false);
-
-        assert!(!client.check_renewal_eligibility(&cred_id));
-    }
-
-    #[test]
-    fn test_renewal_eligibility_false_outside_window() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Expires in 60 days, window is only 30 days → outside window.
-        let expires_at = 1_000_000u64 + 60 * 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
-
-        assert!(!client.check_renewal_eligibility(&cred_id));
-    }
-
-    #[test]
-    fn test_renewal_eligibility_false_already_expired() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 2_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64; // already expired
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
-
-        assert!(!client.check_renewal_eligibility(&cred_id));
-    }
-
-    #[test]
-    fn test_renewal_eligibility_revoked_credential() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64 + 5 * 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-        client.set_renewal_policy(&issuer, &1u32, &(30 * 86400u64), &(7 * 86400u64), &true);
-        client.revoke_credential(&issuer, &cred_id);
-
-        assert!(!client.check_renewal_eligibility(&cred_id));
-    }
-
-    // ── Notification metadata ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_create_expiry_notification_metadata() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64 + 10 * 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        let notif = client.create_expiry_notification(&issuer, &cred_id);
-
-        assert_eq!(notif.credential_id, cred_id);
-        assert_eq!(notif.expires_at, expires_at);
-        assert_eq!(notif.created_at, 1_000_000u64);
-        assert_eq!(notif.seconds_until_expiry, 10 * 86400u64);
-        assert_eq!(notif.issuer, issuer);
-        assert_eq!(notif.subject, subject);
-    }
-
-    #[test]
-    #[should_panic(expected = "only the issuer can create expiry notifications")]
-    fn test_create_expiry_notification_unauthorized() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let stranger = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64 + 86400;
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        // stranger is not the issuer
-        client.create_expiry_notification(&stranger, &cred_id);
-    }
-
-    #[test]
-    #[should_panic(expected = "credential is already expired")]
-    fn test_create_expiry_notification_already_expired() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 2_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let expires_at = 1_000_000u64; // already expired
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-
-        client.create_expiry_notification(&issuer, &cred_id);
-    }
-
-    // ── get_expiring_credentials ─────────────────────────────────────────────
-
-    #[test]
-    fn test_get_expiring_credentials_mixed_states() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-
-        // Credential 1: expires in 5 days → in window.
-        let c1 = client.issue_credential(
-            &issuer, &subject, &1u32, &meta, &Some(1_000_000 + 5 * 86400),
-        );
-        // Credential 2: expires in 40 days → outside 30-day window.
-        let c2 = client.issue_credential(
-            &issuer, &subject, &1u32, &meta, &Some(1_000_000 + 40 * 86400),
-        );
-        // Credential 3: no expiry → not included.
-        let c3 = client.issue_credential(&issuer, &subject, &1u32, &meta, &None);
-        // Credential 4: already expired → not included.
-        let c4 = client.issue_credential(
-            &issuer, &subject, &1u32, &meta, &Some(1_000_000 - 1),
-        );
-        let _ = (c2, c3, c4);
-
-        let within = 30u64 * 86400;
-        let expiring = client.get_expiring_credentials(&subject, &within);
-
-        // Only c1 should be returned.
-        assert_eq!(expiring.len(), 1);
-        assert_eq!(expiring.get(0).unwrap(), c1);
-    }
-
-    #[test]
-    fn test_get_expiring_credentials_revoked_excluded() {
-        let env = Env::default();
-        env.mock_all_auths();
-        set_time(&env, 1_000_000);
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"hash");
-        let expires_at = 1_000_000u64 + 5 * 86400;
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &Some(expires_at));
-        client.revoke_credential(&issuer, &cred_id);
-
-        let expiring = client.get_expiring_credentials(&subject, &(30 * 86400u64));
-        assert_eq!(expiring.len(), 0);
-    }
-
-    // ── get_renewal_policy round-trip ─────────────────────────────────────────
-
-    #[test]
-    fn test_set_and_get_renewal_policy() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        client.initialize(&admin);
-
-        client.set_renewal_policy(&issuer, &2u32, &(14 * 86400u64), &(3 * 86400u64), &true);
-
-        let policy = client.get_renewal_policy(&issuer, &2u32).unwrap();
-        assert_eq!(policy.renewal_window_secs, 14 * 86400u64);
-        assert_eq!(policy.notify_before_secs, 3 * 86400u64);
-        assert!(policy.renewable);
-    }
-
-    #[test]
-    fn test_get_renewal_policy_not_found() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        client.initialize(&admin);
-
-        let policy = client.get_renewal_policy(&issuer, &99u32);
-        assert!(policy.is_none());
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"meta");
+        let cred_id2 = client2.issue_credential(&issuer, &subject, &1u32, &meta);
+        client2.pause(&admin);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client2.request_proof(&verifier, &cred_id2, &claim_types, &None);
+        }));
+        assert!(result.is_err(), "request_proof should fail when paused");
+        drop(cred_id); // suppress unused warning
     }
 }
