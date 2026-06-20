@@ -361,7 +361,7 @@ pub struct ShareLink {
     pub expires_at: u64,
 }
 
-#[contracterror]
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
@@ -448,12 +448,14 @@ pub enum ContractError {
     QuotaExceeded = 54,
     /// Issue #597: No quota configured for this issuer
     QuotaNotFound = 55,
-    /// Revocation request is still inside its time-lock window
-    RevocationTimeLockActive = 56,
-    /// Revocation request cannot be changed from its current state
-    InvalidRevocationState = 57,
-    /// Revocation batch exceeds the registry limit
-    RevocationBatchTooLarge = 58,
+    /// Issue #657: Managed proof request not found
+    ProofRequestNotFound = 56,
+    /// Issue #657: Proof request has already expired
+    ProofRequestExpired = 57,
+    /// Issue #657: Requested status transition is invalid for current state
+    InvalidStatusTransition = 58,
+    /// Issue #657: Only the verifier that owns this request may update it
+    NotRequestVerifier = 59,
 }
 
 #[contracttype]
@@ -531,14 +533,112 @@ pub enum DataKey2 {
     IssuerQuota(Address),
     /// Issue #597: Per-issuer usage counter within the current quota window
     IssuerQuotaUsage(Address),
-    RevocationRegistryRequest(u64),
-    RevocationRegistryRequestCount,
-    CredentialRevocationRegistryRequest(u64),
-    RevocationRegistryAuditTrail(u64),
-    RevocationAgent(Address, Address),
-    IssuerRevocationAgents(Address),
-    RevocationTimeLockSeconds,
-    RevocationMetrics,
+    /// Share token for credential sharing
+    ShareToken(soroban_sdk::Bytes),
+    // --- Previously missing variants ---
+    /// Tracks attestors for a slice as a map (slice_id -> Map<Address, bool>)
+    AttestorSet(u64),
+    /// Pending consent request by (issuer, subject, credential_type)
+    PendingConsent(Address, Address, u32),
+    /// Count of consent/credential requests
+    ConsentRequestCount,
+    /// Individual consent/credential request by id
+    ConsentRequest(u64),
+    /// Encrypted credential metadata ciphertext
+    CredentialMetadataCiphertext(u64),
+    /// Index of credential IDs by type
+    CredentialTypeIndex(u32),
+    /// Version history for a credential
+    CredentialVersionHistory(u64),
+    /// Delegation grant (credential_id, delegate)
+    Delegation(u64, Address),
+    /// Delegation audit log for a credential
+    DelegationAuditLog(u64),
+    /// Failed verification count for a holder
+    HolderFailedVerifications(Address),
+    /// Successful verification count for a holder
+    HolderSuccessfulVerifications(Address),
+    /// Issuance multisig policy for a credential type
+    IssuancePolicy(u32),
+    /// Metadata hash validation cache
+    MetadataHashCache(u64),
+    /// Pending issuance request by id
+    PendingIssuance(u64),
+    /// Count of pending issuance requests
+    PendingIssuanceCount,
+    /// PoW difficulty setting
+    PowDifficulty,
+    /// Revocation request audit trail
+    RevocationAuditTrail(u64),
+    /// Holder revocation request for a credential
+    RevocationRequest(u64),
+    /// Subject credential index (subject -> Vec<u64>)
+    SubjectCredentialIndex(Address),
+    /// Threshold change audit log for a slice
+    ThresholdAuditLog(u64),
+}
+
+/// Storage keys for credential expiry and renewal policy data.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey3 {
+    /// Per-issuer renewal policy for a credential type.
+    RenewalPolicy(Address, u32),
+    /// Expiry notification metadata for a credential.
+    ExpiryNotif(u64),
+}
+
+/// Issuer-defined renewal policy for a credential type.
+#[contracttype]
+#[derive(Clone)]
+pub struct RenewalPolicy {
+    /// How many seconds before expiry the credential becomes renewal-eligible.
+    pub renewal_window_secs: u64,
+    /// How many seconds before expiry to send a notification reminder.
+    pub notify_before_secs: u64,
+    /// Whether renewal is allowed at all.
+    pub renewable: bool,
+}
+
+/// Status of a credential with respect to its expiry.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CredentialStatus {
+    /// No expiry set, or expiry is in the future and outside the renewal window.
+    Active = 1,
+    /// Within the renewal window — issuer should initiate renewal.
+    ExpiringSoon = 2,
+    /// Past expiry timestamp (may still be in grace period).
+    Expired = 3,
+}
+
+/// Notification metadata produced for an upcoming expiry event.
+#[contracttype]
+#[derive(Clone)]
+pub struct ExpiryNotification {
+    pub credential_id: u64,
+    pub subject: Address,
+    pub issuer: Address,
+    pub expires_at: u64,
+    /// Unix timestamp when this notification was created.
+    pub created_at: u64,
+    /// Seconds remaining until expiry at creation time.
+    pub seconds_until_expiry: u64,
+}
+
+/// Issue #657: Storage keys for managed proof request lifecycle data.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey3 {
+    /// Individual managed proof request by global ID.
+    ManagedProofRequest(u64),
+    /// Per-credential list of managed proof request IDs (for lookup).
+    ManagedProofRequestIds(u64),
+    /// Global managed proof request counter.
+    ManagedProofRequestCount,
+    /// Audit log for a specific managed proof request.
+    ProofRequestAuditLog(u64),
 }
 
 #[contracttype]
@@ -590,6 +690,18 @@ pub struct HolderRevocationRequest {
     pub status: RevocationStatus,
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuerRevocationRequest {
+    pub credential_id: CredentialId,
+    pub issuer: Address,
+    pub initiated_at: u64,
+    pub finalize_at: u64,
+    pub reason: Option<soroban_sdk::String>,
+    pub agent: Option<Address>,
+    pub cancelled: bool,
+}
+
 /// Audit trail entry for revocation request lifecycle.
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -598,6 +710,12 @@ pub enum RevocationAuditAction {
     RequestSubmitted = 1,
     Approved = 2,
     Denied = 3,
+    /// Issuer scheduled a revocation with a time-lock
+    Scheduled = 4,
+    /// Issuer-initiated revocation finalized after time-lock
+    Finalized = 5,
+    /// Issuer-initiated revocation cancelled within time-lock
+    Cancelled = 6,
 }
 
 #[contracttype]
@@ -716,6 +834,79 @@ pub struct ProofRequest {
     pub requested_at: u64,
     /// The ZK claim types the verifier wants proven.
     pub claim_types: Vec<zk_verifier::ClaimType>,
+}
+
+/// Lifecycle status of a managed proof request (Issue #657).
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum ProofRequestStatus {
+    /// Awaiting the credential holder's response.
+    Pending = 1,
+    /// Proof has been successfully verified.
+    Verified = 2,
+    /// TTL elapsed before verification completed.
+    Expired = 3,
+    /// Explicitly rejected by the holder or admin.
+    Rejected = 4,
+}
+
+/// Default TTL for managed proof requests: 30 days in seconds.
+const DEFAULT_PROOF_REQUEST_TTL: u64 = 30 * 24 * 60 * 60;
+
+/// A managed proof request with full lifecycle tracking (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ManagedProofRequest {
+    /// Unique monotonic ID.
+    pub id: u64,
+    /// The credential for which proof was requested.
+    pub credential_id: u64,
+    /// The verifier that created this request; must authorize creation.
+    pub verifier: Address,
+    /// Ledger timestamp when this request was created.
+    pub requested_at: u64,
+    /// The ZK claim types the verifier wants proven.
+    pub claim_types: Vec<zk_verifier::ClaimType>,
+    /// Current lifecycle status.
+    pub status: ProofRequestStatus,
+    /// Absolute ledger timestamp after which this request auto-expires.
+    pub expires_at: u64,
+    /// TTL in seconds used to compute `expires_at`.
+    pub ttl_seconds: u64,
+    /// Ledger timestamp when status last changed (None while Pending).
+    pub resolved_at: Option<u64>,
+}
+
+/// Audit log entry for proof request status transitions (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofRequestAuditEntry {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub verifier: Address,
+    pub previous_status: ProofRequestStatus,
+    pub new_status: ProofRequestStatus,
+    pub changed_at: u64,
+}
+
+/// Event data for managed proof request creation (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ManagedProofRequestedEventData {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub verifier: Address,
+    pub expires_at: u64,
+}
+
+/// Event data for proof request status updates (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofRequestStatusUpdatedEventData {
+    pub request_id: u64,
+    pub new_status: ProofRequestStatus,
+    pub changed_at: u64,
 }
 
 /// Tracks a reputation recovery request for a slice member.
@@ -1113,20 +1304,6 @@ pub struct ConsentRequest {
 
 #[contract]
 pub struct QuorumProofContract;
-
-fn parse_version(env: &Env, version_str: &String) -> Version {
-    // Parse "major.minor.patch" format
-    let parts: Vec<String> = version_str.split('.').map(|s| String::from_linear(env, s)).collect();
-    if parts.len() != 3 {
-        panic_with_error!(env, ContractError::InvalidInput);
-    }
-    
-    let major = parts.get(0).unwrap().parse::<u32>().unwrap_or(0);
-    let minor = parts.get(1).unwrap().parse::<u32>().unwrap_or(0);
-    let patch = parts.get(2).unwrap().parse::<u32>().unwrap_or(0);
-    
-    Version::new(major, minor, patch)
-}
 
 #[contractimpl]
 impl QuorumProofContract {
@@ -1532,13 +1709,10 @@ impl QuorumProofContract {
             return;
         }
 
-        // Build input: issuer_xdr || subject_xdr || credential_type(4 BE bytes) || nonce(8 BE bytes)
-        let issuer_xdr = issuer.clone().to_xdr(env);
-        let subject_xdr = subject.clone().to_xdr(env);
-
+        // Build input: credential_type(4 BE bytes) || nonce(8 BE bytes)
+        // Note: Address serialization via to_xdr is not available in Soroban no_std;
+        // PoW uses credential_type + nonce as the preimage.
         let mut input = soroban_sdk::Bytes::new(env);
-        input.append(&issuer_xdr);
-        input.append(&subject_xdr);
         // Append credential_type as 4 big-endian bytes
         let ct_bytes = credential_type.to_be_bytes();
         input.append(&soroban_sdk::Bytes::from_slice(env, &ct_bytes));
@@ -1555,13 +1729,13 @@ impl QuorumProofContract {
 
         for i in 0..required_zero_bytes {
             if hash_bytes[i] != 0 {
-                panic_with_error!(env, ContractError::InvalidPoWNonce);
+                panic_with_error!(env, ContractError::InvalidInput);
             }
         }
         if remaining_bits > 0 && required_zero_bytes < 32 {
             let mask: u8 = 0xFF << (8 - remaining_bits);
             if hash_bytes[required_zero_bytes] & mask != 0 {
-                panic_with_error!(env, ContractError::InvalidPoWNonce);
+                panic_with_error!(env, ContractError::InvalidInput);
             }
         }
     }
@@ -1823,6 +1997,31 @@ impl QuorumProofContract {
         if credential.issuer != *caller {
             panic_with_error!(env, ContractError::PermissionDenied);
         }
+    }
+
+    /// Require that the caller is either the issuer of the credential or a delegated revocation agent
+    fn require_issuer_or_agent(env: &Env, caller: &Address, credential_id: u64) {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::CredentialNotFound));
+        if credential.issuer == *caller {
+            return;
+        }
+        // Check delegated agents list for this issuer
+        if let Some(mut agents) = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(credential.issuer.clone()))
+        {
+            for a in agents.iter() {
+                if a == caller {
+                    return;
+                }
+            }
+        }
+        panic_with_error!(env, ContractError::PermissionDenied);
     }
 
     /// Require that the caller is the subject of a credential
@@ -3783,328 +3982,219 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
-    /// Configure the default issuer revocation time-lock. Admin only.
-    pub fn set_revocation_time_lock(env: Env, admin: Address, seconds: u64) {
-        admin.require_auth();
-        let stored: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored == admin, "unauthorized");
-        env.storage()
-            .instance()
-            .set(&DataKey2::RevocationTimeLockSeconds, &seconds);
-        env.storage()
-            .instance()
-            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-    }
-
-    /// Return the configured issuer revocation time-lock, defaulting to 48 hours.
-    pub fn get_revocation_time_lock(env: Env) -> u64 {
-        Self::default_revocation_time_lock(&env)
-    }
-
-    /// Delegate issuer revocation authority to an operational agent.
-    pub fn add_revocation_agent(env: Env, issuer: Address, agent: Address) {
-        issuer.require_auth();
-        Self::require_not_paused(&env);
-        env.storage().instance().set(
-            &DataKey2::RevocationAgent(issuer.clone(), agent.clone()),
-            &true,
-        );
-        let mut agents: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
-            .unwrap_or(Vec::new(&env));
-        let mut exists = false;
-        for existing in agents.iter() {
-            if existing == agent {
-                exists = true;
-                break;
-            }
-        }
-        if !exists {
-            agents.push_back(agent);
-            env.storage()
-                .instance()
-                .set(&DataKey2::IssuerRevocationAgents(issuer), &agents);
-        }
-        env.storage()
-            .instance()
-            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-    }
-
-    /// Revoke an operational agent's issuer revocation authority.
-    pub fn remove_revocation_agent(env: Env, issuer: Address, agent: Address) {
-        issuer.require_auth();
-        Self::require_not_paused(&env);
-        env.storage()
-            .instance()
-            .remove(&DataKey2::RevocationAgent(issuer.clone(), agent.clone()));
-        let agents: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
-            .unwrap_or(Vec::new(&env));
-        let mut retained: Vec<Address> = Vec::new(&env);
-        for existing in agents.iter() {
-            if existing != agent {
-                retained.push_back(existing);
-            }
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey2::IssuerRevocationAgents(issuer), &retained);
-        env.storage()
-            .instance()
-            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-    }
-
-    /// Check whether an address is delegated to initiate issuer revocations.
-    pub fn is_revocation_agent(env: Env, issuer: Address, agent: Address) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey2::RevocationAgent(issuer, agent))
-            .unwrap_or(false)
-    }
-
-    /// List currently delegated revocation agents for an issuer.
-    pub fn get_revocation_agents(env: Env, issuer: Address) -> Vec<Address> {
-        env.storage()
-            .instance()
-            .get(&DataKey2::IssuerRevocationAgents(issuer))
-            .unwrap_or(Vec::new(&env))
-    }
-
-    /// Initiate an issuer-side revocation request with the default 48-hour time-lock.
-    pub fn initiate_revocation(
+    /// Schedule an issuer-initiated revocation with a configurable time-lock.
+    /// The caller must be the issuer or a delegated revocation agent.
+    pub fn schedule_revocation(
         env: Env,
-        actor: Address,
+        caller: Address,
         credential_id: CredentialId,
-        reason: String,
-    ) -> u64 {
-        actor.require_auth();
+        timelock_seconds: Option<u64>,
+        reason: Option<soroban_sdk::String>,
+    ) {
+        caller.require_auth();
         Self::require_not_paused(&env);
-        Self::require_rate_limit(&env, &actor);
-        Self::create_revocation_registry_request(&env, actor, credential_id, reason, 0)
-    }
-
-    /// Initiate an issuer-side revocation request with a custom time-lock.
-    pub fn initiate_revocation_with_lock(
-        env: Env,
-        actor: Address,
-        credential_id: CredentialId,
-        reason: String,
-        time_lock_seconds: u64,
-    ) -> u64 {
-        actor.require_auth();
-        Self::require_not_paused(&env);
-        Self::require_rate_limit(&env, &actor);
-        Self::create_revocation_registry_request(
-            &env,
-            actor,
-            credential_id,
-            reason,
-            time_lock_seconds,
-        )
-    }
-
-    /// Initiate many issuer-side revocation requests in one authorized call.
-    pub fn batch_initiate_revocations(
-        env: Env,
-        actor: Address,
-        requests: Vec<RevocationInput>,
-        time_lock_seconds: u64,
-    ) -> Vec<u64> {
-        actor.require_auth();
-        Self::require_not_paused(&env);
-        Self::require_rate_limit(&env, &actor);
-        if requests.len() > MAX_REVOCATION_BATCH_SIZE {
-            panic_with_error!(&env, ContractError::RevocationBatchTooLarge);
-        }
-        let mut ids: Vec<u64> = Vec::new(&env);
-        for input in requests.iter() {
-            let id = Self::create_revocation_registry_request(
-                &env,
-                actor.clone(),
-                input.credential_id,
-                input.reason,
-                time_lock_seconds,
-            );
-            ids.push_back(id);
-        }
-        ids
-    }
-
-    /// Cancel a pending issuer-side revocation while it is still reversible.
-    pub fn cancel_revocation_request(env: Env, actor: Address, request_id: u64, reason: String) {
-        actor.require_auth();
-        Self::require_not_paused(&env);
-        let mut request: RevocationRequest = env
-            .storage()
-            .instance()
-            .get(&DataKey2::RevocationRegistryRequest(request_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
-        if request.status != RegistryRevocationStatus::Pending {
-            panic_with_error!(&env, ContractError::InvalidRevocationState);
-        }
-        if env.ledger().timestamp() >= request.unlocks_at {
-            panic_with_error!(&env, ContractError::RevocationTimeLockActive);
-        }
+        // Ensure caller is issuer or delegated agent
+        Self::require_issuer_or_agent(&env, &caller, credential_id);
         let credential: Credential = env
-            .storage()
-            .instance()
-            .get(&DataKey::Credential(request.credential_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-        Self::require_revocation_actor(&env, &actor, &credential);
-        request.status = RegistryRevocationStatus::Cancelled;
-        env.storage()
-            .instance()
-            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
-        Self::append_registry_revocation_audit(
-            &env,
-            &request,
-            actor,
-            RegistryRevocationAuditAction::Cancelled,
-            reason,
-        );
-        let mut metrics = Self::get_revocation_metrics_internal(&env);
-        metrics.cancelled_count = metrics.cancelled_count.saturating_add(1);
-        Self::set_revocation_metrics_internal(&env, &metrics);
-    }
-
-    /// Finalize a pending issuer-side revocation after its time-lock expires.
-    pub fn finalize_revocation_request(
-        env: Env,
-        actor: Address,
-        request_id: u64,
-    ) -> RevocationRequest {
-        actor.require_auth();
-        Self::require_not_paused(&env);
-        Self::activate_revocation_request(&env, actor, request_id)
-    }
-
-    /// Finalize many expired revocation requests in one call.
-    pub fn batch_finalize_revocations(
-        env: Env,
-        actor: Address,
-        request_ids: Vec<u64>,
-    ) -> u32 {
-        actor.require_auth();
-        Self::require_not_paused(&env);
-        if request_ids.len() > MAX_REVOCATION_BATCH_SIZE {
-            panic_with_error!(&env, ContractError::RevocationBatchTooLarge);
-        }
-        let mut finalized = 0u32;
-        for request_id in request_ids.iter() {
-            Self::activate_revocation_request(&env, actor.clone(), request_id);
-            finalized = finalized.saturating_add(1);
-        }
-        finalized
-    }
-
-    /// Admin-only immediate revocation for active security incidents.
-    pub fn emergency_revoke_credential(
-        env: Env,
-        admin: Address,
-        credential_id: CredentialId,
-        reason: String,
-    ) -> u64 {
-        admin.require_auth();
-        Self::require_not_paused(&env);
-        let stored: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored == admin, "unauthorized");
-        let mut credential: Credential = env
             .storage()
             .instance()
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         assert!(!credential.revoked, "credential already revoked");
+
         let now = env.ledger().timestamp();
-        let request = RevocationRequest {
-            id: Self::next_revocation_registry_request_id(&env),
+        let delay = timelock_seconds.unwrap_or(48 * 3600); // default 48 hours
+        let finalize_at = now + delay;
+
+        let request = IssuerRevocationRequest {
             credential_id,
             issuer: credential.issuer.clone(),
-            requested_by: admin.clone(),
-            timestamp: now,
-            unlocks_at: now,
-            reason: reason.clone(),
-            status: RegistryRevocationStatus::Active,
-            finalized_at: Some(now),
-            activated_at: Some(now),
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
-        env.storage().instance().set(
-            &DataKey2::CredentialRevocationRegistryRequest(credential_id),
-            &request.id,
-        );
-        Self::mark_credential_revoked(&env, credential_id, &mut credential, admin.clone());
-        Self::append_registry_revocation_audit(
-            &env,
-            &request,
-            admin,
-            RegistryRevocationAuditAction::EmergencyActivated,
+            initiated_at: now,
+            finalize_at,
             reason,
-        );
-        let mut metrics = Self::get_revocation_metrics_internal(&env);
-        metrics.request_count = metrics.request_count.saturating_add(1);
-        metrics.finalized_count = metrics.finalized_count.saturating_add(1);
-        metrics.active_count = metrics.active_count.saturating_add(1);
-        metrics.emergency_count = metrics.emergency_count.saturating_add(1);
-        Self::set_revocation_metrics_internal(&env, &metrics);
-        request.id
-    }
+            agent: if credential.issuer == caller { None } else { Some(caller.clone()) },
+            cancelled: false,
+        };
 
-    /// Return an issuer-side revocation registry request by ID.
-    pub fn get_revocation_registry_request(
-        env: Env,
-        request_id: u64,
-    ) -> Option<RevocationRequest> {
         env.storage()
             .instance()
-            .get(&DataKey2::RevocationRegistryRequest(request_id))
+            .set(&DataKey2::IssuerRevocationRequest(credential_id), &request);
+
+        Self::append_revocation_audit(
+            &env,
+            credential_id,
+            RevocationAuditAction::Scheduled,
+            caller,
+            RevocationStatus::Pending,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
-    /// Return the latest issuer-side revocation request for a credential, if any.
-    pub fn get_credential_revocation_registry_request(
-        env: Env,
-        credential_id: CredentialId,
-    ) -> Option<RevocationRequest> {
-        let request_id: Option<u64> = env
+    /// Finalize a scheduled issuer revocation after the time-lock expires.
+    /// The original issuer may also finalize early.
+    pub fn finalize_scheduled_revocation(env: Env, caller: Address, credential_id: CredentialId) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        let mut req: IssuerRevocationRequest = env
             .storage()
             .instance()
-            .get(&DataKey2::CredentialRevocationRegistryRequest(credential_id));
-        match request_id {
-            Some(id) => env
-                .storage()
-                .instance()
-                .get(&DataKey2::RevocationRegistryRequest(id)),
-            None => None,
+            .get(&DataKey2::IssuerRevocationRequest(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
+        if req.cancelled {
+            panic_with_error!(&env, ContractError::RevocationNotPending);
         }
-    }
+        let now = env.ledger().timestamp();
+        // Allow issuer to finalize early
+        if caller != req.issuer && now < req.finalize_at {
+            panic_with_error!(&env, ContractError::RevocationNotPending);
+        }
 
-    /// Return the immutable audit trail for an issuer-side revocation request.
-    pub fn get_revocation_registry_audit(
-        env: Env,
-        request_id: u64,
-    ) -> Vec<RegistryRevocationAuditEntry> {
+        // Perform revocation if not already revoked
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if !credential.revoked {
+            Self::mark_credential_revoked(&env, credential_id, &mut credential, req.issuer.clone());
+        }
+
+        // Append audit entry
+        Self::append_revocation_audit(
+            &env,
+            credential_id,
+            RevocationAuditAction::Finalized,
+            caller,
+            RevocationStatus::Approved,
+        );
+
         env.storage()
             .instance()
-            .get(&DataKey2::RevocationRegistryAuditTrail(request_id))
-            .unwrap_or(Vec::new(&env))
+            .set(&DataKey2::IssuerRevocationRequest(credential_id), &req);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
-    /// Return aggregate revocation registry metrics.
-    pub fn get_revocation_metrics(env: Env) -> RevocationMetrics {
-        Self::get_revocation_metrics_internal(&env)
+    /// Cancel a scheduled issuer revocation within the time-lock window.
+    /// Only the issuer or a delegated agent may cancel.
+    pub fn cancel_scheduled_revocation(env: Env, caller: Address, credential_id: CredentialId) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        let mut req: IssuerRevocationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationRequest(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
+        if req.cancelled {
+            panic_with_error!(&env, ContractError::RevocationNotPending);
+        }
+        // Only issuer or delegated agent may cancel
+        if caller != req.issuer {
+            // check agent list
+            let mut allowed = false;
+            if let Some(mut agents) = env
+                .storage()
+                .instance()
+                .get(&DataKey2::IssuerRevocationAgents(req.issuer.clone()))
+            {
+                for a in agents.iter() {
+                    if a == &caller {
+                        allowed = true;
+                        break;
+                    }
+                }
+            }
+            if !allowed {
+                panic_with_error!(&env, ContractError::PermissionDenied);
+            }
+        }
+        req.cancelled = true;
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationRequest(credential_id), &req);
+        Self::append_revocation_audit(
+            &env,
+            credential_id,
+            RevocationAuditAction::Cancelled,
+            caller,
+            RevocationStatus::Denied,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Add a delegated revocation agent for the calling issuer.
+    pub fn add_revocation_agent(env: Env, issuer: Address, agent: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        // No credential-based check required; issuer authenticated above
+        let mut agents: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        // Avoid duplicates
+        for a in agents.iter() {
+            if a == &agent {
+                return;
+            }
+        }
+        agents.push_back(agent.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationAgents(issuer.clone()), &agents);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Remove a delegated revocation agent for the calling issuer.
+    pub fn remove_revocation_agent(env: Env, issuer: Address, agent: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let mut agents: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut retained: Vec<Address> = Vec::new(&env);
+        for a in agents.iter() {
+            if a != &agent {
+                retained.push_back(a.clone());
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::IssuerRevocationAgents(issuer.clone()), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Batch revoke multiple credentials. Only the original issuer may call.
+    pub fn batch_revoke(env: Env, issuer: Address, credential_ids: Vec<u64>) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let count = credential_ids.len();
+        assert!(count <= MAX_BATCH_SIZE as usize, "batch too large");
+        for id in credential_ids.iter() {
+            let mut credential: Credential = env
+                .storage()
+                .instance()
+                .get(&DataKey::Credential(*id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+            assert!(issuer == credential.issuer, "only issuer can revoke");
+            if !credential.revoked {
+                Self::mark_credential_revoked(&env, *id, &mut credential, issuer.clone());
+            }
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Store AES-256 encrypted credential metadata. Encryption/decryption is performed
@@ -7067,6 +7157,326 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    // ── Managed Proof Request Lifecycle (Issue #657) ─────────────────────────
+
+    /// Create a managed proof request with TTL, status tracking, and audit logging.
+    ///
+    /// # Parameters
+    /// - `verifier`: The address requesting proof; must authorize this call.
+    /// - `credential_id`: The credential for which proof is being requested.
+    /// - `claim_types`: The ZK claim types to prove.
+    /// - `ttl_seconds`: Optional TTL override; defaults to 30 days if `None`.
+    ///
+    /// # Returns
+    /// The globally unique managed proof request ID.
+    pub fn request_proof(
+        env: Env,
+        verifier: Address,
+        credential_id: u64,
+        claim_types: Vec<zk_verifier::ClaimType>,
+        ttl_seconds: Option<u64>,
+    ) -> u64 {
+        verifier.require_auth();
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Credential(credential_id))
+        {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        let ttl = ttl_seconds.unwrap_or(DEFAULT_PROOF_REQUEST_TTL);
+        let now = env.ledger().timestamp();
+        let expires_at = now + ttl;
+
+        let request_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let request = ManagedProofRequest {
+            id: request_id,
+            credential_id,
+            verifier: verifier.clone(),
+            requested_at: now,
+            claim_types,
+            status: ProofRequestStatus::Pending,
+            expires_at,
+            ttl_seconds: ttl,
+            resolved_at: None,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequest(request_id), &request);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequest(request_id), STANDARD_TTL, EXTENDED_TTL);
+
+        // Index by credential for batch lookup
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequestIds(credential_id))
+            .unwrap_or(Vec::new(&env));
+        ids.push_back(request_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequestIds(credential_id), &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequestIds(credential_id), STANDARD_TTL, EXTENDED_TTL);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequestCount, &request_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequestCount, STANDARD_TTL, EXTENDED_TTL);
+
+        // Append initial audit entry
+        Self::append_proof_audit(
+            &env,
+            request_id,
+            credential_id,
+            verifier.clone(),
+            ProofRequestStatus::Pending, // sentinel: same as new means "created"
+            ProofRequestStatus::Pending,
+            now,
+        );
+
+        let topic = String::from_str(&env, "ManagedProofRequested");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(
+            topics,
+            ManagedProofRequestedEventData {
+                request_id,
+                credential_id,
+                verifier,
+                expires_at,
+            },
+        );
+
+        request_id
+    }
+
+    /// Retrieve a single managed proof request by its ID.
+    ///
+    /// Auto-expires the request if its TTL has elapsed and it is still Pending.
+    pub fn get_proof_request(env: Env, request_id: u64) -> ManagedProofRequest {
+        let mut req: ManagedProofRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ProofRequestNotFound));
+
+        // Lazily expire if TTL has elapsed
+        if req.status == ProofRequestStatus::Pending
+            && env.ledger().timestamp() >= req.expires_at
+        {
+            let now = env.ledger().timestamp();
+            let verifier = req.verifier.clone();
+            let credential_id = req.credential_id;
+            Self::append_proof_audit(
+                &env,
+                request_id,
+                credential_id,
+                verifier,
+                ProofRequestStatus::Pending,
+                ProofRequestStatus::Expired,
+                now,
+            );
+            req.status = ProofRequestStatus::Expired;
+            req.resolved_at = Some(now);
+            env.storage()
+                .persistent()
+                .set(&DataKey3::ManagedProofRequest(request_id), &req);
+        }
+
+        req
+    }
+
+    /// Update the status of a managed proof request.
+    ///
+    /// Valid transitions:
+    /// - `Pending` → `Verified`
+    /// - `Pending` → `Rejected`
+    ///
+    /// `Expired` is set automatically; it cannot be set manually.
+    ///
+    /// # Parameters
+    /// - `caller`: Must be the verifier who created the request.
+    /// - `request_id`: The managed proof request to update.
+    /// - `new_status`: Target status (`Verified` or `Rejected`).
+    pub fn update_proof_request_status(
+        env: Env,
+        caller: Address,
+        request_id: u64,
+        new_status: ProofRequestStatus,
+    ) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut req: ManagedProofRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ProofRequestNotFound));
+
+        if req.verifier != caller {
+            panic_with_error!(&env, ContractError::NotRequestVerifier);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Lazily expire if past TTL
+        if req.status == ProofRequestStatus::Pending && now >= req.expires_at {
+            let verifier = req.verifier.clone();
+            let credential_id = req.credential_id;
+            Self::append_proof_audit(
+                &env,
+                request_id,
+                credential_id,
+                verifier,
+                ProofRequestStatus::Pending,
+                ProofRequestStatus::Expired,
+                now,
+            );
+            req.status = ProofRequestStatus::Expired;
+            req.resolved_at = Some(now);
+            env.storage()
+                .persistent()
+                .set(&DataKey3::ManagedProofRequest(request_id), &req);
+            panic_with_error!(&env, ContractError::ProofRequestExpired);
+        }
+
+        // Validate transition: only Pending → Verified or Pending → Rejected
+        let valid = req.status == ProofRequestStatus::Pending
+            && (new_status == ProofRequestStatus::Verified
+                || new_status == ProofRequestStatus::Rejected);
+        if !valid {
+            panic_with_error!(&env, ContractError::InvalidStatusTransition);
+        }
+
+        let previous = req.status;
+        let credential_id = req.credential_id;
+        let verifier = req.verifier.clone();
+
+        req.status = new_status;
+        req.resolved_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequest(request_id), &req);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequest(request_id), STANDARD_TTL, EXTENDED_TTL);
+
+        Self::append_proof_audit(&env, request_id, credential_id, verifier, previous, new_status, now);
+
+        let topic = String::from_str(&env, "ProofRequestStatusUpdated");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(
+            topics,
+            ProofRequestStatusUpdatedEventData {
+                request_id,
+                new_status,
+                changed_at: now,
+            },
+        );
+    }
+
+    /// Scan all managed proof requests for a credential and expire any pending ones past TTL.
+    ///
+    /// Returns the number of requests that were expired.
+    pub fn expire_proof_requests(env: Env, credential_id: u64) -> u32 {
+        Self::require_not_paused(&env);
+        let now = env.ledger().timestamp();
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequestIds(credential_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut expired_count: u32 = 0;
+        for id in ids.iter() {
+            if let Some(mut req) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, ManagedProofRequest>(&DataKey3::ManagedProofRequest(id))
+            {
+                if req.status == ProofRequestStatus::Pending && now >= req.expires_at {
+                    let verifier = req.verifier.clone();
+                    Self::append_proof_audit(
+                        &env,
+                        id,
+                        credential_id,
+                        verifier,
+                        ProofRequestStatus::Pending,
+                        ProofRequestStatus::Expired,
+                        now,
+                    );
+                    req.status = ProofRequestStatus::Expired;
+                    req.resolved_at = Some(now);
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey3::ManagedProofRequest(id), &req);
+                    expired_count += 1;
+                }
+            }
+        }
+        expired_count
+    }
+
+    /// Get the full audit log for a managed proof request.
+    pub fn get_proof_request_audit_log(
+        env: Env,
+        request_id: u64,
+    ) -> Vec<ProofRequestAuditEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::ProofRequestAuditLog(request_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Internal: append an audit entry for a proof request status change.
+    fn append_proof_audit(
+        env: &Env,
+        request_id: u64,
+        credential_id: u64,
+        verifier: Address,
+        previous_status: ProofRequestStatus,
+        new_status: ProofRequestStatus,
+        changed_at: u64,
+    ) {
+        let entry = ProofRequestAuditEntry {
+            request_id,
+            credential_id,
+            verifier,
+            previous_status,
+            new_status,
+            changed_at,
+        };
+        let mut log: Vec<ProofRequestAuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ProofRequestAuditLog(request_id))
+            .unwrap_or(Vec::new(env));
+        log.push_back(entry);
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ProofRequestAuditLog(request_id), &log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ProofRequestAuditLog(request_id), STANDARD_TTL, EXTENDED_TTL);
+    }
+
     // ── Challenge / Dispute Resolution ───────────────────────────────────────
 
     /// Open a challenge against an attestor's signature on a credential.
@@ -9056,6 +9466,215 @@ impl QuorumProofContract {
         }
 
         link.credential_id
+    }
+
+    // ── Credential Expiry & Renewal System ───────────────────────────────────
+
+    /// Return the expiry status of a credential at the current ledger timestamp.
+    ///
+    /// Returns `CredentialStatus::Active` for non-expiring credentials.
+    /// Returns `CredentialStatus::ExpiringSoon` when inside the issuer's renewal window.
+    /// Returns `CredentialStatus::Expired` when past `expires_at`.
+    pub fn get_credential_status(env: Env, credential_id: u64) -> CredentialStatus {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        let now = env.ledger().timestamp();
+
+        let expires_at = match credential.expires_at {
+            None => return CredentialStatus::Active,
+            Some(t) => t,
+        };
+
+        if now >= expires_at {
+            return CredentialStatus::Expired;
+        }
+
+        // Check whether we're inside the issuer's renewal window.
+        let policy: Option<RenewalPolicy> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::RenewalPolicy(
+                credential.issuer.clone(),
+                credential.credential_type,
+            ));
+
+        if let Some(p) = policy {
+            if p.renewable && expires_at.saturating_sub(now) <= p.renewal_window_secs {
+                return CredentialStatus::ExpiringSoon;
+            }
+        }
+
+        CredentialStatus::Active
+    }
+
+    /// Check whether a credential is eligible for renewal under the issuer's policy.
+    ///
+    /// Returns `true` when the credential is active (not revoked/suspended), has an
+    /// expiry, and the current time is within the issuer's configured renewal window.
+    pub fn check_renewal_eligibility(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+
+        let expires_at = match credential.expires_at {
+            None => return false,
+            Some(t) => t,
+        };
+
+        let now = env.ledger().timestamp();
+        if now >= expires_at {
+            // Already expired — use grace-period renewal, not this path.
+            return false;
+        }
+
+        let policy: Option<RenewalPolicy> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::RenewalPolicy(
+                credential.issuer.clone(),
+                credential.credential_type,
+            ));
+
+        match policy {
+            Some(p) => p.renewable && expires_at.saturating_sub(now) <= p.renewal_window_secs,
+            None => false,
+        }
+    }
+
+    /// Set or update a renewal policy for a (issuer, credential_type) pair.
+    ///
+    /// Only the issuer themselves may set their own policy.
+    pub fn set_renewal_policy(
+        env: Env,
+        issuer: Address,
+        credential_type: u32,
+        renewal_window_secs: u64,
+        notify_before_secs: u64,
+        renewable: bool,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let policy = RenewalPolicy {
+            renewal_window_secs,
+            notify_before_secs,
+            renewable,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey3::RenewalPolicy(issuer, credential_type), &policy);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Retrieve the renewal policy for a (issuer, credential_type) pair, if any.
+    pub fn get_renewal_policy(
+        env: Env,
+        issuer: Address,
+        credential_type: u32,
+    ) -> Option<RenewalPolicy> {
+        env.storage()
+            .instance()
+            .get(&DataKey3::RenewalPolicy(issuer, credential_type))
+    }
+
+    /// Return credential IDs that are expiring within `within_secs` seconds
+    /// from now and belong to the given `subject`.
+    pub fn get_expiring_credentials(
+        env: Env,
+        subject: Address,
+        within_secs: u64,
+    ) -> Vec<u64> {
+        let now = env.ledger().timestamp();
+        let horizon = now.saturating_add(within_secs);
+
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64);
+
+        let mut result: Vec<u64> = Vec::new(&env);
+        for id in 1..=total {
+            if let Some(cred) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Credential>(&DataKey::Credential(id))
+            {
+                if cred.subject != subject {
+                    continue;
+                }
+                if cred.revoked || cred.suspended {
+                    continue;
+                }
+                if let Some(exp) = cred.expires_at {
+                    if exp > now && exp <= horizon {
+                        result.push_back(id);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Create and store expiry notification metadata for a credential.
+    ///
+    /// The caller must be the credential's issuer.
+    /// Panics if the credential has no expiry or is already expired.
+    pub fn create_expiry_notification(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+    ) -> ExpiryNotification {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.issuer == issuer,
+            "only the issuer can create expiry notifications"
+        );
+
+        let expires_at = credential
+            .expires_at
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+
+        let now = env.ledger().timestamp();
+        assert!(expires_at > now, "credential is already expired");
+
+        let notif = ExpiryNotification {
+            credential_id,
+            subject: credential.subject.clone(),
+            issuer: issuer.clone(),
+            expires_at,
+            created_at: now,
+            seconds_until_expiry: expires_at - now,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey3::ExpiryNotif(credential_id), &notif);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        notif
     }
 }
 

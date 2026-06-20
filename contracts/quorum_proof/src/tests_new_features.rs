@@ -3,6 +3,8 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{vec, Env};
+    // Expiry system types used in tests below.
+    use crate::CredentialStatus;
 
     // ── Upgrade Validation Tests ──────────────────────────────────────────────
 
@@ -1470,5 +1472,355 @@ mod tests {
 
         let metadata = soroban_sdk::Bytes::from_slice(&env, b"test");
         client.set_credential_metadata(&issuer, &999u64, &metadata, &CompressionType::None);
+    }
+
+    // ── Proof Request Lifecycle Tests (Issue #657) ────────────────────────────
+
+    fn setup_with_credential(env: &Env) -> (QuorumProofContractClient, Address, u64) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        let issuer = Address::generate(env);
+        let subject = Address::generate(env);
+        let meta = soroban_sdk::Bytes::from_slice(env, b"meta");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta);
+        (client, issuer, cred_id)
+    }
+
+    #[test]
+    fn test_request_proof_creates_pending_request() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        assert_eq!(req_id, 1u64);
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.id, 1u64);
+        assert_eq!(req.credential_id, cred_id);
+        assert_eq!(req.verifier, verifier);
+        assert_eq!(req.status, ProofRequestStatus::Pending);
+        assert!(req.resolved_at.is_none());
+    }
+
+    #[test]
+    fn test_request_proof_default_ttl_30_days() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000_000,
+            protocol_version: 21,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        let req = client.get_proof_request(&req_id);
+
+        let expected_expiry = 1_000_000u64 + 30 * 24 * 60 * 60;
+        assert_eq!(req.expires_at, expected_expiry);
+        assert_eq!(req.ttl_seconds, 30 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn test_request_proof_custom_ttl() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &Some(3600u64));
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.expires_at, 3600u64);
+        assert_eq!(req.ttl_seconds, 3600u64);
+    }
+
+    #[test]
+    fn test_request_proof_nonexistent_credential_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.request_proof(&verifier, &999u64, &claim_types, &None);
+        }));
+        assert!(result.is_err(), "should fail for missing credential");
+    }
+
+    #[test]
+    fn test_update_proof_request_status_to_verified() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.status, ProofRequestStatus::Verified);
+        assert!(req.resolved_at.is_some());
+    }
+
+    #[test]
+    fn test_update_proof_request_status_to_rejected() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Rejected);
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.status, ProofRequestStatus::Rejected);
+    }
+
+    #[test]
+    fn test_update_proof_request_status_wrong_verifier_fails() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let other = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.update_proof_request_status(&other, &req_id, &ProofRequestStatus::Verified);
+        }));
+        assert!(result.is_err(), "non-owner should not update status");
+    }
+
+    #[test]
+    fn test_invalid_transition_from_verified_fails() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+
+        // Cannot transition again from Verified
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Rejected);
+        }));
+        assert!(result.is_err(), "cannot transition from Verified");
+    }
+
+    #[test]
+    fn test_get_proof_request_auto_expires_on_read() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        // Create with 1-second TTL
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &Some(1u64));
+
+        // Advance past TTL
+        env.ledger().set(LedgerInfo {
+            timestamp: 2,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+
+        let req = client.get_proof_request(&req_id);
+        assert_eq!(req.status, ProofRequestStatus::Expired);
+        assert!(req.resolved_at.is_some());
+    }
+
+    #[test]
+    fn test_expire_proof_requests_batch() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        // r1 and r2 expire in 1s; r3 expires in 1 day
+        client.request_proof(&v1, &cred_id, &claim_types, &Some(1u64));
+        client.request_proof(&v2, &cred_id, &claim_types, &Some(1u64));
+        let r3 = client.request_proof(&v3, &cred_id, &claim_types, &Some(86400u64));
+
+        // Advance to ts=2 (past r1/r2 TTL, r3 still valid)
+        env.ledger().set(LedgerInfo {
+            timestamp: 2,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+
+        let expired = client.expire_proof_requests(&cred_id);
+        assert_eq!(expired, 2u32);
+
+        // r3 should still be pending
+        let req3 = client.get_proof_request(&r3);
+        assert_eq!(req3.status, ProofRequestStatus::Pending);
+    }
+
+    #[test]
+    fn test_update_expired_request_fails() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 0,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &Some(1u64));
+
+        env.ledger().set(LedgerInfo {
+            timestamp: 2,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1,
+            min_persistent_entry_ttl: 1,
+            max_entry_ttl: 10_000_000,
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+        }));
+        assert!(result.is_err(), "expired request cannot be updated");
+    }
+
+    #[test]
+    fn test_audit_log_records_creation_and_transitions() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let req_id = client.request_proof(&verifier, &cred_id, &claim_types, &None);
+        client.update_proof_request_status(&verifier, &req_id, &ProofRequestStatus::Verified);
+
+        let log = client.get_proof_request_audit_log(&req_id);
+        assert_eq!(log.len(), 2u32); // created + verified
+        assert_eq!(log.get(0).unwrap().new_status, ProofRequestStatus::Pending);
+        assert_eq!(log.get(1).unwrap().new_status, ProofRequestStatus::Verified);
+    }
+
+    #[test]
+    fn test_multiple_requests_same_credential_independent() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let r1 = client.request_proof(&v1, &cred_id, &claim_types, &None);
+        let r2 = client.request_proof(&v2, &cred_id, &claim_types, &None);
+
+        client.update_proof_request_status(&v1, &r1, &ProofRequestStatus::Verified);
+
+        // r2 should still be pending even though r1 was verified
+        let req2 = client.get_proof_request(&r2);
+        assert_eq!(req2.status, ProofRequestStatus::Pending);
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn test_get_proof_request_missing_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.get_proof_request(&9999u64);
+        }));
+        assert!(result.is_err(), "should panic for non-existent request");
+    }
+
+    #[test]
+    fn test_proof_request_when_paused_fails() {
+        let env = Env::default();
+        let (client, _, cred_id) = setup_with_credential(&env);
+        let admin = Address::generate(&env);
+        // Re-init to get admin
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client2 = QuorumProofContractClient::new(&env, &contract_id);
+        client2.initialize(&admin);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"meta");
+        let cred_id2 = client2.issue_credential(&issuer, &subject, &1u32, &meta);
+        client2.pause(&admin);
+        let verifier = Address::generate(&env);
+        let claim_types: soroban_sdk::Vec<zk_verifier::ClaimType> = soroban_sdk::vec![&env];
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client2.request_proof(&verifier, &cred_id2, &claim_types, &None);
+        }));
+        assert!(result.is_err(), "request_proof should fail when paused");
+        drop(cred_id); // suppress unused warning
     }
 }
