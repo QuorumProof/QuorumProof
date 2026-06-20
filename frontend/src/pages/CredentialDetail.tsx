@@ -176,6 +176,26 @@ export default function CredentialDetail() {
           >
             🔗 Share
           </button>
+          <button
+            className="btn btn--sm btn--ghost"
+            onClick={() => navigate('/credential/issue/wizard', {
+              state: {
+                seed: {
+                  credentialType: credential.credential_type,
+                  metadataHash: decodeMetadataHash(credential.metadata_hash) ?? '',
+                  attestors: attestors.map((addr, i) => ({
+                    id: `dup-${i}`,
+                    address: addr,
+                    role: attestorRole(i),
+                  })),
+                  threshold: slice?.threshold ?? 1,
+                },
+              },
+            })}
+            aria-label="Duplicate this credential as a new wizard draft"
+          >
+            ⧉ Duplicate
+          </button>
         </div>
 
         {/* Credential Details */}
