@@ -21,3 +21,6 @@ export type { SliceHealth, SliceThresholdVisualizerProps } from './SliceThreshol
 export { SliceRecommendationPanel } from './SliceRecommendationPanel';
 export { AttestorReputationDisplay } from './AttestorReputationDisplay';
 export type { AttestorReputation } from './AttestorReputationDisplay';
+export { ClaimProofGenerator } from './ClaimProofGenerator';
+export { CLAIM_TYPE_OPTIONS, findClaimTypeOption, encodeProofRequest, buildProofShareUrl } from '../lib/claimDisclosure';
+export type { ClaimTypeOption } from '../lib/claimDisclosure';
