@@ -937,6 +937,55 @@ textarea {
   border: 1px solid rgba(245,158,11,0.25);
 }
 
+.disclosure-preview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 640px) {
+  .disclosure-preview {
+    grid-template-columns: 1fr;
+  }
+}
+
+.disclosure-preview__heading {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-bottom: 8px;
+}
+
+.disclosure-preview__heading--shown {
+  color: var(--green);
+}
+
+.disclosure-preview__heading--hidden {
+  color: var(--text-secondary);
+}
+
+.disclosure-preview__text {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin: 0 0 6px 0;
+}
+
+.disclosure-preview__list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.disclosure-preview__list li {
+  margin-bottom: 4px;
+}
+
 /* Credential ID list (for address lookup) */
 .cred-list {
   display: flex;

@@ -7,6 +7,7 @@ import { VerificationHistory } from '../components/VerificationHistory';
 import { AttestorReputationDisplay } from '../components/AttestorReputationDisplay';
 import type { VerificationRecord } from '../components/VerificationHistory';
 import { AttestationProgress } from '../components/AttestationProgress';
+import { ClaimProofGenerator } from '../components/ClaimProofGenerator';
 import {
   getCredential,
   getAttestors,
@@ -225,6 +226,9 @@ export default function CredentialDetail() {
             </div>
           </div>
         </div>
+
+        {/* Privacy-Preserving Claim Proof Generator */}
+        <ClaimProofGenerator credentialId={credential.id} />
 
         {/* Quorum Slice & Attestation */}
         <div className="detail-card">
