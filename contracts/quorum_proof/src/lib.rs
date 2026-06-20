@@ -446,6 +446,14 @@ pub enum ContractError {
     QuotaExceeded = 54,
     /// Issue #597: No quota configured for this issuer
     QuotaNotFound = 55,
+    /// Issue #657: Managed proof request not found
+    ProofRequestNotFound = 56,
+    /// Issue #657: Proof request has already expired
+    ProofRequestExpired = 57,
+    /// Issue #657: Requested status transition is invalid for current state
+    InvalidStatusTransition = 58,
+    /// Issue #657: Only the verifier that owns this request may update it
+    NotRequestVerifier = 59,
 }
 
 #[contracttype]
@@ -523,6 +531,20 @@ pub enum DataKey2 {
     IssuerQuota(Address),
     /// Issue #597: Per-issuer usage counter within the current quota window
     IssuerQuotaUsage(Address),
+}
+
+/// Issue #657: Storage keys for managed proof request lifecycle data.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey3 {
+    /// Individual managed proof request by global ID.
+    ManagedProofRequest(u64),
+    /// Per-credential list of managed proof request IDs (for lookup).
+    ManagedProofRequestIds(u64),
+    /// Global managed proof request counter.
+    ManagedProofRequestCount,
+    /// Audit log for a specific managed proof request.
+    ProofRequestAuditLog(u64),
 }
 
 #[contracttype]
@@ -628,6 +650,79 @@ pub struct ProofRequest {
     pub requested_at: u64,
     /// The ZK claim types the verifier wants proven.
     pub claim_types: Vec<zk_verifier::ClaimType>,
+}
+
+/// Lifecycle status of a managed proof request (Issue #657).
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum ProofRequestStatus {
+    /// Awaiting the credential holder's response.
+    Pending = 1,
+    /// Proof has been successfully verified.
+    Verified = 2,
+    /// TTL elapsed before verification completed.
+    Expired = 3,
+    /// Explicitly rejected by the holder or admin.
+    Rejected = 4,
+}
+
+/// Default TTL for managed proof requests: 30 days in seconds.
+const DEFAULT_PROOF_REQUEST_TTL: u64 = 30 * 24 * 60 * 60;
+
+/// A managed proof request with full lifecycle tracking (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ManagedProofRequest {
+    /// Unique monotonic ID.
+    pub id: u64,
+    /// The credential for which proof was requested.
+    pub credential_id: u64,
+    /// The verifier that created this request; must authorize creation.
+    pub verifier: Address,
+    /// Ledger timestamp when this request was created.
+    pub requested_at: u64,
+    /// The ZK claim types the verifier wants proven.
+    pub claim_types: Vec<zk_verifier::ClaimType>,
+    /// Current lifecycle status.
+    pub status: ProofRequestStatus,
+    /// Absolute ledger timestamp after which this request auto-expires.
+    pub expires_at: u64,
+    /// TTL in seconds used to compute `expires_at`.
+    pub ttl_seconds: u64,
+    /// Ledger timestamp when status last changed (None while Pending).
+    pub resolved_at: Option<u64>,
+}
+
+/// Audit log entry for proof request status transitions (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofRequestAuditEntry {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub verifier: Address,
+    pub previous_status: ProofRequestStatus,
+    pub new_status: ProofRequestStatus,
+    pub changed_at: u64,
+}
+
+/// Event data for managed proof request creation (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ManagedProofRequestedEventData {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub verifier: Address,
+    pub expires_at: u64,
+}
+
+/// Event data for proof request status updates (Issue #657).
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofRequestStatusUpdatedEventData {
+    pub request_id: u64,
+    pub new_status: ProofRequestStatus,
+    pub changed_at: u64,
 }
 
 /// Tracks a reputation recovery request for a slice member.
@@ -6438,6 +6533,326 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::ProofRequests(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Managed Proof Request Lifecycle (Issue #657) ─────────────────────────
+
+    /// Create a managed proof request with TTL, status tracking, and audit logging.
+    ///
+    /// # Parameters
+    /// - `verifier`: The address requesting proof; must authorize this call.
+    /// - `credential_id`: The credential for which proof is being requested.
+    /// - `claim_types`: The ZK claim types to prove.
+    /// - `ttl_seconds`: Optional TTL override; defaults to 30 days if `None`.
+    ///
+    /// # Returns
+    /// The globally unique managed proof request ID.
+    pub fn request_proof(
+        env: Env,
+        verifier: Address,
+        credential_id: u64,
+        claim_types: Vec<zk_verifier::ClaimType>,
+        ttl_seconds: Option<u64>,
+    ) -> u64 {
+        verifier.require_auth();
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Credential(credential_id))
+        {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        let ttl = ttl_seconds.unwrap_or(DEFAULT_PROOF_REQUEST_TTL);
+        let now = env.ledger().timestamp();
+        let expires_at = now + ttl;
+
+        let request_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let request = ManagedProofRequest {
+            id: request_id,
+            credential_id,
+            verifier: verifier.clone(),
+            requested_at: now,
+            claim_types,
+            status: ProofRequestStatus::Pending,
+            expires_at,
+            ttl_seconds: ttl,
+            resolved_at: None,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequest(request_id), &request);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequest(request_id), STANDARD_TTL, EXTENDED_TTL);
+
+        // Index by credential for batch lookup
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequestIds(credential_id))
+            .unwrap_or(Vec::new(&env));
+        ids.push_back(request_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequestIds(credential_id), &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequestIds(credential_id), STANDARD_TTL, EXTENDED_TTL);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequestCount, &request_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequestCount, STANDARD_TTL, EXTENDED_TTL);
+
+        // Append initial audit entry
+        Self::append_proof_audit(
+            &env,
+            request_id,
+            credential_id,
+            verifier.clone(),
+            ProofRequestStatus::Pending, // sentinel: same as new means "created"
+            ProofRequestStatus::Pending,
+            now,
+        );
+
+        let topic = String::from_str(&env, "ManagedProofRequested");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(
+            topics,
+            ManagedProofRequestedEventData {
+                request_id,
+                credential_id,
+                verifier,
+                expires_at,
+            },
+        );
+
+        request_id
+    }
+
+    /// Retrieve a single managed proof request by its ID.
+    ///
+    /// Auto-expires the request if its TTL has elapsed and it is still Pending.
+    pub fn get_proof_request(env: Env, request_id: u64) -> ManagedProofRequest {
+        let mut req: ManagedProofRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ProofRequestNotFound));
+
+        // Lazily expire if TTL has elapsed
+        if req.status == ProofRequestStatus::Pending
+            && env.ledger().timestamp() >= req.expires_at
+        {
+            let now = env.ledger().timestamp();
+            let verifier = req.verifier.clone();
+            let credential_id = req.credential_id;
+            Self::append_proof_audit(
+                &env,
+                request_id,
+                credential_id,
+                verifier,
+                ProofRequestStatus::Pending,
+                ProofRequestStatus::Expired,
+                now,
+            );
+            req.status = ProofRequestStatus::Expired;
+            req.resolved_at = Some(now);
+            env.storage()
+                .persistent()
+                .set(&DataKey3::ManagedProofRequest(request_id), &req);
+        }
+
+        req
+    }
+
+    /// Update the status of a managed proof request.
+    ///
+    /// Valid transitions:
+    /// - `Pending` → `Verified`
+    /// - `Pending` → `Rejected`
+    ///
+    /// `Expired` is set automatically; it cannot be set manually.
+    ///
+    /// # Parameters
+    /// - `caller`: Must be the verifier who created the request.
+    /// - `request_id`: The managed proof request to update.
+    /// - `new_status`: Target status (`Verified` or `Rejected`).
+    pub fn update_proof_request_status(
+        env: Env,
+        caller: Address,
+        request_id: u64,
+        new_status: ProofRequestStatus,
+    ) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut req: ManagedProofRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ProofRequestNotFound));
+
+        if req.verifier != caller {
+            panic_with_error!(&env, ContractError::NotRequestVerifier);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Lazily expire if past TTL
+        if req.status == ProofRequestStatus::Pending && now >= req.expires_at {
+            let verifier = req.verifier.clone();
+            let credential_id = req.credential_id;
+            Self::append_proof_audit(
+                &env,
+                request_id,
+                credential_id,
+                verifier,
+                ProofRequestStatus::Pending,
+                ProofRequestStatus::Expired,
+                now,
+            );
+            req.status = ProofRequestStatus::Expired;
+            req.resolved_at = Some(now);
+            env.storage()
+                .persistent()
+                .set(&DataKey3::ManagedProofRequest(request_id), &req);
+            panic_with_error!(&env, ContractError::ProofRequestExpired);
+        }
+
+        // Validate transition: only Pending → Verified or Pending → Rejected
+        let valid = req.status == ProofRequestStatus::Pending
+            && (new_status == ProofRequestStatus::Verified
+                || new_status == ProofRequestStatus::Rejected);
+        if !valid {
+            panic_with_error!(&env, ContractError::InvalidStatusTransition);
+        }
+
+        let previous = req.status;
+        let credential_id = req.credential_id;
+        let verifier = req.verifier.clone();
+
+        req.status = new_status;
+        req.resolved_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ManagedProofRequest(request_id), &req);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ManagedProofRequest(request_id), STANDARD_TTL, EXTENDED_TTL);
+
+        Self::append_proof_audit(&env, request_id, credential_id, verifier, previous, new_status, now);
+
+        let topic = String::from_str(&env, "ProofRequestStatusUpdated");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(
+            topics,
+            ProofRequestStatusUpdatedEventData {
+                request_id,
+                new_status,
+                changed_at: now,
+            },
+        );
+    }
+
+    /// Scan all managed proof requests for a credential and expire any pending ones past TTL.
+    ///
+    /// Returns the number of requests that were expired.
+    pub fn expire_proof_requests(env: Env, credential_id: u64) -> u32 {
+        Self::require_not_paused(&env);
+        let now = env.ledger().timestamp();
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ManagedProofRequestIds(credential_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut expired_count: u32 = 0;
+        for id in ids.iter() {
+            if let Some(mut req) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, ManagedProofRequest>(&DataKey3::ManagedProofRequest(id))
+            {
+                if req.status == ProofRequestStatus::Pending && now >= req.expires_at {
+                    let verifier = req.verifier.clone();
+                    Self::append_proof_audit(
+                        &env,
+                        id,
+                        credential_id,
+                        verifier,
+                        ProofRequestStatus::Pending,
+                        ProofRequestStatus::Expired,
+                        now,
+                    );
+                    req.status = ProofRequestStatus::Expired;
+                    req.resolved_at = Some(now);
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey3::ManagedProofRequest(id), &req);
+                    expired_count += 1;
+                }
+            }
+        }
+        expired_count
+    }
+
+    /// Get the full audit log for a managed proof request.
+    pub fn get_proof_request_audit_log(
+        env: Env,
+        request_id: u64,
+    ) -> Vec<ProofRequestAuditEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::ProofRequestAuditLog(request_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Internal: append an audit entry for a proof request status change.
+    fn append_proof_audit(
+        env: &Env,
+        request_id: u64,
+        credential_id: u64,
+        verifier: Address,
+        previous_status: ProofRequestStatus,
+        new_status: ProofRequestStatus,
+        changed_at: u64,
+    ) {
+        let entry = ProofRequestAuditEntry {
+            request_id,
+            credential_id,
+            verifier,
+            previous_status,
+            new_status,
+            changed_at,
+        };
+        let mut log: Vec<ProofRequestAuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::ProofRequestAuditLog(request_id))
+            .unwrap_or(Vec::new(env));
+        log.push_back(entry);
+        env.storage()
+            .persistent()
+            .set(&DataKey3::ProofRequestAuditLog(request_id), &log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey3::ProofRequestAuditLog(request_id), STANDARD_TTL, EXTENDED_TTL);
     }
 
     // ── Challenge / Dispute Resolution ───────────────────────────────────────
