@@ -303,7 +303,7 @@ impl ZkVerifierContract {
         let history_key = DataKey::KeyRotationHistory;
         let mut rotations: Vec<KeyRotationEntry> = env.storage().instance()
             .get(&history_key)
-            .unwrap_or_else(|_| Vec::new(&env));
+            .unwrap_or_else(|| Vec::new(&env));
         rotations.push_back(rotation);
         env.storage().instance().set(&history_key, &rotations);
 
@@ -315,7 +315,7 @@ impl ZkVerifierContract {
     pub fn get_key_rotation_history(env: Env) -> Vec<KeyRotationEntry> {
         env.storage().instance()
             .get(&DataKey::KeyRotationHistory)
-            .unwrap_or_else(|_| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Verify a Groth16 ZK proof for a claim.

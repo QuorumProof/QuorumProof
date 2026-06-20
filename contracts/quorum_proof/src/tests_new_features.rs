@@ -3,6 +3,8 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{vec, Env};
+    // Expiry system types used in tests below.
+    use crate::CredentialStatus;
 
     // ── Upgrade Validation Tests ──────────────────────────────────────────────
 
