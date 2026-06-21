@@ -13,3 +13,5 @@ import { STELLAR_RPC_URL } from '../config/env';
 export const rpcClient = new StellarRpc.Server(STELLAR_RPC_URL, {
   allowHttp: false
 });
+
+export function getRpcClient() { return rpcClient; }
