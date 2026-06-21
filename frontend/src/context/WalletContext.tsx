@@ -1,9 +1,10 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import type { ReactNode } from 'react';
 import {
   isConnected,
   isAllowed,
   setAllowed,
-  getPublicKey,
+  getAddress,
 } from '@stellar/freighter-api';
 import { STELLAR_NETWORK } from '../config/env';
 
@@ -36,14 +37,17 @@ export function WalletProvider({ children }: WalletProviderProps) {
     const init = async () => {
       try {
         setError(null);
-        const connected = await isConnected();
-        setHasFreighter(connected);
-        if (connected) {
+        const connResult = await isConnected();
+        const freighterConnected = connResult.isConnected;
+        setHasFreighter(freighterConnected);
+        if (freighterConnected) {
           const allowed = await isAllowed();
-          if (allowed) {
-            const pubKey = await getPublicKey();
-            setAddress(pubKey);
-            localStorage.setItem(STORAGE_KEY, pubKey);
+          if (allowed.isAllowed) {
+            const result = await getAddress();
+            if (result.address) {
+              setAddress(result.address);
+              localStorage.setItem(STORAGE_KEY, result.address);
+            }
           } else {
             localStorage.removeItem(STORAGE_KEY);
           }
@@ -70,9 +74,11 @@ export function WalletProvider({ children }: WalletProviderProps) {
     try {
       setError(null);
       await setAllowed();
-      const pubKey = await getPublicKey();
-      setAddress(pubKey);
-      localStorage.setItem(STORAGE_KEY, pubKey);
+      const result = await getAddress();
+      if (result.address) {
+        setAddress(result.address);
+        localStorage.setItem(STORAGE_KEY, result.address);
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect wallet';
       setError(errorMsg);

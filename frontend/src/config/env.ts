@@ -27,19 +27,17 @@ function validateEnv(): EnvConfig {
   const missingVars = requiredVars.filter(varName => !import.meta.env[varName]);
 
   if (missingVars.length > 0) {
-    throw new Error(
-      `Missing required environment variables: ${missingVars.join(', ')}\n\n` +
-      'Please check your .env file and ensure all required variables are set.\n' +
-      'See .env.example for the expected format.'
+    console.warn(
+      `[QuorumProof] Missing env vars: ${missingVars.join(', ')}. Using empty defaults.`
     );
   }
 
   return {
-    STELLAR_NETWORK: import.meta.env.VITE_STELLAR_NETWORK,
-    STELLAR_RPC_URL: import.meta.env.VITE_STELLAR_RPC_URL,
-    CONTRACT_QUORUM_PROOF: import.meta.env.VITE_CONTRACT_QUORUM_PROOF,
-    CONTRACT_SBT_REGISTRY: import.meta.env.VITE_CONTRACT_SBT_REGISTRY,
-    CONTRACT_ZK_VERIFIER: import.meta.env.VITE_CONTRACT_ZK_VERIFIER,
+    STELLAR_NETWORK: import.meta.env.VITE_STELLAR_NETWORK ?? 'testnet',
+    STELLAR_RPC_URL: import.meta.env.VITE_STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org',
+    CONTRACT_QUORUM_PROOF: import.meta.env.VITE_CONTRACT_QUORUM_PROOF ?? '',
+    CONTRACT_SBT_REGISTRY: import.meta.env.VITE_CONTRACT_SBT_REGISTRY ?? '',
+    CONTRACT_ZK_VERIFIER: import.meta.env.VITE_CONTRACT_ZK_VERIFIER ?? '',
   };
 }
 

@@ -3,7 +3,7 @@ import {
   isConnected,
   isAllowed,
   setAllowed,
-  getPublicKey,
+  getAddress,
 } from '@stellar/freighter-api';
 
 export interface FreighterState {
@@ -22,13 +22,13 @@ export function useFreighter(): FreighterState {
   useEffect(() => {
     const init = async () => {
       try {
-        const connected = await isConnected();
-        setHasFreighter(connected);
-        if (connected) {
-          const allowed = await isAllowed();
-          if (allowed) {
-            const pubKey = await getPublicKey();
-            setAddress(pubKey);
+        const connResult = await isConnected();
+        setHasFreighter(connResult.isConnected);
+        if (connResult.isConnected) {
+          const allowedResult = await isAllowed();
+          if (allowedResult.isAllowed) {
+            const result = await getAddress();
+            if (result.address) setAddress(result.address);
           }
         }
       } catch (err) {
@@ -47,8 +47,8 @@ export function useFreighter(): FreighterState {
     }
     try {
       await setAllowed();
-      const pubKey = await getPublicKey();
-      setAddress(pubKey);
+      const result = await getAddress();
+      if (result.address) setAddress(result.address);
     } catch (err) {
       console.error('User rejected connection or error occurred:', err);
     }

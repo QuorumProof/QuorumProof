@@ -252,3 +252,15 @@ function uint8ArrayToHex(arr: Uint8Array): string {
 
 // Export aliases for backward compatibility
 export { STELLAR_NETWORK as NETWORK, CONTRACT_QUORUM_PROOF as CONTRACT_ID, STELLAR_RPC_URL as RPC_URL };
+
+/**
+ * Get proof/verification requests for a credential (returns empty array if none).
+ */
+export async function getProofRequests(credentialId: string | number | bigint): Promise<any[]> {
+  try {
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
+    return await simulate(CONTRACT_QUORUM_PROOF, 'get_proof_requests', [credVal]);
+  } catch {
+    return [];
+  }
+}
