@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { Navbar } from '../components/Navbar';
 import { getCredential, getAttestors, isExpired } from '../lib/contracts/quorumProof';
 import type { Credential } from '../lib/contracts/quorumProof';
 import { credTypeLabel, formatAddress, formatTimestamp } from '../lib/credentialUtils';
@@ -83,7 +82,6 @@ export default function CredentialCompare() {
 
   return (
     <>
-      <Navbar />
       <main className="container" style={{ paddingTop: '40px', maxWidth: '900px', paddingBottom: '64px' }}>
         <h1 className="compare-title">Compare Credentials</h1>
         <p className="compare-subtitle">Enter two credential IDs to compare them side-by-side.</p>

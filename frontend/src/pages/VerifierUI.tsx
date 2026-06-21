@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Navbar } from '../components/Navbar';
 import {
   getCredential,
   getCredentialsBySubject,
@@ -211,7 +210,6 @@ export default function VerifierUI() {
 
   return (
     <>
-      <Navbar />
       <main className="container" style={{ paddingTop: 0, paddingBottom: 64 }}>
         <div className="verify-hero">
           <div className="verify-hero__eyebrow">🔍 Verifier Dashboard</div>

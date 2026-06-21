@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Navbar } from '../components/Navbar';
 import { ShareCredentialDialog } from '../components/ShareCredentialDialog';
 import { AuditTrail } from '../components/AuditTrail';
 import { VerificationHistory } from '../components/VerificationHistory';
@@ -82,7 +81,6 @@ export default function CredentialDetail() {
   if (loading) {
     return (
       <>
-        <Navbar />
         <main className="container" style={{ paddingTop: '40px' }}>
           <div className="loading-state"><div className="spinner" /><p>Loading credential…</p></div>
         </main>
@@ -93,7 +91,6 @@ export default function CredentialDetail() {
   if (error || !credential) {
     return (
       <>
-        <Navbar />
         <main className="container" style={{ paddingTop: 40 }}>
           <div className="error-card">
             <div className="error-card__icon">⚠️</div>
@@ -126,7 +123,6 @@ export default function CredentialDetail() {
 
   return (
     <>
-      <Navbar />
       <main className="container" style={{ paddingTop: '40px', maxWidth: '800px', paddingBottom: '64px' }}>
         {/* Back */}
         <button className="btn btn--ghost btn--sm" style={{ marginBottom: '24px' }} onClick={() => navigate('/dashboard')}>

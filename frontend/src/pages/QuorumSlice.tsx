@@ -1,5 +1,3 @@
-import { Navbar } from '../components/Navbar';
-import { WalletGuard } from '../components/WalletGate';
 import { QuorumSliceBuilder } from '../components/QuorumSliceBuilder';
 import { SliceBackupRestore } from '../components/SliceBackupRestore';
 import { useWallet } from '../hooks';
@@ -29,7 +27,6 @@ export default function QuorumSlice() {
 
   return (
     <div id="app">
-      <Navbar />
       <main className="dashboard-main">
         <div className="container" style={{ maxWidth: 600 }}>
           <div className="dashboard-header" style={{ marginBottom: 32 }}>
