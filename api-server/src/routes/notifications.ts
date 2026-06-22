@@ -7,6 +7,7 @@ import {
   type NotificationPreferences,
   type NotificationEvent,
 } from '../notifications.js';
+import { broadcastEvent } from '../ws/server.js';
 
 const router = Router();
 
@@ -19,11 +20,6 @@ const VALID_EVENTS = new Set<NotificationEvent>([
   'credential_expiring',
 ]);
 
-/**
- * PUT /api/notifications/preferences
- * Set or update notification preferences for an address.
- * Body: NotificationPreferences
- */
 router.put('/preferences', (req: Request, res: Response) => {
   const body = req.body as Partial<NotificationPreferences>;
 
@@ -60,10 +56,6 @@ router.put('/preferences', (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-/**
- * GET /api/notifications/preferences/:address
- * Retrieve notification preferences for an address.
- */
 router.get('/preferences/:address', (req: Request, res: Response) => {
   const prefs = getPreferences(req.params.address);
   if (!prefs) {
@@ -73,21 +65,11 @@ router.get('/preferences/:address', (req: Request, res: Response) => {
   res.json(prefs);
 });
 
-/**
- * GET /api/notifications/history
- * Query params: address (optional)
- * Returns notification history, optionally filtered by address.
- */
 router.get('/history', (req: Request, res: Response) => {
   const address = typeof req.query.address === 'string' ? req.query.address : undefined;
   res.json({ data: getHistory(address) });
 });
 
-/**
- * POST /api/notifications/send
- * Manually trigger a notification for testing/admin purposes.
- * Body: { address: string, event: NotificationEvent, credential_id: number }
- */
 router.post('/send', async (req: Request, res: Response) => {
   const { address, event, credential_id } = req.body as {
     address?: unknown;
@@ -108,8 +90,16 @@ router.post('/send', async (req: Request, res: Response) => {
     return;
   }
 
+  const wsRecipients = broadcastEvent({
+    type: event as string,
+    credential_id: credential_id as number,
+    issuer: req.body.issuer as string | undefined,
+    holder: req.body.holder as string | undefined,
+    timestamp: new Date().toISOString(),
+  });
+
   await dispatchNotification(address, event as NotificationEvent, credential_id);
-  res.json({ success: true });
+  res.json({ success: true, ws_recipients: wsRecipients });
 });
 
 export default router;

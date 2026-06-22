@@ -19,30 +19,35 @@ const HORIZON_DEFAULTS: Record<string, string> = {
 };
 
 function readEnv(): EnvConfig {
-  const network = import.meta.env.VITE_STELLAR_NETWORK || 'testnet';
-  const rpcUrl = import.meta.env.VITE_STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org';
+  const network = import.meta.env.VITE_STELLAR_NETWORK ?? 'testnet';
+  const rpcUrl =
+    import.meta.env.VITE_STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org';
   const horizonUrl =
-    import.meta.env.VITE_HORIZON_URL || HORIZON_DEFAULTS[network] || HORIZON_DEFAULTS.testnet;
+    import.meta.env.VITE_HORIZON_URL ?? HORIZON_DEFAULTS[network] ?? HORIZON_DEFAULTS.testnet;
 
   const config: EnvConfig = {
     STELLAR_NETWORK: network,
     STELLAR_RPC_URL: rpcUrl,
     HORIZON_URL: horizonUrl,
-    CONTRACT_QUORUM_PROOF: import.meta.env.VITE_CONTRACT_QUORUM_PROOF || '',
-    CONTRACT_SBT_REGISTRY: import.meta.env.VITE_CONTRACT_SBT_REGISTRY || '',
-    CONTRACT_ZK_VERIFIER: import.meta.env.VITE_CONTRACT_ZK_VERIFIER || '',
+    CONTRACT_QUORUM_PROOF: import.meta.env.VITE_CONTRACT_QUORUM_PROOF ?? '',
+    CONTRACT_SBT_REGISTRY: import.meta.env.VITE_CONTRACT_SBT_REGISTRY ?? '',
+    CONTRACT_ZK_VERIFIER: import.meta.env.VITE_CONTRACT_ZK_VERIFIER ?? '',
   };
 
-  const missingContracts = [
-    !config.CONTRACT_QUORUM_PROOF && 'VITE_CONTRACT_QUORUM_PROOF',
-    !config.CONTRACT_SBT_REGISTRY && 'VITE_CONTRACT_SBT_REGISTRY',
-    !config.CONTRACT_ZK_VERIFIER && 'VITE_CONTRACT_ZK_VERIFIER',
-  ].filter(Boolean);
+  const trackedVars = [
+    'VITE_STELLAR_NETWORK',
+    'VITE_STELLAR_RPC_URL',
+    'VITE_HORIZON_URL',
+    'VITE_CONTRACT_QUORUM_PROOF',
+    'VITE_CONTRACT_SBT_REGISTRY',
+    'VITE_CONTRACT_ZK_VERIFIER',
+  ];
 
-  if (missingContracts.length > 0) {
+  const missingVars = trackedVars.filter((varName) => !import.meta.env[varName]);
+
+  if (missingVars.length > 0) {
     console.warn(
-      `[QuorumProof] Missing contract env vars: ${missingContracts.join(', ')}. ` +
-        'Contract reads will fail until .env is configured.'
+      `[QuorumProof] Missing env vars: ${missingVars.join(', ')}. Using defaults where applicable.`
     );
   }
 

@@ -33,6 +33,11 @@ export const getAttestors = _getAttestors as (id: bigint) => Promise<string[]>;
 export const isExpired = _isExpired as (id: bigint) => Promise<boolean>;
 export const getSlice = _getSlice as (id: bigint) => Promise<QuorumSlice>;
 
+export {
+  getCredentialsBySubject,
+  isAttested,
+} from '../../stellar';
+
 /** Issue a new credential on-chain. Returns the new credential ID. */
 export async function issueCredential(
   issuer: string,

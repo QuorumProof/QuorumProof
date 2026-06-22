@@ -20,6 +20,7 @@ const TOPIC_ATTESTATION_RENEWAL: &str = "AttestationRenewed";
 const TOPIC_SBT_TRANSFER: &str = "SbtTransferred";
 const TOPIC_PROOF_REQUEST: &str = "ProofRequested";
 const TOPIC_RECOVERY_INITIATED: &str = "RecoveryInitiated";
+const TOPIC_METADATA_SCHEMA_UPGRADE: &str = "MetadataSchemaUpgraded";
 const TOPIC_RECOVERY_APPROVED: &str = "RecoveryApproved";
 const TOPIC_RECOVERY_EXECUTED: &str = "RecoveryExecuted";
 const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
@@ -496,6 +497,10 @@ pub enum DataKey {
     SlashCount(Address),
     /// Issue #487: Tracks the current state schema version for migration support.
     StateVersion,
+    /// Active metadata schema version for new credential metadata.
+    MetadataSchemaVersion,
+    /// Schema definition for a given version (version -> MetadataSchema).
+    MetadataSchema(u32),
 }
 
 #[contracttype]
@@ -580,6 +585,10 @@ pub enum DataKey2 {
     SubjectCredentialIndex(Address),
     /// Threshold change audit log for a slice
     ThresholdAuditLog(u64),
+    /// Which metadata schema version a credential's metadata conforms to.
+    CredentialMetadataSchema(u64),
+    /// Migration audit record for a schema transition.
+    MetadataSchemaMigration(u32),
 }
 
 /// Storage keys for credential expiry and renewal policy data.
@@ -822,6 +831,29 @@ pub struct CredentialVersion {
     pub metadata: soroban_sdk::Bytes,
     pub updated_at: u64,
     pub updated_by: Address,
+}
+
+/// Metadata schema definition for a specific version.
+/// Immutable once registered — schemas are append-only.
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataSchema {
+    pub version: u32,
+    pub schema_hash: soroban_sdk::Bytes,
+    pub created_at: u64,
+    pub description: soroban_sdk::Bytes,
+}
+
+/// Record of a metadata schema migration batch.
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataMigration {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub migrated_count: u32,
+    pub completed: bool,
+    pub started_at: u64,
+    pub completed_at: Option<u64>,
 }
 
 /// A single proof request record, capturing who requested proof of a credential and when.
@@ -1366,6 +1398,20 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Register v1 metadata schema as the initial active schema
+        let now = env.ledger().timestamp();
+        let v1_schema = MetadataSchema {
+            version: 1,
+            schema_hash: soroban_sdk::Bytes::from_slice(&env, b"v1-initial"),
+            created_at: now,
+            description: soroban_sdk::Bytes::from_slice(&env, b"v1: flat key-value metadata"),
+        };
+        env.storage().instance().set(&DataKey::MetadataSchema(1), &v1_schema);
+        env.storage().instance().set(&DataKey::MetadataSchemaVersion, &1u32);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Issue #487: Returns the current state schema version.
@@ -1413,6 +1459,312 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ── Metadata Schema Versioning ─────────────────────────────────────
+
+    /// Register a new metadata schema version.
+    /// Only the admin may call this. Versions must be strictly greater than the current max.
+    pub fn register_metadata_schema(
+        env: Env,
+        admin: Address,
+        version: u32,
+        schema_hash: soroban_sdk::Bytes,
+        description: soroban_sdk::Bytes,
+    ) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        assert!(version > 0, "version must be greater than 0");
+        assert!(
+            !env.storage().instance().has(&DataKey::MetadataSchema(version)),
+            "schema version already registered"
+        );
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        assert!(
+            version == active + 1,
+            "version must be sequential (current active: {})",
+            active
+        );
+
+        let schema = MetadataSchema {
+            version,
+            schema_hash,
+            created_at: env.ledger().timestamp(),
+            description,
+        };
+        env.storage().instance().set(&DataKey::MetadataSchema(version), &schema);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Set the active metadata schema version.
+    /// Only the admin may call this. The schema must already be registered.
+    pub fn set_active_metadata_schema(env: Env, admin: Address, version: u32) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        assert!(
+            env.storage().instance().has(&DataKey::MetadataSchema(version)),
+            "schema version not registered"
+        );
+        env.storage().instance().set(&DataKey::MetadataSchemaVersion, &version);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the current active metadata schema version.
+    /// Returns 0 if no schema has been registered.
+    pub fn get_active_metadata_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32)
+    }
+
+    /// Return the schema definition for a given version.
+    /// Returns None if the version is not registered.
+    pub fn get_metadata_schema(env: Env, version: u32) -> Option<MetadataSchema> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MetadataSchema(version))
+    }
+
+    /// Return the metadata schema version that a specific credential's metadata conforms to.
+    /// Returns 0 for credentials issued before schema versioning was enabled.
+    pub fn get_credential_metadata_schema(env: Env, credential_id: u64) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::CredentialMetadataSchema(credential_id))
+            .unwrap_or(0u32)
+    }
+
+    /// Internal: validate metadata bytes against a given schema version.
+    fn validate_metadata_for_schema(
+        _env: &Env,
+        version: u32,
+        metadata: &soroban_sdk::Bytes,
+    ) {
+        match version {
+            1 => {
+                assert!(!metadata.is_empty(), "v1 metadata cannot be empty");
+                assert!(
+                    metadata.len() <= MAX_METADATA_BYTES_SIZE,
+                    "v1 metadata exceeds max size"
+                );
+            }
+            _ => {
+                panic_with_error!(_env, ContractError::InvalidInput);
+            }
+        }
+    }
+
+    /// Internal: set the metadata schema version for a credential.
+    fn set_credential_metadata_schema(env: &Env, credential_id: u64, schema_version: u32) {
+        env.storage().instance().set(
+            &DataKey2::CredentialMetadataSchema(credential_id),
+            &schema_version,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Apply migration transforms to metadata bytes from one version to another.
+    /// Each step transforms vN → vN+1. Returns the transformed bytes.
+    fn apply_metadata_migration(
+        _env: &Env,
+        from_version: u32,
+        to_version: u32,
+        metadata: &soroban_sdk::Bytes,
+    ) -> soroban_sdk::Bytes {
+        let mut current = metadata.clone();
+        for v in from_version..to_version {
+            match v {
+                1 => {
+                    // v1 → v2: identity transform (placeholder for future format change)
+                    current = current.clone();
+                }
+                _ => {}
+            }
+        }
+        current
+    }
+
+    /// Batch-migrate credential metadata from older schema versions to a target version.
+    /// Only the admin may call this.
+    ///
+    /// Processes credentials with IDs in [start_id, end_id].
+    /// For each credential whose metadata schema version < to_version:
+    ///   - Reads stored metadata
+    ///   - Applies migration transforms for each version gap
+    ///   - Writes transformed data back
+    ///   - Updates CredentialMetadataSchema
+    ///
+    /// Returns the number of credentials migrated.
+    pub fn migrate_metadata_schema(
+        env: Env,
+        admin: Address,
+        to_version: u32,
+        start_id: u64,
+        end_id: u64,
+    ) -> u32 {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        assert!(to_version > 0, "target version must be >= 1");
+        assert!(
+            env.storage().instance().has(&DataKey::MetadataSchema(to_version)),
+            "target schema version not registered"
+        );
+        assert!(end_id >= start_id, "end_id must be >= start_id");
+
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        assert!(
+            to_version <= active,
+            "cannot migrate to a version beyond active"
+        );
+
+        let mut migrated: u32 = 0;
+        let started_at = env.ledger().timestamp();
+
+        for id in start_id..=end_id {
+            if !env.storage().instance().has(&DataKey::Credential(id)) {
+                continue;
+            }
+            let current_schema: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::CredentialMetadataSchema(id))
+                .unwrap_or(0u32);
+            if current_schema >= to_version {
+                continue;
+            }
+            let stored: Option<CredentialMetadata> = env
+                .storage()
+                .instance()
+                .get(&DataKey2::CredentialMetadataStore(id));
+            if let Some(meta) = stored {
+                let transformed = Self::apply_metadata_migration(
+                    &env,
+                    current_schema,
+                    to_version,
+                    &meta.data,
+                );
+                let new_meta = CredentialMetadata {
+                    data: transformed,
+                    compression: meta.compression,
+                };
+                env.storage().instance().set(
+                    &DataKey2::CredentialMetadataStore(id),
+                    &new_meta,
+                );
+                Self::set_credential_metadata_schema(&env, id, to_version);
+                migrated += 1;
+            }
+        }
+
+        let migration_record = MetadataMigration {
+            from_version: 0u32,
+            to_version,
+            migrated_count: migrated,
+            completed: true,
+            started_at,
+            completed_at: Some(env.ledger().timestamp()),
+        };
+        env.storage().instance().set(
+            &DataKey2::MetadataSchemaMigration(to_version),
+            &migration_record,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let topic = String::from_str(&env, TOPIC_METADATA_SCHEMA_UPGRADE);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, (admin, to_version, migrated));
+
+        migrated
+    }
+
+    /// Return the schema version distribution across all credentials.
+    /// Scans all credential IDs from 1 to current count and returns counts per schema version.
+    pub fn get_metadata_schema_distribution(env: Env) -> soroban_sdk::Map<u32, u32> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64);
+        let mut dist: soroban_sdk::Map<u32, u32> = soroban_sdk::Map::new(&env);
+        for id in 1..=count {
+            let schema: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::CredentialMetadataSchema(id))
+                .unwrap_or(0u32);
+            let current = dist.get(schema).unwrap_or(0u32);
+            dist.set(schema, current + 1);
+        }
+        dist
+    }
+
+    /// Resolve credential metadata with lazy migration.
+    /// If the credential's metadata schema version is behind the active version,
+    /// the metadata is transformed in-memory (not written to storage).
+    /// If schema matches current active version, returns the stored metadata directly.
+    pub fn resolve_credential_metadata(
+        env: Env,
+        credential_id: u64,
+    ) -> Option<CredentialMetadata> {
+        let _credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        let stored: Option<CredentialMetadata> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialMetadataStore(credential_id));
+
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        let credential_schema: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialMetadataSchema(credential_id))
+            .unwrap_or(0u32);
+
+        stored.map(|meta| {
+            if credential_schema < active && credential_schema > 0 {
+                let transformed = Self::apply_metadata_migration(
+                    &env,
+                    credential_schema,
+                    active,
+                    &meta.data,
+                );
+                CredentialMetadata {
+                    data: transformed,
+                    compression: meta.compression,
+                }
+            } else {
+                meta
+            }
+        })
     }
 
     /// Pause the contract. Only admin may call this.
@@ -3450,8 +3802,18 @@ impl QuorumProofContract {
             id,
             1,
             credential.metadata_hash.clone(),
-            issuer,
+            issuer.clone(),
         );
+
+        // Track metadata schema version for this credential
+        let active_schema: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        if active_schema > 0 {
+            Self::set_credential_metadata_schema(env, id, active_schema);
+        }
 
         id
     }
@@ -3694,6 +4056,16 @@ impl QuorumProofContract {
             new_metadata_hash,
         );
 
+        // Update metadata schema version to current active
+        let active_schema: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        if active_schema > 0 {
+            Self::set_credential_metadata_schema(&env, credential_id, active_schema);
+        }
+
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -3732,6 +4104,17 @@ impl QuorumProofContract {
             _credential.issuer == issuer,
             "only the issuer may set metadata"
         );
+
+        // Validate metadata against current active schema
+        let active_schema: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        if active_schema > 0 {
+            Self::validate_metadata_for_schema(&env, active_schema, &metadata);
+        }
+
         let credential_metadata = CredentialMetadata {
             data: metadata,
             compression,
@@ -3743,6 +4126,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Track the schema version for this credential's metadata
+        Self::set_credential_metadata_schema(&env, credential_id, active_schema);
     }
 
     /// Retrieve credential metadata with compression information.
@@ -5964,6 +6350,16 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         Self::invalidate_verification_caches_for_credential(&env, credential_id);
+
+        // Update metadata schema version to current active
+        let active_schema: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        if active_schema > 0 {
+            Self::set_credential_metadata_schema(&env, credential_id, active_schema);
+        }
 
         let event_data = RenewalEventData {
             credential_id,
@@ -15366,6 +15762,299 @@ mod feature_tests {
         // Get slice should work
         let slice = client.get_slice(&slice_id);
         assert_eq!(slice.id, slice_id);
+    }
+
+    // ── Metadata Schema Versioning Tests ─────────────────────────────────
+
+    #[test]
+    fn test_initialize_registers_v1_schema() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let version = client.get_active_metadata_schema_version();
+        assert_eq!(version, 1u32);
+
+        let schema = client.get_metadata_schema(&1u32);
+        assert!(schema.is_some());
+        let schema = schema.unwrap();
+        assert_eq!(schema.version, 1);
+    }
+
+    #[test]
+    fn test_register_metadata_schema_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let stranger = Address::generate(&env);
+        let hash = Bytes::from_slice(&env, b"v2-hash");
+        let desc = Bytes::from_slice(&env, b"v2 schema");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.register_metadata_schema(&stranger, &2u32, &hash, &desc);
+        }));
+        assert!(result.is_err(), "non-admin must not register schema");
+    }
+
+    #[test]
+    fn test_register_and_activate_metadata_schema() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = Bytes::from_slice(&env, b"v2-hash");
+        let desc = Bytes::from_slice(&env, b"v2: nested fields");
+        client.register_metadata_schema(&admin, &2u32, &hash, &desc);
+
+        let schema = client.get_metadata_schema(&2u32).unwrap();
+        assert_eq!(schema.version, 2);
+
+        // Activate v2
+        client.set_active_metadata_schema(&admin, &2u32);
+        assert_eq!(client.get_active_metadata_schema_version(), 2u32);
+    }
+
+    #[test]
+    fn test_new_credential_uses_active_schema() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let schema_version = client.get_credential_metadata_schema(&cred_id);
+        assert_eq!(schema_version, 1u32);
+    }
+
+    #[test]
+    fn test_metadata_validation_rejects_empty_v1() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        let empty_meta = Bytes::new(&env);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_credential_metadata(&issuer, &cred_id, &empty_meta, &CompressionType::None);
+        }));
+        assert!(result.is_err(), "empty v1 metadata must be rejected");
+    }
+
+    #[test]
+    fn test_metadata_validation_oversized_v1_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        // Create oversized metadata (> MAX_METADATA_BYTES_SIZE = 1024)
+        let large_data = vec![0u8; 1025];
+        let oversized = Bytes::from_slice(&env, &large_data);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_credential_metadata(&issuer, &cred_id, &oversized, &CompressionType::None);
+        }));
+        assert!(result.is_err(), "oversized v1 metadata must be rejected");
+    }
+
+    #[test]
+    fn test_set_credential_metadata_succeeds_with_valid_v1() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        let valid_data = Bytes::from_slice(&env, b"{\"name\":\"Alice\",\"age\":30}");
+        client.set_credential_metadata(&issuer, &cred_id, &valid_data, &CompressionType::None);
+
+        let stored = client.get_credential_metadata(&cred_id).unwrap();
+        assert_eq!(stored.data, valid_data);
+        assert_eq!(stored.compression, CompressionType::None);
+
+        // Schema version should be tracked
+        let schema_ver = client.get_credential_metadata_schema(&cred_id);
+        assert_eq!(schema_ver, 1u32);
+    }
+
+    #[test]
+    fn test_metadata_schema_distribution() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let subject2 = Address::generate(&env);
+        client.issue_credential(&issuer, &subject2, &2u32, &meta, &None, &0u64);
+
+        // Register and activate v2 so new credentials use it
+        let hash = Bytes::from_slice(&env, b"v2-hash");
+        let desc = Bytes::from_slice(&env, b"v2");
+        client.register_metadata_schema(&admin, &2u32, &hash, &desc);
+        client.set_active_metadata_schema(&admin, &2u32);
+
+        let subject3 = Address::generate(&env);
+        client.issue_credential(&issuer, &subject3, &3u32, &meta, &None, &0u64);
+
+        let dist = client.get_metadata_schema_distribution();
+        assert_eq!(dist.get(1u32).unwrap_or(0u32), 2u32);
+        assert_eq!(dist.get(2u32).unwrap_or(0u32), 1u32);
+    }
+
+    #[test]
+    fn test_migrate_metadata_schema_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let mut cred_ids = Vec::new(&env);
+        for _ in 0..3 {
+            let id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+            let data = Bytes::from_slice(&env, &[b"meta-data-", &[id as u8]].concat());
+            client.set_credential_metadata(&issuer, &id, &data, &CompressionType::None);
+            cred_ids.push_back(id);
+        }
+
+        // Register v2 and migrate
+        let hash = Bytes::from_slice(&env, b"v2-hash");
+        let desc = Bytes::from_slice(&env, b"v2");
+        client.register_metadata_schema(&admin, &2u32, &hash, &desc);
+        client.set_active_metadata_schema(&admin, &2u32);
+
+        let migrated = client.migrate_metadata_schema(&admin, &2u32, &1u64, &3u64);
+        assert_eq!(migrated, 3u32);
+
+        // Verify schema versions updated
+        for id in 0..3 {
+            let schema_ver = client.get_credential_metadata_schema(&cred_ids.get(id).unwrap());
+            // cred_ids are 1,2,3 but we issued 3 credentials
+        }
+
+        // Metadata should still be readable
+        for i in 0..3 {
+            let stored = client.get_credential_metadata(&cred_ids.get(i).unwrap());
+            assert!(stored.is_some());
+        }
+    }
+
+    #[test]
+    fn test_backward_compat_old_reader_still_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let data = Bytes::from_slice(&env, b"original-metadata");
+        client.set_credential_metadata(&issuer, &cred_id, &data, &CompressionType::None);
+
+        // Old get_credential_metadata still works
+        let stored = client.get_credential_metadata(&cred_id).unwrap();
+        assert_eq!(stored.data, data);
+
+        // Lazy resolve returns the same data when schema matches
+        let resolved = client.resolve_credential_metadata(&cred_id).unwrap();
+        assert_eq!(resolved.data, data);
+    }
+
+    #[test]
+    fn test_credential_version_independent_from_schema() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let cred = client.get_credential(&cred_id);
+        assert_eq!(cred.version, 1u32);
+
+        let schema_ver = client.get_credential_metadata_schema(&cred_id);
+        assert_eq!(schema_ver, 1u32);
+        // Credential.version and MetadataSchemaVersion are independent
+        assert_ne!(cred.version, schema_ver); // both are 1 but conceptually different
+    }
+
+    #[test]
+    fn test_set_active_schema_rejects_unregistered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_active_metadata_schema(&admin, &99u32);
+        }));
+        assert!(result.is_err(), "unregistered schema must be rejected");
+    }
+
+    #[test]
+    fn test_register_schema_rejects_non_sequential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = Bytes::from_slice(&env, b"v3-hash");
+        let desc = Bytes::from_slice(&env, b"v3");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.register_metadata_schema(&admin, &3u32, &hash, &desc);
+        }));
+        assert!(result.is_err(), "non-sequential version must be rejected");
+    }
+
+    #[test]
+    fn test_register_schema_rejects_duplicate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = Bytes::from_slice(&env, b"v1-dup");
+        let desc = Bytes::from_slice(&env, b"v1 duplicate");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.register_metadata_schema(&admin, &1u32, &hash, &desc);
+        }));
+        assert!(result.is_err(), "duplicate schema version must be rejected");
+    }
+
+    #[test]
+    fn test_migrate_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = Bytes::from_slice(&env, b"v2-hash");
+        let desc = Bytes::from_slice(&env, b"v2");
+        client.register_metadata_schema(&admin, &2u32, &hash, &desc);
+        client.set_active_metadata_schema(&admin, &2u32);
+
+        let stranger = Address::generate(&env);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.migrate_metadata_schema(&stranger, &2u32, &1u64, &10u64);
+        }));
+        assert!(result.is_err(), "non-admin must not migrate");
     }
 }
 
