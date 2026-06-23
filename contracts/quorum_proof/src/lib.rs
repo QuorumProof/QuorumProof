@@ -11,6 +11,8 @@ use soroban_sdk::{
 use soroban_sdk::xdr::ToXdr;
 use zk_verifier::{ClaimType, ZkVerifierContractClient};
 
+mod rbac;
+
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
 const TOPIC_CONSENT_REVOKED: &str = "ConsentRevoked";
@@ -51,6 +53,11 @@ const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
 const DEFAULT_REVOCATION_TIME_LOCK_SECONDS: u64 = 172_800; // 48 hours
 const MAX_REVOCATION_BATCH_SIZE: u32 = 128;
+
+const TOPIC_ROLE_GRANTED: &str = "RoleGranted";
+const TOPIC_ROLE_REVOKED: &str = "RoleRevoked";
+const TOPIC_ROLE_DELEGATED: &str = "RoleDelegated";
+const TOPIC_ROLE_DELEGATION_REVOKED: &str = "RoleDelegationRevoked";
 
 #[contracttype]
 #[derive(Clone)]
@@ -461,6 +468,12 @@ pub enum ContractError {
     InvalidStatusTransition = 58,
     /// Issue #657: Only the verifier that owns this request may update it
     NotRequestVerifier = 59,
+    /// Role-based access control: role assignment not found
+    RoleNotFound = 60,
+    /// Role-based access control: role delegation not found
+    RoleDelegationNotFound = 61,
+    /// Role-based access control: caller does not hold the required role
+    RoleRequired = 62,
 }
 
 #[contracttype]
@@ -652,6 +665,14 @@ pub enum DataKey3 {
     ManagedProofRequestCount,
     /// Audit log for a specific managed proof request.
     ProofRequestAuditLog(u64),
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey4 {
+    RoleAssignment(Address),
+    RoleDelegation(Address),
+    RoleAuditLog,
 }
 
 #[contracttype]
@@ -10414,6 +10435,83 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
         notif
+    }
+
+    // ─── RBAC public functions ───────────────────────────────────────────
+
+    /// Assign a role to an address. Only the contract admin may call this.
+    pub fn assign_role(env: Env, admin: Address, target: Address, role: u32, expires_at: u64) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        let rbac_role = match role {
+            1 => rbac::Role::Admin,
+            2 => rbac::Role::Issuer,
+            3 => rbac::Role::Verifier,
+            4 => rbac::Role::RevocationAgent,
+            _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
+        };
+        crate::rbac::assign_role(&env, &admin, &target, rbac_role, expires_at);
+    }
+
+    /// Revoke a role from an address. Only the contract admin may call this.
+    pub fn revoke_role(env: Env, admin: Address, target: Address) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::revoke_role(&env, &admin, &target);
+    }
+
+    /// Delegate a role from `delegator` to `delegatee`.
+    pub fn delegate_role(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+        role: u32,
+        expires_at: u64,
+    ) {
+        delegator.require_auth();
+        Self::require_not_paused(&env);
+        let rbac_role = match role {
+            1 => rbac::Role::Admin,
+            2 => rbac::Role::Issuer,
+            3 => rbac::Role::Verifier,
+            4 => rbac::Role::RevocationAgent,
+            _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
+        };
+        crate::rbac::delegate_role(&env, &delegator, &delegatee, rbac_role, expires_at);
+    }
+
+    /// Revoke a role delegation.
+    pub fn revoke_delegation(env: Env, caller: Address, delegatee: Address) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::revoke_delegation(&env, &caller, &delegatee);
+    }
+
+    /// Check if an address holds a given role.
+    pub fn has_role(env: Env, address: Address, role: u32) -> bool {
+        let rbac_role = match role {
+            1 => rbac::Role::Admin,
+            2 => rbac::Role::Issuer,
+            3 => rbac::Role::Verifier,
+            4 => rbac::Role::RevocationAgent,
+            _ => return false,
+        };
+        crate::rbac::has_role(&env, &address, rbac_role)
+    }
+
+    /// Get the role assignment for an address (if any).
+    pub fn get_role_assignment(env: Env, address: Address) -> Option<rbac::RoleAssignment> {
+        crate::rbac::get_role_assignment(&env, &address)
+    }
+
+    /// Get the role delegation for an address (if any).
+    pub fn get_role_delegation(env: Env, address: Address) -> Option<rbac::RoleDelegation> {
+        crate::rbac::get_role_delegation(&env, &address)
+    }
+
+    /// Get the full RBAC audit log.
+    pub fn get_role_audit_log(env: Env) -> Vec<rbac::RoleAuditEntry> {
+        crate::rbac::get_audit_log(&env)
     }
 }
 
