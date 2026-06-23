@@ -1,3 +1,5 @@
+import { Navbar } from '../components/Navbar';
+import { WalletGuard } from '../components/WalletGate';
 import { CredentialWizard } from '../components/CredentialWizard';
 import type { WizardSeed } from '../components/CredentialWizard';
 import { useWallet } from '../hooks';
@@ -10,6 +12,7 @@ export default function IssueCredentialWizard() {
 
   return (
     <div id="app">
+      <Navbar />
       <main className="dashboard-main">
         <div className="container" style={{ maxWidth: 720 }}>
           <div className="dashboard-header" style={{ marginBottom: 32 }}>

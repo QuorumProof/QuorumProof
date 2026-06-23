@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Navbar } from '../components/Navbar';
 
 interface FAQItem {
   id: string;
@@ -93,6 +94,7 @@ export default function Help() {
 
   return (
     <>
+      <Navbar />
       <main className="container help-main">
         <header className="help-header">
           <h1 className="help-title">Help & FAQ</h1>
