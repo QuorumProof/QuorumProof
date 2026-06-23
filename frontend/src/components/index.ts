@@ -4,7 +4,6 @@ export { AuditTrail } from './AuditTrail';
 export type { AuditEvent, AuditEventType } from './AuditTrail';
 export { VerificationHistory } from './VerificationHistory';
 export type { VerificationRecord } from './VerificationHistory';
-export { WalletGate } from './WalletGate';
 export { WalletGuard } from './WalletGuard';
 export { CredentialCard } from './CredentialCard';
 export { EmptyState } from './EmptyState';

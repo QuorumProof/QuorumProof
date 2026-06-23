@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Navbar } from '../components/Navbar';
 import { CredentialCard } from '../components/CredentialCard';
 import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
 import { ExportCredentialsDialog } from '../components/ExportCredentialsDialog';
 import { ImportCredentialsDialog } from '../components/ImportCredentialsDialog';
+import { CredentialSearchFilter, type SearchFilters } from '../components/CredentialSearchFilter';
 import { useWallet, useRealtimeUpdates } from '../hooks';
 import {
   getCredentialsBySubject,
@@ -24,7 +24,7 @@ const DEFAULT_FILTERS: SearchFilters = {
 };
 
 export default function Dashboard() {
-  const { address, disconnect } = useWallet();
+  const { address } = useWallet();
   const [cards, setCards] = useState<CredCardData[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -130,7 +130,6 @@ export default function Dashboard() {
 
   return (
     <>
-      <Navbar />
       <main className="container container--wide dashboard-main">
         <header className="dashboard-header">
           <div>
@@ -159,21 +158,6 @@ export default function Dashboard() {
             >
               📤 Import
             </button>
-            {address && (
-              <div className="wallet-sim-card">
-                <div className="wallet-sim__label">Connected Address</div>
-                <div className="mono" style={{ fontSize: '12px', wordBreak: 'break-all' }}>
-                  {address}
-                </div>
-                <button
-                  className="btn btn--ghost btn--sm"
-                  style={{ marginTop: '8px' }}
-                  onClick={disconnect}
-                >
-                  Disconnect
-                </button>
-              </div>
-            )}
           </div>
         </header>
 
@@ -212,7 +196,7 @@ export default function Dashboard() {
 
           {/* Empty state */}
           {!loading && !error && cards.length === 0 && (
-            <EmptyState address={address!} />
+            <EmptyState address={address} />
           )}
 
           {/* No results after filtering */}

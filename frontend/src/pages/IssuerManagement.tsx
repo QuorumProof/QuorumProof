@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Navbar } from '../components/Navbar';
 import { useWallet } from '../hooks';
 import {
   getCredential,
@@ -120,7 +119,6 @@ export default function IssuerManagement() {
   if (!address) {
     return (
       <>
-        <Navbar />
         <main className="container">
           <div className="empty-state">
             <div className="empty-state__icon">🔒</div>
@@ -134,7 +132,6 @@ export default function IssuerManagement() {
 
   return (
     <>
-      <Navbar />
       <main className="container" style={{ paddingBottom: 64 }}>
         <header className="dashboard-header">
           <div>

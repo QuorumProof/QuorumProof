@@ -1,5 +1,3 @@
-import { Navbar } from '../components/Navbar';
-import { WalletGuard } from '../components/WalletGate';
 import { IssueCredentialForm } from '../components/IssueCredentialForm';
 import { useWallet } from '../hooks';
 
@@ -13,7 +11,6 @@ export default function IssueCredential() {
 
   return (
     <div id="app">
-      <Navbar />
       <main className="dashboard-main">
         <div className="container" style={{ maxWidth: 600 }}>
           <div className="dashboard-header" style={{ marginBottom: 32 }}>

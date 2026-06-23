@@ -1,5 +1,4 @@
 import { useState, useCallback } from 'react';
-import { Navbar } from '../components/Navbar';
 import {
   getCredential,
   getCredentialsBySubject,
@@ -123,7 +122,6 @@ export default function CredentialSearch() {
 
   return (
     <>
-      <Navbar />
       <main className="container" style={{ paddingBottom: 64 }}>
         <div className="verify-hero">
           <div className="verify-hero__eyebrow">🔎 Credential Search</div>

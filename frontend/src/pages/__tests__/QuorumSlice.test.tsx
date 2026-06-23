@@ -1,91 +1,94 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter } from 'react-router-dom';
 import QuorumSlice from '../QuorumSlice';
-import { useFreighter } from '../../lib/hooks/useFreighter';
+import { useWallet } from '../../hooks';
 
-// Mock useFreighter hook
-vi.mock('../../lib/hooks/useFreighter', () => ({
-  useFreighter: vi.fn(),
+vi.mock('../../hooks', () => ({
+  useWallet: vi.fn(),
 }));
 
-// Mock QuorumSliceBuilder component
 vi.mock('../../components/QuorumSliceBuilder', () => ({
-  QuorumSliceBuilder: ({ creatorAddress }: { creatorAddress: string }) => (
-    <div data-testid="quorum-slice-builder" data-creator-address={creatorAddress}>
+  QuorumSliceBuilder: ({
+    creatorAddress,
+    initialThreshold,
+  }: {
+    creatorAddress: string;
+    initialThreshold?: number;
+  }) => (
+    <div
+      data-testid="quorum-slice-builder"
+      data-creator-address={creatorAddress}
+      data-initial-threshold={initialThreshold ?? ''}
+    >
       QuorumSliceBuilder
     </div>
   ),
 }));
 
-// Mock Navbar
-vi.mock('../../components/Navbar', () => ({
-  Navbar: () => <div>Navbar</div>,
+vi.mock('../../components/SliceBackupRestore', () => ({
+  SliceBackupRestore: () => <div>SliceBackupRestore</div>,
 }));
 
-const mockUseFreighter = vi.mocked(useFreighter);
+const mockUseWallet = vi.mocked(useWallet);
 
 describe('QuorumSlice page (#236)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
   });
 
   it('passes creatorAddress from wallet to QuorumSliceBuilder', () => {
     const testAddress = 'GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFSNQB37HNU7F5V4Z5SHEOSVBQ';
-    mockUseFreighter.mockReturnValue({
+
+    mockUseWallet.mockReturnValue({
       address: testAddress,
       isInitializing: false,
-      connect: vi.fn(),
-      hasFreighter: true,
-      disconnect: vi.fn(),
-    });
+    } as ReturnType<typeof useWallet>);
 
-    render(<BrowserRouter><QuorumSlice /></BrowserRouter>);
+    render(
+      <BrowserRouter>
+        <QuorumSlice />
+      </BrowserRouter>
+    );
 
     const builder = screen.getByTestId('quorum-slice-builder');
     expect(builder).toHaveAttribute('data-creator-address', testAddress);
   });
 
-  it('shows connect wallet prompt when no address is available', () => {
-    mockUseFreighter.mockReturnValue({
-      address: null,
+  it('loads slice configuration from URL search params', () => {
+    const testAddress = 'GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFSNQB37HNU7F5V4Z5SHEOSVBQ';
+    const draft = { attestors: [], threshold: 3 };
+    const encoded = btoa(JSON.stringify(draft));
+
+    mockUseWallet.mockReturnValue({
+      address: testAddress,
       isInitializing: false,
-      connect: vi.fn(),
-      hasFreighter: true,
-      disconnect: vi.fn(),
-    });
+    } as ReturnType<typeof useWallet>);
 
-    render(<BrowserRouter><QuorumSlice /></BrowserRouter>);
+    render(
+      <MemoryRouter initialEntries={[`/slice/new?slice=${encoded}`]}>
+        <QuorumSlice />
+      </MemoryRouter>
+    );
 
-    expect(screen.getByText('Connect Your Wallet')).toBeInTheDocument();
-    expect(screen.getByText(/You need a connected Freighter wallet/)).toBeInTheDocument();
+    expect(screen.getByText(/Slice configuration loaded from shared URL/)).toBeInTheDocument();
+    const builder = screen.getByTestId('quorum-slice-builder');
+    expect(builder).toHaveAttribute('data-initial-threshold', '3');
   });
 
-  it('shows loading state while wallet is initializing', () => {
-    mockUseFreighter.mockReturnValue({
-      address: null,
-      isInitializing: true,
-      connect: vi.fn(),
-      hasFreighter: true,
-      disconnect: vi.fn(),
-    });
-
-    render(<BrowserRouter><QuorumSlice /></BrowserRouter>);
-
-    expect(screen.getByText('Connecting wallet…')).toBeInTheDocument();
-  });
-
-  it('does not render QuorumSliceBuilder when address is undefined', () => {
-    mockUseFreighter.mockReturnValue({
-      address: undefined as unknown as null,
+  it('renders SliceBackupRestore section', () => {
+    mockUseWallet.mockReturnValue({
+      address: 'GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFSNQB37HNU7F5V4Z5SHEOSVBQ',
       isInitializing: false,
-      connect: vi.fn(),
-      hasFreighter: true,
-      disconnect: vi.fn(),
-    });
+    } as ReturnType<typeof useWallet>);
 
-    render(<BrowserRouter><QuorumSlice /></BrowserRouter>);
+    render(
+      <BrowserRouter>
+        <QuorumSlice />
+      </BrowserRouter>
+    );
 
-    expect(screen.queryByTestId('quorum-slice-builder')).not.toBeInTheDocument();
+    expect(screen.getByText('SliceBackupRestore')).toBeInTheDocument();
   });
 });
