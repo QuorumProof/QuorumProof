@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Navbar } from '../components/Navbar';
 import { CredentialCard } from '../components/CredentialCard';
 import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
@@ -97,6 +98,7 @@ export default function Profile() {
 
   return (
     <>
+      <Navbar />
       <main className="container" style={{ paddingTop: '40px', maxWidth: '900px', paddingBottom: '64px' }}>
 
         {/* Profile header */}

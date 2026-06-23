@@ -21,9 +21,7 @@ vi.mock('../../stellar', () => ({
 }));
 
 vi.mock('../../components/Navbar', () => ({ Navbar: () => <div>Navbar</div> }));
-vi.mock('../../components/WalletGuard', () => ({
-  WalletGuard: ({ children }: { children: unknown }) => children,
-}));
+vi.mock('../../components/WalletGate', () => ({ WalletGate: () => <div>WalletGate</div> }));
 vi.mock('../../components/CredentialCard', () => ({ CredentialCard: () => <div>CredentialCard</div> }));
 vi.mock('../../components/CredentialCardSkeleton', () => ({
   CredentialCardSkeleton: () => <div data-testid="credential-skeleton">Skeleton</div>,
@@ -34,23 +32,10 @@ const TEST_ADDR = 'GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFSNQB37HNU7F5V4Z5SHEOSVBQ';
 
 const walletConnected = {
   address: TEST_ADDR,
-  isConnected: true,
+  hasFreighter: true,
   isInitializing: false,
-  isConnecting: false,
-  network: 'testnet',
-  error: null,
-  balanceXlm: '10 XLM',
-  balanceUsd: '$1.00',
-  balanceLoading: false,
-  showConnectModal: false,
-  availableWallets: [],
-  walletsLoading: false,
   connect: vi.fn(),
   disconnect: vi.fn(),
-  openConnectModal: vi.fn(),
-  closeConnectModal: vi.fn(),
-  refreshBalance: vi.fn(),
-  signTransaction: vi.fn(),
 };
 
 describe('Dashboard (#239)', () => {

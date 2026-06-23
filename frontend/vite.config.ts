@@ -1,17 +1,11 @@
-import path from 'node:path';
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import type { UserConfig } from 'vitest/config';
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import type { UserConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
-  resolve: {
-    alias: {
-      buffer: path.resolve(__dirname, 'node_modules/buffer/'),
-    },
-  },
   optimizeDeps: {
-    include: ['@stellar/stellar-sdk', '@creit.tech/stellar-wallets-kit', 'buffer'],
+    include: ["@stellar/stellar-sdk"],
   },
   build: {
     commonjsOptions: {
