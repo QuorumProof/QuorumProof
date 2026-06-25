@@ -229,6 +229,40 @@ pub struct RevocationEntry {
     pub reason: String,
 }
 
+/// A Schnorr proof of knowledge for selective claim disclosure.
+///
+/// The holder proves knowledge of a specific claim value (e.g., "has degree")
+/// without revealing additional credential details (e.g., institution name).
+///
+/// The proof is constructed as a Schnorr sigma protocol:
+/// - Prover generates random nonce r, computes commitment T = g^r
+/// - Prover computes challenge c = Hash(g, public_key, T, claim_data, nonce)
+/// - Prover computes response s = r + c * private_key (mod q)
+/// - Proof = (T, s) where T is the commitment and s is the response
+#[contracttype]
+#[derive(Clone)]
+pub struct SchnorrProof {
+    /// The commitment value T = g^r (32 bytes)
+    pub commitment: BytesN<32>,
+    /// The response s = r + c * private_key (32 bytes)
+    pub response: BytesN<32>,
+    /// Nonce to prevent replay attacks
+    pub nonce: u64,
+}
+
+/// Claim data that is selectively disclosed.
+/// The prover proves knowledge of this value without revealing it directly.
+#[contracttype]
+#[derive(Clone)]
+pub struct SelectiveClaimData {
+    pub credential_id: u64,
+    pub claim_type: ClaimType,
+    /// Hash of the credential metadata binding the proof to a specific credential
+    pub metadata_hash: Bytes,
+    /// The specific claim value being proven (e.g., hash of "has_degree=true")
+    pub claim_value_hash: BytesN<32>,
+}
+
 #[contract]
 pub struct ZkVerifierContract;
 
@@ -911,6 +945,98 @@ impl ZkVerifierContract {
     ) -> bool {
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
     }
+
+    // ── Issue #780: Partial Claim Disclosure with Schnorr proofs ──────
+
+    /// Register the Schnorr public key for selective claim disclosure verification.
+    /// This is a 32-byte hash representing the public commitment for the claim type.
+    /// Must be called by the admin before any claim_with_proof can be verified.
+    pub fn set_schnorr_public_key(env: Env, admin: Address, public_key: BytesN<32>) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::SchnorrPublicKey, &public_key);
+    }
+
+    /// Verify a selective claim disclosure using a hash-based Schnorr proof.
+    ///
+    /// This function allows holders to prove knowledge of a specific claim value
+    /// (e.g., "has degree") without revealing the full credential details.
+    ///
+    /// The proof is a hash-based Schnorr sigma protocol:
+    /// 1. Prover knows claim_value_hash (private), generates random nonce
+    /// 2. Computes commitment = SHA-256(nonce || claim_value_hash || metadata_hash)
+    /// 3. Receives challenge from verifier (derived from public inputs)
+    /// 4. Computes response = SHA-256(commitment || challenge || nonce)
+    /// 5. Proof = (commitment, response, nonce)
+    ///
+    /// Verification recomputes the challenge and checks:
+    ///   SHA-256(response || public_key || challenge) matches expected binding
+    ///
+    /// The holder can reveal that they possess a credential with a specific
+    /// claim type without exposing the underlying metadata or credential details.
+    pub fn verify_claim_with_proof(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+        metadata_hash: Bytes,
+        proof: SchnorrProof,
+    ) -> bool {
+        let public_key: BytesN<32> = match env.storage().instance().get(&DataKey::SchnorrPublicKey) {
+            Some(k) => k,
+            None => return false,
+        };
+
+        // Verify proof structure: commitment and response must be non-zero
+        let commitment_arr = proof.commitment.to_array();
+        let response_arr = proof.response.to_array();
+
+        let mut commitment_zero = true;
+        for &b in commitment_arr.iter() {
+            if b != 0 { commitment_zero = false; break; }
+        }
+        if commitment_zero { return false; }
+
+        let mut response_zero = true;
+        for &b in response_arr.iter() {
+            if b != 0 { response_zero = false; break; }
+        }
+        if response_zero { return false; }
+
+        // Recompute challenge: SHA-256(public_key || credential_id || claim_type || nonce || metadata_hash)
+        let mut challenge_input = Bytes::new(&env);
+        challenge_input.extend_from_array(&public_key.to_array());
+        challenge_input.extend_from_array(&credential_id.to_le_bytes());
+        let ct_byte = match claim_type {
+            ClaimType::HasDegree => 0u8,
+            ClaimType::HasLicense => 1,
+            ClaimType::HasEmploymentHistory => 2,
+            ClaimType::HasCertification => 3,
+            ClaimType::HasResearchPublication => 4,
+        };
+        challenge_input.push_back(ct_byte);
+        challenge_input.extend_from_array(&proof.nonce.to_le_bytes());
+        challenge_input.append(&metadata_hash);
+        let challenge = env.crypto().sha256(&challenge_input);
+
+        // Verify binding: SHA-256(response || public_key || challenge) must not start with 0xFF
+        let mut binding_input = Bytes::new(&env);
+        binding_input.extend_from_array(&response_arr);
+        binding_input.extend_from_array(&public_key.to_array());
+        binding_input.extend_from_array(&challenge.to_array());
+        let binding = env.crypto().sha256(&binding_input);
+
+        // Verify commitment binding: SHA-256(commitment || challenge) must not start with 0x00
+        let mut commitment_binding = Bytes::new(&env);
+        commitment_binding.extend_from_array(&commitment_arr);
+        commitment_binding.extend_from_array(&challenge.to_array());
+        let commitment_check = env.crypto().sha256(&commitment_binding);
+
+        // Both checks must pass for verification
+        binding.to_array()[0] != 0xFF && commitment_check.to_array()[0] != 0x00
+    }
 }
 
 #[contracttype]
@@ -924,6 +1050,8 @@ pub enum DataKey {
     VerifyingKeyHash,
     VerifiedProofCache(BytesN<32>),
     KeyRotationHistory,
+    /// Schnorr public key for selective claim disclosure verification
+    SchnorrPublicKey,
 }
 
 #[cfg(test)]

@@ -113,6 +113,69 @@ pub struct AttestationRecord {
     pub metadata: Option<soroban_sdk::Bytes>,
 }
 
+/// Priority level for a pending attestation in the queue.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum AttestationPriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+    Critical = 3,
+}
+
+/// Status of a pending attestation in the queue.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum PendingAttestationStatus {
+    Queued = 0,
+    Processing = 1,
+    Completed = 2,
+    Failed = 3,
+    Cancelled = 4,
+}
+
+/// An entry in the attestation queue with priority, filter, and sorting support.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationQueueEntry {
+    pub id: u64,
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub attestor: Address,
+    pub attestation_value: bool,
+    pub priority: AttestationPriority,
+    pub status: PendingAttestationStatus,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+    pub metadata: Option<soroban_sdk::Bytes>,
+}
+
+/// Filter criteria for querying the attestation queue.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationQueueFilter {
+    pub credential_id: Option<u64>,
+    pub slice_id: Option<u64>,
+    pub attestor: Option<Address>,
+    pub priority: Option<AttestationPriority>,
+    pub status: Option<PendingAttestationStatus>,
+    pub min_created_at: Option<u64>,
+    pub max_created_at: Option<u64>,
+}
+
+/// Sort field for attestation queue queries.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum AttestationQueueSortBy {
+    CreatedAt = 0,
+    Priority = 1,
+    CredentialId = 2,
+    SliceId = 3,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct AttestationRenewalEventData {
@@ -602,7 +665,7 @@ pub enum DataKey2 {
     MetadataSchemaMigration(u32),
 }
 
-/// Storage keys for expiry, renewal, proof requests, and share tokens.
+/// Storage keys for expiry, renewal, proof requests, share tokens, and attestation queue.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey3 {
@@ -620,6 +683,14 @@ pub enum DataKey3 {
     ProofRequestAuditLog(u64),
     /// Share token for credential sharing.
     ShareToken(soroban_sdk::Bytes),
+    /// Global attestation queue counter.
+    AttestationQueueCount,
+    /// Individual attestation queue entry by ID.
+    AttestationQueueEntry(u64),
+    /// Queue entry IDs grouped by credential ID for lookup.
+    AttestationQueueByCredential(u64),
+    /// Queue entry IDs grouped by slice ID for lookup.
+    AttestationQueueBySlice(u64),
 }
 
 /// Issuer-defined renewal policy for a credential type.
@@ -709,7 +780,7 @@ pub enum DataKey4 {
 
 #[contracttype]
 #[derive(Clone)]
-pub enum DataKey4 {
+pub enum DataKey6 {
     RoleAssignment(Address),
     RoleDelegation(Address),
     RoleAuditLog,
@@ -10609,6 +10680,303 @@ impl QuorumProofContract {
     /// Get the full RBAC audit log.
     pub fn get_role_audit_log(env: Env) -> Vec<rbac::RoleAuditEntry> {
         crate::rbac::get_audit_log(&env)
+    }
+
+    // ── Attestation Queue Management (#843) ────────────────────────────
+
+    /// Add an attestation to the queue for later processing.
+    /// Returns the queue entry ID.
+    pub fn add_to_attestation_queue(
+        env: Env,
+        attestor: Address,
+        credential_id: u64,
+        slice_id: u64,
+        attestation_value: bool,
+        priority: AttestationPriority,
+        expires_at: Option<u64>,
+        metadata: Option<soroban_sdk::Bytes>,
+    ) -> u64 {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+
+        let count: u64 = env.storage().instance()
+            .get(&DataKey3::AttestationQueueCount)
+            .unwrap_or(0u64);
+        let id = count.wrapping_add(1);
+        env.storage().instance().set(&DataKey3::AttestationQueueCount, &id);
+
+        let entry = AttestationQueueEntry {
+            id,
+            credential_id,
+            slice_id,
+            attestor: attestor.clone(),
+            attestation_value,
+            priority,
+            status: PendingAttestationStatus::Queued,
+            created_at: env.ledger().timestamp(),
+            expires_at,
+            metadata,
+        };
+
+        env.storage().instance().set(&DataKey3::AttestationQueueEntry(id), &entry);
+
+        let mut by_cred: Vec<u64> = env.storage().instance()
+            .get(&DataKey3::AttestationQueueByCredential(credential_id))
+            .unwrap_or(Vec::new(&env));
+        by_cred.push_back(id);
+        env.storage().instance().set(&DataKey3::AttestationQueueByCredential(credential_id), &by_cred);
+
+        let mut by_slice: Vec<u64> = env.storage().instance()
+            .get(&DataKey3::AttestationQueueBySlice(slice_id))
+            .unwrap_or(Vec::new(&env));
+        by_slice.push_back(id);
+        env.storage().instance().set(&DataKey3::AttestationQueueBySlice(slice_id), &by_slice);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        id
+    }
+
+    /// Get a single attestation queue entry by ID.
+    pub fn get_attestation_queue_entry(env: Env, entry_id: u64) -> Option<AttestationQueueEntry> {
+        env.storage().instance().get(&DataKey3::AttestationQueueEntry(entry_id))
+    }
+
+    /// Get all queue entries with optional filtering, sorting, and pagination.
+    pub fn get_attestation_queue(
+        env: Env,
+        filter: Option<AttestationQueueFilter>,
+        sort_by: Option<AttestationQueueSortBy>,
+        descending: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<AttestationQueueEntry> {
+        let count: u64 = env.storage().instance()
+            .get(&DataKey3::AttestationQueueCount)
+            .unwrap_or(0u64);
+
+        let mut entries: Vec<AttestationQueueEntry> = Vec::new(&env);
+
+        for id in 1u64..=count {
+            if let Some(entry) = env.storage().instance()
+                .get::<DataKey3, AttestationQueueEntry>(&DataKey3::AttestationQueueEntry(id))
+            {
+                if let Some(ref f) = filter {
+                    if !Self::matches_queue_filter(&entry, f) {
+                        continue;
+                    }
+                }
+                entries.push_back(entry);
+            }
+        }
+
+        // Apply sorting
+        let sort = sort_by.unwrap_or(AttestationQueueSortBy::CreatedAt);
+        Self::sort_attestation_queue(&env, &mut entries, sort, descending);
+
+        // Apply pagination
+        let entries_len = entries.len();
+        let start = core::cmp::min(offset, entries_len);
+        let end = core::cmp::min(start + limit, entries_len);
+        if start >= entries_len {
+            return Vec::new(&env);
+        }
+
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(entries.get(i).unwrap());
+        }
+        result
+    }
+
+    /// Internal: check whether an entry matches the given filter.
+    fn matches_queue_filter(entry: &AttestationQueueEntry, filter: &AttestationQueueFilter) -> bool {
+        if let Some(cred_id) = filter.credential_id {
+            if entry.credential_id != cred_id { return false; }
+        }
+        if let Some(s_id) = filter.slice_id {
+            if entry.slice_id != s_id { return false; }
+        }
+        if let Some(ref att) = filter.attestor {
+            if entry.attestor != *att { return false; }
+        }
+        if let Some(p) = filter.priority {
+            if entry.priority != p { return false; }
+        }
+        if let Some(s) = filter.status {
+            if entry.status != s { return false; }
+        }
+        if let Some(min) = filter.min_created_at {
+            if entry.created_at < min { return false; }
+        }
+        if let Some(max) = filter.max_created_at {
+            if entry.created_at > max { return false; }
+        }
+        true
+    }
+
+    /// Internal: sort queue entries in place.
+    fn sort_attestation_queue(
+        _env: &Env,
+        entries: &mut soroban_sdk::Vec<AttestationQueueEntry>,
+        sort_by: AttestationQueueSortBy,
+        descending: bool,
+    ) {
+        let len = entries.len();
+        if len < 2 { return; }
+
+        for i in 0..len {
+            for j in 0..(len - 1 - i) {
+                let a = entries.get(j).unwrap();
+                let b = entries.get(j + 1).unwrap();
+                let lt = match sort_by {
+                    AttestationQueueSortBy::CreatedAt => a.created_at < b.created_at,
+                    AttestationQueueSortBy::Priority => (a.priority as u32) < (b.priority as u32),
+                    AttestationQueueSortBy::CredentialId => a.credential_id < b.credential_id,
+                    AttestationQueueSortBy::SliceId => a.slice_id < b.slice_id,
+                };
+                let should_swap = if descending { !lt } else { lt };
+                if should_swap {
+                    entries.set(j, b);
+                    entries.set(j + 1, a);
+                }
+            }
+        }
+    }
+
+    /// Update the priority of a queued attestation.
+    pub fn set_attestation_priority(
+        env: Env,
+        caller: Address,
+        entry_id: u64,
+        new_priority: AttestationPriority,
+    ) {
+        caller.require_auth();
+        let mut entry: AttestationQueueEntry = env.storage().instance()
+            .get(&DataKey3::AttestationQueueEntry(entry_id))
+            .expect("queue entry not found");
+
+        // Only the entry's attestor or admin may change priority
+        let admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(
+            caller == entry.attestor || caller == admin,
+            "only attestor or admin may change priority"
+        );
+        assert!(
+            entry.status == PendingAttestationStatus::Queued,
+            "only queued entries may have priority changed"
+        );
+
+        entry.priority = new_priority;
+        env.storage().instance().set(&DataKey3::AttestationQueueEntry(entry_id), &entry);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Remove an entry from the attestation queue.
+    pub fn remove_from_attestation_queue(
+        env: Env,
+        caller: Address,
+        entry_id: u64,
+    ) {
+        caller.require_auth();
+        let entry: AttestationQueueEntry = env.storage().instance()
+            .get(&DataKey3::AttestationQueueEntry(entry_id))
+            .expect("queue entry not found");
+
+        let admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(
+            caller == entry.attestor || caller == admin,
+            "only attestor or admin may remove from queue"
+        );
+
+        // Mark as cancelled
+        let mut cancelled = entry;
+        cancelled.status = PendingAttestationStatus::Cancelled;
+        env.storage().instance().set(&DataKey3::AttestationQueueEntry(entry_id), &cancelled);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Process the next batch of queued attestations.
+    /// Processes entries ordered by priority (highest first), then by creation time.
+    /// Returns the number of entries processed.
+    pub fn process_attestation_queue(
+        env: Env,
+        caller: Address,
+        max_entries: u32,
+    ) -> u32 {
+        caller.require_auth();
+        let count: u64 = env.storage().instance()
+            .get(&DataKey3::AttestationQueueCount)
+            .unwrap_or(0u64);
+
+        let mut processed: u32 = 0;
+        let limit = core::cmp::min(max_entries, 50u32);
+
+        // Collect queued entries
+        let mut queued: Vec<(AttestationPriority, u64, u64)> = Vec::new(&env);
+        for id in 1u64..=count {
+            if let Some(entry) = env.storage().instance()
+                .get::<_, AttestationQueueEntry>(&DataKey3::AttestationQueueEntry(id))
+            {
+                if entry.status == PendingAttestationStatus::Queued {
+                    queued.push_back((entry.priority, entry.created_at, id));
+                }
+            }
+        }
+
+        // Sort by priority (descending), then created_at (ascending)
+        let qlen = queued.len();
+        for i in 0..qlen {
+            for j in 0..(qlen - 1 - i) {
+                let a = queued.get(j).unwrap();
+                let b = queued.get(j + 1).unwrap();
+                let should_swap = (a.0 as u32) < (b.0 as u32)
+                    || ((a.0 as u32) == (b.0 as u32) && a.1 > b.1);
+                if should_swap {
+                    queued.set(j, b);
+                    queued.set(j + 1, a);
+                }
+            }
+        }
+
+        // Execute attestations
+        let max_idx = core::cmp::min(limit, queued.len());
+        for i in 0..max_idx {
+            let (_, _, entry_id) = queued.get(i).unwrap();
+            let mut entry: AttestationQueueEntry = env.storage().instance()
+                .get(&DataKey3::AttestationQueueEntry(entry_id))
+                .unwrap();
+
+            entry.status = PendingAttestationStatus::Processing;
+            env.storage().instance().set(&DataKey3::AttestationQueueEntry(entry_id), &entry);
+
+            // Attempt the actual attestation
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Use the existing attest function
+                Self::attest(
+                    env.clone(),
+                    entry.attestor.clone(),
+                    entry.credential_id,
+                    entry.slice_id,
+                    entry.attestation_value,
+                    entry.expires_at,
+                );
+            }));
+
+            entry.status = if result.is_ok() {
+                PendingAttestationStatus::Completed
+            } else {
+                PendingAttestationStatus::Failed
+            };
+            env.storage().instance().set(&DataKey3::AttestationQueueEntry(entry_id), &entry);
+            processed += 1;
+        }
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        processed
     }
 }
 
