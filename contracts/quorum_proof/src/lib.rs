@@ -461,6 +461,12 @@ pub enum ContractError {
     InvalidStatusTransition = 58,
     /// Issue #657: Only the verifier that owns this request may update it
     NotRequestVerifier = 59,
+    /// Invalid revocation state transition
+    InvalidRevocationState = 60,
+    /// Revocation time lock is still active
+    RevocationTimeLockActive = 61,
+    /// Circuit breaker: degraded write limit reached
+    CircuitBreakerDegradedLimitReached = 62,
 }
 
 #[contracttype]
@@ -542,8 +548,6 @@ pub enum DataKey2 {
     IssuerQuota(Address),
     /// Issue #597: Per-issuer usage counter within the current quota window
     IssuerQuotaUsage(Address),
-    /// Share token for credential sharing
-    ShareToken(soroban_sdk::Bytes),
     // --- Previously missing variants ---
     /// Tracks attestors for a slice as a map (slice_id -> Map<Address, bool>)
     AttestorSet(u64),
@@ -591,7 +595,7 @@ pub enum DataKey2 {
     MetadataSchemaMigration(u32),
 }
 
-/// Storage keys for credential expiry and renewal policy data.
+/// Storage keys for expiry, renewal, proof requests, and share tokens.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey3 {
@@ -599,6 +603,16 @@ pub enum DataKey3 {
     RenewalPolicy(Address, u32),
     /// Expiry notification metadata for a credential.
     ExpiryNotif(u64),
+    /// Individual managed proof request by global ID.
+    ManagedProofRequest(u64),
+    /// Per-credential list of managed proof request IDs (for lookup).
+    ManagedProofRequestIds(u64),
+    /// Global managed proof request counter.
+    ManagedProofRequestCount,
+    /// Audit log for a specific managed proof request.
+    ProofRequestAuditLog(u64),
+    /// Share token for credential sharing.
+    ShareToken(soroban_sdk::Bytes),
 }
 
 /// Issuer-defined renewal policy for a credential type.
@@ -640,18 +654,50 @@ pub struct ExpiryNotification {
     pub seconds_until_expiry: u64,
 }
 
-/// Issue #657: Storage keys for managed proof request lifecycle data.
+/// Storage keys for revocation, credential index, threshold audit log, and related features.
 #[contracttype]
 #[derive(Clone)]
-pub enum DataKey3 {
-    /// Individual managed proof request by global ID.
-    ManagedProofRequest(u64),
-    /// Per-credential list of managed proof request IDs (for lookup).
-    ManagedProofRequestIds(u64),
-    /// Global managed proof request counter.
-    ManagedProofRequestCount,
-    /// Audit log for a specific managed proof request.
-    ProofRequestAuditLog(u64),
+pub enum DataKey5 {
+    /// Holder revocation request for a credential
+    RevocationRequest(u64),
+    /// Subject credential index (subject -> Vec<u64>)
+    SubjectCredentialIndex(Address),
+    /// Threshold change audit log for a slice
+    ThresholdAuditLog(u64),
+    /// Issuer revocation agents (issuer -> Vec<Address>)
+    IssuerRevocationAgents(Address),
+    /// Slice threshold type / mechanism identifier
+    SliceThresholdType(u64),
+    /// Revocation registry request by id
+    RevocationRegistryRequest(u64),
+    /// Issuer revocation request by credential id
+    IssuerRevocationRequest(u64),
+    /// Weight change audit log for a slice
+    WeightAuditLog(u64),
+    /// Global revocation registry request counter
+    RevocationRegistryRequestCount,
+    /// Audit trail for a specific revocation registry request
+    RevocationRegistryAuditTrail(u64),
+    /// Revocation metrics / aggregated data
+    RevocationMetrics,
+    /// Attestation weight for a specific (credential, slice, attestor) tuple
+    AttestationWeight(u64, u64, Address),
+    /// Credential -> revocation registry request id mapping
+    CredRevRegistryRequest(u64),
+    /// Revocation agent for a specific (credential, subject) pair
+    RevocationAgent(Address, Address),
+    /// Revocation time lock duration in seconds
+    RevocationTimeLockSeconds,
+}
+
+/// Storage keys for the circuit breaker system.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey4 {
+    CircuitBreakerState,
+    CircuitBreakerConfig,
+    CircuitBreakerActivation,
+    CircuitBreakerDegradedWriteCount,
 }
 
 #[contracttype]
@@ -1805,7 +1851,61 @@ impl QuorumProofContract {
             .unwrap_or(false)
     }
 
+    // ── Circuit Breaker ─────────────────────────────────────────────────────────
+
+    /// Transition the contract to Paused state. Blocks all mutations.
+    /// Publishes a `CircuitBreaker` event.
+    pub fn emergency_pause(env: Env, admin: Address, reason: String) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        circuit_breaker::emergency_pause(&env, &admin, reason);
+    }
+
+    /// Transition the contract to Degraded mode. Writes are rate-limited.
+    /// Publishes a `CircuitBreaker` event.
+    pub fn emergency_degrade(env: Env, admin: Address, reason: String) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        circuit_breaker::emergency_degrade(&env, &admin, reason);
+    }
+
+    /// Manually resume normal operations from Degraded or Paused.
+    pub fn resume(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        circuit_breaker::resume(&env, &admin);
+    }
+
+    /// Query the current circuit breaker state (checks TTL for auto-recovery).
+    pub fn get_circuit_breaker_state(env: Env) -> circuit_breaker::CircuitBreakerState {
+        circuit_breaker::get_state_with_recovery(&env)
+    }
+
+    /// Return the current activation details, if any.
+    pub fn get_circuit_breaker_activation(
+        env: Env,
+    ) -> Option<circuit_breaker::CircuitBreakerActivation> {
+        circuit_breaker::get_activation(&env)
+    }
+
+    /// Update the circuit breaker configuration. Only admin.
+    pub fn set_circuit_breaker_config(
+        env: Env,
+        admin: Address,
+        config: circuit_breaker::CircuitBreakerConfig,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        circuit_breaker::set_config(&env, &config);
+    }
+
+    /// Read the current circuit breaker configuration.
+    pub fn get_circuit_breaker_config(env: Env) -> circuit_breaker::CircuitBreakerConfig {
+        circuit_breaker::get_config(&env)
+    }
+
     fn require_not_paused(env: &Env) {
+        circuit_breaker::check_and_recover(env);
         if env
             .storage()
             .instance()
@@ -1813,6 +1913,9 @@ impl QuorumProofContract {
             .unwrap_or(false)
         {
             panic_with_error!(env, ContractError::ContractPaused);
+        }
+        if let Err(e) = circuit_breaker::enforce_degraded_write_limit(env) {
+            panic_with_error!(env, e);
         }
     }
 
@@ -1927,7 +2030,7 @@ impl QuorumProofContract {
     pub fn is_rate_limit_whitelisted(env: Env, issuer: Address) -> bool {
         env.storage()
             .instance()
-            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(issuer))
+            .get(&DataKey2::RateLimitWhitelist(issuer))
             .unwrap_or(false)
     }
 
@@ -2076,7 +2179,7 @@ impl QuorumProofContract {
         assert!(stored == admin, "unauthorized");
         env.storage()
             .instance()
-            .set(&DataKey3::PowDifficulty, &difficulty);
+            .set(&DataKey2::PowDifficulty, &difficulty);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -2086,7 +2189,7 @@ impl QuorumProofContract {
     pub fn get_pow_difficulty(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&DataKey3::PowDifficulty)
+            .get(&DataKey2::PowDifficulty)
             .unwrap_or(DEFAULT_POW_DIFFICULTY)
     }
 
@@ -2102,7 +2205,7 @@ impl QuorumProofContract {
         let difficulty: u32 = env
             .storage()
             .instance()
-            .get(&DataKey3::PowDifficulty)
+            .get(&DataKey2::PowDifficulty)
             .unwrap_or(DEFAULT_POW_DIFFICULTY);
 
         if difficulty == 0 {
@@ -2147,7 +2250,7 @@ impl QuorumProofContract {
         if env
             .storage()
             .instance()
-            .get::<DataKey2, bool>(&DataKey2::RateLimitWhitelist(address.clone()))
+            .get(&DataKey2::RateLimitWhitelist(address.clone()))
             .unwrap_or(false)
         {
             return true;
@@ -2413,10 +2516,10 @@ impl QuorumProofContract {
         if let Some(mut agents) = env
             .storage()
             .instance()
-            .get(&DataKey2::IssuerRevocationAgents(credential.issuer.clone()))
+            .get::<_, Vec<Address>>(&DataKey5::IssuerRevocationAgents(credential.issuer.clone()))
         {
             for a in agents.iter() {
-                if a == caller {
+                if &a == caller {
                     return;
                 }
             }
@@ -2568,12 +2671,12 @@ impl QuorumProofContract {
         let mut trail: Vec<RevocationAuditEntry> = env
             .storage()
             .instance()
-            .get(&DataKey3::RevocationAuditTrail(credential_id))
+            .get(&DataKey2::RevocationAuditTrail(credential_id))
             .unwrap_or(Vec::new(env));
         trail.push_back(entry);
         env.storage()
             .instance()
-            .set(&DataKey3::RevocationAuditTrail(credential_id), &trail);
+            .set(&DataKey2::RevocationAuditTrail(credential_id), &trail);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -2582,7 +2685,7 @@ impl QuorumProofContract {
     fn default_revocation_time_lock(env: &Env) -> u64 {
         env.storage()
             .instance()
-            .get(&DataKey2::RevocationTimeLockSeconds)
+            .get(&DataKey5::RevocationTimeLockSeconds)
             .unwrap_or(DEFAULT_REVOCATION_TIME_LOCK_SECONDS)
     }
 
@@ -2593,7 +2696,7 @@ impl QuorumProofContract {
         let delegated = env
             .storage()
             .instance()
-            .get::<DataKey2, bool>(&DataKey2::RevocationAgent(
+            .get(&DataKey5::RevocationAgent(
                 credential.issuer.clone(),
                 actor.clone(),
             ))
@@ -2623,12 +2726,12 @@ impl QuorumProofContract {
         let mut trail: Vec<RegistryRevocationAuditEntry> = env
             .storage()
             .instance()
-            .get(&DataKey2::RevocationRegistryAuditTrail(request.id))
+            .get(&DataKey5::RevocationRegistryAuditTrail(request.id))
             .unwrap_or(Vec::new(env));
         trail.push_back(entry);
         env.storage()
             .instance()
-            .set(&DataKey2::RevocationRegistryAuditTrail(request.id), &trail);
+            .set(&DataKey5::RevocationRegistryAuditTrail(request.id), &trail);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -2637,7 +2740,7 @@ impl QuorumProofContract {
     fn get_revocation_metrics_internal(env: &Env) -> RevocationMetrics {
         env.storage()
             .instance()
-            .get(&DataKey2::RevocationMetrics)
+            .get(&DataKey5::RevocationMetrics)
             .unwrap_or(RevocationMetrics {
                 request_count: 0,
                 finalized_count: 0,
@@ -2650,7 +2753,7 @@ impl QuorumProofContract {
     fn set_revocation_metrics_internal(env: &Env, metrics: &RevocationMetrics) {
         env.storage()
             .instance()
-            .set(&DataKey2::RevocationMetrics, metrics);
+            .set(&DataKey5::RevocationMetrics, metrics);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -2660,12 +2763,12 @@ impl QuorumProofContract {
         let next = env
             .storage()
             .instance()
-            .get(&DataKey2::RevocationRegistryRequestCount)
+            .get(&DataKey5::RevocationRegistryRequestCount)
             .unwrap_or(0u64)
             .saturating_add(1);
         env.storage()
             .instance()
-            .set(&DataKey2::RevocationRegistryRequestCount, &next);
+            .set(&DataKey5::RevocationRegistryRequestCount, &next);
         next
     }
 
@@ -2686,12 +2789,12 @@ impl QuorumProofContract {
         if let Some(existing_id) = env
             .storage()
             .instance()
-            .get::<DataKey2, u64>(&DataKey2::CredentialRevocationRegistryRequest(credential_id))
+            .get(&DataKey5::CredRevRegistryRequest(credential_id))
         {
             let existing: RevocationRequest = env
                 .storage()
                 .instance()
-                .get(&DataKey2::RevocationRegistryRequest(existing_id))
+                .get(&DataKey5::RevocationRegistryRequest(existing_id))
                 .unwrap_or_else(|| panic_with_error!(env, ContractError::RevocationRequestNotFound));
             if existing.status == RegistryRevocationStatus::Pending {
                 panic_with_error!(env, ContractError::RevocationNotPending);
@@ -2718,9 +2821,9 @@ impl QuorumProofContract {
         };
         env.storage()
             .instance()
-            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+            .set(&DataKey5::RevocationRegistryRequest(request.id), &request);
         env.storage().instance().set(
-            &DataKey2::CredentialRevocationRegistryRequest(credential_id),
+            &DataKey5::CredRevRegistryRequest(credential_id),
             &request.id,
         );
         let mut metrics = Self::get_revocation_metrics_internal(env);
@@ -2744,7 +2847,7 @@ impl QuorumProofContract {
         let mut request: RevocationRequest = env
             .storage()
             .instance()
-            .get(&DataKey2::RevocationRegistryRequest(request_id))
+            .get(&DataKey5::RevocationRegistryRequest(request_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::RevocationRequestNotFound));
         if request.status != RegistryRevocationStatus::Pending {
             panic_with_error!(env, ContractError::InvalidRevocationState);
@@ -2763,7 +2866,7 @@ impl QuorumProofContract {
         request.finalized_at = Some(now);
         env.storage()
             .instance()
-            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+            .set(&DataKey5::RevocationRegistryRequest(request.id), &request);
         Self::append_registry_revocation_audit(
             env,
             &request,
@@ -2779,7 +2882,7 @@ impl QuorumProofContract {
         request.activated_at = Some(now);
         env.storage()
             .instance()
-            .set(&DataKey2::RevocationRegistryRequest(request.id), &request);
+            .set(&DataKey5::RevocationRegistryRequest(request.id), &request);
         Self::append_registry_revocation_audit(
             env,
             &request,
@@ -3226,7 +3329,7 @@ impl QuorumProofContract {
     fn threshold_type(env: &Env, slice_id: u64) -> ThresholdType {
         env.storage()
             .instance()
-            .get(&DataKey2::SliceThresholdType(slice_id))
+            .get(&DataKey5::SliceThresholdType(slice_id))
             .unwrap_or(ThresholdType::Absolute)
     }
 
@@ -3305,7 +3408,7 @@ impl QuorumProofContract {
         env.storage().instance().set(&DataKey::SliceCount, &id);
         env.storage()
             .instance()
-            .set(&DataKey2::SliceThresholdType(id), &threshold_type);
+            .set(&DataKey5::SliceThresholdType(id), &threshold_type);
         env.storage()
             .instance()
             .set(&DataKey2::AttestorSet(id), &seen);
@@ -3363,12 +3466,12 @@ impl QuorumProofContract {
         let mut ids: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey3::SubjectCredentialIndex(subject.clone()))
+            .get(&DataKey5::SubjectCredentialIndex(subject.clone()))
             .unwrap_or(Vec::new(env));
         ids.push_back(credential_id);
         env.storage()
             .instance()
-            .set(&DataKey3::SubjectCredentialIndex(subject), &ids);
+            .set(&DataKey5::SubjectCredentialIndex(subject), &ids);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -3378,7 +3481,7 @@ impl QuorumProofContract {
         let ids: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey3::SubjectCredentialIndex(subject.clone()))
+            .get(&DataKey5::SubjectCredentialIndex(subject.clone()))
             .unwrap_or(Vec::new(env));
         let mut retained: Vec<u64> = Vec::new(env);
         for id in ids.iter() {
@@ -3388,7 +3491,7 @@ impl QuorumProofContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey3::SubjectCredentialIndex(subject), &retained);
+            .set(&DataKey5::SubjectCredentialIndex(subject), &retained);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -3471,7 +3574,7 @@ impl QuorumProofContract {
     fn is_credential_type_transferable(env: &Env, credential_type: u32) -> bool {
         env.storage()
             .instance()
-            .get::<DataKey2, TransferRestriction>(&DataKey2::TransferRestriction(credential_type))
+            .get::<_, TransferRestriction>(&DataKey2::TransferRestriction(credential_type))
             .map(|r| r.is_transferable)
             .unwrap_or(true) // Default to transferable if not configured
     }
@@ -3502,7 +3605,7 @@ impl QuorumProofContract {
             current = env
                 .storage()
                 .instance()
-                .get::<DataKey2, Option<u32>>(&DataKey2::CredentialTypeParent(curr_type))
+                .get(&DataKey2::CredentialTypeParent(curr_type))
                 .flatten();
         }
         false
@@ -4276,7 +4379,7 @@ impl QuorumProofContract {
         let all_creds: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey3::SubjectCredentialIndex(subject.clone()))
+            .get(&DataKey5::SubjectCredentialIndex(subject.clone()))
             .unwrap_or_else(|| {
                 // Fallback to legacy SubjectCredentials for backwards compatibility
                 env.storage()
@@ -4409,8 +4512,8 @@ impl QuorumProofContract {
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         assert!(!credential.revoked, "credential already revoked");
-        if let Some(existing) = env.storage().instance().get::<DataKey3, HolderRevocationRequest>(
-            &DataKey3::RevocationRequest(credential_id),
+        if let Some(existing) = env.storage().instance().get::<DataKey5, HolderRevocationRequest>(
+            &DataKey5::RevocationRequest(credential_id),
         ) {
             assert!(
                 existing.status != RevocationStatus::Pending,
@@ -4426,7 +4529,7 @@ impl QuorumProofContract {
         };
         env.storage()
             .instance()
-            .set(&DataKey3::RevocationRequest(credential_id), &request);
+            .set(&DataKey5::RevocationRequest(credential_id), &request);
         Self::append_revocation_audit(
             &env,
             credential_id,
@@ -4447,7 +4550,7 @@ impl QuorumProofContract {
         let mut request: HolderRevocationRequest = env
             .storage()
             .instance()
-            .get(&DataKey3::RevocationRequest(credential_id))
+            .get(&DataKey5::RevocationRequest(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
         if request.status != RevocationStatus::Pending {
             panic_with_error!(&env, ContractError::RevocationNotPending);
@@ -4455,7 +4558,7 @@ impl QuorumProofContract {
         request.status = RevocationStatus::Approved;
         env.storage()
             .instance()
-            .set(&DataKey3::RevocationRequest(credential_id), &request);
+            .set(&DataKey5::RevocationRequest(credential_id), &request);
         Self::append_revocation_audit(
             &env,
             credential_id,
@@ -4481,7 +4584,7 @@ impl QuorumProofContract {
         let mut request: HolderRevocationRequest = env
             .storage()
             .instance()
-            .get(&DataKey3::RevocationRequest(credential_id))
+            .get(&DataKey5::RevocationRequest(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
         if request.status != RevocationStatus::Pending {
             panic_with_error!(&env, ContractError::RevocationNotPending);
@@ -4489,7 +4592,7 @@ impl QuorumProofContract {
         request.status = RevocationStatus::Denied;
         env.storage()
             .instance()
-            .set(&DataKey3::RevocationRequest(credential_id), &request);
+            .set(&DataKey5::RevocationRequest(credential_id), &request);
         Self::append_revocation_audit(
             &env,
             credential_id,
@@ -4509,7 +4612,7 @@ impl QuorumProofContract {
     ) -> Option<HolderRevocationRequest> {
         env.storage()
             .instance()
-            .get(&DataKey3::RevocationRequest(credential_id))
+            .get(&DataKey5::RevocationRequest(credential_id))
     }
 
     /// Return the full revocation audit trail for a credential.
@@ -4519,7 +4622,7 @@ impl QuorumProofContract {
     ) -> Vec<RevocationAuditEntry> {
         env.storage()
             .instance()
-            .get(&DataKey3::RevocationAuditTrail(credential_id))
+            .get(&DataKey2::RevocationAuditTrail(credential_id))
             .unwrap_or(Vec::new(&env))
     }
 
@@ -4559,7 +4662,7 @@ impl QuorumProofContract {
 
         env.storage()
             .instance()
-            .set(&DataKey2::IssuerRevocationRequest(credential_id), &request);
+            .set(&DataKey5::IssuerRevocationRequest(credential_id), &request);
 
         Self::append_revocation_audit(
             &env,
@@ -4581,7 +4684,7 @@ impl QuorumProofContract {
         let mut req: IssuerRevocationRequest = env
             .storage()
             .instance()
-            .get(&DataKey2::IssuerRevocationRequest(credential_id))
+            .get(&DataKey5::IssuerRevocationRequest(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
         if req.cancelled {
             panic_with_error!(&env, ContractError::RevocationNotPending);
@@ -4613,7 +4716,7 @@ impl QuorumProofContract {
 
         env.storage()
             .instance()
-            .set(&DataKey2::IssuerRevocationRequest(credential_id), &req);
+            .set(&DataKey5::IssuerRevocationRequest(credential_id), &req);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -4627,7 +4730,7 @@ impl QuorumProofContract {
         let mut req: IssuerRevocationRequest = env
             .storage()
             .instance()
-            .get(&DataKey2::IssuerRevocationRequest(credential_id))
+            .get(&DataKey5::IssuerRevocationRequest(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::RevocationRequestNotFound));
         if req.cancelled {
             panic_with_error!(&env, ContractError::RevocationNotPending);
@@ -4639,10 +4742,10 @@ impl QuorumProofContract {
             if let Some(mut agents) = env
                 .storage()
                 .instance()
-                .get(&DataKey2::IssuerRevocationAgents(req.issuer.clone()))
+                .get::<_, Vec<Address>>(&DataKey5::IssuerRevocationAgents(req.issuer.clone()))
             {
                 for a in agents.iter() {
-                    if a == &caller {
+                    if a == caller {
                         allowed = true;
                         break;
                     }
@@ -4655,7 +4758,7 @@ impl QuorumProofContract {
         req.cancelled = true;
         env.storage()
             .instance()
-            .set(&DataKey2::IssuerRevocationRequest(credential_id), &req);
+            .set(&DataKey5::IssuerRevocationRequest(credential_id), &req);
         Self::append_revocation_audit(
             &env,
             credential_id,
@@ -4676,18 +4779,18 @@ impl QuorumProofContract {
         let mut agents: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .get(&DataKey5::IssuerRevocationAgents(issuer.clone()))
             .unwrap_or(Vec::new(&env));
         // Avoid duplicates
         for a in agents.iter() {
-            if a == &agent {
+            if a == agent {
                 return;
             }
         }
         agents.push_back(agent.clone());
         env.storage()
             .instance()
-            .set(&DataKey2::IssuerRevocationAgents(issuer.clone()), &agents);
+            .set(&DataKey5::IssuerRevocationAgents(issuer.clone()), &agents);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -4700,17 +4803,17 @@ impl QuorumProofContract {
         let mut agents: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey2::IssuerRevocationAgents(issuer.clone()))
+            .get(&DataKey5::IssuerRevocationAgents(issuer.clone()))
             .unwrap_or(Vec::new(&env));
         let mut retained: Vec<Address> = Vec::new(&env);
         for a in agents.iter() {
-            if a != &agent {
+            if a != agent {
                 retained.push_back(a.clone());
             }
         }
         env.storage()
             .instance()
-            .set(&DataKey2::IssuerRevocationAgents(issuer.clone()), &retained);
+            .set(&DataKey5::IssuerRevocationAgents(issuer.clone()), &retained);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -4721,16 +4824,16 @@ impl QuorumProofContract {
         issuer.require_auth();
         Self::require_not_paused(&env);
         let count = credential_ids.len();
-        assert!(count <= MAX_BATCH_SIZE as usize, "batch too large");
+        assert!(count <= MAX_BATCH_SIZE, "batch too large");
         for id in credential_ids.iter() {
             let mut credential: Credential = env
                 .storage()
                 .instance()
-                .get(&DataKey::Credential(*id))
+                .get(&DataKey::Credential(id))
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
             assert!(issuer == credential.issuer, "only issuer can revoke");
             if !credential.revoked {
-                Self::mark_credential_revoked(&env, *id, &mut credential, issuer.clone());
+                Self::mark_credential_revoked(&env, id, &mut credential, issuer.clone());
             }
         }
         env.storage()
@@ -5197,7 +5300,7 @@ impl QuorumProofContract {
     pub fn get_slice_threshold_audit(env: Env, slice_id: u64) -> Vec<ThresholdAuditEntry> {
         env.storage()
             .instance()
-            .get(&DataKey3::ThresholdAuditLog(slice_id))
+            .get(&DataKey5::ThresholdAuditLog(slice_id))
             .unwrap_or(Vec::new(&env))
     }
 
@@ -5235,7 +5338,7 @@ impl QuorumProofContract {
     pub fn get_weight_audit(env: Env, slice_id: u64) -> Vec<WeightAuditEntry> {
         env.storage()
             .instance()
-            .get(&DataKey2::WeightAuditLog(slice_id))
+            .get(&DataKey5::WeightAuditLog(slice_id))
             .unwrap_or(Vec::new(&env))
     }
 
@@ -5393,12 +5496,12 @@ impl QuorumProofContract {
         let mut audit: Vec<WeightAuditEntry> = env
             .storage()
             .instance()
-            .get(&DataKey2::WeightAuditLog(slice_id))
+            .get(&DataKey5::WeightAuditLog(slice_id))
             .unwrap_or(Vec::new(&env));
         audit.push_back(entry.clone());
         env.storage()
             .instance()
-            .set(&DataKey2::WeightAuditLog(slice_id), &audit);
+            .set(&DataKey5::WeightAuditLog(slice_id), &audit);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -5442,7 +5545,7 @@ impl QuorumProofContract {
             .instance()
             .set(&DataKey::Slice(slice_id), &slice);
         env.storage().instance().set(
-            &DataKey2::SliceThresholdType(slice_id),
+            &DataKey5::SliceThresholdType(slice_id),
             &ThresholdType::Absolute,
         );
         env.storage()
@@ -5461,12 +5564,12 @@ impl QuorumProofContract {
         let mut audit_log: Vec<ThresholdAuditEntry> = env
             .storage()
             .instance()
-            .get(&DataKey3::ThresholdAuditLog(slice_id))
+            .get(&DataKey5::ThresholdAuditLog(slice_id))
             .unwrap_or(Vec::new(&env));
         audit_log.push_back(audit_entry.clone());
         env.storage()
             .instance()
-            .set(&DataKey3::ThresholdAuditLog(slice_id), &audit_log);
+            .set(&DataKey5::ThresholdAuditLog(slice_id), &audit_log);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -5507,7 +5610,7 @@ impl QuorumProofContract {
             .instance()
             .set(&DataKey::Slice(slice_id), &slice);
         env.storage().instance().set(
-            &DataKey2::SliceThresholdType(slice_id),
+            &DataKey5::SliceThresholdType(slice_id),
             &ThresholdType::Percentage,
         );
 
@@ -5521,12 +5624,12 @@ impl QuorumProofContract {
         let mut audit_log: Vec<ThresholdAuditEntry> = env
             .storage()
             .instance()
-            .get(&DataKey3::ThresholdAuditLog(slice_id))
+            .get(&DataKey5::ThresholdAuditLog(slice_id))
             .unwrap_or(Vec::new(&env));
         audit_log.push_back(audit_entry.clone());
         env.storage()
             .instance()
-            .set(&DataKey3::ThresholdAuditLog(slice_id), &audit_log);
+            .set(&DataKey5::ThresholdAuditLog(slice_id), &audit_log);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -5983,7 +6086,7 @@ impl QuorumProofContract {
             .and_then(|position| slice.weights.get(position as u32))
             .expect("attestor weight missing");
         env.storage().instance().set(
-            &DataKey2::AttestationWeight(credential_id, slice_id, attestor.clone()),
+            &DataKey5::AttestationWeight(credential_id, slice_id, attestor.clone()),
             &attestation_weight,
         );
         env.storage()
@@ -6295,7 +6398,7 @@ impl QuorumProofContract {
                 let grace_period = env
                     .storage()
                     .instance()
-                    .get::<DataKey2, u64>(&DataKey2::GracePeriod(credential.credential_type))
+                    .get(&DataKey2::GracePeriod(credential.credential_type))
                     .unwrap_or(0u64);
                 let grace_end = expires_at + grace_period;
                 return now >= grace_end;
@@ -6335,7 +6438,7 @@ impl QuorumProofContract {
             let grace_period = env
                 .storage()
                 .instance()
-                .get::<DataKey2, u64>(&DataKey2::GracePeriod(credential.credential_type))
+                .get(&DataKey2::GracePeriod(credential.credential_type))
                 .unwrap_or(0u64);
             let grace_end = expires_at + grace_period;
             assert!(now < grace_end, "grace period has ended, cannot renew");
@@ -6414,7 +6517,7 @@ impl QuorumProofContract {
     pub fn is_holder_whitelisted(env: Env, issuer: Address, holder: Address) -> bool {
         env.storage()
             .instance()
-            .get::<DataKey2, bool>(&DataKey2::HolderWhitelist(issuer, holder))
+            .get(&DataKey2::HolderWhitelist(issuer, holder))
             .unwrap_or(false)
     }
 
@@ -6736,15 +6839,15 @@ impl QuorumProofContract {
                     continue;
                 }
             }
-            let captured_weight = env.storage().instance().get::<DataKey2, u32>(
-                &DataKey2::AttestationWeight(credential_id, slice_id, rec.attestor.clone()),
+            let captured_weight = env.storage().instance().get(
+                &DataKey5::AttestationWeight(credential_id, slice_id, rec.attestor.clone()),
             );
             // A captured value also proves that the attestation was submitted for this slice.
             // Only slices created before snapshot support use the legacy membership lookup.
             let is_legacy_slice = !env
                 .storage()
                 .instance()
-                .has(&DataKey2::SliceThresholdType(slice_id));
+                .has(&DataKey5::SliceThresholdType(slice_id));
             let weight = captured_weight.or_else(|| {
                 if is_legacy_slice {
                     slice
@@ -7297,7 +7400,7 @@ impl QuorumProofContract {
         if let Some(delegation) = env
             .storage()
             .instance()
-            .get::<DataKey2, Delegation>(&DataKey2::Delegation(credential_id, caller.clone()))
+            .get::<_, Delegation>(&DataKey2::Delegation(credential_id, caller.clone()))
         {
             // Check if delegation hasn't expired (current ledger time < expiry)
             if env.ledger().timestamp() < delegation.expiry {
@@ -7446,7 +7549,7 @@ impl QuorumProofContract {
     pub fn get_credential_type_parent(env: Env, type_id: u32) -> Option<u32> {
         env.storage()
             .instance()
-            .get::<DataKey2, Option<u32>>(&DataKey2::CredentialTypeParent(type_id))
+            .get(&DataKey2::CredentialTypeParent(type_id))
             .flatten()
     }
 
@@ -17269,3 +17372,5 @@ mod proptest_credentials;
 
 #[path = "weighted_voting_tests.rs"]
 mod weighted_voting_tests;
+
+mod circuit_breaker;
