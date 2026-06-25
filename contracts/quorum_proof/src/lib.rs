@@ -72,6 +72,8 @@ pub struct CredentialIssuedEventData {
 pub struct RevokeEventData {
     pub credential_id: u64,
     pub subject: Address,
+    pub issuer: Address,
+    pub revoked_at: u64,
 }
 
 #[contracttype]
@@ -3023,6 +3025,8 @@ impl QuorumProofContract {
         let event_data = RevokeEventData {
             credential_id,
             subject: credential.subject.clone(),
+            issuer: revoker.clone(),
+            revoked_at: env.ledger().timestamp(),
         };
         let topic = String::from_str(env, TOPIC_REVOKE);
         let mut topics: Vec<String> = Vec::new(env);
