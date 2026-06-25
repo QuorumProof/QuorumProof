@@ -4,9 +4,29 @@ import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
+import { createRateLimiter } from './middleware/rateLimiter.js';
+import { createDDoSProtection } from './middleware/ddosProtection.js';
+import { createWsServer } from './ws/server.js';
+import { getConnectionCount, getSubscriberCount } from './ws/subscriptions.js';
+import { getWsMetrics } from './ws/metrics.js';
+import { broadcastEvent } from './ws/server.js';
 
 const app = express();
-app.use(express.json());
+
+const ddosProtection = createDDoSProtection();
+app.use(ddosProtection);
+
+app.use(express.json({ limit: '100kb' }));
+
+const apiRateLimiter = createRateLimiter({
+  windowMs: 60000,
+  max: 100,
+  name: 'api',
+  backoffMultiplier: 2,
+  maxViolations: 5,
+});
+
+app.use('/api', apiRateLimiter);
 
 app.use((req, _res, next) => {
   console.log(JSON.stringify({

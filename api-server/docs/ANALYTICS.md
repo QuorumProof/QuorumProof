@@ -246,10 +246,19 @@ Anomaly detection uses Z-score statistical analysis:
 
 ## Rate Limiting
 
-- **Window**: 60 seconds
-- **Max Requests**: 500 per client per window
-- **Client ID**: Based on IP address
-- **Response**: 429 status code when limit exceeded
+Rate limiting is applied globally via centralized middleware. All `/api/*` routes are protected.
+
+- **Window**: 60 seconds per window
+- **General Limit**: 100 requests per window per client
+- **Client Identification**: Uses `X-Stellar-Address` header for authenticated users, falls back to IP address
+- **Response Headers**:
+  - `X-RateLimit-Limit`: Maximum requests allowed in the window
+  - `X-RateLimit-Remaining`: Requests remaining in the current window
+  - `X-RateLimit-Reset`: Unix timestamp when the window resets
+  - `Retry-After`: Seconds to wait before retrying (when rate limited)
+- **Response**: 429 status code with JSON error body when limit exceeded
+- **Exponential Backoff**: Repeated violations double the wait time per offense (up to `maxViolations` threshold, after which the client is permanently blocked)
+- **DDoS Protection**: Additional layer with request body size limits (100 KB), burst detection (20 requests per 2s window per IP), and concurrent request limits (20 per IP)
 
 ## GDPR Compliance
 

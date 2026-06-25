@@ -13,41 +13,10 @@ type SorobanClient = {
   addressVal: (a: string) => unknown;
 };
 
-const RATE_LIMIT_WINDOW = 60000; // 1 minute
-const RATE_LIMIT_MAX_REQUESTS = 500; // Increased for test compatibility
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
-
-function checkRateLimit(clientId: string): boolean {
-  const now = Date.now();
-  const entry = rateLimitMap.get(clientId);
-
-  if (!entry || now > entry.resetTime) {
-    rateLimitMap.set(clientId, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
-    return true;
-  }
-
-  if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
-    return false;
-  }
-
-  entry.count++;
-  return true;
-}
-
-function getClientId(req: Request): string {
-  return req.ip || 'unknown';
-}
-
 export function createAnalyticsRouter(soroban: SorobanClient) {
   const router = Router();
 
   router.post('/events', (req: Request, res: Response) => {
-    const clientId = getClientId(req);
-    if (!checkRateLimit(clientId)) {
-      res.status(429).json({ error: 'Rate limit exceeded' });
-      return;
-    }
-
     const event: CredentialEvent = req.body;
 
     if (!event.type || !event.credential_id || !event.timestamp) {
@@ -65,12 +34,6 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
   });
 
   router.get('/metrics', (req: Request, res: Response) => {
-    const clientId = getClientId(req);
-    if (!checkRateLimit(clientId)) {
-      res.status(429).json({ error: 'Rate limit exceeded' });
-      return;
-    }
-
     const startDate = (req.query.start_date as string) || getDateDaysAgo(90);
     const endDate = (req.query.end_date as string) || new Date().toISOString().split('T')[0];
 
@@ -93,12 +56,6 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
   });
 
   router.get('/anomalies', (req: Request, res: Response) => {
-    const clientId = getClientId(req);
-    if (!checkRateLimit(clientId)) {
-      res.status(429).json({ error: 'Rate limit exceeded' });
-      return;
-    }
-
     const startDate = (req.query.start_date as string) || getDateDaysAgo(30);
     const endDate = (req.query.end_date as string) || new Date().toISOString().split('T')[0];
 
@@ -126,12 +83,6 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
   });
 
   router.get('/events', (req: Request, res: Response) => {
-    const clientId = getClientId(req);
-    if (!checkRateLimit(clientId)) {
-      res.status(429).json({ error: 'Rate limit exceeded' });
-      return;
-    }
-
     const startDateParam = (req.query.start_date as string) || getDateDaysAgo(7);
     const endDateParam = (req.query.end_date as string) || new Date().toISOString();
     const eventType = req.query.type as string | undefined;
@@ -161,12 +112,6 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
   });
 
   router.get('/summary', (req: Request, res: Response) => {
-    const clientId = getClientId(req);
-    if (!checkRateLimit(clientId)) {
-      res.status(429).json({ error: 'Rate limit exceeded' });
-      return;
-    }
-
     const summary = metricsStore.getSummary();
     res.json({
       ...summary,
