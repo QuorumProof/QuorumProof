@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, useLocation, Navigate } from 'react-route
 import { AppLayout } from './components/AppLayout';
 import { WalletGuard } from './components/WalletGuard';
 import { useWallet } from './hooks';
+import { useServiceWorker } from './hooks/useServiceWorker';
 import './styles.css';
 import './index.css';
 
@@ -39,33 +40,49 @@ const NotFound = () => (
 function AppContent() {
   const location = useLocation();
   const { address, connect, network } = useWallet();
+  const { isOnline } = useServiceWorker();
 
   return (
-    <AppLayout
-      currentPath={location.pathname}
-      walletAddress={address}
-      onConnectWallet={connect}
-      network={network}
-    >
-      <Suspense fallback={<LoadingFallback />}>
-        <Routes>
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
-          <Route path="/dashboard" element={<WalletGuard><Dashboard /></WalletGuard>} />
-          <Route path="/verify" element={<Verify />} />
-          <Route path="/verifier" element={<VerifierUI />} />
-          <Route path="/verifier/dashboard" element={<VerificationDashboard />} />
-          <Route path="/issuer" element={<WalletGuard><IssuerManagement /></WalletGuard>} />
-          <Route path="/search" element={<CredentialSearch />} />
-          <Route path="/help" element={<Help />} />
-          <Route path="/slice/new" element={<WalletGuard><QuorumSlice /></WalletGuard>} />
-          <Route path="/credential/issue" element={<WalletGuard><IssueCredential /></WalletGuard>} />
-          <Route path="/credential/:id" element={<CredentialDetail />} />
-          <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
-          <Route path="/compare" element={<CredentialCompare />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </Suspense>
-    </AppLayout>
+    <>
+      {!isOnline && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+            background: '#b45309', color: '#fff',
+            textAlign: 'center', padding: '8px 16px', fontSize: '14px',
+          }}
+        >
+          You are offline. Read-only data may be available from cache; live contract calls will fail until reconnected.
+        </div>
+      )}
+      <AppLayout
+        currentPath={location.pathname}
+        walletAddress={address}
+        onConnectWallet={connect}
+        network={network}
+      >
+        <Suspense fallback={<LoadingFallback />}>
+          <Routes>
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={<WalletGuard><Dashboard /></WalletGuard>} />
+            <Route path="/verify" element={<Verify />} />
+            <Route path="/verifier" element={<VerifierUI />} />
+            <Route path="/verifier/dashboard" element={<VerificationDashboard />} />
+            <Route path="/issuer" element={<WalletGuard><IssuerManagement /></WalletGuard>} />
+            <Route path="/search" element={<CredentialSearch />} />
+            <Route path="/help" element={<Help />} />
+            <Route path="/slice/new" element={<WalletGuard><QuorumSlice /></WalletGuard>} />
+            <Route path="/credential/issue" element={<WalletGuard><IssueCredential /></WalletGuard>} />
+            <Route path="/credential/:id" element={<CredentialDetail />} />
+            <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
+            <Route path="/compare" element={<CredentialCompare />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </Suspense>
+      </AppLayout>
+    </>
   );
 }
 
