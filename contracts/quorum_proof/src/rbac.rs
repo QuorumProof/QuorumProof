@@ -1,4 +1,4 @@
-use crate::{ContractError, DataKey4, EXTENDED_TTL, STANDARD_TTL};
+use crate::{ContractError, DataKey6, EXTENDED_TTL, STANDARD_TTL};
 use soroban_sdk::{contracttype, panic_with_error, Address, Env, String, Vec};
 
 #[contracttype]
@@ -53,7 +53,7 @@ pub fn has_role(env: &Env, address: &Address, role: Role) -> bool {
     if let Some(assignment) = env
         .storage()
         .instance()
-        .get::<_, RoleAssignment>(&DataKey4::RoleAssignment(address.clone()))
+        .get::<_, RoleAssignment>(&DataKey6::RoleAssignment(address.clone()))
     {
         if assignment.role == role {
             if assignment.expires_at == 0 || env.ledger().timestamp() < assignment.expires_at {
@@ -64,7 +64,7 @@ pub fn has_role(env: &Env, address: &Address, role: Role) -> bool {
     if let Some(delegation) = env
         .storage()
         .instance()
-        .get::<_, RoleDelegation>(&DataKey4::RoleDelegation(address.clone()))
+        .get::<_, RoleDelegation>(&DataKey6::RoleDelegation(address.clone()))
     {
         if delegation.role == role {
             if delegation.expires_at == 0 || env.ledger().timestamp() < delegation.expires_at {
@@ -107,7 +107,7 @@ pub fn assign_role(
 
     env.storage()
         .instance()
-        .set(&DataKey4::RoleAssignment(target.clone()), &assignment);
+        .set(&DataKey6::RoleAssignment(target.clone()), &assignment);
     env.storage()
         .instance()
         .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -122,12 +122,12 @@ pub fn assign_role(
     let mut audit_log: Vec<RoleAuditEntry> = env
         .storage()
         .instance()
-        .get(&DataKey4::RoleAuditLog)
+        .get(&DataKey6::RoleAuditLog)
         .unwrap_or(Vec::new(env));
     audit_log.push_back(entry);
     env.storage()
         .instance()
-        .set(&DataKey4::RoleAuditLog, &audit_log);
+        .set(&DataKey6::RoleAuditLog, &audit_log);
     env.storage()
         .instance()
         .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -156,13 +156,13 @@ pub fn revoke_role(env: &Env, admin: &Address, target: &Address) {
     let assignment: RoleAssignment = env
         .storage()
         .instance()
-        .get(&DataKey4::RoleAssignment(target.clone()))
+        .get(&DataKey6::RoleAssignment(target.clone()))
         .unwrap_or_else(|| panic_with_error!(env, ContractError::RoleNotFound));
     let role = assignment.role;
 
     env.storage()
         .instance()
-        .remove(&DataKey4::RoleAssignment(target.clone()));
+        .remove(&DataKey6::RoleAssignment(target.clone()));
 
     let now = env.ledger().timestamp();
     let entry = RoleAuditEntry {
@@ -175,12 +175,12 @@ pub fn revoke_role(env: &Env, admin: &Address, target: &Address) {
     let mut audit_log: Vec<RoleAuditEntry> = env
         .storage()
         .instance()
-        .get(&DataKey4::RoleAuditLog)
+        .get(&DataKey6::RoleAuditLog)
         .unwrap_or(Vec::new(env));
     audit_log.push_back(entry);
     env.storage()
         .instance()
-        .set(&DataKey4::RoleAuditLog, &audit_log);
+        .set(&DataKey6::RoleAuditLog, &audit_log);
     env.storage()
         .instance()
         .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -220,7 +220,7 @@ pub fn delegate_role(
     };
     env.storage()
         .instance()
-        .set(&DataKey4::RoleDelegation(delegatee.clone()), &delegation);
+        .set(&DataKey6::RoleDelegation(delegatee.clone()), &delegation);
     env.storage()
         .instance()
         .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -236,12 +236,12 @@ pub fn delegate_role(
     let mut audit_log: Vec<RoleAuditEntry> = env
         .storage()
         .instance()
-        .get(&DataKey4::RoleAuditLog)
+        .get(&DataKey6::RoleAuditLog)
         .unwrap_or(Vec::new(env));
     audit_log.push_back(entry);
     env.storage()
         .instance()
-        .set(&DataKey4::RoleAuditLog, &audit_log);
+        .set(&DataKey6::RoleAuditLog, &audit_log);
     env.storage()
         .instance()
         .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -270,7 +270,7 @@ pub fn revoke_delegation(env: &Env, delegator: &Address, delegatee: &Address) {
     let delegation: RoleDelegation = env
         .storage()
         .instance()
-        .get(&DataKey4::RoleDelegation(delegatee.clone()))
+        .get(&DataKey6::RoleDelegation(delegatee.clone()))
         .unwrap_or_else(|| panic_with_error!(env, ContractError::RoleDelegationNotFound));
 
     let is_admin = stored_admin == *delegator;
@@ -283,7 +283,7 @@ pub fn revoke_delegation(env: &Env, delegator: &Address, delegatee: &Address) {
     let role = delegation.role;
     env.storage()
         .instance()
-        .remove(&DataKey4::RoleDelegation(delegatee.clone()));
+        .remove(&DataKey6::RoleDelegation(delegatee.clone()));
 
     let now = env.ledger().timestamp();
     let entry = RoleAuditEntry {
@@ -296,12 +296,12 @@ pub fn revoke_delegation(env: &Env, delegator: &Address, delegatee: &Address) {
     let mut audit_log: Vec<RoleAuditEntry> = env
         .storage()
         .instance()
-        .get(&DataKey4::RoleAuditLog)
+        .get(&DataKey6::RoleAuditLog)
         .unwrap_or(Vec::new(env));
     audit_log.push_back(entry);
     env.storage()
         .instance()
-        .set(&DataKey4::RoleAuditLog, &audit_log);
+        .set(&DataKey6::RoleAuditLog, &audit_log);
     env.storage()
         .instance()
         .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -323,19 +323,19 @@ pub fn revoke_delegation(env: &Env, delegator: &Address, delegatee: &Address) {
 pub fn get_role_assignment(env: &Env, address: &Address) -> Option<RoleAssignment> {
     env.storage()
         .instance()
-        .get::<_, RoleAssignment>(&DataKey4::RoleAssignment(address.clone()))
+        .get::<_, RoleAssignment>(&DataKey6::RoleAssignment(address.clone()))
 }
 
 pub fn get_role_delegation(env: &Env, address: &Address) -> Option<RoleDelegation> {
     env.storage()
         .instance()
-        .get::<_, RoleDelegation>(&DataKey4::RoleDelegation(address.clone()))
+        .get::<_, RoleDelegation>(&DataKey6::RoleDelegation(address.clone()))
 }
 
 pub fn get_audit_log(env: &Env) -> Vec<RoleAuditEntry> {
     env.storage()
         .instance()
-        .get(&DataKey4::RoleAuditLog)
+        .get(&DataKey6::RoleAuditLog)
         .unwrap_or(Vec::new(env))
 }
 
