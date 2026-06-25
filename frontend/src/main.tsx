@@ -6,6 +6,9 @@ import { WalletProvider } from './context/WalletContext.tsx'
 import { ToastProvider } from './context/ToastContext.tsx'
 import { ToastContainer } from './components/ToastContainer.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
+import { initSentry } from './lib/sentry.ts'
+
+initSentry()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
