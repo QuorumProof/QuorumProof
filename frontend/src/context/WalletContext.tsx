@@ -1,12 +1,8 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
-import {
-  isConnected,
-  isAllowed,
-  setAllowed,
-  getAddress,
-} from '@stellar/freighter-api';
 import { STELLAR_NETWORK } from '../config/env';
+import type { WalletType, WalletState as WalletStateType } from '../wallets/types';
+import { getWalletAdapter, detectAvailableWallets } from '../wallets/registry';
 
 interface WalletState {
   address: string | null;
@@ -17,7 +13,7 @@ interface WalletState {
   isInitializing: boolean;
   network: string;
   error: string | null;
-  connect: () => Promise<void>;
+  connect: (type?: WalletType) => Promise<void>;
   disconnect: () => void;
   switchWallet: (index: number) => void;
 }
@@ -75,6 +71,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
   const [hasFreighter, setHasFreighter] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [availableWallets, setAvailableWallets] = useState<WalletType[]>([]);
 
   const address = wallets.length > 0 ? wallets[activeIndex] ?? wallets[0] : null;
 
@@ -119,11 +116,14 @@ export function WalletProvider({ children }: WalletProviderProps) {
     init();
   }, []);
 
-  const connect = useCallback(async () => {
-    if (!hasFreighter) {
+  const connect = useCallback(async (type?: WalletType) => {
+    const walletToUse = type || (availableWallets.includes('freighter') ? 'freighter' : availableWallets[0]);
+
+    if (!walletToUse) {
       window.open('https://freighter.app', '_blank');
       return;
     }
+
     try {
       setError(null);
       await setAllowed();
@@ -143,9 +143,10 @@ export function WalletProvider({ children }: WalletProviderProps) {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect wallet';
       setError(errorMsg);
-      console.error('User rejected connection or error occurred:', err);
+      setWalletType(null);
+      console.error('Wallet connection error:', err);
     }
-  }, [hasFreighter]);
+  }, [availableWallets]);
 
   const disconnect = useCallback(() => {
     setWallets(prev => {

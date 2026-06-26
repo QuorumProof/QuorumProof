@@ -320,7 +320,56 @@ describe('Rate Limiter Middleware', () => {
     });
   });
 
-  describe('permanent block after maxViolations', () => {
+  describe('trusted client bypass', () => {
+  it('bypasses rate limiting for trusted IPs via env var', async () => {
+    process.env.TRUSTED_IPS = '127.0.0.1,10.0.0.1';
+    const limiter = createRateLimiter({ windowMs: 60000, max: 1, name: 'test', backoffMultiplier: 2, maxViolations: 3 });
+    const app = createTestApp(limiter);
+
+    const res1 = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.1');
+    expect(res1.status).toBe(200);
+
+    const res2 = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.1');
+    expect(res2.status).toBe(200);
+
+    const res3 = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.1');
+    expect(res3.status).toBe(200);
+
+    delete process.env.TRUSTED_IPS;
+  });
+
+  it('bypasses rate limiting for trusted header', async () => {
+    process.env.TRUSTED_HEADER_NAME = 'x-internal-request';
+    process.env.TRUSTED_HEADER_VALUE = 'internal-secret';
+    const limiter = createRateLimiter({ windowMs: 60000, max: 1, name: 'test', backoffMultiplier: 2, maxViolations: 3 });
+    const app = createTestApp(limiter);
+
+    const res1 = await request(app).get('/api/test').set('x-internal-request', 'internal-secret');
+    expect(res1.status).toBe(200);
+
+    const res2 = await request(app).get('/api/test').set('x-internal-request', 'internal-secret');
+    expect(res2.status).toBe(200);
+
+    delete process.env.TRUSTED_HEADER_NAME;
+    delete process.env.TRUSTED_HEADER_VALUE;
+  });
+
+  it('does not bypass for untrusted clients', async () => {
+    process.env.TRUSTED_IPS = '10.0.0.1';
+    const limiter = createRateLimiter({ windowMs: 60000, max: 1, name: 'test', backoffMultiplier: 2, maxViolations: 3 });
+    const app = createTestApp(limiter);
+
+    const res1 = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.2');
+    expect(res1.status).toBe(200);
+
+    const res2 = await request(app).get('/api/test').set('X-Forwarded-For', '10.0.0.2');
+    expect(res2.status).toBe(429);
+
+    delete process.env.TRUSTED_IPS;
+  });
+});
+
+describe('permanent block after maxViolations', () => {
     it('permanently blocks after maxViolations violations', async () => {
       const limiter = createRateLimiter({ windowMs: 50, max: 1, name: 'test', backoffMultiplier: 2, maxViolations: 3 });
       const app = createTestApp(limiter);
