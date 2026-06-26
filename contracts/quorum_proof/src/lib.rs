@@ -18741,6 +18741,9 @@ mod proptest_slices;
 #[path = "proptest_credentials.rs"]
 mod proptest_credentials;
 
+#[path = "proptest_state_transitions.rs"]
+mod proptest_state_transitions;
+
 #[path = "weighted_voting_tests.rs"]
 mod weighted_voting_tests;
 
