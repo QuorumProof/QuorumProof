@@ -2,6 +2,9 @@ import { Router, Request, Response } from 'express';
 import {
   metricsStore,
   CredentialEvent,
+  buildMetricsQuery,
+  buildEventLogQuery,
+  buildAnomalyQuery,
   type AnomalyDetectionResult,
   type DailyMetrics,
 } from '../services/metrics.js';
@@ -34,81 +37,82 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
   });
 
   router.get('/metrics', (req: Request, res: Response) => {
-    const startDate = (req.query.start_date as string) || getDateDaysAgo(90);
-    const endDate = (req.query.end_date as string) || new Date().toISOString().split('T')[0];
-
-    if (!isValidDateRange(startDate, endDate)) {
-      res.status(400).json({ error: 'Invalid date range or format' });
-      return;
+    try {
+      const query = buildMetricsQuery(
+        req.query.start_date as string | undefined,
+        req.query.end_date as string | undefined
+      );
+      const metrics = metricsStore.getMetrics(query);
+      res.json({
+        start_date: query.startDate,
+        end_date: query.endDate,
+        metrics,
+        summary: {
+          total_issued: metrics.reduce((sum, m) => sum + m.issued_count, 0),
+          total_attested: metrics.reduce((sum, m) => sum + m.attested_count, 0),
+          total_revoked: metrics.reduce((sum, m) => sum + m.revoked_count, 0),
+        },
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Invalid query parameters';
+      res.status(400).json({ error: message });
     }
-
-    const metrics = metricsStore.getMetrics(startDate, endDate);
-    res.json({
-      start_date: startDate,
-      end_date: endDate,
-      metrics,
-      summary: {
-        total_issued: metrics.reduce((sum, m) => sum + m.issued_count, 0),
-        total_attested: metrics.reduce((sum, m) => sum + m.attested_count, 0),
-        total_revoked: metrics.reduce((sum, m) => sum + m.revoked_count, 0),
-      },
-    });
   });
 
   router.get('/anomalies', (req: Request, res: Response) => {
-    const startDate = (req.query.start_date as string) || getDateDaysAgo(30);
-    const endDate = (req.query.end_date as string) || new Date().toISOString().split('T')[0];
+    try {
+      const threshold = req.query.threshold ? parseFloat(req.query.threshold as string) : undefined;
+      const query = buildAnomalyQuery(
+        req.query.start_date as string | undefined,
+        req.query.end_date as string | undefined,
+        threshold
+      );
+      const metrics = metricsStore.getMetrics({
+        startDate: query.startDate,
+        endDate: query.endDate,
+      });
+      const anomalies = metricsStore.detectAnomalies(metrics, query.threshold);
 
-    if (!isValidDateRange(startDate, endDate)) {
-      res.status(400).json({ error: 'Invalid date range or format' });
-      return;
+      const anomalousMetrics = metrics.filter((_, i) => anomalies[i]?.is_anomalous);
+
+      res.json({
+        start_date: query.startDate,
+        end_date: query.endDate,
+        threshold: query.threshold,
+        total_anomalies: anomalousMetrics.length,
+        anomalous_dates: anomalousMetrics.map((m, i) => ({
+          date: m.date,
+          issued_count: m.issued_count,
+          anomaly_score: m.anomaly_score,
+          anomaly_details: anomalies.find((a) => a.score === m.anomaly_score),
+        })),
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Invalid query parameters';
+      res.status(400).json({ error: message });
     }
-
-    const metrics = metricsStore.getMetrics(startDate, endDate);
-    const anomalies = metricsStore.detectAnomalies(metrics);
-
-    const anomalousMetrics = metrics.filter((_, i) => anomalies[i]?.is_anomalous);
-
-    res.json({
-      start_date: startDate,
-      end_date: endDate,
-      total_anomalies: anomalousMetrics.length,
-      anomalous_dates: anomalousMetrics.map((m, i) => ({
-        date: m.date,
-        issued_count: m.issued_count,
-        anomaly_score: m.anomaly_score,
-        anomaly_details: anomalies.find((a) => a.score === m.anomaly_score),
-      })),
-    });
   });
 
   router.get('/events', (req: Request, res: Response) => {
-    const startDateParam = (req.query.start_date as string) || getDateDaysAgo(7);
-    const endDateParam = (req.query.end_date as string) || new Date().toISOString();
-    const eventType = req.query.type as string | undefined;
+    try {
+      const query = buildEventLogQuery(
+        req.query.start_date as string | undefined,
+        req.query.end_date as string | undefined,
+        req.query.type as string | undefined
+      );
+      const events = metricsStore.getEventLog(query);
 
-    // Normalize dates to YYYY-MM-DD format
-    const startDate = normalizeDateInput(startDateParam);
-    const endDate = normalizeDateInput(endDateParam);
-
-    if (!startDate || !endDate || !isValidDateRange(startDate, endDate)) {
-      res.status(400).json({ error: 'Invalid date range or format' });
-      return;
+      res.json({
+        start_date: query.startDate,
+        end_date: query.endDate,
+        event_type_filter: query.type,
+        total_events: events.length,
+        events,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Invalid query parameters';
+      res.status(400).json({ error: message });
     }
-
-    let events = metricsStore.getEventLog(startDate, endDate);
-
-    if (eventType) {
-      events = events.filter((e) => e.type === eventType);
-    }
-
-    res.json({
-      start_date: startDate,
-      end_date: endDate,
-      event_type_filter: eventType,
-      total_events: events.length,
-      events,
-    });
   });
 
   router.get('/summary', (req: Request, res: Response) => {
@@ -128,45 +132,6 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
   });
 
   return router;
-}
-
-function getDateDaysAgo(days: number): string {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - days);
-  return date.toISOString().split('T')[0];
-}
-
-function normalizeDateInput(input: string): string | null {
-  // Handle ISO format (2026-06-22T00:00:00Z)
-  if (input.includes('T')) {
-    const date = new Date(input);
-    if (!isNaN(date.getTime())) {
-      return date.toISOString().split('T')[0];
-    }
-  }
-
-  // Handle YYYY-MM-DD format
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-  if (dateRegex.test(input)) {
-    const date = new Date(input);
-    if (!isNaN(date.getTime())) {
-      return input;
-    }
-  }
-
-  return null;
-}
-
-function isValidDateRange(startDate: string, endDate: string): boolean {
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-  if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
-    return false;
-  }
-
-  const start = new Date(startDate);
-  const end = new Date(endDate);
-
-  return !isNaN(start.getTime()) && !isNaN(end.getTime()) && start <= end;
 }
 
 // Default export using real soroban client
