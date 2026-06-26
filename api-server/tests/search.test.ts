@@ -215,19 +215,20 @@ describe('GET /api/credentials/search', () => {
     expect(res.body.data[0].created_at).toBe('2024-01-01T00:00:00Z');
   });
 
-  it('paginates results', async () => {
+  it('paginates results using cursor', async () => {
     mockSimulateCall
       .mockResolvedValueOnce(3n)
       .mockResolvedValueOnce(cred(1))
       .mockResolvedValueOnce(cred(2))
       .mockResolvedValueOnce(cred(3));
 
-    const res = await request(app).get('/api/credentials/search?page=2&page_size=2');
+    const res = await request(app).get('/api/credentials/search?limit=2');
     expect(res.status).toBe(200);
-    expect(res.body.data).toHaveLength(1);
-    expect(res.body.pagination.page).toBe(2);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.pagination.limit).toBe(2);
     expect(res.body.pagination.total).toBe(3);
-    expect(res.body.pagination.total_pages).toBe(2);
+    expect(res.body.pagination.has_more).toBe(true);
+    expect(res.body.pagination.next_cursor).toBeTruthy();
   });
 
   it('returns 400 for invalid sort_by', async () => {
@@ -235,13 +236,13 @@ describe('GET /api/credentials/search', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 for invalid page', async () => {
-    const res = await request(app).get('/api/credentials/search?page=0');
+  it('returns 400 for invalid limit', async () => {
+    const res = await request(app).get('/api/credentials/search?limit=0');
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 for page_size > 100', async () => {
-    const res = await request(app).get('/api/credentials/search?page_size=101');
+  it('returns 400 for limit > 100', async () => {
+    const res = await request(app).get('/api/credentials/search?limit=101');
     expect(res.status).toBe(400);
   });
 

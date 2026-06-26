@@ -74,8 +74,8 @@ export function createCredentialsRouter(soroban: SorobanClient) {
    *   - attestation_count_min, attestation_count_max: attestation count range
    *   - created_after, created_before: creation date range (ISO 8601)
    *   - expires_after, expires_before: expiration date range (ISO 8601)
-   *   - page: page number (default: 1)
-   *   - page_size: results per page (default: 20, max: 100)
+   *   - cursor: base64-encoded cursor for pagination (from previous response)
+   *   - limit: results per page (default: 20, max: 100)
    *   - sort_by: id|type|relevance|created_at|updated_at (default: id)
    *   - sort_order: asc|desc (default: asc)
    *   - facets: comma-separated facet names (default: issuer,credential_type,status,issuer_type)
@@ -100,22 +100,17 @@ export function createCredentialsRouter(soroban: SorobanClient) {
         created_before,
         expires_after,
         expires_before,
-        page: pageQ = '1',
-        page_size: pageSizeQ = '20',
+        cursor: cursorQ,
+        limit: limitQ = '20',
         sort_by: sortBy = 'id',
         sort_order: sortOrder = 'asc',
         facets: facetsQ,
       } = req.query as Record<string, string>;
 
-      // Validate pagination
-      const pageNum = parseInt(pageQ, 10);
-      const pageSizeNum = parseInt(pageSizeQ, 10);
-      if (isNaN(pageNum) || pageNum < 1) {
-        res.status(400).json({ error: 'page must be a positive integer >= 1' });
-        return;
-      }
-      if (isNaN(pageSizeNum) || pageSizeNum < 1 || pageSizeNum > 100) {
-        res.status(400).json({ error: 'page_size must be between 1 and 100' });
+      // Validate limit
+      const limitNum = parseInt(limitQ, 10);
+      if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+        res.status(400).json({ error: 'limit must be between 1 and 100' });
         return;
       }
 
@@ -136,8 +131,8 @@ export function createCredentialsRouter(soroban: SorobanClient) {
       // Build search options
       const options: SearchOptions = {
         query: q,
-        page: pageNum,
-        page_size: pageSizeNum,
+        cursor: cursorQ,
+        limit: limitNum,
         sort_by: (sortBy as any) || 'id',
         sort_order: (sortOrder as any) || 'asc',
         facets,

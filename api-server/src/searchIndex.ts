@@ -33,10 +33,11 @@ export type SearchResult = {
   data: CredentialRecord[];
   facets: SearchFacet[];
   pagination: {
-    page: number;
-    page_size: number;
+    cursor: string | null;
+    next_cursor: string | null;
+    limit: number;
     total: number;
-    total_pages: number;
+    has_more: boolean;
   };
   query_info?: {
     full_text_query?: string;
@@ -61,8 +62,8 @@ export type SearchFilters = {
 
 export type SearchOptions = SearchFilters & {
   query?: string;
-  page?: number;
-  page_size?: number;
+  cursor?: string;
+  limit?: number;
   sort_by?: 'id' | 'type' | 'relevance' | 'created_at' | 'updated_at';
   sort_order?: 'asc' | 'desc';
   facets?: string[];
@@ -144,23 +145,57 @@ export class SearchIndex {
   }
 
   /**
+   * Decode cursor to sort value for constant-time lookup
+   */
+  private decodeCursor(cursor: string | undefined): string | null {
+    if (!cursor) return null;
+    try {
+      const decoded = Buffer.from(cursor, 'base64').toString('utf-8');
+      return decoded;
+    } catch {
+      return null;
+    }
+  }
+
+  private encodeCursor(value: string): string {
+    return Buffer.from(value).toString('base64');
+  }
+
+  /**
+   * Get sort value string for a credential (used for cursor encoding)
+   */
+  private getSortValue(cred: CredentialRecord, sort_by: string): string {
+    switch (sort_by) {
+      case 'type':
+        return String(cred.credential_type).padStart(20, '0');
+      case 'created_at':
+        return cred.created_at || '';
+      case 'updated_at':
+        return cred.updated_at || '';
+      case 'relevance':
+        return String(0).padStart(20, '0');
+      case 'id':
+      default:
+        return String(cred.id).padStart(20, '0');
+    }
+  }
+
+  /**
    * Search credentials with filters and full-text search
    */
   search(options: SearchOptions): SearchResult {
     const startTime = Date.now();
     const {
       query,
-      page = 1,
-      page_size = 20,
+      cursor,
+      limit = 20,
       sort_by = 'id',
       sort_order = 'asc',
       facets = ['issuer', 'credential_type', 'status', 'issuer_type'],
       owner,
     } = options;
 
-    // Validate pagination
-    const pageNum = Math.max(1, page);
-    const pageSize = Math.min(100, Math.max(1, page_size));
+    const pageSize = Math.min(100, Math.max(1, limit));
 
     // Step 1: Apply filters
     let filtered = Array.from(this.credentials.values()).filter(cred => {
@@ -306,10 +341,30 @@ export class SearchIndex {
       }
     }
 
-    // Step 5: Paginate
+    // Step 5: Paginate using cursor (binary search) instead of offset
     const total = filtered.length;
-    const start = (pageNum - 1) * pageSize;
-    const data = filtered.slice(start, start + pageSize);
+    const cursorVal = this.decodeCursor(cursor);
+    let startIndex = 0;
+
+    if (cursorVal) {
+      let low = 0;
+      let high = filtered.length - 1;
+      while (low <= high) {
+        const mid = (low + high) >>> 1;
+        const midVal = this.getSortValue(filtered[mid], sort_by);
+        if (midVal < cursorVal) {
+          low = mid + 1;
+        } else if (midVal > cursorVal) {
+          high = mid - 1;
+        } else {
+          startIndex = mid + 1;
+          break;
+        }
+      }
+      if (startIndex === 0) startIndex = low;
+    }
+
+    const data = filtered.slice(startIndex, startIndex + pageSize);
 
     // Step 6: Build facet response
     const facetsResponse: SearchFacet[] = [];
@@ -326,16 +381,23 @@ export class SearchIndex {
       }
     }
 
+    const hasMore = startIndex + pageSize < total;
+    const nextCursor = hasMore && data.length > 0
+      ? this.encodeCursor(this.getSortValue(data[data.length - 1], sort_by))
+      : null;
+    const currentCursor = cursor || null;
+
     const executionTime = Date.now() - startTime;
 
     return {
       data,
       facets: facetsResponse,
       pagination: {
-        page: pageNum,
-        page_size: pageSize,
+        cursor: currentCursor,
+        next_cursor: nextCursor,
+        limit: pageSize,
         total,
-        total_pages: Math.ceil(total / pageSize),
+        has_more: hasMore,
       },
       query_info: {
         full_text_query: query,
