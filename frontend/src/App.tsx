@@ -20,6 +20,7 @@ const IssueCredential = lazy(() => import('./pages/IssueCredential').then(module
 const Profile = lazy(() => import('./pages/Profile').then(module => ({ default: module.default })));
 const CredentialCompare = lazy(() => import('./pages/CredentialCompare').then(module => ({ default: module.default })));
 const Help = lazy(() => import('./pages/Help').then(module => ({ default: module.default })));
+const CredentialSharing = lazy(() => import('./pages/CredentialSharing').then(module => ({ default: module.default })));
 
 // Loading fallback
 const LoadingFallback = () => (
@@ -43,46 +44,32 @@ function AppContent() {
   const { isOnline } = useServiceWorker();
 
   return (
-    <>
-      {!isOnline && (
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
-            background: '#b45309', color: '#fff',
-            textAlign: 'center', padding: '8px 16px', fontSize: '14px',
-          }}
-        >
-          You are offline. Read-only data may be available from cache; live contract calls will fail until reconnected.
-        </div>
-      )}
-      <AppLayout
-        currentPath={location.pathname}
-        walletAddress={address}
-        onConnectWallet={connect}
-        network={network}
-      >
-        <Suspense fallback={<LoadingFallback />}>
-          <Routes>
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<WalletGuard><Dashboard /></WalletGuard>} />
-            <Route path="/verify" element={<Verify />} />
-            <Route path="/verifier" element={<VerifierUI />} />
-            <Route path="/verifier/dashboard" element={<VerificationDashboard />} />
-            <Route path="/issuer" element={<WalletGuard><IssuerManagement /></WalletGuard>} />
-            <Route path="/search" element={<CredentialSearch />} />
-            <Route path="/help" element={<Help />} />
-            <Route path="/slice/new" element={<WalletGuard><QuorumSlice /></WalletGuard>} />
-            <Route path="/credential/issue" element={<WalletGuard><IssueCredential /></WalletGuard>} />
-            <Route path="/credential/:id" element={<CredentialDetail />} />
-            <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
-            <Route path="/compare" element={<CredentialCompare />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </Suspense>
-      </AppLayout>
-    </>
+    <AppLayout
+      currentPath={location.pathname}
+      walletAddress={address}
+      onConnectWallet={connect}
+      network={network}
+    >
+      <Suspense fallback={<LoadingFallback />}>
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<WalletGuard><Dashboard /></WalletGuard>} />
+          <Route path="/verify" element={<Verify />} />
+          <Route path="/verifier" element={<VerifierUI />} />
+          <Route path="/verifier/dashboard" element={<VerificationDashboard />} />
+          <Route path="/issuer" element={<WalletGuard><IssuerManagement /></WalletGuard>} />
+          <Route path="/search" element={<CredentialSearch />} />
+          <Route path="/help" element={<Help />} />
+          <Route path="/slice/new" element={<WalletGuard><QuorumSlice /></WalletGuard>} />
+          <Route path="/credential/issue" element={<WalletGuard><IssueCredential /></WalletGuard>} />
+          <Route path="/credential/:id" element={<CredentialDetail />} />
+          <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
+          <Route path="/compare" element={<CredentialCompare />} />
+          <Route path="/share" element={<WalletGuard><CredentialSharing /></WalletGuard>} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
+    </AppLayout>
   );
 }
 

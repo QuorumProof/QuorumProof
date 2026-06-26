@@ -68,6 +68,9 @@ export function AppLayout({ currentPath, walletAddress, onConnectWallet, network
           <a href="/compare" className={`px-3 py-2 rounded ${isActive('/compare') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
             Compare
           </a>
+          <a href="/share" className={`px-3 py-2 rounded ${isActive('/share') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Share
+          </a>
         </nav>
 
         {/* Wallet and Network */}
