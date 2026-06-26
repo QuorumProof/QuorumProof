@@ -5,8 +5,10 @@ import {
   getCredential,
   getCredentialsBySubject,
   getAttestors,
+  getIssuerQuota,
+  getIssuerQuotaUsage,
 } from '../lib/contracts/quorumProof';
-import type { Credential } from '../lib/contracts/quorumProof';
+import type { Credential, IssuerQuota, IssuerQuotaUsage } from '../lib/contracts/quorumProof';
 import { credTypeLabel, formatTimestamp, formatAddress } from '../lib/credentialUtils';
 
 interface ManagedCredential {
@@ -25,11 +27,20 @@ export default function IssuerManagement() {
   const [credentials, setCredentials] = useState<ManagedCredential[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'credentials' | 'attestors'>('credentials');
+  const [activeTab, setActiveTab] = useState<'credentials' | 'attestors' | 'quota'>('credentials');
   const [bulkRevoking, setBulkRevoking] = useState(false);
   const [revokeMsg, setRevokeMsg] = useState<string | null>(null);
   const [newAttestor, setNewAttestor] = useState('');
   const [attestorMsg, setAttestorMsg] = useState<string | null>(null);
+
+  // Issue #798: Quota state
+  const [quota, setQuota] = useState<IssuerQuota | null>(null);
+  const [quotaUsage, setQuotaUsage] = useState<IssuerQuotaUsage | null>(null);
+  const [quotaLoading, setQuotaLoading] = useState(false);
+  const [quotaMaxCreds, setQuotaMaxCreds] = useState('100');
+  const [quotaWindowDays, setQuotaWindowDays] = useState('1');
+  const [quotaAlertPct, setQuotaAlertPct] = useState('80');
+  const [quotaMsg, setQuotaMsg] = useState<string | null>(null);
 
   const fetchCredentials = useCallback(async (issuerAddress: string) => {
     setLoading(true);
@@ -57,6 +68,32 @@ export default function IssuerManagement() {
     if (!address) return;
     fetchCredentials(address);
   }, [address, fetchCredentials]);
+
+  const fetchQuota = useCallback(async (issuerAddress: string) => {
+    setQuotaLoading(true);
+    try {
+      const [q, usage] = await Promise.all([
+        getIssuerQuota(issuerAddress),
+        getIssuerQuotaUsage(issuerAddress),
+      ]);
+      setQuota(q);
+      setQuotaUsage(usage);
+      if (q) {
+        setQuotaMaxCreds(String(q.max_credentials));
+        setQuotaWindowDays(String(Number(q.window_seconds) / 86400));
+        setQuotaAlertPct(String(q.alert_threshold_pct));
+      }
+    } catch {
+      // quota not set or read error — not fatal
+    } finally {
+      setQuotaLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!address) return;
+    fetchQuota(address);
+  }, [address, fetchQuota]);
 
   const toggleSelect = (id: bigint) => {
     setCredentials((prev) =>
@@ -169,6 +206,14 @@ export default function IssuerManagement() {
             onClick={() => setActiveTab('attestors')}
           >
             🏛️ Attestors ({attestorList.length})
+          </button>
+          <button
+            className={`tab-btn${activeTab === 'quota' ? ' active' : ''}`}
+            role="tab"
+            aria-selected={activeTab === 'quota'}
+            onClick={() => setActiveTab('quota')}
+          >
+            📊 Quota
           </button>
         </div>
 
@@ -353,6 +398,98 @@ export default function IssuerManagement() {
               </div>
             )}
           </>
+        )}
+
+        {/* Quota Tab — Issue #798 */}
+        {!loading && activeTab === 'quota' && (
+          <div className="detail-card">
+            <div className="detail-card__header">
+              <span className="detail-card__title">ISSUANCE QUOTA</span>
+              <button
+                className="btn btn--ghost btn--sm"
+                onClick={() => fetchQuota(address!)}
+                disabled={quotaLoading}
+                aria-label="Refresh quota"
+              >
+                🔄 Refresh
+              </button>
+            </div>
+            <div className="detail-card__body">
+              {quota && quotaUsage && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>Current window usage</div>
+                  <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                    <div>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--color-indigo, #6366f1)' }}>
+                        {quotaUsage.issued_count}
+                        <span style={{ fontSize: 14, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 4 }}>
+                          / {quota.max_credentials}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>credentials issued</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 24, fontWeight: 700 }}>
+                        {Math.round((quotaUsage.issued_count / quota.max_credentials) * 100)}%
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>quota used</div>
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 8, height: 8, background: 'var(--bg-tertiary, #1e293b)', borderRadius: 4, overflow: 'hidden' }}>
+                    <div style={{
+                      height: '100%',
+                      width: `${Math.min(100, Math.round((quotaUsage.issued_count / quota.max_credentials) * 100))}%`,
+                      background: quotaUsage.issued_count >= quota.max_credentials ? '#ef4444'
+                        : quotaUsage.issued_count >= Math.floor(quota.max_credentials * quota.alert_threshold_pct / 100) ? '#f59e0b'
+                        : '#22c55e',
+                      borderRadius: 4,
+                      transition: 'width 0.3s',
+                    }} />
+                  </div>
+                </div>
+              )}
+              {!quota && !quotaLoading && (
+                <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+                  No quota configured. Without a quota, unlimited credentials can be issued.
+                </p>
+              )}
+              <div style={{ borderTop: '1px solid var(--border-color, #334155)', paddingTop: 16, marginTop: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Configure Quota (Admin)</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+                    Max credentials
+                    <input className="input" type="number" min={1} value={quotaMaxCreds}
+                      onChange={(e) => setQuotaMaxCreds(e.target.value)} aria-label="Maximum credentials per window" />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+                    Window (days)
+                    <input className="input" type="number" min={1} value={quotaWindowDays}
+                      onChange={(e) => setQuotaWindowDays(e.target.value)} aria-label="Quota window in days" />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+                    Alert threshold %
+                    <input className="input" type="number" min={0} max={100} value={quotaAlertPct}
+                      onChange={(e) => setQuotaAlertPct(e.target.value)} aria-label="Alert threshold percentage" />
+                  </label>
+                </div>
+                <button
+                  className="btn btn--primary btn--sm"
+                  style={{ marginTop: 12 }}
+                  onClick={() => setQuotaMsg(
+                    `⚠️ On-chain quota update requires admin signature. CLI: set_issuer_quota(admin, ${address}, ${quotaMaxCreds}, ${Number(quotaWindowDays) * 86400}, ${quotaAlertPct})`
+                  )}
+                  aria-label="Set issuer quota"
+                >
+                  Set Quota
+                </button>
+                {quotaMsg && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#f59e0b', background: 'var(--bg-tertiary, #1e293b)', padding: '8px 12px', borderRadius: 6 }}>
+                    {quotaMsg}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </main>
 

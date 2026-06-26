@@ -72,6 +72,8 @@ pub struct CredentialIssuedEventData {
 pub struct RevokeEventData {
     pub credential_id: u64,
     pub subject: Address,
+    pub issuer: Address,
+    pub revoked_at: u64,
 }
 
 #[contracttype]
@@ -290,6 +292,77 @@ pub struct IssuanceApprovedEventData {
     pub signer: Address,
     pub approvals_so_far: u32,
     pub threshold: u32,
+}
+
+// ── Issue #666: Multi-Signature Attestation Workflow ─────────────────────────
+
+/// Sensitivity level for a credential type, controlling multi-sig requirements.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CredentialSensitivity {
+    Standard = 0,
+    High = 1,
+    Critical = 2,
+}
+
+/// Policy defining multi-sig attestation requirements per sensitivity level.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationPolicy {
+    pub sensitivity: CredentialSensitivity,
+    /// Minimum number of co-signatures required.
+    pub threshold: u32,
+    /// Seconds within which all signatures must be collected (default 7 days).
+    pub window_seconds: u64,
+}
+
+/// A pending multi-sig attestation request.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationRequest {
+    pub id: u64,
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub initiator: Address,
+    pub required_signers: soroban_sdk::Vec<Address>,
+    pub signatures: soroban_sdk::Vec<Address>,
+    pub threshold: u32,
+    pub attestation_value: bool,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+    pub rolled_back: bool,
+}
+
+/// Event emitted when a multi-sig attestation request is created.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationRequestedEventData {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub initiator: Address,
+    pub threshold: u32,
+    pub expires_at: u64,
+}
+
+/// Event emitted when a signer co-signs an attestation request.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationSignedEventData {
+    pub request_id: u64,
+    pub signer: Address,
+    pub signatures_so_far: u32,
+    pub threshold: u32,
+}
+
+/// Event emitted when a multi-sig attestation is executed or rolled back.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationFinalizedEventData {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub executed: bool,
 }
 
 /// Event data emitted when a fork is detected.
@@ -537,6 +610,18 @@ pub enum ContractError {
     RevocationTimeLockActive = 61,
     /// Circuit breaker: degraded write limit reached
     CircuitBreakerDegradedLimitReached = 62,
+    /// Issue #666: No attestation policy set for this credential type
+    AttestationPolicyNotFound = 63,
+    /// Issue #666: Signer is not in the required signers list
+    NotAttestationSigner = 64,
+    /// Issue #666: Signer has already signed this attestation request
+    AlreadySignedAttestation = 65,
+    /// Issue #666: Attestation request not found
+    AttestationRequestNotFound = 66,
+    /// Issue #666: Attestation request window has expired
+    AttestationRequestExpired = 67,
+    /// Issue #666: Attestation request already finalized
+    AttestationRequestFinalized = 68,
 }
 
 #[contracttype]
@@ -663,6 +748,12 @@ pub enum DataKey2 {
     CredentialMetadataSchema(u64),
     /// Migration audit record for a schema transition.
     MetadataSchemaMigration(u32),
+    /// Issue #666: Multi-sig attestation policy for a credential type (u32 -> AttestationPolicy)
+    AttestationPolicy(u32),
+    /// Issue #666: Pending multi-sig attestation request by id
+    AttestationRequest(u64),
+    /// Issue #666: Count of attestation requests
+    AttestationRequestCount,
 }
 
 /// Storage keys for expiry, renewal, proof requests, share tokens, and attestation queue.
@@ -3023,6 +3114,8 @@ impl QuorumProofContract {
         let event_data = RevokeEventData {
             credential_id,
             subject: credential.subject.clone(),
+            issuer: revoker.clone(),
+            revoked_at: env.ledger().timestamp(),
         };
         let topic = String::from_str(env, TOPIC_REVOKE);
         let mut topics: Vec<String> = Vec::new(env);
@@ -6850,6 +6943,348 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .get(&DataKey2::PendingIssuance(request_id))
+    }
+
+    // ── Issue #666: Multi-Signature Attestation Workflow ─────────────────────
+
+    /// Set an attestation policy for a credential type. Admin only.
+    /// Credentials of this type require `threshold` co-signatures within `window_seconds`.
+    pub fn set_attestation_policy(
+        env: Env,
+        admin: Address,
+        credential_type: u32,
+        sensitivity: CredentialSensitivity,
+        threshold: u32,
+        window_seconds: u64,
+    ) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        let stored: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        assert!(threshold > 0, "threshold must be > 0");
+        assert!(threshold <= MAX_MULTISIG_SIGNERS, "threshold exceeds maximum");
+        assert!(window_seconds > 0, "window_seconds must be > 0");
+        let policy = AttestationPolicy { sensitivity, threshold, window_seconds };
+        env.storage().instance().set(&DataKey2::AttestationPolicy(credential_type), &policy);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the attestation policy for a credential type. Returns None if not set.
+    pub fn get_attestation_policy(env: Env, credential_type: u32) -> Option<AttestationPolicy> {
+        env.storage().instance().get(&DataKey2::AttestationPolicy(credential_type))
+    }
+
+    /// Initiate a multi-sig attestation request for a high-sensitivity credential.
+    /// The initiator must be a member of the specified slice.
+    /// Returns the new request ID.
+    pub fn request_multisig_attestation(
+        env: Env,
+        initiator: Address,
+        credential_id: u64,
+        slice_id: u64,
+        required_signers: soroban_sdk::Vec<Address>,
+        attestation_value: bool,
+    ) -> u64 {
+        initiator.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &initiator);
+        Self::precondition(&env, credential_id > 0);
+        Self::precondition(&env, slice_id > 0);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(!credential.revoked, "credential is revoked");
+
+        let policy: AttestationPolicy = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationPolicy(credential.credential_type))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationPolicyNotFound));
+
+        assert!(
+            required_signers.len() >= policy.threshold,
+            "not enough required signers for policy threshold"
+        );
+
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Verify initiator is in the slice
+        let in_slice = env
+            .storage()
+            .instance()
+            .get::<_, soroban_sdk::Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+            .map(|set| set.contains_key(initiator.clone()))
+            .unwrap_or_else(|| slice.attestors.contains(&initiator));
+        assert!(in_slice, "initiator not in slice");
+
+        let now = env.ledger().timestamp();
+        let request_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let mut initial_signatures: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        initial_signatures.push_back(initiator.clone());
+
+        let request = AttestationRequest {
+            id: request_id,
+            credential_id,
+            slice_id,
+            initiator: initiator.clone(),
+            required_signers,
+            signatures: initial_signatures,
+            threshold: policy.threshold,
+            attestation_value,
+            created_at: now,
+            expires_at: now.saturating_add(policy.window_seconds),
+            executed: false,
+            rolled_back: false,
+        };
+        env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+        env.storage().instance().set(&DataKey2::AttestationRequestCount, &request_id);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = AttestationRequestedEventData {
+            request_id,
+            credential_id,
+            initiator: request.initiator.clone(),
+            threshold: policy.threshold,
+            expires_at: request.expires_at,
+        };
+        let topic = String::from_str(&env, "AttestationRequested");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        request_id
+    }
+
+    /// Co-sign an existing multi-sig attestation request.
+    /// If the signature threshold is met, the attestation is executed automatically.
+    /// Returns true if the attestation was executed (threshold reached), false otherwise.
+    pub fn sign_attestation_request(env: Env, signer: Address, request_id: u64) -> bool {
+        signer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &signer);
+
+        let mut request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+
+        if request.executed || request.rolled_back {
+            panic_with_error!(&env, ContractError::AttestationRequestFinalized);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > request.expires_at {
+            // Auto-rollback: window expired without reaching threshold
+            request.rolled_back = true;
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            let event_data = AttestationFinalizedEventData {
+                request_id,
+                credential_id: request.credential_id,
+                executed: false,
+            };
+            let topic = String::from_str(&env, "AttestationRolledBack");
+            let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+            panic_with_error!(&env, ContractError::AttestationRequestExpired);
+        }
+
+        // Check signer is in required_signers
+        if !request.required_signers.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::NotAttestationSigner);
+        }
+
+        // Prevent replay: check not already signed
+        if request.signatures.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::AlreadySignedAttestation);
+        }
+
+        request.signatures.push_back(signer.clone());
+        let signatures_so_far = request.signatures.len();
+
+        let event_data = AttestationSignedEventData {
+            request_id,
+            signer,
+            signatures_so_far,
+            threshold: request.threshold,
+        };
+        let topic = String::from_str(&env, "AttestationSigned");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        if signatures_so_far >= request.threshold {
+            // Threshold met — execute the attestation
+            request.executed = true;
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            // Call the standard attest path internally
+            let credential: Credential = env
+                .storage()
+                .instance()
+                .get(&DataKey::Credential(request.credential_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+            let mut records: soroban_sdk::Vec<AttestationRecord> = env
+                .storage()
+                .instance()
+                .get(&DataKey::Attestors(request.credential_id))
+                .unwrap_or(soroban_sdk::Vec::new(&env));
+
+            let record = AttestationRecord {
+                attestor: request.initiator.clone(),
+                attested_at: now,
+                expires_at: None,
+                attestation_value: request.attestation_value,
+                metadata: None,
+            };
+            records.push_back(record);
+            env.storage().instance().set(&DataKey::Attestors(request.credential_id), &records);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            let attest_event = AttestationEventData {
+                attestor: request.initiator.clone(),
+                credential_id: request.credential_id,
+                slice_id: request.slice_id,
+            };
+            let attest_topic = String::from_str(&env, TOPIC_ATTESTATION);
+            let mut attest_topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            attest_topics.push_back(attest_topic);
+            env.events().publish(attest_topics, attest_event);
+
+            // Notify credential holder
+            let notification = HolderNotification {
+                credential_id: request.credential_id,
+                attestor: request.initiator.clone(),
+                slice_id: request.slice_id,
+                notified_at: now,
+            };
+            let mut notif_history: soroban_sdk::Vec<HolderNotification> = env
+                .storage()
+                .instance()
+                .get(&DataKey2::NotificationHistory(credential.subject))
+                .unwrap_or(soroban_sdk::Vec::new(&env));
+            notif_history.push_back(notification.clone());
+            env.storage().instance().set(
+                &DataKey2::NotificationHistory(request.initiator.clone()),
+                &notif_history,
+            );
+            let notif_topic = String::from_str(&env, TOPIC_HOLDER_NOTIFIED);
+            let mut notif_topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            notif_topics.push_back(notif_topic);
+            env.events().publish(notif_topics, notification);
+
+            let fin_event = AttestationFinalizedEventData {
+                request_id,
+                credential_id: request.credential_id,
+                executed: true,
+            };
+            let fin_topic = String::from_str(&env, "AttestationExecuted");
+            let mut fin_topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            fin_topics.push_back(fin_topic);
+            env.events().publish(fin_topics, fin_event);
+
+            true
+        } else {
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            false
+        }
+    }
+
+    /// Explicitly roll back an expired attestation request.
+    /// Anyone can trigger rollback once the window has passed and threshold wasn't met.
+    pub fn rollback_attestation_request(env: Env, request_id: u64) {
+        let mut request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+
+        if request.executed || request.rolled_back {
+            panic_with_error!(&env, ContractError::AttestationRequestFinalized);
+        }
+
+        let now = env.ledger().timestamp();
+        assert!(now > request.expires_at, "attestation window still active");
+
+        request.rolled_back = true;
+        env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = AttestationFinalizedEventData {
+            request_id,
+            credential_id: request.credential_id,
+            executed: false,
+        };
+        let topic = String::from_str(&env, "AttestationRolledBack");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get a pending multi-sig attestation request by ID.
+    pub fn get_attestation_request(env: Env, request_id: u64) -> Option<AttestationRequest> {
+        env.storage().instance().get(&DataKey2::AttestationRequest(request_id))
+    }
+
+    /// Check if a credential's attestation request window has expired without reaching threshold.
+    pub fn is_attestation_request_expired(env: Env, request_id: u64) -> bool {
+        let request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+        env.ledger().timestamp() > request.expires_at && !request.executed
+    }
+
+    /// Check if a credential's attestation request window has expired without reaching threshold.
+    pub fn check_and_rollback_attestation(env: Env, request_id: u64) -> bool {
+        let mut request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+
+        if request.executed || request.rolled_back {
+            return false;
+        }
+
+        let now = env.ledger().timestamp();
+        if now > request.expires_at {
+            request.rolled_back = true;
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            let event_data = AttestationFinalizedEventData {
+                request_id,
+                credential_id: request.credential_id,
+                executed: false,
+            };
+            let topic = String::from_str(&env, "AttestationRolledBack");
+            let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+            true
+        } else {
+            false
+        }
     }
 
     /// Check if a credential has met its quorum threshold using weighted trust.

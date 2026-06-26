@@ -7,6 +7,9 @@ import { ToastProvider } from './context/ToastContext.tsx'
 import { NetworkProvider } from './context/NetworkContext.tsx'
 import { ToastContainer } from './components/ToastContainer.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
+import { initSentry } from './lib/sentry.ts'
+
+initSentry()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
