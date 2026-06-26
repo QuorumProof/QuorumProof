@@ -68,6 +68,12 @@ export function AppLayout({ currentPath, walletAddress, onConnectWallet, network
           <a href="/compare" className={`px-3 py-2 rounded ${isActive('/compare') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
             Compare
           </a>
+          <a href="/attestor/reputation" className={`px-3 py-2 rounded ${isActive('/attestor/reputation') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Reputation
+          </a>
+          <a href="/attestor/batch" className={`px-3 py-2 rounded ${isActive('/attestor/batch') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Batch Attest
+          </a>
         </nav>
 
         {/* Wallet and Network */}

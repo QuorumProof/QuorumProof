@@ -19,6 +19,8 @@ const IssueCredential = lazy(() => import('./pages/IssueCredential').then(module
 const Profile = lazy(() => import('./pages/Profile').then(module => ({ default: module.default })));
 const CredentialCompare = lazy(() => import('./pages/CredentialCompare').then(module => ({ default: module.default })));
 const Help = lazy(() => import('./pages/Help').then(module => ({ default: module.default })));
+const AttestorReputationPage = lazy(() => import('./pages/AttestorReputationPage').then(module => ({ default: module.default })));
+const BatchAttestation = lazy(() => import('./pages/BatchAttestation').then(module => ({ default: module.default })));
 
 // Loading fallback
 const LoadingFallback = () => (
@@ -62,6 +64,8 @@ function AppContent() {
           <Route path="/credential/:id" element={<CredentialDetail />} />
           <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
           <Route path="/compare" element={<CredentialCompare />} />
+          <Route path="/attestor/reputation" element={<WalletGuard><AttestorReputationPage /></WalletGuard>} />
+          <Route path="/attestor/batch" element={<WalletGuard><BatchAttestation /></WalletGuard>} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>

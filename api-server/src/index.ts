@@ -4,6 +4,7 @@ import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
+import attestorRouter from './routes/attestor.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createWsServer } from './ws/server.js';
@@ -43,6 +44,7 @@ app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/attestor', attestorRouter);
 
 app.get('/health', (_req, res) => {
   res.json({
