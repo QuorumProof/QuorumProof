@@ -19,6 +19,7 @@ const IssueCredential = lazy(() => import('./pages/IssueCredential').then(module
 const Profile = lazy(() => import('./pages/Profile').then(module => ({ default: module.default })));
 const CredentialCompare = lazy(() => import('./pages/CredentialCompare').then(module => ({ default: module.default })));
 const Help = lazy(() => import('./pages/Help').then(module => ({ default: module.default })));
+const CredentialSharing = lazy(() => import('./pages/CredentialSharing').then(module => ({ default: module.default })));
 
 // Loading fallback
 const LoadingFallback = () => (
@@ -62,6 +63,7 @@ function AppContent() {
           <Route path="/credential/:id" element={<CredentialDetail />} />
           <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
           <Route path="/compare" element={<CredentialCompare />} />
+          <Route path="/share" element={<WalletGuard><CredentialSharing /></WalletGuard>} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>
