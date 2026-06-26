@@ -7,7 +7,6 @@ import { useServiceWorker } from './hooks/useServiceWorker';
 import './styles.css';
 import './index.css';
 
-// Lazy load pages
 const Dashboard = lazy(() => import('./pages/Dashboard').then(module => ({ default: module.default })));
 const Verify = lazy(() => import('./pages/Verify').then(module => ({ default: module.default })));
 const VerifierUI = lazy(() => import('./pages/VerifierUI').then(module => ({ default: module.default })));
@@ -22,14 +21,12 @@ const CredentialCompare = lazy(() => import('./pages/CredentialCompare').then(mo
 const Help = lazy(() => import('./pages/Help').then(module => ({ default: module.default })));
 const CredentialSharing = lazy(() => import('./pages/CredentialSharing').then(module => ({ default: module.default })));
 
-// Loading fallback
 const LoadingFallback = () => (
   <div className="flex items-center justify-center h-full">
     <div className="text-slate-400">Loading...</div>
   </div>
 );
 
-// 404 component
 const NotFound = () => (
   <div className="flex flex-col items-center justify-center h-full">
     <h1 className="text-2xl font-bold text-slate-100 mb-4">Page not found</h1>
@@ -46,9 +43,11 @@ function AppContent() {
   return (
     <AppLayout
       currentPath={location.pathname}
-      walletAddress={address}
+      walletAddress={address ?? undefined}
+      wallets={wallets}
+      activeIndex={activeIndex}
       onConnectWallet={connect}
-      network={network}
+      onSwitchWallet={switchWallet}
     >
       <Suspense fallback={<LoadingFallback />}>
         <Routes>

@@ -1,26 +1,16 @@
-export type StellarNetwork = 'testnet' | 'mainnet' | 'futurenet' | 'standalone';
+import { type StellarNetwork, VALID_NETWORKS as VALID, getNetworkConfig } from './lib/networkConfig';
 
-export const VALID_NETWORKS: StellarNetwork[] = ['testnet', 'mainnet', 'futurenet', 'standalone'];
+export type { StellarNetwork } from './lib/networkConfig';
+export const VALID_NETWORKS = VALID;
 
 export interface EnvConfig {
   network: StellarNetwork;
   rpcUrl: string;
 }
 
-const rawNetwork = import.meta.env.VITE_STELLAR_NETWORK as string | undefined;
-
-let network: StellarNetwork;
-if (!rawNetwork) {
-  network = 'testnet';
-} else if ((VALID_NETWORKS as string[]).includes(rawNetwork)) {
-  network = rawNetwork as StellarNetwork;
-} else {
-  console.warn(`Unknown VITE_STELLAR_NETWORK value "${rawNetwork}"; falling back to testnet`);
-  network = 'testnet';
+export function getEnvConfig(): EnvConfig {
+  const cfg = getNetworkConfig();
+  return { network: cfg.network, rpcUrl: cfg.rpcUrl };
 }
 
-const rpcUrl: string =
-  (import.meta.env.VITE_STELLAR_RPC_URL as string | undefined) ??
-  'https://soroban-testnet.stellar.org';
-
-export const envConfig: EnvConfig = { network, rpcUrl };
+export const envConfig: EnvConfig = getEnvConfig();
