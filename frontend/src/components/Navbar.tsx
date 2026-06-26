@@ -2,8 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useFreighter } from '../lib/hooks/useFreighter';
 import { NotificationCenter } from './NotificationCenter';
-
-const NETWORK = import.meta.env.VITE_STELLAR_NETWORK || 'testnet';
+import { NetworkSwitcher } from './NetworkSwitcher';
 
 function formatAddress(addr: string) {
   if (!addr || addr.length < 10) return addr;
@@ -62,7 +61,7 @@ export function Navbar() {
         </div>
 
         <div className="navbar__right">
-          <span className="navbar__badge">{NETWORK}</span>
+          <NetworkSwitcher />
           <NotificationCenter />
           {isInitializing ? (
             <span className="navbar__badge" style={{ opacity: 0.5 }}>Connecting…</span>

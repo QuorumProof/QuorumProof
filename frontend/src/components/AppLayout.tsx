@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { NetworkSwitcher } from "./NetworkSwitcher";
 
 interface AppLayoutProps {
   currentPath: string;
@@ -7,7 +8,6 @@ interface AppLayoutProps {
   activeIndex?: number;
   onConnectWallet?: () => void;
   onSwitchWallet?: (index: number) => void;
-  network?: string;
   children: React.ReactNode;
 }
 
@@ -23,7 +23,6 @@ export function AppLayout({
   activeIndex = 0,
   onConnectWallet,
   onSwitchWallet,
-  network = "Testnet",
   children
 }: AppLayoutProps) {
   const isActive = (href: string) => currentPath === href;
@@ -78,7 +77,7 @@ export function AppLayout({
         </nav>
 
         <div className="flex items-center space-x-4">
-          <span className="text-sm text-slate-400">{network}</span>
+          <NetworkSwitcher />
           {walletAddress ? (
             <div style={{ position: 'relative' }} ref={menuRef}>
               <button

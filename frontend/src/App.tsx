@@ -35,7 +35,7 @@ const NotFound = () => (
 
 function AppContent() {
   const location = useLocation();
-  const { address, connect, network, wallets, activeIndex, switchWallet } = useWallet();
+  const { address, connect, wallets, activeIndex, switchWallet } = useWallet();
 
   return (
     <AppLayout
@@ -45,7 +45,6 @@ function AppContent() {
       activeIndex={activeIndex}
       onConnectWallet={connect}
       onSwitchWallet={switchWallet}
-      network={network ?? undefined}
     >
       <Suspense fallback={<LoadingFallback />}>
         <Routes>
