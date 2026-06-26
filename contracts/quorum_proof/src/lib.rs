@@ -4463,6 +4463,186 @@ impl QuorumProofContract {
         BatchResult::Ok(ids)
     }
 
+    /// Issue credentials to DID-identified subjects in a single batch call.
+    ///
+    /// This function resolves each DID to its corresponding Stellar address
+    /// and issues credentials atomically. All DIDs must be active and registered.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing all credentials; must authorize this call.
+    /// - `subject_dids`: Ordered list of subject DIDs (one per credential).
+    /// - `credential_types`: Ordered list of credential type IDs, one per subject.
+    /// - `metadata_hashes`: Ordered list of metadata hashes, one per subject.
+    /// - `expires_at`: Optional shared expiry timestamp applied to all issued credentials.
+    ///
+    /// # Returns
+    /// `BatchResult::Ok(Vec<u64>)` on success, `BatchResult::Err(BatchError)` on failure.
+    pub fn issue_batch_by_did(
+        env: Env,
+        issuer: Address,
+        subject_dids: Vec<soroban_sdk::String>,
+        credential_types: Vec<u32>,
+        metadata_hashes: Vec<soroban_sdk::Bytes>,
+        expires_at: Option<u64>,
+    ) -> BatchResult {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let batch_len = subject_dids.len() as u32;
+        if batch_len == 0 {
+            return BatchResult::Ok(Vec::new(&env));
+        }
+        Self::validate_array_bounds(batch_len, 1, MAX_BATCH_SIZE, "subject_dids");
+        assert!(
+            credential_types.len() == batch_len && metadata_hashes.len() == batch_len,
+            "input lengths must match"
+        );
+
+        // Pre-validation: resolve all DIDs before issuing any credentials
+        let mut resolved: Vec<Address> = Vec::new(&env);
+        for i in 0..batch_len {
+            let did = subject_dids.get(i).unwrap();
+            let did_bytes = did.into_bytes();
+            let doc: DidDocument = match env.storage().instance().get(&DataKey7::DidDocument(did_bytes)) {
+                Some(d) => d,
+                None => {
+                    let reason = soroban_sdk::String::from_str(&env, "DID not found");
+                    return BatchResult::Err(BatchError { failing_index: i, reason });
+                }
+            };
+            if !doc.active {
+                let reason = soroban_sdk::String::from_str(&env, "DID is deactivated");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+            resolved.push_back(doc.address);
+        }
+
+        // Build CredentialInput vector from resolved addresses
+        let mut credentials: Vec<CredentialInput> = Vec::new(&env);
+        for i in 0..batch_len {
+            let input = CredentialInput {
+                subject: resolved.get(i).unwrap(),
+                credential_type: credential_types.get(i).unwrap(),
+                metadata_hash: metadata_hashes.get(i).unwrap(),
+                expires_at: expires_at.clone(),
+            };
+            credentials.push_back(input);
+        }
+
+        // Delegate to the existing atomically validated batch issuer
+        Self::issue_batch_with_credentials(&env, issuer, credentials)
+    }
+
+    /// Internal: validates and issues a pre-built CredentialInput vector atomically.
+    fn issue_batch_with_credentials(
+        env: &Env,
+        issuer: Address,
+        credentials: Vec<CredentialInput>,
+    ) -> BatchResult {
+        let batch_len = credentials.len() as u32;
+
+        // Pre-validation phase
+        for i in 0..batch_len {
+            let cred_input = credentials.get(i).unwrap();
+
+            if cred_input.credential_type == 0 {
+                let reason = soroban_sdk::String::from_str(env, "credential_type must be greater than 0");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+            if cred_input.metadata_hash.is_empty() {
+                let reason = soroban_sdk::String::from_str(env, "metadata_hash cannot be empty");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+            if cred_input.metadata_hash.len() > MAX_METADATA_SIZE {
+                let reason = soroban_sdk::String::from_str(env, "metadata_hash exceeds max size");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+
+            let duplicate_key = DataKey::SubjectIssuerType(
+                cred_input.subject.clone(),
+                issuer.clone(),
+                cred_input.credential_type,
+            );
+            if env.storage().instance().has(&duplicate_key) {
+                let reason = soroban_sdk::String::from_str(env, "duplicate credential type for this subject");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey2::BlacklistEntry(issuer.clone(), cred_input.subject.clone()))
+            {
+                let reason = soroban_sdk::String::from_str(env, "subject is blacklisted by this issuer");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+
+            for j in 0..i {
+                let other = credentials.get(j).unwrap();
+                if cred_input.subject == other.subject
+                    && cred_input.credential_type == other.credential_type
+                {
+                    let reason = soroban_sdk::String::from_str(env, "duplicate within batch");
+                    return BatchResult::Err(BatchError { failing_index: i, reason });
+                }
+            }
+        }
+
+        // Issue all credentials
+        let mut ids: Vec<u64> = Vec::new(env);
+        for i in 0..batch_len {
+            let cred_input = credentials.get(i).unwrap();
+            let id = Self::issue_inner(
+                env,
+                issuer.clone(),
+                cred_input.subject.clone(),
+                cred_input.credential_type,
+                cred_input.metadata_hash.clone(),
+                cred_input.expires_at,
+            );
+
+            let duplicate_key = DataKey::SubjectIssuerType(
+                cred_input.subject.clone(),
+                issuer.clone(),
+                cred_input.credential_type,
+            );
+            env.storage().instance().set(&duplicate_key, &id);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            ids.push_back(id);
+        }
+
+        BatchResult::Ok(ids)
+    }
+
+    /// Issue credentials to multiple subjects identified by DIDs.
+    ///
+    /// Simpler interface: resolves DIDs, issues credentials, returns IDs.
+    /// Reverts on any failure (panics).
+    pub fn batch_issue_credentials_by_did(
+        env: Env,
+        issuer: Address,
+        subject_dids: Vec<soroban_sdk::String>,
+        credential_types: Vec<u32>,
+        metadata_hashes: Vec<soroban_sdk::Bytes>,
+        expires_at: Option<u64>,
+    ) -> Vec<u64> {
+        let result = Self::issue_batch_by_did(
+            env,
+            issuer,
+            subject_dids,
+            credential_types,
+            metadata_hashes,
+            expires_at,
+        );
+        match result {
+            BatchResult::Ok(ids) => ids,
+            BatchResult::Err(err) => {
+                panic_with_error!(&env, ContractError::InvalidInput);
+            }
+        }
+    }
+
     /// Retrieve a credential by ID.
     ///
     /// # Parameters
