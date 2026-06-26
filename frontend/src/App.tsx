@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, useLocation, Navigate } from 'react-route
 import { AppLayout } from './components/AppLayout';
 import { WalletGuard } from './components/WalletGuard';
 import { useWallet } from './hooks';
+import { useServiceWorker } from './hooks/useServiceWorker';
 import './styles.css';
 import './index.css';
 
@@ -40,6 +41,7 @@ const NotFound = () => (
 function AppContent() {
   const location = useLocation();
   const { address, connect, network } = useWallet();
+  const { isOnline } = useServiceWorker();
 
   return (
     <AppLayout
