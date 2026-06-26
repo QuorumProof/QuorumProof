@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { SearchIndex, type SearchOptions, type CredentialRecord as SearchCredentialRecord } from '../searchIndex.js';
+import { MetadataHashCache } from '../services/metadataHashCache.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -26,6 +27,7 @@ type CredentialRecord = SearchCredentialRecord;
 export function createCredentialsRouter(soroban: SorobanClient) {
   const router = Router();
   const searchIndex = new SearchIndex();
+  const metadataHashCache = new MetadataHashCache();
   let indexedCredentials: Set<string> = new Set();
 
   /**
@@ -45,6 +47,8 @@ export function createCredentialsRouter(soroban: SorobanClient) {
           credRecord.id = String(credRecord.id || i);
           allCredentials.push(credRecord);
           indexedCredentials.add(credRecord.id);
+          // Populate metadata hash cache
+          metadataHashCache.set(credRecord.id, credRecord.metadata_hash, cred as Record<string, unknown>);
         } catch {
           // skip missing/expired credentials
         }
@@ -59,7 +63,7 @@ export function createCredentialsRouter(soroban: SorobanClient) {
 
   /**
    * GET /api/credentials/search
-   * Advanced search with filters, full-text search, and facet aggregation
+   * Advanced search with filters, full-text search, and cursor-based pagination
    * Query params:
    *   - q: full-text search query
    *   - type: credential type (supports multiple: type=1&type=2)
@@ -70,8 +74,8 @@ export function createCredentialsRouter(soroban: SorobanClient) {
    *   - attestation_count_min, attestation_count_max: attestation count range
    *   - created_after, created_before: creation date range (ISO 8601)
    *   - expires_after, expires_before: expiration date range (ISO 8601)
-   *   - page: page number (default: 1)
-   *   - page_size: results per page (default: 20, max: 100)
+   *   - cursor: base64-encoded cursor for pagination (from previous response)
+   *   - limit: results per page (default: 20, max: 100)
    *   - sort_by: id|type|relevance|created_at|updated_at (default: id)
    *   - sort_order: asc|desc (default: asc)
    *   - facets: comma-separated facet names (default: issuer,credential_type,status,issuer_type)
@@ -96,22 +100,17 @@ export function createCredentialsRouter(soroban: SorobanClient) {
         created_before,
         expires_after,
         expires_before,
-        page: pageQ = '1',
-        page_size: pageSizeQ = '20',
+        cursor: cursorQ,
+        limit: limitQ = '20',
         sort_by: sortBy = 'id',
         sort_order: sortOrder = 'asc',
         facets: facetsQ,
       } = req.query as Record<string, string>;
 
-      // Validate pagination
-      const pageNum = parseInt(pageQ, 10);
-      const pageSizeNum = parseInt(pageSizeQ, 10);
-      if (isNaN(pageNum) || pageNum < 1) {
-        res.status(400).json({ error: 'page must be a positive integer >= 1' });
-        return;
-      }
-      if (isNaN(pageSizeNum) || pageSizeNum < 1 || pageSizeNum > 100) {
-        res.status(400).json({ error: 'page_size must be between 1 and 100' });
+      // Validate limit
+      const limitNum = parseInt(limitQ, 10);
+      if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+        res.status(400).json({ error: 'limit must be between 1 and 100' });
         return;
       }
 
@@ -132,8 +131,8 @@ export function createCredentialsRouter(soroban: SorobanClient) {
       // Build search options
       const options: SearchOptions = {
         query: q,
-        page: pageNum,
-        page_size: pageSizeNum,
+        cursor: cursorQ,
+        limit: limitNum,
         sort_by: (sortBy as any) || 'id',
         sort_order: (sortOrder as any) || 'asc',
         facets,
@@ -242,10 +241,12 @@ export function createCredentialsRouter(soroban: SorobanClient) {
    */
   router.post('/search/refresh-index', async (req: Request, res: Response) => {
     try {
+      metadataHashCache.invalidateAll();
       await populateIndex();
       res.json({
         success: true,
         index_size: searchIndex.getIndexSize(),
+        cache_size: metadataHashCache.size,
         last_indexed: searchIndex.getLastIndexed(),
       });
     } catch (err: unknown) {
@@ -256,14 +257,47 @@ export function createCredentialsRouter(soroban: SorobanClient) {
 
   /**
    * GET /api/credentials/search/index-stats
-   * Get search index statistics
+   * Get search index and metadata hash cache statistics
    */
   router.get('/search/index-stats', (_req: Request, res: Response) => {
     res.json({
       index_size: searchIndex.getIndexSize(),
+      cache_size: metadataHashCache.size,
       last_indexed: searchIndex.getLastIndexed(),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  /**
+   * GET /api/credentials/:id/metadata-hash
+   * Returns the cached metadata hash for a credential, fetching from chain if needed.
+   */
+  router.get('/:id/metadata-hash', async (req: Request, res: Response) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: 'Invalid credential ID' });
+      return;
+    }
+
+    const cached = metadataHashCache.get(String(id));
+    if (cached) {
+      res.json({ credential_id: id, metadata_hash: cached.metadata_hash, cached: true });
+      return;
+    }
+
+    try {
+      const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(id)]);
+      const record = serializeBigInt(cred) as CredentialRecord;
+      metadataHashCache.set(String(id), record.metadata_hash, cred as Record<string, unknown>);
+      res.json({ credential_id: id, metadata_hash: record.metadata_hash, cached: false });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('CredentialNotFound') || msg.includes('not found')) {
+        res.status(404).json({ error: 'Credential not found' });
+      } else {
+        res.status(500).json({ error: msg });
+      }
+    }
   });
 
   return router;

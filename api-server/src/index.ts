@@ -1,5 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { createServer } from 'http';
+import compression from 'compression';
+import zlib from 'zlib';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
 import notificationsRouter from './routes/notifications.js';
