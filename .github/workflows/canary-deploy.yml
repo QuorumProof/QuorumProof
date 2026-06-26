@@ -1,0 +1,131 @@
+# .github/workflows/canary-deploy.yml — Issue #847: Canary deployment pipeline.
+#
+# Triggered manually (workflow_dispatch) or on pushes to `release/*` branches.
+# Deploys to 10% of endpoints, monitors health for the soak period, then
+# promotes to full rollout or rolls back automatically.
+
+name: Canary Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      contract_id:
+        description: "Soroban contract ID to upgrade"
+        required: true
+      wasm_artifact:
+        description: "Path to the compiled .wasm file (relative to repo root)"
+        required: true
+        default: "target/wasm32-unknown-unknown/release/quorum_proof.wasm"
+      network:
+        description: "Target network"
+        required: true
+        default: "testnet"
+        type: choice
+        options:
+          - testnet
+          - mainnet
+      canary_soak_seconds:
+        description: "Soak period in seconds before promoting to full rollout"
+        required: false
+        default: "120"
+  push:
+    branches:
+      - "release/*"
+
+jobs:
+  build:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    outputs:
+      wasm_path: ${{ steps.build.outputs.wasm_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build contract WASM
+        id: build
+        run: |
+          cargo build \
+            --release \
+            --target wasm32-unknown-unknown \
+            -p quorum_proof
+          WASM_PATH="target/wasm32-unknown-unknown/release/quorum_proof.wasm"
+          echo "wasm_path=$WASM_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quorum-proof-wasm
+          path: target/wasm32-unknown-unknown/release/quorum_proof.wasm
+          retention-days: 7
+
+  canary:
+    name: Canary Deploy (10%)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.network || 'testnet' }}
+    concurrency:
+      group: canary-deploy-${{ github.event.inputs.network || 'testnet' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: quorum-proof-wasm
+          path: target/wasm32-unknown-unknown/release/
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh \
+            | bash -s -- --target ~/.local/bin
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Stellar network
+        run: |
+          stellar network add \
+            --rpc-url "${{ vars.STELLAR_RPC_URL }}" \
+            --network-passphrase "${{ vars.STELLAR_NETWORK_PASSPHRASE }}" \
+            "${{ github.event.inputs.network || 'testnet' }}"
+
+      - name: Run canary deployment
+        env:
+          STELLAR_NETWORK: ${{ github.event.inputs.network || 'testnet' }}
+          STELLAR_RPC_URL: ${{ vars.STELLAR_RPC_URL }}
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_DEPLOY_SECRET_KEY }}
+          CANARY_SOAK_SECONDS: ${{ github.event.inputs.canary_soak_seconds || '120' }}
+          CANARY_ERROR_THRESHOLD: "0.05"
+          CANARY_LATENCY_P95_MS: "2000"
+          PROMETHEUS_URL: ${{ vars.PROMETHEUS_URL || 'http://localhost:9090' }}
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+          CONTRACT_QUORUM_PROOF: ${{ github.event.inputs.contract_id || vars.CONTRACT_QUORUM_PROOF }}
+        run: |
+          chmod +x scripts/canary_deploy.sh
+          scripts/canary_deploy.sh \
+            "$CONTRACT_QUORUM_PROOF" \
+            "target/wasm32-unknown-unknown/release/quorum_proof.wasm" \
+            "$STELLAR_SECRET_KEY"
+
+      - name: Notify success
+        if: success()
+        run: |
+          echo "Canary deployment completed successfully."
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          echo "Canary deployment failed — rollback was triggered automatically."

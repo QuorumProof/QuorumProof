@@ -45,21 +45,32 @@ export function createSlicesRouter(soroban: SorobanClient) {
   });
 
   /**
-   * GET /api/slices?page=1&page_size=20
-   * Returns paginated list of quorum slices.
+   * GET /api/slices?cursor=<base64>&limit=20
+   * Returns cursor-paginated list of quorum slices.
    */
   router.get('/', async (req: Request, res: Response) => {
-    const page = Math.max(1, parseInt(String(req.query.page ?? '1'), 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.page_size ?? '20'), 10) || 20));
+    const cursorQ = req.query.cursor ? String(req.query.cursor) : undefined;
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
+
+    let startId = 1;
+    if (cursorQ) {
+      try {
+        const decoded = Buffer.from(cursorQ, 'base64').toString('utf-8');
+        startId = parseInt(decoded, 10) + 1;
+        if (isNaN(startId) || startId < 1) startId = 1;
+      } catch {
+        res.status(400).json({ error: 'Invalid cursor' });
+        return;
+      }
+    }
 
     try {
       const sliceCount: bigint = await soroban.simulateCall('get_slice_count', []);
       const total = Number(sliceCount);
-      const start = (page - 1) * pageSize + 1;
-      const end = Math.min(start + pageSize - 1, total);
+      const end = Math.min(startId + limit - 1, total);
 
       const slices = [];
-      for (let i = start; i <= end; i++) {
+      for (let i = startId; i <= end; i++) {
         try {
           const slice = await soroban.simulateCall('get_slice', [soroban.u64Val(i)]);
           slices.push(serializeBigInt(slice));
@@ -68,9 +79,20 @@ export function createSlicesRouter(soroban: SorobanClient) {
         }
       }
 
+      const hasMore = end < total;
+      const nextCursor = hasMore && slices.length > 0
+        ? Buffer.from(String(end)).toString('base64')
+        : null;
+
       res.json({
         data: slices,
-        pagination: { page, page_size: pageSize, total },
+        pagination: {
+          cursor: cursorQ ?? null,
+          next_cursor: nextCursor,
+          limit,
+          total,
+          has_more: hasMore,
+        },
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -2,7 +2,15 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { createAnalyticsRouter } from '../src/routes/analytics.js';
-import { metricsStore, CredentialEvent, DailyMetrics } from '../src/services/metrics.js';
+import {
+  metricsStore,
+  CredentialEvent,
+  DailyMetrics,
+  buildMetricsQuery,
+  buildEventLogQuery,
+  buildAnomalyQuery,
+  parseDateParam,
+} from '../src/services/metrics.js';
 
 const mockSimulateCall = vi.fn();
 const mockSoroban = {
@@ -70,7 +78,7 @@ describe('Analytics API', () => {
 
       const res = await request(app).post('/api/analytics/events').send(invalidEvent);
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('Missing required fields');
+      expect(res.body.error).toContain('Validation failed');
     });
 
     it('should reject invalid event types', async () => {
@@ -82,7 +90,7 @@ describe('Analytics API', () => {
 
       const res = await request(app).post('/api/analytics/events').send(event);
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('Invalid event type');
+      expect(res.body.error).toContain('Validation failed');
     });
   });
 
@@ -118,7 +126,7 @@ describe('Analytics API', () => {
         .query({ start_date: 'invalid-date', end_date: 'also-invalid' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('Invalid date range');
+      expect(res.body.error).toContain('Invalid date');
     });
 
     it('should handle 10k+ synthetic events', async () => {

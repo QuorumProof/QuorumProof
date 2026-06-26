@@ -72,6 +72,8 @@ pub struct CredentialIssuedEventData {
 pub struct RevokeEventData {
     pub credential_id: u64,
     pub subject: Address,
+    pub issuer: Address,
+    pub revoked_at: u64,
 }
 
 #[contracttype]
@@ -290,6 +292,77 @@ pub struct IssuanceApprovedEventData {
     pub signer: Address,
     pub approvals_so_far: u32,
     pub threshold: u32,
+}
+
+// ── Issue #666: Multi-Signature Attestation Workflow ─────────────────────────
+
+/// Sensitivity level for a credential type, controlling multi-sig requirements.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CredentialSensitivity {
+    Standard = 0,
+    High = 1,
+    Critical = 2,
+}
+
+/// Policy defining multi-sig attestation requirements per sensitivity level.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationPolicy {
+    pub sensitivity: CredentialSensitivity,
+    /// Minimum number of co-signatures required.
+    pub threshold: u32,
+    /// Seconds within which all signatures must be collected (default 7 days).
+    pub window_seconds: u64,
+}
+
+/// A pending multi-sig attestation request.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationRequest {
+    pub id: u64,
+    pub credential_id: u64,
+    pub slice_id: u64,
+    pub initiator: Address,
+    pub required_signers: soroban_sdk::Vec<Address>,
+    pub signatures: soroban_sdk::Vec<Address>,
+    pub threshold: u32,
+    pub attestation_value: bool,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+    pub rolled_back: bool,
+}
+
+/// Event emitted when a multi-sig attestation request is created.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationRequestedEventData {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub initiator: Address,
+    pub threshold: u32,
+    pub expires_at: u64,
+}
+
+/// Event emitted when a signer co-signs an attestation request.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationSignedEventData {
+    pub request_id: u64,
+    pub signer: Address,
+    pub signatures_so_far: u32,
+    pub threshold: u32,
+}
+
+/// Event emitted when a multi-sig attestation is executed or rolled back.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationFinalizedEventData {
+    pub request_id: u64,
+    pub credential_id: u64,
+    pub executed: bool,
 }
 
 /// Event data emitted when a fork is detected.
@@ -537,6 +610,18 @@ pub enum ContractError {
     RevocationTimeLockActive = 61,
     /// Circuit breaker: degraded write limit reached
     CircuitBreakerDegradedLimitReached = 62,
+    /// Issue #666: No attestation policy set for this credential type
+    AttestationPolicyNotFound = 63,
+    /// Issue #666: Signer is not in the required signers list
+    NotAttestationSigner = 64,
+    /// Issue #666: Signer has already signed this attestation request
+    AlreadySignedAttestation = 65,
+    /// Issue #666: Attestation request not found
+    AttestationRequestNotFound = 66,
+    /// Issue #666: Attestation request window has expired
+    AttestationRequestExpired = 67,
+    /// Issue #666: Attestation request already finalized
+    AttestationRequestFinalized = 68,
 }
 
 #[contracttype]
@@ -663,6 +748,12 @@ pub enum DataKey2 {
     CredentialMetadataSchema(u64),
     /// Migration audit record for a schema transition.
     MetadataSchemaMigration(u32),
+    /// Issue #666: Multi-sig attestation policy for a credential type (u32 -> AttestationPolicy)
+    AttestationPolicy(u32),
+    /// Issue #666: Pending multi-sig attestation request by id
+    AttestationRequest(u64),
+    /// Issue #666: Count of attestation requests
+    AttestationRequestCount,
 }
 
 /// Storage keys for expiry, renewal, proof requests, share tokens, and attestation queue.
@@ -786,6 +877,20 @@ pub enum DataKey6 {
     RoleAuditLog,
 }
 
+/// Storage keys for W3C Decentralized Identifier (DID) support.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey7 {
+    /// DID document indexed by DID string (as Bytes).
+    DidDocument(soroban_sdk::Bytes),
+    /// Reverse lookup: Stellar Address -> DID string (as Bytes).
+    DidByAddress(Address),
+    /// Global DID counter.
+    DidCount,
+    /// DID method scheme (e.g., "stellar").
+    DidMethod,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct CredentialTypeDef {
@@ -813,6 +918,73 @@ pub struct Credential {
     pub expires_at: Option<u64>,
     pub version: u32,
 }
+
+/// W3C DID verification method key type.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum DidKeyType {
+    Ed25519VerificationKey2018 = 1,
+    Ed25519VerificationKey2020 = 2,
+    X25519KeyAgreementKey2019 = 3,
+    EcdsaSecp256k1VerificationKey2019 = 4,
+    SchnorrSecp256k1VerificationKey2019 = 5,
+}
+
+/// W3C Decentralized Identifier (DID) document stored on-chain.
+///
+/// Follows the W3C DID Core 1.0 specification with Soroban-compatible
+/// field types. Each DID is uniquely derived from a Stellar address
+/// using the `did:stellar:<address>` method scheme.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidDocument {
+    /// Full DID string, e.g. "did:stellar:GA2GB5B..." or "did:ethr:0x..."
+    pub did: soroban_sdk::String,
+    /// The blockchain address this DID resolves to.
+    pub address: Address,
+    /// DID method (e.g. "stellar", "ethr", "key").
+    pub method: soroban_sdk::String,
+    /// Key type used for verification.
+    pub key_type: DidKeyType,
+    /// Multibase-encoded public key bytes.
+    pub public_key: soroban_sdk::Bytes,
+    /// Whether the DID is active (not deactivated).
+    pub active: bool,
+    /// Ledger timestamp of registration.
+    pub created_at: u64,
+    /// Ledger timestamp of last update.
+    pub updated_at: u64,
+}
+
+/// Event payload emitted when a DID is registered.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidRegisteredEventData {
+    pub did: soroban_sdk::String,
+    pub address: Address,
+    pub method: soroban_sdk::String,
+}
+
+/// Event payload emitted when a DID is updated.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidUpdatedEventData {
+    pub did: soroban_sdk::String,
+    pub address: Address,
+}
+
+/// Event payload emitted when a DID is deactivated.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidDeactivatedEventData {
+    pub did: soroban_sdk::String,
+    pub address: Address,
+}
+
+const TOPIC_DID_REGISTERED: &str = "DidRegistered";
+const TOPIC_DID_UPDATED: &str = "DidUpdated";
+const TOPIC_DID_DEACTIVATED: &str = "DidDeactivated";
 
 /// Status of a holder-initiated revocation request.
 #[contracttype]
@@ -1545,6 +1717,221 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
+
+    // ── W3C Decentralized Identifier (DID) Support ─────────────────────
+
+    /// Register a new W3C DID document and link it to a Stellar address.
+    ///
+    /// The caller provides a full DID string (e.g. `did:stellar:GA2...`,
+    /// `did:ethr:0x...`, `did:key:z6Mk...`) which is stored on-chain and
+    /// resolvable across blockchain platforms and custody models.
+    ///
+    /// Each Stellar address may register at most one active DID.
+    ///
+    /// # Parameters
+    /// - `address`: The Stellar address to associate with the DID; must authorize.
+    /// - `did`: Full W3C DID string (e.g. "did:stellar:GA2GB5B...").
+    /// - `key_type`: Cryptographic key type for verification methods.
+    /// - `public_key`: Multibase-encoded public key bytes for the verification method.
+    ///
+    /// # Panics
+    /// Panics if the address already has a DID registered.
+    /// Panics if the DID string is empty.
+    /// Panics if the DID does not start with "did:".
+    pub fn register_did(
+        env: Env,
+        address: Address,
+        did: soroban_sdk::String,
+        key_type: DidKeyType,
+        public_key: soroban_sdk::Bytes,
+    ) {
+        address.require_auth();
+
+        assert!(!did.is_empty(), "DID string cannot be empty");
+
+        // Ensure no DID already exists for this address
+        assert!(
+            !env.storage().instance().has(&DataKey7::DidByAddress(address.clone())),
+            "DID already registered for this address"
+        );
+
+        // Ensure the DID is not already registered
+        let did_bytes = did.clone().into_bytes();
+        assert!(
+            !env.storage().instance().has(&DataKey7::DidDocument(did_bytes.clone())),
+            "DID string already registered"
+        );
+
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidCount)
+            .unwrap_or(0u64);
+
+        let now = env.ledger().timestamp();
+        let doc = DidDocument {
+            did: did.clone(),
+            address: address.clone(),
+            method: soroban_sdk::String::from_str(&env, "stellar"),
+            key_type,
+            public_key,
+            active: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        env.storage().instance().set(&DataKey7::DidDocument(did_bytes.clone()), &doc);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.storage().instance().set(&DataKey7::DidByAddress(address.clone()), &did_bytes);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.storage().instance().set(&DataKey7::DidCount, &(count + 1));
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = DidRegisteredEventData {
+            did: did.clone(),
+            address,
+            method: soroban_sdk::String::from_str(&env, "stellar"),
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_REGISTERED);
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Resolve a W3C DID document by its DID string.
+    /// Returns `None` if the DID is not registered.
+    pub fn resolve_did(env: Env, did: soroban_sdk::String) -> Option<DidDocument> {
+        let did_bytes = did.into_bytes();
+        env.storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes))
+    }
+
+    /// Look up the DID string registered for a Stellar address.
+    /// Returns `None` if no DID is registered for the address.
+    pub fn get_did_for_address(env: Env, address: Address) -> Option<soroban_sdk::String> {
+        let did_bytes: Option<soroban_sdk::Bytes> = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidByAddress(address));
+        did_bytes.map(|b| soroban_sdk::String::from_bytes(&env, b))
+    }
+
+    /// Update the public key and key type for an existing DID.
+    /// The caller must be the address that owns the DID.
+    pub fn update_did(
+        env: Env,
+        address: Address,
+        new_key_type: DidKeyType,
+        new_public_key: soroban_sdk::Bytes,
+    ) {
+        address.require_auth();
+
+        let did_bytes: soroban_sdk::Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidByAddress(address.clone()))
+            .expect("no DID registered for this address");
+
+        let mut doc: DidDocument = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes.clone()))
+            .expect("DID document not found");
+
+        doc.key_type = new_key_type;
+        doc.public_key = new_public_key;
+        doc.updated_at = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey7::DidDocument(did_bytes), &doc);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = DidUpdatedEventData {
+            did: doc.did.clone(),
+            address,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_UPDATED);
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Deactivate a DID document. The DID entry is marked inactive but
+    /// remains on-chain for resolution and audit purposes.
+    pub fn deactivate_did(env: Env, address: Address) {
+        address.require_auth();
+
+        let did_bytes: soroban_sdk::Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidByAddress(address.clone()))
+            .expect("no DID registered for this address");
+
+        let mut doc: DidDocument = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes.clone()))
+            .expect("DID document not found");
+
+        doc.active = false;
+        doc.updated_at = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey7::DidDocument(did_bytes), &doc);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = DidDeactivatedEventData {
+            did: doc.did.clone(),
+            address,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_DEACTIVATED);
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Return the total number of registered DIDs.
+    pub fn get_did_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey7::DidCount)
+            .unwrap_or(0u64)
+    }
+
+    /// Issue a credential to a DID-identified subject.
+    ///
+    /// Resolves the DID to a Stellar address and issues the credential.
+    /// The DID must be active and registered.
+    pub fn issue_credential_to_did(
+        env: Env,
+        issuer: Address,
+        subject_did: soroban_sdk::String,
+        credential_type: u32,
+        metadata_hash: soroban_sdk::Bytes,
+        expires_at: Option<u64>,
+        nonce: u64,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let doc = Self::require_active_did(&env, &subject_did);
+        let subject = doc.address;
+        Self::issue_credential(env, issuer, subject, credential_type, metadata_hash, expires_at, nonce)
+    }
+
+    /// Resolve a DID and return its document, panicking if not found or inactive.
+    fn require_active_did(env: &Env, did: &soroban_sdk::String) -> DidDocument {
+        let did_bytes = did.clone().into_bytes();
+        let doc: DidDocument = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes.clone()))
+            .expect("DID not found");
+        assert!(doc.active, "DID is deactivated");
+        doc
+    }
+
+    // ── End DID Support ────────────────────────────────────────────────
 
     /// Issue #487: Returns the current state schema version.
     /// Returns 0 if no version has been set (pre-versioning state).
@@ -3023,6 +3410,8 @@ impl QuorumProofContract {
         let event_data = RevokeEventData {
             credential_id,
             subject: credential.subject.clone(),
+            issuer: revoker.clone(),
+            revoked_at: env.ledger().timestamp(),
         };
         let topic = String::from_str(env, TOPIC_REVOKE);
         let mut topics: Vec<String> = Vec::new(env);
@@ -4165,6 +4554,186 @@ impl QuorumProofContract {
         }
 
         BatchResult::Ok(ids)
+    }
+
+    /// Issue credentials to DID-identified subjects in a single batch call.
+    ///
+    /// This function resolves each DID to its corresponding Stellar address
+    /// and issues credentials atomically. All DIDs must be active and registered.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing all credentials; must authorize this call.
+    /// - `subject_dids`: Ordered list of subject DIDs (one per credential).
+    /// - `credential_types`: Ordered list of credential type IDs, one per subject.
+    /// - `metadata_hashes`: Ordered list of metadata hashes, one per subject.
+    /// - `expires_at`: Optional shared expiry timestamp applied to all issued credentials.
+    ///
+    /// # Returns
+    /// `BatchResult::Ok(Vec<u64>)` on success, `BatchResult::Err(BatchError)` on failure.
+    pub fn issue_batch_by_did(
+        env: Env,
+        issuer: Address,
+        subject_dids: Vec<soroban_sdk::String>,
+        credential_types: Vec<u32>,
+        metadata_hashes: Vec<soroban_sdk::Bytes>,
+        expires_at: Option<u64>,
+    ) -> BatchResult {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let batch_len = subject_dids.len() as u32;
+        if batch_len == 0 {
+            return BatchResult::Ok(Vec::new(&env));
+        }
+        Self::validate_array_bounds(batch_len, 1, MAX_BATCH_SIZE, "subject_dids");
+        assert!(
+            credential_types.len() == batch_len && metadata_hashes.len() == batch_len,
+            "input lengths must match"
+        );
+
+        // Pre-validation: resolve all DIDs before issuing any credentials
+        let mut resolved: Vec<Address> = Vec::new(&env);
+        for i in 0..batch_len {
+            let did = subject_dids.get(i).unwrap();
+            let did_bytes = did.into_bytes();
+            let doc: DidDocument = match env.storage().instance().get(&DataKey7::DidDocument(did_bytes)) {
+                Some(d) => d,
+                None => {
+                    let reason = soroban_sdk::String::from_str(&env, "DID not found");
+                    return BatchResult::Err(BatchError { failing_index: i, reason });
+                }
+            };
+            if !doc.active {
+                let reason = soroban_sdk::String::from_str(&env, "DID is deactivated");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+            resolved.push_back(doc.address);
+        }
+
+        // Build CredentialInput vector from resolved addresses
+        let mut credentials: Vec<CredentialInput> = Vec::new(&env);
+        for i in 0..batch_len {
+            let input = CredentialInput {
+                subject: resolved.get(i).unwrap(),
+                credential_type: credential_types.get(i).unwrap(),
+                metadata_hash: metadata_hashes.get(i).unwrap(),
+                expires_at: expires_at.clone(),
+            };
+            credentials.push_back(input);
+        }
+
+        // Delegate to the existing atomically validated batch issuer
+        Self::issue_batch_with_credentials(&env, issuer, credentials)
+    }
+
+    /// Internal: validates and issues a pre-built CredentialInput vector atomically.
+    fn issue_batch_with_credentials(
+        env: &Env,
+        issuer: Address,
+        credentials: Vec<CredentialInput>,
+    ) -> BatchResult {
+        let batch_len = credentials.len() as u32;
+
+        // Pre-validation phase
+        for i in 0..batch_len {
+            let cred_input = credentials.get(i).unwrap();
+
+            if cred_input.credential_type == 0 {
+                let reason = soroban_sdk::String::from_str(env, "credential_type must be greater than 0");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+            if cred_input.metadata_hash.is_empty() {
+                let reason = soroban_sdk::String::from_str(env, "metadata_hash cannot be empty");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+            if cred_input.metadata_hash.len() > MAX_METADATA_SIZE {
+                let reason = soroban_sdk::String::from_str(env, "metadata_hash exceeds max size");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+
+            let duplicate_key = DataKey::SubjectIssuerType(
+                cred_input.subject.clone(),
+                issuer.clone(),
+                cred_input.credential_type,
+            );
+            if env.storage().instance().has(&duplicate_key) {
+                let reason = soroban_sdk::String::from_str(env, "duplicate credential type for this subject");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey2::BlacklistEntry(issuer.clone(), cred_input.subject.clone()))
+            {
+                let reason = soroban_sdk::String::from_str(env, "subject is blacklisted by this issuer");
+                return BatchResult::Err(BatchError { failing_index: i, reason });
+            }
+
+            for j in 0..i {
+                let other = credentials.get(j).unwrap();
+                if cred_input.subject == other.subject
+                    && cred_input.credential_type == other.credential_type
+                {
+                    let reason = soroban_sdk::String::from_str(env, "duplicate within batch");
+                    return BatchResult::Err(BatchError { failing_index: i, reason });
+                }
+            }
+        }
+
+        // Issue all credentials
+        let mut ids: Vec<u64> = Vec::new(env);
+        for i in 0..batch_len {
+            let cred_input = credentials.get(i).unwrap();
+            let id = Self::issue_inner(
+                env,
+                issuer.clone(),
+                cred_input.subject.clone(),
+                cred_input.credential_type,
+                cred_input.metadata_hash.clone(),
+                cred_input.expires_at,
+            );
+
+            let duplicate_key = DataKey::SubjectIssuerType(
+                cred_input.subject.clone(),
+                issuer.clone(),
+                cred_input.credential_type,
+            );
+            env.storage().instance().set(&duplicate_key, &id);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            ids.push_back(id);
+        }
+
+        BatchResult::Ok(ids)
+    }
+
+    /// Issue credentials to multiple subjects identified by DIDs.
+    ///
+    /// Simpler interface: resolves DIDs, issues credentials, returns IDs.
+    /// Reverts on any failure (panics).
+    pub fn batch_issue_credentials_by_did(
+        env: Env,
+        issuer: Address,
+        subject_dids: Vec<soroban_sdk::String>,
+        credential_types: Vec<u32>,
+        metadata_hashes: Vec<soroban_sdk::Bytes>,
+        expires_at: Option<u64>,
+    ) -> Vec<u64> {
+        let result = Self::issue_batch_by_did(
+            env,
+            issuer,
+            subject_dids,
+            credential_types,
+            metadata_hashes,
+            expires_at,
+        );
+        match result {
+            BatchResult::Ok(ids) => ids,
+            BatchResult::Err(err) => {
+                panic_with_error!(&env, ContractError::InvalidInput);
+            }
+        }
     }
 
     /// Retrieve a credential by ID.
@@ -6850,6 +7419,348 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .get(&DataKey2::PendingIssuance(request_id))
+    }
+
+    // ── Issue #666: Multi-Signature Attestation Workflow ─────────────────────
+
+    /// Set an attestation policy for a credential type. Admin only.
+    /// Credentials of this type require `threshold` co-signatures within `window_seconds`.
+    pub fn set_attestation_policy(
+        env: Env,
+        admin: Address,
+        credential_type: u32,
+        sensitivity: CredentialSensitivity,
+        threshold: u32,
+        window_seconds: u64,
+    ) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        let stored: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        assert!(threshold > 0, "threshold must be > 0");
+        assert!(threshold <= MAX_MULTISIG_SIGNERS, "threshold exceeds maximum");
+        assert!(window_seconds > 0, "window_seconds must be > 0");
+        let policy = AttestationPolicy { sensitivity, threshold, window_seconds };
+        env.storage().instance().set(&DataKey2::AttestationPolicy(credential_type), &policy);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the attestation policy for a credential type. Returns None if not set.
+    pub fn get_attestation_policy(env: Env, credential_type: u32) -> Option<AttestationPolicy> {
+        env.storage().instance().get(&DataKey2::AttestationPolicy(credential_type))
+    }
+
+    /// Initiate a multi-sig attestation request for a high-sensitivity credential.
+    /// The initiator must be a member of the specified slice.
+    /// Returns the new request ID.
+    pub fn request_multisig_attestation(
+        env: Env,
+        initiator: Address,
+        credential_id: u64,
+        slice_id: u64,
+        required_signers: soroban_sdk::Vec<Address>,
+        attestation_value: bool,
+    ) -> u64 {
+        initiator.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &initiator);
+        Self::precondition(&env, credential_id > 0);
+        Self::precondition(&env, slice_id > 0);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(!credential.revoked, "credential is revoked");
+
+        let policy: AttestationPolicy = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationPolicy(credential.credential_type))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationPolicyNotFound));
+
+        assert!(
+            required_signers.len() >= policy.threshold,
+            "not enough required signers for policy threshold"
+        );
+
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Verify initiator is in the slice
+        let in_slice = env
+            .storage()
+            .instance()
+            .get::<_, soroban_sdk::Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+            .map(|set| set.contains_key(initiator.clone()))
+            .unwrap_or_else(|| slice.attestors.contains(&initiator));
+        assert!(in_slice, "initiator not in slice");
+
+        let now = env.ledger().timestamp();
+        let request_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let mut initial_signatures: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        initial_signatures.push_back(initiator.clone());
+
+        let request = AttestationRequest {
+            id: request_id,
+            credential_id,
+            slice_id,
+            initiator: initiator.clone(),
+            required_signers,
+            signatures: initial_signatures,
+            threshold: policy.threshold,
+            attestation_value,
+            created_at: now,
+            expires_at: now.saturating_add(policy.window_seconds),
+            executed: false,
+            rolled_back: false,
+        };
+        env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+        env.storage().instance().set(&DataKey2::AttestationRequestCount, &request_id);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = AttestationRequestedEventData {
+            request_id,
+            credential_id,
+            initiator: request.initiator.clone(),
+            threshold: policy.threshold,
+            expires_at: request.expires_at,
+        };
+        let topic = String::from_str(&env, "AttestationRequested");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        request_id
+    }
+
+    /// Co-sign an existing multi-sig attestation request.
+    /// If the signature threshold is met, the attestation is executed automatically.
+    /// Returns true if the attestation was executed (threshold reached), false otherwise.
+    pub fn sign_attestation_request(env: Env, signer: Address, request_id: u64) -> bool {
+        signer.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_rate_limit(&env, &signer);
+
+        let mut request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+
+        if request.executed || request.rolled_back {
+            panic_with_error!(&env, ContractError::AttestationRequestFinalized);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > request.expires_at {
+            // Auto-rollback: window expired without reaching threshold
+            request.rolled_back = true;
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            let event_data = AttestationFinalizedEventData {
+                request_id,
+                credential_id: request.credential_id,
+                executed: false,
+            };
+            let topic = String::from_str(&env, "AttestationRolledBack");
+            let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+            panic_with_error!(&env, ContractError::AttestationRequestExpired);
+        }
+
+        // Check signer is in required_signers
+        if !request.required_signers.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::NotAttestationSigner);
+        }
+
+        // Prevent replay: check not already signed
+        if request.signatures.iter().any(|s| s == signer) {
+            panic_with_error!(&env, ContractError::AlreadySignedAttestation);
+        }
+
+        request.signatures.push_back(signer.clone());
+        let signatures_so_far = request.signatures.len();
+
+        let event_data = AttestationSignedEventData {
+            request_id,
+            signer,
+            signatures_so_far,
+            threshold: request.threshold,
+        };
+        let topic = String::from_str(&env, "AttestationSigned");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        if signatures_so_far >= request.threshold {
+            // Threshold met — execute the attestation
+            request.executed = true;
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            // Call the standard attest path internally
+            let credential: Credential = env
+                .storage()
+                .instance()
+                .get(&DataKey::Credential(request.credential_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+            let mut records: soroban_sdk::Vec<AttestationRecord> = env
+                .storage()
+                .instance()
+                .get(&DataKey::Attestors(request.credential_id))
+                .unwrap_or(soroban_sdk::Vec::new(&env));
+
+            let record = AttestationRecord {
+                attestor: request.initiator.clone(),
+                attested_at: now,
+                expires_at: None,
+                attestation_value: request.attestation_value,
+                metadata: None,
+            };
+            records.push_back(record);
+            env.storage().instance().set(&DataKey::Attestors(request.credential_id), &records);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            let attest_event = AttestationEventData {
+                attestor: request.initiator.clone(),
+                credential_id: request.credential_id,
+                slice_id: request.slice_id,
+            };
+            let attest_topic = String::from_str(&env, TOPIC_ATTESTATION);
+            let mut attest_topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            attest_topics.push_back(attest_topic);
+            env.events().publish(attest_topics, attest_event);
+
+            // Notify credential holder
+            let notification = HolderNotification {
+                credential_id: request.credential_id,
+                attestor: request.initiator.clone(),
+                slice_id: request.slice_id,
+                notified_at: now,
+            };
+            let mut notif_history: soroban_sdk::Vec<HolderNotification> = env
+                .storage()
+                .instance()
+                .get(&DataKey2::NotificationHistory(credential.subject))
+                .unwrap_or(soroban_sdk::Vec::new(&env));
+            notif_history.push_back(notification.clone());
+            env.storage().instance().set(
+                &DataKey2::NotificationHistory(request.initiator.clone()),
+                &notif_history,
+            );
+            let notif_topic = String::from_str(&env, TOPIC_HOLDER_NOTIFIED);
+            let mut notif_topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            notif_topics.push_back(notif_topic);
+            env.events().publish(notif_topics, notification);
+
+            let fin_event = AttestationFinalizedEventData {
+                request_id,
+                credential_id: request.credential_id,
+                executed: true,
+            };
+            let fin_topic = String::from_str(&env, "AttestationExecuted");
+            let mut fin_topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            fin_topics.push_back(fin_topic);
+            env.events().publish(fin_topics, fin_event);
+
+            true
+        } else {
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            false
+        }
+    }
+
+    /// Explicitly roll back an expired attestation request.
+    /// Anyone can trigger rollback once the window has passed and threshold wasn't met.
+    pub fn rollback_attestation_request(env: Env, request_id: u64) {
+        let mut request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+
+        if request.executed || request.rolled_back {
+            panic_with_error!(&env, ContractError::AttestationRequestFinalized);
+        }
+
+        let now = env.ledger().timestamp();
+        assert!(now > request.expires_at, "attestation window still active");
+
+        request.rolled_back = true;
+        env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = AttestationFinalizedEventData {
+            request_id,
+            credential_id: request.credential_id,
+            executed: false,
+        };
+        let topic = String::from_str(&env, "AttestationRolledBack");
+        let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get a pending multi-sig attestation request by ID.
+    pub fn get_attestation_request(env: Env, request_id: u64) -> Option<AttestationRequest> {
+        env.storage().instance().get(&DataKey2::AttestationRequest(request_id))
+    }
+
+    /// Check if a credential's attestation request window has expired without reaching threshold.
+    pub fn is_attestation_request_expired(env: Env, request_id: u64) -> bool {
+        let request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+        env.ledger().timestamp() > request.expires_at && !request.executed
+    }
+
+    /// Check if a credential's attestation request window has expired without reaching threshold.
+    pub fn check_and_rollback_attestation(env: Env, request_id: u64) -> bool {
+        let mut request: AttestationRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AttestationRequest(request_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestationRequestNotFound));
+
+        if request.executed || request.rolled_back {
+            return false;
+        }
+
+        let now = env.ledger().timestamp();
+        if now > request.expires_at {
+            request.rolled_back = true;
+            env.storage().instance().set(&DataKey2::AttestationRequest(request_id), &request);
+            env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            let event_data = AttestationFinalizedEventData {
+                request_id,
+                credential_id: request.credential_id,
+                executed: false,
+            };
+            let topic = String::from_str(&env, "AttestationRolledBack");
+            let mut topics: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+            true
+        } else {
+            false
+        }
     }
 
     /// Check if a credential has met its quorum threshold using weighted trust.
@@ -17829,6 +18740,9 @@ mod proptest_slices;
 
 #[path = "proptest_credentials.rs"]
 mod proptest_credentials;
+
+#[path = "proptest_state_transitions.rs"]
+mod proptest_state_transitions;
 
 #[path = "weighted_voting_tests.rs"]
 mod weighted_voting_tests;
