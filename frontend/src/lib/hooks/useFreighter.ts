@@ -17,13 +17,56 @@ export interface FreighterState {
   switchWallet: (index: number) => void;
 }
 
+const STORAGE_KEY = 'quorum-proof-wallets';
+
+interface PersistedWalletState {
+  wallets: string[];
+  activeIndex: number;
+}
+
+function loadPersistedState(): PersistedWalletState | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedWalletState;
+    if (Array.isArray(parsed.wallets) && parsed.wallets.length > 0) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function savePersistedState(wallets: string[], activeIndex: number): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ wallets, activeIndex }));
+  } catch { /* noop */ }
+}
+
+function clearPersistedState(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch { /* noop */ }
+}
+
 export function useFreighter(): FreighterState {
-  const [wallets, setWallets] = useState<string[]>([]);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [wallets, setWallets] = useState<string[]>(() => {
+    const persisted = loadPersistedState();
+    return persisted ? persisted.wallets : [];
+  });
+  const [activeIndex, setActiveIndex] = useState<number>(() => {
+    const persisted = loadPersistedState();
+    return persisted ? persisted.activeIndex : 0;
+  });
   const [hasFreighter, setHasFreighter] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
 
   const address = wallets.length > 0 ? wallets[activeIndex] ?? wallets[0] : null;
+
+  useEffect(() => {
+    savePersistedState(wallets, activeIndex);
+  }, [wallets, activeIndex]);
 
   useEffect(() => {
     const init = async () => {
@@ -35,8 +78,17 @@ export function useFreighter(): FreighterState {
           if (allowedResult.isAllowed) {
             const result = await getAddress();
             if (result.address) {
-              setWallets([result.address]);
-              setActiveIndex(0);
+              const persisted = loadPersistedState();
+              if (persisted && persisted.wallets.includes(result.address)) {
+                setWallets(persisted.wallets);
+                setActiveIndex(persisted.activeIndex);
+              } else {
+                setWallets(prev => {
+                  if (prev.includes(result.address)) return prev;
+                  return [result.address, ...prev];
+                });
+                setActiveIndex(0);
+              }
             }
           }
         }
@@ -75,7 +127,11 @@ export function useFreighter(): FreighterState {
   }, [hasFreighter]);
 
   const disconnect = useCallback(() => {
-    setWallets(prev => prev.filter((_, i) => i !== activeIndex));
+    setWallets(prev => {
+      const next = prev.filter((_, i) => i !== activeIndex);
+      if (next.length === 0) clearPersistedState();
+      return next;
+    });
     setActiveIndex(() => {
       const newLength = wallets.length - 1;
       if (newLength <= 0) return 0;
