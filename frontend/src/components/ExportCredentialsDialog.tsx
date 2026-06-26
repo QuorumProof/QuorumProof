@@ -66,8 +66,33 @@ export function ExportCredentialsDialog({ credentials, onClose }: ExportCredenti
           </div>
 
           <div className="form-info">
-            <p>Exporting {credentials.length} credential(s) as {format.toUpperCase()}</p>
+            <p>
+              {format === 'pdf' && credentials.length > 1
+                ? `PDF will generate individual files for all ${credentials.length} credential(s). Each opens in a new tab for printing.`
+                : `Exporting ${credentials.length} credential(s) as ${format.toUpperCase()}`}
+            </p>
           </div>
+
+          {format === 'pdf' && credentials.length === 1 && (
+            <div style={{
+              marginTop: 16,
+              padding: 12,
+              background: '#1a1f2e',
+              borderRadius: 8,
+              border: '1px solid #2d3748',
+              fontSize: 13,
+              color: '#94a3b8',
+            }}>
+              <p>PDF includes a styled credential template with:</p>
+              <ul style={{ margin: '8px 0 0 16px', lineHeight: 1.8 }}>
+                <li>QR code linking to on-chain verification</li>
+                <li>Credential details (ID, type, subject, issuer)</li>
+                <li>Status badge (Active/Revoked)</li>
+                <li>Metadata hash for integrity verification</li>
+                <li>Blockchain anchor stamp</li>
+              </ul>
+            </div>
+          )}
         </div>
 
         <div className="modal-footer">
@@ -77,7 +102,7 @@ export function ExportCredentialsDialog({ credentials, onClose }: ExportCredenti
             onClick={handleExport}
             disabled={isExporting}
           >
-            {isExporting ? 'Exporting...' : 'Export'}
+            {isExporting ? 'Exporting...' : `Export as ${format.toUpperCase()}`}
           </button>
         </div>
       </div>
