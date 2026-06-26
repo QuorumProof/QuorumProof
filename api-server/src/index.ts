@@ -8,6 +8,7 @@ import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
+import { createRequestSigning } from './middleware/requestSigning.js';
 import { createWsServer } from './ws/server.js';
 import { getConnectionCount, getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics } from './ws/metrics.js';
@@ -20,69 +21,20 @@ app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
 
-// Brotli compression middleware for responses > 1KB
-function brotliCompression(req: Request, res: Response, next: NextFunction): void {
-  if (req.headers['x-no-compression'] || req.method === 'HEAD') {
-    next();
-    return;
-  }
-  const acceptEncoding = req.headers['accept-encoding'] || '';
-  if (!acceptEncoding.includes('br')) {
-    next();
-    return;
-  }
-  const originalWrite = res.write.bind(res);
-  const originalEnd = res.end.bind(res);
-  const chunks: Buffer[] = [];
-  let contentLength = 0;
+const requestSigning = createRequestSigning();
+app.use('/api', requestSigning);
 
-  res.write = function (chunk: unknown, ...args: unknown[]) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-    chunks.push(buf);
-    contentLength += buf.length;
-    return true;
-  } as typeof res.write;
-
-  res.end = function (chunk?: unknown, ...args: unknown[]) {
-    if (chunk) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-      chunks.push(buf);
-      contentLength += buf.length;
-    }
-    if (contentLength < 1024) {
-      res.removeHeader('content-encoding');
-      for (const c of chunks) originalWrite(c);
-      originalEnd();
-      return res;
-    }
-    res.setHeader('content-encoding', 'br');
-    const compressed = zlib.brotliCompressSync(Buffer.concat(chunks), {
-      params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
-    });
-    res.setHeader('content-length', compressed.length);
-    res.removeHeader('transfer-encoding');
-    originalWrite(compressed);
-    originalEnd();
-    return res;
-  } as typeof res.end;
-
-  next();
-}
-
-app.use(brotliCompression);
-
-// Standard gzip/deflate compression as fallback for clients without brotli
-app.use(compression({ threshold: 1024, filter: (req, res) => {
-  if (req.headers['accept-encoding'] && String(req.headers['accept-encoding']).includes('br')) return false;
-  return compression.filter(req, res);
-} }));
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10);
+const RATE_LIMIT_BACKOFF = parseInt(process.env.RATE_LIMIT_BACKOFF ?? '2', 10);
+const RATE_LIMIT_MAX_VIOLATIONS = parseInt(process.env.RATE_LIMIT_MAX_VIOLATIONS ?? '5', 10);
 
 const apiRateLimiter = createRateLimiter({
-  windowMs: 60000,
-  max: 100,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   name: 'api',
-  backoffMultiplier: 2,
-  maxViolations: 5,
+  backoffMultiplier: RATE_LIMIT_BACKOFF,
+  maxViolations: RATE_LIMIT_MAX_VIOLATIONS,
 });
 
 app.use('/api', apiRateLimiter);

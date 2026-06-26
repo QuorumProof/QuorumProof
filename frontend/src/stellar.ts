@@ -20,8 +20,9 @@ import {
   CONTRACT_ZK_VERIFIER,
   STELLAR_RPC_URL,
 } from './config/env';
-import { rpcClient } from './lib/rpcClient';
+import { getRpcClient } from './lib/rpcClient';
 import { handleContractError } from './lib/handleContractError';
+import { onNetworkChange } from './lib/networkConfig';
 
 /** Stellar network passphrase map */
 const PASSPHRASES: Record<string, string> = {
@@ -30,7 +31,12 @@ const PASSPHRASES: Record<string, string> = {
   futurenet: Networks.FUTURENET,
 };
 
-const networkPassphrase = PASSPHRASES[STELLAR_NETWORK] || Networks.TESTNET;
+let networkPassphrase = PASSPHRASES[STELLAR_NETWORK] || Networks.TESTNET;
+
+onNetworkChange((config) => {
+  networkPassphrase = PASSPHRASES[config.network] || Networks.TESTNET;
+  void config;
+});
 
 /**
  * Simulate a read-only contract call and return the parsed native JS value.
@@ -61,7 +67,7 @@ async function simulate(contractId: string, method: string, args: any[] = []): P
     .build();
 
   try {
-    const result = await rpcClient.simulateTransaction(tx);
+    const result = await getRpcClient().simulateTransaction(tx);
 
     if (StellarRpc.Api.isSimulationError(result)) {
       throw new Error(result.error || 'Simulation failed');

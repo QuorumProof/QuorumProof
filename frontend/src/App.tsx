@@ -3,10 +3,10 @@ import { BrowserRouter, Routes, Route, useLocation, Navigate } from 'react-route
 import { AppLayout } from './components/AppLayout';
 import { WalletGuard } from './components/WalletGuard';
 import { useWallet } from './hooks';
+import { useServiceWorker } from './hooks/useServiceWorker';
 import './styles.css';
 import './index.css';
 
-// Lazy load pages
 const Dashboard = lazy(() => import('./pages/Dashboard').then(module => ({ default: module.default })));
 const Verify = lazy(() => import('./pages/Verify').then(module => ({ default: module.default })));
 const VerifierUI = lazy(() => import('./pages/VerifierUI').then(module => ({ default: module.default })));
@@ -19,15 +19,14 @@ const IssueCredential = lazy(() => import('./pages/IssueCredential').then(module
 const Profile = lazy(() => import('./pages/Profile').then(module => ({ default: module.default })));
 const CredentialCompare = lazy(() => import('./pages/CredentialCompare').then(module => ({ default: module.default })));
 const Help = lazy(() => import('./pages/Help').then(module => ({ default: module.default })));
+const CredentialSharing = lazy(() => import('./pages/CredentialSharing').then(module => ({ default: module.default })));
 
-// Loading fallback
 const LoadingFallback = () => (
   <div className="flex items-center justify-center h-full">
     <div className="text-slate-400">Loading...</div>
   </div>
 );
 
-// 404 component
 const NotFound = () => (
   <div className="flex flex-col items-center justify-center h-full">
     <h1 className="text-2xl font-bold text-slate-100 mb-4">Page not found</h1>
@@ -39,13 +38,16 @@ const NotFound = () => (
 function AppContent() {
   const location = useLocation();
   const { address, connect, network } = useWallet();
+  const { isOnline } = useServiceWorker();
 
   return (
     <AppLayout
       currentPath={location.pathname}
-      walletAddress={address}
+      walletAddress={address ?? undefined}
+      wallets={wallets}
+      activeIndex={activeIndex}
       onConnectWallet={connect}
-      network={network}
+      onSwitchWallet={switchWallet}
     >
       <Suspense fallback={<LoadingFallback />}>
         <Routes>
@@ -62,6 +64,7 @@ function AppContent() {
           <Route path="/credential/:id" element={<CredentialDetail />} />
           <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
           <Route path="/compare" element={<CredentialCompare />} />
+          <Route path="/share" element={<WalletGuard><CredentialSharing /></WalletGuard>} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>
