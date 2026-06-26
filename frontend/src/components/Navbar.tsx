@@ -1,3 +1,4 @@
+import { useState, useRef, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useFreighter } from '../lib/hooks/useFreighter';
 import { NotificationCenter } from './NotificationCenter';
@@ -11,7 +12,19 @@ function formatAddress(addr: string) {
 
 export function Navbar() {
   const location = useLocation();
-  const { address, isInitializing, connect, disconnect } = useFreighter();
+  const { address, isInitializing, connect, disconnect, wallets, activeIndex, switchWallet } = useFreighter();
+  const [showWalletMenu, setShowWalletMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowWalletMenu(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   return (
     <nav className="navbar">
@@ -54,11 +67,61 @@ export function Navbar() {
           {isInitializing ? (
             <span className="navbar__badge" style={{ opacity: 0.5 }}>Connecting…</span>
           ) : address ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span className="navbar__badge" title={address} style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
-                {formatAddress(address)}
-              </span>
-              <button className="btn btn--ghost" style={{ padding: '4px 10px', fontSize: '12px' }} onClick={disconnect}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} ref={menuRef}>
+              <div style={{ position: 'relative' }}>
+                <button
+                  className="navbar__badge"
+                  title={address}
+                  style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', cursor: 'pointer' }}
+                  onClick={() => setShowWalletMenu(prev => !prev)}
+                >
+                  {formatAddress(address)}
+                  {wallets.length > 1 && (
+                    <span style={{ marginLeft: 4, fontSize: 10 }}>▼</span>
+                  )}
+                </button>
+                {showWalletMenu && wallets.length > 0 && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: '100%',
+                      right: 0,
+                      marginTop: 4,
+                      background: '#1e293b',
+                      border: '1px solid #334155',
+                      borderRadius: 8,
+                      padding: '4px 0',
+                      minWidth: 200,
+                      zIndex: 50,
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                    }}
+                  >
+                    {wallets.map((w, i) => (
+                      <button
+                        key={w}
+                        style={{
+                          display: 'block',
+                          width: '100%',
+                          padding: '8px 12px',
+                          fontSize: 12,
+                          fontFamily: 'var(--font-mono)',
+                          textAlign: 'left',
+                          background: i === activeIndex ? '#334155' : 'transparent',
+                          color: '#e2e8f0',
+                          border: 'none',
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => { switchWallet(i); setShowWalletMenu(false); }}
+                        onMouseEnter={(e) => { if (i !== activeIndex) e.currentTarget.style.background = '#2d3748'; }}
+                        onMouseLeave={(e) => { if (i !== activeIndex) e.currentTarget.style.background = 'transparent'; }}
+                      >
+                        {formatAddress(w)} {i === activeIndex ? ' ✓' : ''}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button className="btn btn--ghost" style={{ padding: '4px 10px', fontSize: '12px' }} onClick={() => { disconnect(); setShowWalletMenu(false); }}>
                 Disconnect
               </button>
             </div>

@@ -10,6 +10,8 @@ import { STELLAR_NETWORK } from '../config/env';
 
 interface WalletState {
   address: string | null;
+  wallets: string[];
+  activeIndex: number;
   isConnected: boolean;
   hasFreighter: boolean;
   isInitializing: boolean;
@@ -17,21 +19,23 @@ interface WalletState {
   error: string | null;
   connect: () => Promise<void>;
   disconnect: () => void;
+  switchWallet: (index: number) => void;
 }
 
 const WalletContext = createContext<WalletState | undefined>(undefined);
-
-const STORAGE_KEY = 'quorum-proof-wallet-address';
 
 interface WalletProviderProps {
   children: ReactNode;
 }
 
 export function WalletProvider({ children }: WalletProviderProps) {
-  const [address, setAddress] = useState<string | null>(null);
+  const [wallets, setWallets] = useState<string[]>([]);
+  const [activeIndex, setActiveIndex] = useState(0);
   const [hasFreighter, setHasFreighter] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const address = wallets.length > 0 ? wallets[activeIndex] ?? wallets[0] : null;
 
   useEffect(() => {
     const init = async () => {
@@ -45,20 +49,15 @@ export function WalletProvider({ children }: WalletProviderProps) {
           if (allowed.isAllowed) {
             const result = await getAddress();
             if (result.address) {
-              setAddress(result.address);
-              localStorage.setItem(STORAGE_KEY, result.address);
+              setWallets([result.address]);
+              setActiveIndex(0);
             }
-          } else {
-            localStorage.removeItem(STORAGE_KEY);
           }
-        } else {
-          localStorage.removeItem(STORAGE_KEY);
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : 'Failed to initialize wallet';
         setError(errorMsg);
         console.error('Error checking Freighter connection:', err);
-        localStorage.removeItem(STORAGE_KEY);
       } finally {
         setIsInitializing(false);
       }
@@ -76,8 +75,16 @@ export function WalletProvider({ children }: WalletProviderProps) {
       await setAllowed();
       const result = await getAddress();
       if (result.address) {
-        setAddress(result.address);
-        localStorage.setItem(STORAGE_KEY, result.address);
+        setWallets(prev => {
+          const existing = prev.findIndex(w => w === result.address);
+          if (existing >= 0) {
+            setActiveIndex(existing);
+            return prev;
+          }
+          const newWallets = [...prev, result.address];
+          setActiveIndex(newWallets.length - 1);
+          return newWallets;
+        });
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect wallet';
@@ -87,20 +94,34 @@ export function WalletProvider({ children }: WalletProviderProps) {
   }, [hasFreighter]);
 
   const disconnect = useCallback(() => {
-    setAddress(null);
+    setWallets(prev => prev.filter((_, i) => i !== activeIndex));
+    setActiveIndex(() => {
+      const newLength = wallets.length - 1;
+      if (newLength <= 0) return 0;
+      if (activeIndex >= newLength) return newLength - 1;
+      return activeIndex;
+    });
     setError(null);
-    localStorage.removeItem(STORAGE_KEY);
-  }, []);
+  }, [activeIndex, wallets.length]);
+
+  const switchWallet = useCallback((index: number) => {
+    if (index >= 0 && index < wallets.length) {
+      setActiveIndex(index);
+    }
+  }, [wallets.length]);
 
   const value: WalletState = {
     address,
-    isConnected: address !== null,
+    wallets,
+    activeIndex,
+    isConnected: wallets.length > 0,
     hasFreighter,
     isInitializing,
     network: STELLAR_NETWORK,
     error,
     connect,
     disconnect,
+    switchWallet,
   };
 
   return (
