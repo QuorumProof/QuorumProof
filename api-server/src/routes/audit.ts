@@ -5,6 +5,7 @@ import {
   verifyMerkleRoot,
   validateLogIntegrity,
 } from '../services/audit.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -216,12 +217,8 @@ export function createAuditRouter(soroban: SorobanClient) {
    * Verify Merkle root integrity for a batch of entries.
    * Body: { batch_id: number }
    */
-  router.post('/verify', async (req: Request, res: Response) => {
-    const batchId = parseInt(req.body.batch_id, 10);
-    if (!Number.isInteger(batchId) || batchId <= 0) {
-      res.status(400).json({ error: 'Invalid batch ID' });
-      return;
-    }
+  router.post('/verify', validate(schemas.auditVerify), async (req: Request, res: Response) => {
+    const batchId = req.body.batch_id as number;
 
     try {
       const notarization = await soroban.simulateCall('get_notarization', [soroban.u64Val(batchId)]);

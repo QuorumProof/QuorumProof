@@ -5,6 +5,7 @@ import {
   type AnomalyDetectionResult,
   type DailyMetrics,
 } from '../services/metrics.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 type SorobanClient = {
   simulateCall: (fn: string) => Promise<unknown>;
@@ -16,18 +17,8 @@ type SorobanClient = {
 export function createAnalyticsRouter(soroban: SorobanClient) {
   const router = Router();
 
-  router.post('/events', (req: Request, res: Response) => {
+  router.post('/events', validate(schemas.analyticsEvent), (req: Request, res: Response) => {
     const event: CredentialEvent = req.body;
-
-    if (!event.type || !event.credential_id || !event.timestamp) {
-      res.status(400).json({ error: 'Missing required fields: type, credential_id, timestamp' });
-      return;
-    }
-
-    if (!['issued', 'attested', 'revoked', 'suspended', 'verified'].includes(event.type)) {
-      res.status(400).json({ error: 'Invalid event type' });
-      return;
-    }
 
     metricsStore.recordEvent(event);
     res.status(201).json({ success: true, event_id: event.credential_id });

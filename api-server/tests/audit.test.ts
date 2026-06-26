@@ -215,7 +215,7 @@ describe('POST /api/audit/verify', () => {
       .send({ batch_id: 0 });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('Invalid batch ID');
+    expect(res.body.error).toContain('Validation failed');
   });
 
   it('returns 500 on contract error', async () => {

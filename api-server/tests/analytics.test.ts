@@ -70,7 +70,7 @@ describe('Analytics API', () => {
 
       const res = await request(app).post('/api/analytics/events').send(invalidEvent);
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('Missing required fields');
+      expect(res.body.error).toContain('Validation failed');
     });
 
     it('should reject invalid event types', async () => {
@@ -82,7 +82,7 @@ describe('Analytics API', () => {
 
       const res = await request(app).post('/api/analytics/events').send(event);
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('Invalid event type');
+      expect(res.body.error).toContain('Validation failed');
     });
   });
 
