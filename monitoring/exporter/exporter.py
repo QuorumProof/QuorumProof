@@ -29,6 +29,7 @@ from metrics import (
     backup_last_success_timestamp,
     backup_verification_status,
 )
+from performance_regression import PerformanceRegressionDetector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,6 +52,8 @@ class QuorumProofExporter:
         self.server = Server(rpc_url)
         self.last_ledger = 0
         self.event_cache: Dict[str, Any] = {}
+        baseline_path = os.getenv("PERF_BASELINE_PATH", "performance_baseline.json")
+        self.perf_detector = PerformanceRegressionDetector(baseline_path=baseline_path)
 
     def start(self):
         """Start the Prometheus HTTP server and begin scraping."""
@@ -79,6 +82,9 @@ class QuorumProofExporter:
             # Process events
             for event in events:
                 self._process_event(event)
+
+            # #846 — Evaluate performance regression after every scrape
+            self.perf_detector.evaluate()
 
             logger.info(f"Scraped {len(events)} events in {duration:.2f}s")
 
@@ -149,6 +155,12 @@ class QuorumProofExporter:
             operation = data.get("operation", "unknown")
             gas = data.get("gas_used", 0)
             contract_gas_usage.labels(operation=operation).set(gas)
+
+        elif event_type == "OperationLatency":
+            # #846 — Feed per-operation timing into the regression detector
+            operation = data.get("operation", "unknown")
+            duration = data.get("duration_seconds", 0.0)
+            self.perf_detector.record_query(operation, duration)
 
         elif event_type == "StateSnapshot":
             size = data.get("state_size", 0)
