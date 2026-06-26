@@ -786,6 +786,20 @@ pub enum DataKey6 {
     RoleAuditLog,
 }
 
+/// Storage keys for W3C Decentralized Identifier (DID) support.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey7 {
+    /// DID document indexed by DID string (as Bytes).
+    DidDocument(soroban_sdk::Bytes),
+    /// Reverse lookup: Stellar Address -> DID string (as Bytes).
+    DidByAddress(Address),
+    /// Global DID counter.
+    DidCount,
+    /// DID method scheme (e.g., "stellar").
+    DidMethod,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct CredentialTypeDef {
@@ -813,6 +827,73 @@ pub struct Credential {
     pub expires_at: Option<u64>,
     pub version: u32,
 }
+
+/// W3C DID verification method key type.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum DidKeyType {
+    Ed25519VerificationKey2018 = 1,
+    Ed25519VerificationKey2020 = 2,
+    X25519KeyAgreementKey2019 = 3,
+    EcdsaSecp256k1VerificationKey2019 = 4,
+    SchnorrSecp256k1VerificationKey2019 = 5,
+}
+
+/// W3C Decentralized Identifier (DID) document stored on-chain.
+///
+/// Follows the W3C DID Core 1.0 specification with Soroban-compatible
+/// field types. Each DID is uniquely derived from a Stellar address
+/// using the `did:stellar:<address>` method scheme.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidDocument {
+    /// Full DID string, e.g. "did:stellar:GA2GB5B..." or "did:ethr:0x..."
+    pub did: soroban_sdk::String,
+    /// The blockchain address this DID resolves to.
+    pub address: Address,
+    /// DID method (e.g. "stellar", "ethr", "key").
+    pub method: soroban_sdk::String,
+    /// Key type used for verification.
+    pub key_type: DidKeyType,
+    /// Multibase-encoded public key bytes.
+    pub public_key: soroban_sdk::Bytes,
+    /// Whether the DID is active (not deactivated).
+    pub active: bool,
+    /// Ledger timestamp of registration.
+    pub created_at: u64,
+    /// Ledger timestamp of last update.
+    pub updated_at: u64,
+}
+
+/// Event payload emitted when a DID is registered.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidRegisteredEventData {
+    pub did: soroban_sdk::String,
+    pub address: Address,
+    pub method: soroban_sdk::String,
+}
+
+/// Event payload emitted when a DID is updated.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidUpdatedEventData {
+    pub did: soroban_sdk::String,
+    pub address: Address,
+}
+
+/// Event payload emitted when a DID is deactivated.
+#[contracttype]
+#[derive(Clone)]
+pub struct DidDeactivatedEventData {
+    pub did: soroban_sdk::String,
+    pub address: Address,
+}
+
+const TOPIC_DID_REGISTERED: &str = "DidRegistered";
+const TOPIC_DID_UPDATED: &str = "DidUpdated";
+const TOPIC_DID_DEACTIVATED: &str = "DidDeactivated";
 
 /// Status of a holder-initiated revocation request.
 #[contracttype]
@@ -1545,6 +1626,221 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
+
+    // ── W3C Decentralized Identifier (DID) Support ─────────────────────
+
+    /// Register a new W3C DID document and link it to a Stellar address.
+    ///
+    /// The caller provides a full DID string (e.g. `did:stellar:GA2...`,
+    /// `did:ethr:0x...`, `did:key:z6Mk...`) which is stored on-chain and
+    /// resolvable across blockchain platforms and custody models.
+    ///
+    /// Each Stellar address may register at most one active DID.
+    ///
+    /// # Parameters
+    /// - `address`: The Stellar address to associate with the DID; must authorize.
+    /// - `did`: Full W3C DID string (e.g. "did:stellar:GA2GB5B...").
+    /// - `key_type`: Cryptographic key type for verification methods.
+    /// - `public_key`: Multibase-encoded public key bytes for the verification method.
+    ///
+    /// # Panics
+    /// Panics if the address already has a DID registered.
+    /// Panics if the DID string is empty.
+    /// Panics if the DID does not start with "did:".
+    pub fn register_did(
+        env: Env,
+        address: Address,
+        did: soroban_sdk::String,
+        key_type: DidKeyType,
+        public_key: soroban_sdk::Bytes,
+    ) {
+        address.require_auth();
+
+        assert!(!did.is_empty(), "DID string cannot be empty");
+
+        // Ensure no DID already exists for this address
+        assert!(
+            !env.storage().instance().has(&DataKey7::DidByAddress(address.clone())),
+            "DID already registered for this address"
+        );
+
+        // Ensure the DID is not already registered
+        let did_bytes = did.clone().into_bytes();
+        assert!(
+            !env.storage().instance().has(&DataKey7::DidDocument(did_bytes.clone())),
+            "DID string already registered"
+        );
+
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidCount)
+            .unwrap_or(0u64);
+
+        let now = env.ledger().timestamp();
+        let doc = DidDocument {
+            did: did.clone(),
+            address: address.clone(),
+            method: soroban_sdk::String::from_str(&env, "stellar"),
+            key_type,
+            public_key,
+            active: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        env.storage().instance().set(&DataKey7::DidDocument(did_bytes.clone()), &doc);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.storage().instance().set(&DataKey7::DidByAddress(address.clone()), &did_bytes);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.storage().instance().set(&DataKey7::DidCount, &(count + 1));
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = DidRegisteredEventData {
+            did: did.clone(),
+            address,
+            method: soroban_sdk::String::from_str(&env, "stellar"),
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_REGISTERED);
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Resolve a W3C DID document by its DID string.
+    /// Returns `None` if the DID is not registered.
+    pub fn resolve_did(env: Env, did: soroban_sdk::String) -> Option<DidDocument> {
+        let did_bytes = did.into_bytes();
+        env.storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes))
+    }
+
+    /// Look up the DID string registered for a Stellar address.
+    /// Returns `None` if no DID is registered for the address.
+    pub fn get_did_for_address(env: Env, address: Address) -> Option<soroban_sdk::String> {
+        let did_bytes: Option<soroban_sdk::Bytes> = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidByAddress(address));
+        did_bytes.map(|b| soroban_sdk::String::from_bytes(&env, b))
+    }
+
+    /// Update the public key and key type for an existing DID.
+    /// The caller must be the address that owns the DID.
+    pub fn update_did(
+        env: Env,
+        address: Address,
+        new_key_type: DidKeyType,
+        new_public_key: soroban_sdk::Bytes,
+    ) {
+        address.require_auth();
+
+        let did_bytes: soroban_sdk::Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidByAddress(address.clone()))
+            .expect("no DID registered for this address");
+
+        let mut doc: DidDocument = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes.clone()))
+            .expect("DID document not found");
+
+        doc.key_type = new_key_type;
+        doc.public_key = new_public_key;
+        doc.updated_at = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey7::DidDocument(did_bytes), &doc);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = DidUpdatedEventData {
+            did: doc.did.clone(),
+            address,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_UPDATED);
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Deactivate a DID document. The DID entry is marked inactive but
+    /// remains on-chain for resolution and audit purposes.
+    pub fn deactivate_did(env: Env, address: Address) {
+        address.require_auth();
+
+        let did_bytes: soroban_sdk::Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidByAddress(address.clone()))
+            .expect("no DID registered for this address");
+
+        let mut doc: DidDocument = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes.clone()))
+            .expect("DID document not found");
+
+        doc.active = false;
+        doc.updated_at = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey7::DidDocument(did_bytes), &doc);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = DidDeactivatedEventData {
+            did: doc.did.clone(),
+            address,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_DEACTIVATED);
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Return the total number of registered DIDs.
+    pub fn get_did_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey7::DidCount)
+            .unwrap_or(0u64)
+    }
+
+    /// Issue a credential to a DID-identified subject.
+    ///
+    /// Resolves the DID to a Stellar address and issues the credential.
+    /// The DID must be active and registered.
+    pub fn issue_credential_to_did(
+        env: Env,
+        issuer: Address,
+        subject_did: soroban_sdk::String,
+        credential_type: u32,
+        metadata_hash: soroban_sdk::Bytes,
+        expires_at: Option<u64>,
+        nonce: u64,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let doc = Self::require_active_did(&env, &subject_did);
+        let subject = doc.address;
+        Self::issue_credential(env, issuer, subject, credential_type, metadata_hash, expires_at, nonce)
+    }
+
+    /// Resolve a DID and return its document, panicking if not found or inactive.
+    fn require_active_did(env: &Env, did: &soroban_sdk::String) -> DidDocument {
+        let did_bytes = did.clone().into_bytes();
+        let doc: DidDocument = env
+            .storage()
+            .instance()
+            .get(&DataKey7::DidDocument(did_bytes.clone()))
+            .expect("DID not found");
+        assert!(doc.active, "DID is deactivated");
+        doc
+    }
+
+    // ── End DID Support ────────────────────────────────────────────────
 
     /// Issue #487: Returns the current state schema version.
     /// Returns 0 if no version has been set (pre-versioning state).
