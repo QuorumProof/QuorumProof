@@ -6,6 +6,7 @@ import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
+import { createRequestSigning } from './middleware/requestSigning.js';
 import { createWsServer } from './ws/server.js';
 import { getConnectionCount, getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics } from './ws/metrics.js';
@@ -17,6 +18,9 @@ const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
+
+const requestSigning = createRequestSigning();
+app.use('/api', requestSigning);
 
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10);
