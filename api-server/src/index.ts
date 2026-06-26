@@ -18,12 +18,17 @@ app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
 
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10);
+const RATE_LIMIT_BACKOFF = parseInt(process.env.RATE_LIMIT_BACKOFF ?? '2', 10);
+const RATE_LIMIT_MAX_VIOLATIONS = parseInt(process.env.RATE_LIMIT_MAX_VIOLATIONS ?? '5', 10);
+
 const apiRateLimiter = createRateLimiter({
-  windowMs: 60000,
-  max: 100,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   name: 'api',
-  backoffMultiplier: 2,
-  maxViolations: 5,
+  backoffMultiplier: RATE_LIMIT_BACKOFF,
+  maxViolations: RATE_LIMIT_MAX_VIOLATIONS,
 });
 
 app.use('/api', apiRateLimiter);
