@@ -357,9 +357,89 @@ Verified proofs can be cached on-chain to avoid repeated verification cost. The 
 
 ---
 
-## 11. Known Limitations
+## 11. Verifier Error Codes
+
+The `zk_verifier` contract uses Soroban's `Error` enum variants to signal rejection reasons. Callers should match against these values when handling failed verifications.
+
+| Error Variant              | Numeric Value | Condition                                                                 |
+|----------------------------|---------------|---------------------------------------------------------------------------|
+| `NotInitialized`           | 1             | `initialize` has not been called; verifying key hash is unset             |
+| `Unauthorized`             | 2             | Caller is not the registered admin (for admin-gated entry points)         |
+| `InvalidProofLength`       | 3             | Proof byte length ≠ 256 (Groth16) or ≠ 768 (PLONK)                       |
+| `InvalidPublicInputs`      | 4             | Public inputs are empty or not a multiple of 32 bytes                     |
+| `ProofPointAtInfinity`     | 5             | A required G1/G2 commitment is the all-zero (point-at-infinity) encoding  |
+| `VerificationFailed`       | 6             | Cryptographic binding check failed (digest[0] == 0xFF)                    |
+| `ProofRevoked`             | 7             | The credential has been explicitly revoked via `revoke_proof`             |
+| `InvalidCommitment`        | 8             | Schnorr commitment or response is the all-zero 32-byte string             |
+| `BatchTooLarge`            | 9             | `verify_batch_proofs` received more proofs than the contract-level limit  |
+| `CacheEntryExpired`        | 10            | Cached verification result is past its TTL (re-verify required)           |
+
+**TypeScript error handling example:**
+```typescript
+try {
+  const result = await zkVerifier.verify_groth16_proof({ proof, public_inputs, vk_hash });
+  if (!result) console.warn('Proof rejected: binding check failed');
+} catch (err: unknown) {
+  const sorobanErr = err as { code?: number; message?: string };
+  switch (sorobanErr.code) {
+    case 3: throw new Error('Malformed proof: incorrect byte length');
+    case 5: throw new Error('Proof contains a point at infinity — regenerate proof');
+    case 7: throw new Error('Credential has been revoked — verification denied');
+    default: throw err;
+  }
+}
+```
+
+---
+
+## 12. Test Vectors
+
+The following test vectors can be used to validate a verifier implementation offline. All byte strings are hex-encoded.
+
+### 12.1 Groth16 Binding-Check Test Vector
+
+These inputs are designed to produce a SHA-256 digest whose first byte is **not** `0xFF`, so the binding check must **pass**.
+
+```
+vk_hash        (32 bytes): 0000000000000000000000000000000000000000000000000000000000000001
+public_inputs  (32 bytes): 0000000000000000000000000000000000000000000000000000000000000002
+proof         (256 bytes): 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+                           2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40
+                           ... (pad to 256 bytes with sequential values, A/C points non-zero)
+
+Expected pi_digest = SHA-256(public_inputs)
+Expected digest    = SHA-256(vk_hash ‖ pi_digest ‖ proof)
+Expected result    = PASS  (digest[0] ≠ 0xFF)
+```
+
+A verifier implementation must produce `PASS` for these inputs. If the first byte of `digest` happens to be `0xFF` with a different test vector, choose a vector where it is not (this is probabilistically rare — expected 1 in 256 vectors).
+
+### 12.2 Point-at-Infinity Rejection Vector
+
+```
+proof (256 bytes): 00000000000000000000000000000000000000000000000000000000000000000
+                   0000000000000000000000000000000000000000000000000000000000000000
+                   (A = 64 zero bytes, B arbitrary, C arbitrary)
+
+Expected result: FAIL with error ProofPointAtInfinity (code 5)
+```
+
+### 12.3 Wrong-Length Rejection Vector
+
+```
+proof (255 bytes): any 255-byte sequence
+Expected result: FAIL with error InvalidProofLength (code 3)
+
+proof (769 bytes, submitted as PLONK): any 769-byte sequence
+Expected result: FAIL with error InvalidProofLength (code 3)
+```
+
+---
+
+## 13. Known Limitations
 
 1. **No full algebraic verification on-chain.** Soroban SDK 21 lacks BN254/BLS12-381 pairing host functions. The 1/256 false-acceptance bound is a bridge solution, not cryptographic soundness.
 2. **Cache key collision risk.** The cache key uses only the first 16 bytes of the proof. Different proofs with the same first 16 bytes and the same `(credential_id, claim_type)` will share a cache entry. Callers must ensure proof bytes are sufficiently unique in the first 16 bytes.
 3. **Admin key is permanent.** The admin address set at initialization cannot be changed. Treat admin key loss as contract loss.
 4. **Schnorr proofs are hash-based, not group-based.** The Schnorr implementation uses SHA-256 as the group operation stand-in; it provides binding security but not the full zero-knowledge guarantee of a group-based Schnorr proof.
+5. **Batch proof limit is unconfigurable.** The `verify_batch_proofs` limit is hardcoded in the contract. Increasing it requires a contract upgrade.
