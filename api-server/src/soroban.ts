@@ -13,6 +13,7 @@ import {
 const RPC_URL = process.env.STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org';
 const NETWORK = (process.env.STELLAR_NETWORK ?? 'testnet') as keyof typeof PASSPHRASES;
 const CONTRACT_ID = process.env.CONTRACT_QUORUM_PROOF ?? '';
+const RPC_POOL_SIZE = parseInt(process.env.RPC_POOL_SIZE ?? '5', 10);
 
 const PASSPHRASES = {
   testnet: Networks.TESTNET,
@@ -20,13 +21,31 @@ const PASSPHRASES = {
   futurenet: Networks.FUTURENET,
 };
 
-const server = new StellarRpc.Server(RPC_URL);
 const networkPassphrase = PASSPHRASES[NETWORK] ?? Networks.TESTNET;
+
+/** Round-robin pool of RPC server instances to reuse connections across requests. */
+class RpcConnectionPool {
+  private readonly pool: StellarRpc.Server[];
+  private index = 0;
+
+  constructor(url: string, size: number) {
+    this.pool = Array.from({ length: size }, () => new StellarRpc.Server(url));
+  }
+
+  acquire(): StellarRpc.Server {
+    const server = this.pool[this.index];
+    this.index = (this.index + 1) % this.pool.length;
+    return server;
+  }
+}
+
+const rpcPool = new RpcConnectionPool(RPC_URL, RPC_POOL_SIZE);
 
 /** Simulate a read-only contract call and return the native JS value. */
 export async function simulateCall(method: string, args: ReturnType<typeof nativeToScVal>[] = []) {
   if (!CONTRACT_ID) throw new Error('CONTRACT_QUORUM_PROOF env var not set');
 
+  const server = rpcPool.acquire();
   const contract = new Contract(CONTRACT_ID);
   const dummyKeypair = Keypair.random();
   const dummyAccount = new Account(dummyKeypair.publicKey(), '0');

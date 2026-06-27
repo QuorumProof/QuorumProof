@@ -144,14 +144,62 @@ function isValidEventType(type: string): boolean {
   return ['issued', 'attested', 'revoked', 'suspended', 'verified'].includes(type);
 }
 
+export interface AttestorStats {
+  first_seen: string;
+  last_seen: string;
+  total_attestations: number;
+  total_response_ms: number;
+  response_count: number;
+  active_credentials: Set<string>;
+}
+
 class MetricsStore {
   private hourlyMetrics: Map<string, HourlyMetrics> = new Map();
   private dailyMetrics: Map<string, DailyMetrics> = new Map();
   private eventLog: CredentialEvent[] = [];
+  private attestorStats: Map<string, AttestorStats> = new Map();
 
   recordEvent(event: CredentialEvent): void {
     this.eventLog.push(event);
     this.aggregateToHourly(event);
+    if (event.attestor) {
+      this.updateAttestorStats(event);
+    }
+  }
+
+  private updateAttestorStats(event: CredentialEvent): void {
+    const addr = event.attestor!;
+    const existing = this.attestorStats.get(addr);
+    if (!existing) {
+      this.attestorStats.set(addr, {
+        first_seen: event.timestamp,
+        last_seen: event.timestamp,
+        total_attestations: event.type === 'attested' ? 1 : 0,
+        total_response_ms: 0,
+        response_count: 0,
+        active_credentials: new Set(event.type === 'attested' ? [event.credential_id] : []),
+      });
+      return;
+    }
+    existing.last_seen = event.timestamp;
+    if (event.type === 'attested') {
+      existing.total_attestations++;
+      existing.active_credentials.add(event.credential_id);
+    } else if (event.type === 'revoked') {
+      existing.active_credentials.delete(event.credential_id);
+    }
+  }
+
+  recordAttestorResponseTime(address: string, responseMs: number): void {
+    const stats = this.attestorStats.get(address);
+    if (stats) {
+      stats.total_response_ms += responseMs;
+      stats.response_count++;
+    }
+  }
+
+  getAttestorStats(address: string): AttestorStats | undefined {
+    return this.attestorStats.get(address);
   }
 
   private aggregateToHourly(event: CredentialEvent): void {

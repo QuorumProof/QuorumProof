@@ -87,6 +87,47 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/attestor/status/:address
+router.get('/status/:address', (req: Request, res: Response) => {
+  const { address } = req.params;
+
+  if (!address) {
+    res.status(400).json({ error: 'address parameter required' });
+    return;
+  }
+
+  const stats = metricsStore.getAttestorStats(address);
+
+  if (!stats) {
+    res.json({
+      address,
+      first_seen: null,
+      last_seen: null,
+      uptime_ms: null,
+      avg_response_ms: null,
+      active_credential_count: 0,
+      total_attestations: 0,
+    });
+    return;
+  }
+
+  const uptimeMs = new Date().getTime() - new Date(stats.first_seen).getTime();
+  const avgResponseMs =
+    stats.response_count > 0
+      ? Math.round(stats.total_response_ms / stats.response_count)
+      : null;
+
+  res.json({
+    address,
+    first_seen: stats.first_seen,
+    last_seen: stats.last_seen,
+    uptime_ms: uptimeMs,
+    avg_response_ms: avgResponseMs,
+    active_credential_count: stats.active_credentials.size,
+    total_attestations: stats.total_attestations,
+  });
+});
+
 // POST /api/attestor/batch-attest
 // Body: { attestor: string; credential_ids: string[]; slice_id: string }
 router.post('/batch-attest', async (req: Request, res: Response) => {
@@ -105,12 +146,14 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
   const results: { credential_id: string; success: boolean; error?: string }[] = [];
 
   for (const credId of credential_ids) {
+    const start = Date.now();
     try {
       await simulateCall('attest_credential', [
         u64Val(BigInt(credId)),
         u64Val(BigInt(slice_id)),
         addressVal(attestor),
       ]);
+      const responseMs = Date.now() - start;
       results.push({ credential_id: credId, success: true });
 
       metricsStore.recordEvent({
@@ -119,6 +162,7 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
         timestamp: new Date().toISOString(),
         attestor,
       });
+      metricsStore.recordAttestorResponseTime(attestor, responseMs);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Attestation failed';
       results.push({ credential_id: credId, success: false, error: msg });

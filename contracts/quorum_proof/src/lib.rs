@@ -891,6 +891,58 @@ pub enum DataKey7 {
     DidMethod,
 }
 
+/// Storage keys for upgrade history and credential time locks (issues #874, #872).
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey8 {
+    /// Ordered list of all contract upgrade records (issue #874).
+    UpgradeHistory,
+    /// Time-lock entry keyed by credential ID (issue #872).
+    TimeLockEntry(u64),
+}
+
+/// A record of a single contract upgrade, stored for governance auditing (issue #874).
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeRecord {
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub upgraded_by: Address,
+    pub timestamp: u64,
+}
+
+/// Status of a credential time lock (issue #872).
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum TimeLockStatus {
+    /// Waiting for the delay period or required confirmations.
+    Pending = 0,
+    /// All conditions met; attestation is now active.
+    Active = 1,
+    /// Cancelled before conditions were met.
+    Cancelled = 2,
+}
+
+/// An optional time-lock on a credential attestation (issue #872).
+///
+/// The attestation becomes active when EITHER:
+/// - `env.ledger().timestamp() >= unlock_at` (when `unlock_at > 0`), OR
+/// - `confirmation_count >= required_confirmations` (when `required_confirmations > 0`).
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialTimeLock {
+    pub credential_id: u64,
+    /// Unix timestamp after which the attestation is automatically active (0 = disabled).
+    pub unlock_at: u64,
+    /// Number of additional attestor confirmations required (0 = disabled).
+    pub required_confirmations: u32,
+    pub confirmation_count: u32,
+    pub confirmations: Vec<Address>,
+    pub created_by: Address,
+    pub created_at: u64,
+    pub status: TimeLockStatus,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct CredentialTypeDef {
@@ -8639,7 +8691,29 @@ impl QuorumProofContract {
             .expect("not initialized");
         assert!(stored == admin, "unauthorized");
         Self::validate_upgrade(env.clone(), new_wasm_hash.clone());
+
+        // Record this upgrade in the history before applying (issue #874).
+        let mut history: Vec<UpgradeRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey8::UpgradeHistory)
+            .unwrap_or(Vec::new(&env));
+        history.push_back(UpgradeRecord {
+            wasm_hash: new_wasm_hash.clone(),
+            upgraded_by: admin,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().instance().set(&DataKey8::UpgradeHistory, &history);
+
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Return the full upgrade history for governance auditing (issue #874).
+    pub fn get_upgrade_history(env: Env) -> Vec<UpgradeRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey8::UpgradeHistory)
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Validate that a new WASM hash is safe to upgrade to.
@@ -11888,6 +11962,123 @@ impl QuorumProofContract {
 
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         processed
+    }
+
+    // ── Time-Locked Credential Approval (Issue #872) ──────────────────────────
+
+    /// Create a time-lock on a credential's attestation.
+    ///
+    /// The attestation becomes active once EITHER condition is satisfied:
+    /// - The ledger timestamp reaches `unlock_at` (set to 0 to disable).
+    /// - `required_confirmations` additional attestors confirm via `confirm_time_lock`
+    ///   (set to 0 to disable).
+    ///
+    /// Only one active time lock may exist per credential at a time.
+    pub fn set_credential_time_lock(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        unlock_at: u64,
+        required_confirmations: u32,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(
+            unlock_at > 0 || required_confirmations > 0,
+            "at least one condition (unlock_at or required_confirmations) must be non-zero"
+        );
+
+        let existing: Option<CredentialTimeLock> = env
+            .storage()
+            .instance()
+            .get(&DataKey8::TimeLockEntry(credential_id));
+        assert!(
+            existing
+                .as_ref()
+                .map(|e: &CredentialTimeLock| e.status != TimeLockStatus::Pending)
+                .unwrap_or(true),
+            "a pending time lock already exists for this credential"
+        );
+
+        let entry = CredentialTimeLock {
+            credential_id,
+            unlock_at,
+            required_confirmations,
+            confirmation_count: 0,
+            confirmations: Vec::new(&env),
+            created_by: issuer,
+            created_at: env.ledger().timestamp(),
+            status: TimeLockStatus::Pending,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey8::TimeLockEntry(credential_id), &entry);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Confirm a pending time lock for a credential.
+    ///
+    /// Each attestor may confirm at most once. If the confirmation threshold is
+    /// reached the lock transitions to `Active` automatically.
+    pub fn confirm_time_lock(env: Env, attestor: Address, credential_id: u64) {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut entry: CredentialTimeLock = env
+            .storage()
+            .instance()
+            .get(&DataKey8::TimeLockEntry(credential_id))
+            .expect("no time lock exists for this credential");
+
+        assert!(
+            entry.status == TimeLockStatus::Pending,
+            "time lock is not pending"
+        );
+
+        // Prevent duplicate confirmations from the same attestor.
+        for existing in entry.confirmations.iter() {
+            assert!(existing != attestor, "attestor has already confirmed");
+        }
+
+        entry.confirmations.push_back(attestor);
+        entry.confirmation_count += 1;
+
+        if entry.required_confirmations > 0
+            && entry.confirmation_count >= entry.required_confirmations
+        {
+            entry.status = TimeLockStatus::Active;
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey8::TimeLockEntry(credential_id), &entry);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Query the time lock for a credential, returning `None` if none exists.
+    pub fn get_credential_time_lock(env: Env, credential_id: u64) -> Option<CredentialTimeLock> {
+        let mut entry: CredentialTimeLock = match env
+            .storage()
+            .instance()
+            .get(&DataKey8::TimeLockEntry(credential_id))
+        {
+            Some(e) => e,
+            None => return None,
+        };
+
+        // Lazily activate if the time-delay condition is now met.
+        if entry.status == TimeLockStatus::Pending
+            && entry.unlock_at > 0
+            && env.ledger().timestamp() >= entry.unlock_at
+        {
+            entry.status = TimeLockStatus::Active;
+            env.storage()
+                .instance()
+                .set(&DataKey8::TimeLockEntry(credential_id), &entry);
+        }
+
+        Some(entry)
     }
 }
 
