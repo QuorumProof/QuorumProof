@@ -8,6 +8,7 @@ import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
 import shareLinksRouter from './routes/shareLinks.js'; // #877
+import bridgeRouter from './routes/bridge.js'; // #880
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
@@ -58,6 +59,7 @@ app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/attestor', attestorRouter);
+app.use('/api/bridge', bridgeRouter); // #880 cross-chain
 
 app.get('/health', (_req, res) => {
   res.json({

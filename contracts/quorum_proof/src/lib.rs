@@ -12029,6 +12029,231 @@ impl QuorumProofContract {
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         processed
     }
+
+    // ── Issue #880: Cross-Chain Interoperability Layer ────────────────────────
+
+    /// Register a cross-chain credential anchor.
+    ///
+    /// An anchor records that a credential issued on another blockchain
+    /// (Ethereum, Polygon, etc.) has been witnessed and stored on Stellar.
+    /// The calling admin must be the contract administrator.
+    ///
+    /// # Parameters
+    /// * `admin`         – contract admin (must sign).
+    /// * `chain_id`      – numeric chain identifier (1=Ethereum, 137=Polygon, …).
+    /// * `credential_id` – local QuorumProof credential ID this anchor relates to.
+    /// * `foreign_tx`    – foreign-chain transaction hash (as bytes, max 64 bytes).
+    /// * `proof_hash`    – Groth16/PLONK proof hash of the foreign credential state.
+    /// * `proof_type`    – `1` = Groth16, `2` = PLONK, `3` = None (hash-only).
+    pub fn register_chain_anchor(
+        env: Env,
+        admin: Address,
+        chain_id: u32,
+        credential_id: u64,
+        foreign_tx: soroban_sdk::Bytes,
+        proof_hash: soroban_sdk::Bytes,
+        proof_type: u32,
+    ) -> u64 {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+
+        // Admin check
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAction));
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        // Credential must exist
+        if !env.storage().instance().has(&DataKey::Credential(credential_id)) {
+            panic_with_error!(&env, ContractError::CredentialNotFound);
+        }
+
+        if foreign_tx.len() == 0 || foreign_tx.len() > 64 {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+        if proof_hash.len() == 0 || proof_hash.len() > 64 {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        let ptype = match proof_type {
+            1 => CrossChainProofType::Groth16,
+            2 => CrossChainProofType::Plonk,
+            3 => CrossChainProofType::HashOnly,
+            _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
+        };
+
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey8::ChainAnchorCount)
+            .unwrap_or(0u64);
+        let anchor_id = count + 1;
+
+        let anchor = CrossChainAnchor {
+            id: anchor_id,
+            chain_id,
+            credential_id,
+            foreign_tx: foreign_tx.clone(),
+            proof_hash: proof_hash.clone(),
+            proof_type: ptype,
+            anchored_at: env.ledger().timestamp(),
+            verified: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey8::ChainAnchor(anchor_id), &anchor);
+        env.storage()
+            .instance()
+            .set(&DataKey8::ChainAnchorCount, &anchor_id);
+
+        // Index by credential
+        let mut cred_anchors: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey8::CredentialAnchors(credential_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        cred_anchors.push_back(anchor_id);
+        env.storage()
+            .instance()
+            .set(&DataKey8::CredentialAnchors(credential_id), &cred_anchors);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("ccanchor"), symbol_short!("reg")),
+            CrossChainAnchoredEventData {
+                anchor_id,
+                chain_id,
+                credential_id,
+                foreign_tx,
+                anchored_at: env.ledger().timestamp(),
+            },
+        );
+
+        anchor_id
+    }
+
+    /// Mark a cross-chain anchor as verified (proof has been checked off-chain).
+    ///
+    /// Only the admin may mark an anchor verified.
+    pub fn verify_chain_anchor(
+        env: Env,
+        admin: Address,
+        anchor_id: u64,
+    ) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAction));
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        let mut anchor: CrossChainAnchor = env
+            .storage()
+            .instance()
+            .get(&DataKey8::ChainAnchor(anchor_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+
+        anchor.verified = true;
+        env.storage()
+            .instance()
+            .set(&DataKey8::ChainAnchor(anchor_id), &anchor);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Retrieve a single cross-chain anchor by ID.
+    pub fn get_chain_anchor(env: Env, anchor_id: u64) -> Option<CrossChainAnchor> {
+        env.storage()
+            .instance()
+            .get(&DataKey8::ChainAnchor(anchor_id))
+    }
+
+    /// Return all anchor IDs associated with a credential.
+    pub fn get_credential_anchors(env: Env, credential_id: u64) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey8::CredentialAnchors(credential_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the total number of registered cross-chain anchors.
+    pub fn get_chain_anchor_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey8::ChainAnchorCount)
+            .unwrap_or(0u64)
+    }
+}
+
+// ── Issue #880: Cross-Chain Interoperability Types ────────────────────────────
+
+/// Proof type used to anchor a foreign-chain credential on Stellar.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CrossChainProofType {
+    /// Groth16 zero-knowledge proof (EVM-compatible).
+    Groth16 = 1,
+    /// PLONK zero-knowledge proof.
+    Plonk = 2,
+    /// No ZK proof — record is anchored by transaction hash only.
+    HashOnly = 3,
+}
+
+/// An on-chain record linking a QuorumProof credential to its origin on
+/// another blockchain (Ethereum, Polygon, etc.).
+#[contracttype]
+#[derive(Clone)]
+pub struct CrossChainAnchor {
+    /// Unique sequential ID.
+    pub id: u64,
+    /// EIP-155 chain ID of the source chain (1=Ethereum, 137=Polygon, …).
+    pub chain_id: u32,
+    /// Local QuorumProof credential ID this anchor relates to.
+    pub credential_id: u64,
+    /// Source-chain transaction hash (up to 64 bytes).
+    pub foreign_tx: soroban_sdk::Bytes,
+    /// Hash of the ZK proof or credential state root from the foreign chain.
+    pub proof_hash: soroban_sdk::Bytes,
+    /// Proof scheme used.
+    pub proof_type: CrossChainProofType,
+    /// Stellar ledger timestamp when anchored.
+    pub anchored_at: u64,
+    /// Whether the proof has been verified by the bridge relay.
+    pub verified: bool,
+}
+
+/// Event data emitted when a new cross-chain anchor is registered.
+#[contracttype]
+#[derive(Clone)]
+pub struct CrossChainAnchoredEventData {
+    pub anchor_id: u64,
+    pub chain_id: u32,
+    pub credential_id: u64,
+    pub foreign_tx: soroban_sdk::Bytes,
+    pub anchored_at: u64,
+}
+
+/// Storage keys for cross-chain interoperability.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey8 {
+    /// Individual anchor by sequential ID.
+    ChainAnchor(u64),
+    /// Total anchor count (monotonic counter).
+    ChainAnchorCount,
+    /// List of anchor IDs for a given credential.
+    CredentialAnchors(u64),
 }
 
 #[cfg(test)]
