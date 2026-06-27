@@ -792,6 +792,39 @@ impl ZkVerifierContract {
         env.storage().instance().set(&DataKey::CacheInvalidated(credential_id), &true);
     }
 
+    /// Advanced cache management: Get cache statistics for monitoring
+    pub fn get_cache_stats(env: Env) -> (u32, u32) {
+        // This is a simplified cache stats implementation
+        // In production, would track hits, misses, entries, etc.
+        let current_ledger = env.ledger().sequence();
+        (current_ledger, 0) // (current_ledger, cache_entries_count)
+    }
+
+    /// Set cache TTL for different proof types
+    pub fn set_cache_ttl_by_type(
+        env: Env,
+        admin: Address,
+        claim_type: ClaimType,
+        ttl: u32,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let key = DataKey::CacheTTL(claim_type);
+        env.storage().instance().set(&key, &ttl);
+    }
+
+    /// Get cache TTL for a claim type (default to 1000 if not set)
+    pub fn get_cache_ttl_by_type(env: Env, claim_type: ClaimType) -> u32 {
+        let key = DataKey::CacheTTL(claim_type.clone());
+        env.storage().instance()
+            .get(&key)
+            .unwrap_or(1000u32) // Default TTL
+    }
+
     /// Admin-only contract upgrade to new WASM.
     fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
@@ -1493,6 +1526,8 @@ pub enum DataKey {
     SchnorrPublicKey,
     /// Range proof parameters for different proof types
     RangeProofParams(RangeProofType),
+    /// Cache TTL settings per claim type
+    CacheTTL(ClaimType),
 }
 
 #[cfg(test)]
