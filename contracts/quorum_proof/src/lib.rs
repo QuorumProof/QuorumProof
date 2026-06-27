@@ -891,6 +891,33 @@ pub enum DataKey7 {
     DidMethod,
 }
 
+/// Storage keys for reputation scoring, credential transfers, and expiry management.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey8 {
+    /// Full reputation score record per attestor address.
+    AttestorReputationScore(Address),
+    /// Allowed recipient restriction for a credential transfer (credential_id -> Address).
+    CredentialTransferRecipient(u64),
+}
+
+/// Detailed attestor reputation score tracking speed, pass rate, and dispute ratio.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorReputationScore {
+    /// Total attestations submitted by this attestor.
+    pub total_attestations: u64,
+    /// Attestations where the attested credential later passed verification.
+    pub passed_verifications: u64,
+    /// Attestations that were subsequently disputed.
+    pub disputed_attestations: u64,
+    /// Sum of (attested_at - credential_issued_at) across all attestations, in seconds.
+    /// Divide by total_attestations to get average attestation speed.
+    pub total_speed_secs: u64,
+    /// Timestamp of the last attestation by this attestor.
+    pub last_attested_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct CredentialTypeDef {
@@ -11888,6 +11915,206 @@ impl QuorumProofContract {
 
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         processed
+    }
+
+    // ── Issue #886: Credential Renewal with Auto-Expiry ──────────────────────
+
+    /// Mark a credential as expired by setting its expiry to the current ledger timestamp.
+    /// Only the original issuer may call this. The credential must not be revoked.
+    pub fn mark_expired(env: Env, issuer: Address, credential_id: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "only the issuer can mark expired");
+        assert!(!credential.revoked, "credential is already revoked");
+        let now = env.ledger().timestamp();
+        credential.expires_at = Some(now);
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        Self::invalidate_verification_caches_for_credential(&env, credential_id);
+        env.events().publish(
+            (symbol_short!("expired"), credential_id),
+            (issuer, now),
+        );
+    }
+
+    // ── Issue #888: Weighted Attestor Voting ─────────────────────────────────
+
+    /// Return the weight of a specific attestor in a quorum slice.
+    /// Returns `None` if the attestor is not in the slice.
+    pub fn get_attestor_weight(env: Env, slice_id: u64, attestor: Address) -> Option<u32> {
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        slice
+            .attestors
+            .iter()
+            .position(|a| a == attestor)
+            .and_then(|pos| slice.weights.get(pos as u32))
+    }
+
+    // ── Issue #889: Credential Transfer Restrictions ──────────────────────────
+
+    /// Transfer a credential's subject to a new address, subject to transfer restrictions.
+    ///
+    /// The current subject must authorize the call. If a `restrict_to` recipient was
+    /// configured via `set_transfer_recipient`, only that address may receive the credential.
+    ///
+    /// Credentials whose type has `is_transferable = false` (set via `set_transfer_restriction`)
+    /// cannot be transferred.
+    pub fn transfer_credential(
+        env: Env,
+        from: Address,
+        credential_id: u64,
+        to: Address,
+    ) {
+        from.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(credential.subject == from, "only the credential subject can transfer");
+        assert!(!credential.revoked, "cannot transfer a revoked credential");
+        assert!(!credential.suspended, "cannot transfer a suspended credential");
+
+        // Check type-level transfer restriction
+        if !Self::is_credential_type_transferable(&env, credential.credential_type) {
+            panic_with_error!(&env, ContractError::TransferNotAllowed);
+        }
+
+        // Check optional per-credential recipient restriction
+        if let Some(allowed_recipient) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey8::CredentialTransferRecipient(credential_id))
+        {
+            if allowed_recipient != to {
+                panic_with_error!(&env, ContractError::UnauthorizedTransfer);
+            }
+            // Clear the restriction after use
+            env.storage()
+                .instance()
+                .remove(&DataKey8::CredentialTransferRecipient(credential_id));
+        }
+
+        credential.subject = to.clone();
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        env.events().publish(
+            (symbol_short!("transfer"), credential_id),
+            (from, to),
+        );
+    }
+
+    /// Optionally restrict the next transfer of a credential to a specific recipient.
+    /// Only the credential subject may call this. The restriction is consumed on transfer.
+    pub fn set_transfer_recipient(
+        env: Env,
+        subject: Address,
+        credential_id: u64,
+        allowed_recipient: Address,
+    ) {
+        subject.require_auth();
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.subject == subject, "only the credential subject can set transfer recipient");
+        env.storage()
+            .instance()
+            .set(&DataKey8::CredentialTransferRecipient(credential_id), &allowed_recipient);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the restricted recipient for the next transfer, if any.
+    pub fn get_transfer_recipient(env: Env, credential_id: u64) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey8::CredentialTransferRecipient(credential_id))
+    }
+
+    // ── Issue #890: Attestor Reputation Scoring ───────────────────────────────
+
+    /// Record a reputation event for an attestor after a credential outcome is known.
+    ///
+    /// - `passed`: true if the attested credential later passed verification.
+    /// - `disputed`: true if this attestation was disputed.
+    /// - `speed_secs`: seconds elapsed between credential issuance and this attestation.
+    ///
+    /// Can be called by any authorized party (e.g., the credential issuer or admin)
+    /// once a verification outcome is known.
+    pub fn record_attestor_reputation(
+        env: Env,
+        caller: Address,
+        attestor: Address,
+        passed: bool,
+        disputed: bool,
+        speed_secs: u64,
+    ) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut score: AttestorReputationScore = env
+            .storage()
+            .instance()
+            .get(&DataKey8::AttestorReputationScore(attestor.clone()))
+            .unwrap_or(AttestorReputationScore {
+                total_attestations: 0,
+                passed_verifications: 0,
+                disputed_attestations: 0,
+                total_speed_secs: 0,
+                last_attested_at: 0,
+            });
+
+        score.total_attestations = score.total_attestations.saturating_add(1);
+        if passed {
+            score.passed_verifications = score.passed_verifications.saturating_add(1);
+        }
+        if disputed {
+            score.disputed_attestations = score.disputed_attestations.saturating_add(1);
+        }
+        score.total_speed_secs = score.total_speed_secs.saturating_add(speed_secs);
+        score.last_attested_at = env.ledger().timestamp();
+
+        env.storage()
+            .instance()
+            .set(&DataKey8::AttestorReputationScore(attestor.clone()), &score);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        env.events().publish(
+            (symbol_short!("rep"), attestor),
+            (passed, disputed, speed_secs),
+        );
+    }
+
+    /// Retrieve the full reputation score for an attestor.
+    /// Returns `None` if no reputation data has been recorded yet.
+    pub fn get_attestor_reputation_score(env: Env, attestor: Address) -> Option<AttestorReputationScore> {
+        env.storage()
+            .instance()
+            .get(&DataKey8::AttestorReputationScore(attestor))
     }
 }
 
