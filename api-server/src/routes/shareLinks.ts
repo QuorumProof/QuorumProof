@@ -67,7 +67,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    * Returns: { token: string (hex), expires_at: number, permission: string }
    */
   router.post('/:id/share', async (req: Request, res: Response) => {
-    const credentialId = parseInt(req.params.id, 10);
+    const credentialId = parseInt(String(req.params.id), 10);
     if (!Number.isInteger(credentialId) || credentialId <= 0) {
       res.status(400).json({ error: 'Invalid credential ID' });
       return;
@@ -100,20 +100,20 @@ export function createShareLinksRouter(soroban: SorobanClient) {
     }
 
     // Build optional password hash argument
-    let passwordHashArg: ReturnType<typeof soroban.u64Val> | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let passwordHashArg: any = null;
     let passwordHashHex: string | null = null;
+
+    const { nativeToScVal } = await import('@stellar/stellar-sdk');
 
     if (typeof password === 'string' && password.length > 0) {
       const { hexDigest, buf } = buildPasswordHashArg(soroban, password);
       passwordHashHex = hexDigest;
-      // Pass as { type: 'bytes', value: buf } via nativeToScVal
-      const { nativeToScVal } = await import('@stellar/stellar-sdk');
-      passwordHashArg = nativeToScVal(buf, { type: 'bytes' }) as ReturnType<typeof soroban.u64Val>;
+      passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
     }
 
     try {
       // Call contract: generate_share_link(subject, credential_id, expiry_hours, password_hash, permission)
-      const { nativeToScVal } = await import('@stellar/stellar-sdk');
       const args = [
         addressVal(subject),
         soroban.u64Val(credentialId),
@@ -208,7 +208,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    * Revokes the link early. Only the creator can revoke.
    */
   router.delete('/share/:token', async (req: Request, res: Response) => {
-    const { token } = req.params;
+    const token = String(req.params.token);
     const { subject } = req.body as { subject?: unknown };
 
     if (typeof subject !== 'string' || subject.length === 0) {
@@ -248,7 +248,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    * Returns the raw ShareLink metadata (no access enforcement — for admin/holder inspection).
    */
   router.get('/share/:token', async (req: Request, res: Response) => {
-    const { token } = req.params;
+    const token = String(req.params.token);
 
     let tokenBuf: Buffer;
     try {
@@ -288,7 +288,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
 // Default export wired to the real Soroban client
 export default createShareLinksRouter({
   simulateCall,
-  u64Val: u64Val as SorobanClient['u64Val'],
-  u32Val: u32Val as SorobanClient['u32Val'],
-  addressVal: addressVal as SorobanClient['addressVal'],
+  u64Val: u64Val as unknown as SorobanClient['u64Val'],
+  u32Val: u32Val as unknown as SorobanClient['u32Val'],
+  addressVal: addressVal as unknown as SorobanClient['addressVal'],
 });

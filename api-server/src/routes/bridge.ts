@@ -214,7 +214,7 @@ router.get('/anchors/pending', (_req: Request, res: Response) => {
 // GET /api/bridge/anchors/:id
 // ---------------------------------------------------------------------------
 router.get('/anchors/:id', async (req: Request, res: Response) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: 'Invalid anchor ID' });
     return;
@@ -242,7 +242,7 @@ router.get('/anchors/:id', async (req: Request, res: Response) => {
 // GET /api/bridge/credentials/:id/anchors
 // ---------------------------------------------------------------------------
 router.get('/credentials/:id/anchors', async (req: Request, res: Response) => {
-  const credId = parseInt(req.params.id, 10);
+  const credId = parseInt(String(req.params.id), 10);
   if (!Number.isInteger(credId) || credId <= 0) {
     res.status(400).json({ error: 'Invalid credential ID' });
     return;
@@ -273,7 +273,7 @@ router.get('/credentials/:id/anchors', async (req: Request, res: Response) => {
 // Body: { admin: string }
 // ---------------------------------------------------------------------------
 router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: 'Invalid anchor ID' });
     return;

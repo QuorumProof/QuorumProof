@@ -786,6 +786,18 @@ pub enum DataKey2 {
     AttestationRequestCount,
 }
 
+/// Storage keys for issue #881: consent management.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey9 {
+    /// Verifier access log for a credential (credential_id -> Vec<VerifierAccessEntry>).
+    VerifierAccessLog(u64),
+    /// Explicit consent grant keyed by (credential_id, verifier).
+    ConsentGrant(u64, Address),
+    /// Index of all verifiers who accessed a credential (credential_id -> Vec<Address>).
+    CredentialVerifiers(u64),
+}
+
 /// Storage keys for expiry, renewal, proof requests, share tokens, and attestation queue.
 #[contracttype]
 #[derive(Clone)]
@@ -1329,6 +1341,41 @@ pub struct DelegationAuditEntry {
     pub expiry: u64,
     /// Ledger sequence when the delegation was granted.
     pub granted_at: u64,
+}
+
+// ── Issue #881: Credential Holder Consent Management ─────────────────────────
+
+/// A record of a verifier accessing a credential (read or download).
+///
+/// Written whenever a verifier redeems a share link, uses a delegation grant,
+/// or has a managed proof request fulfilled.
+#[contracttype]
+#[derive(Clone)]
+pub struct VerifierAccessEntry {
+    /// Verifier who performed the access.
+    pub verifier: Address,
+    /// Credential that was accessed.
+    pub credential_id: u64,
+    /// Access context: 1=ShareLink, 2=Delegation, 3=ProofRequest.
+    pub access_type: u32,
+    /// Unix timestamp of the access.
+    pub accessed_at: u64,
+    /// Whether the holder has revoked this verifier's future access.
+    pub access_revoked: bool,
+}
+
+/// Granular consent grant — the holder explicitly approves a specific verifier.
+#[contracttype]
+#[derive(Clone)]
+pub struct ConsentGrant {
+    pub holder: Address,
+    pub verifier: Address,
+    pub credential_id: u64,
+    /// Unix timestamp after which this grant expires (0 = no expiry).
+    pub expires_at: u64,
+    pub granted_at: u64,
+    pub revoked: bool,
+    pub revoked_at: u64,
 }
 
 /// Audit log entry for quorum slice threshold changes.
@@ -12192,6 +12239,296 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey8::ChainAnchorCount)
             .unwrap_or(0u64)
+    }
+
+    // ── Issue #881: Credential Holder Consent Management ─────────────────────
+
+    /// Record that a verifier accessed a credential.
+    ///
+    /// This is intended to be called internally by other contract functions
+    /// (share link validation, delegation use, proof request fulfillment)
+    /// but is exposed publicly so the off-chain API bridge can also record
+    /// access events from the API server.
+    ///
+    /// # Parameters
+    /// * `holder`        – credential subject (must sign to authorise the write).
+    /// * `credential_id` – credential that was accessed.
+    /// * `verifier`      – address of the verifier performing the access.
+    /// * `access_type`   – 1=ShareLink, 2=Delegation, 3=ProofRequest.
+    pub fn record_verifier_access(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+        verifier: Address,
+        access_type: u32,
+    ) {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        if access_type < 1 || access_type > 3 {
+            panic_with_error!(&env, ContractError::InvalidEnumValue);
+        }
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.subject != holder {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        let now = env.ledger().timestamp();
+        let entry = VerifierAccessEntry {
+            verifier: verifier.clone(),
+            credential_id,
+            access_type,
+            accessed_at: now,
+            access_revoked: false,
+        };
+
+        let mut log: Vec<VerifierAccessEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey9::VerifierAccessLog(credential_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        log.push_back(entry);
+        env.storage()
+            .instance()
+            .set(&DataKey9::VerifierAccessLog(credential_id), &log);
+
+        // Update the credential -> verifiers index
+        let mut verifiers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey9::CredentialVerifiers(credential_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut already_indexed = false;
+        for v in verifiers.iter() {
+            if v == verifier {
+                already_indexed = true;
+                break;
+            }
+        }
+        if !already_indexed {
+            verifiers.push_back(verifier);
+            env.storage()
+                .instance()
+                .set(&DataKey9::CredentialVerifiers(credential_id), &verifiers);
+        }
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the full verifier access log for a credential.
+    ///
+    /// Only the credential subject may call this function.
+    pub fn get_verifier_access_log(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+    ) -> Vec<VerifierAccessEntry> {
+        holder.require_auth();
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.subject != holder {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        env.storage()
+            .instance()
+            .get(&DataKey9::VerifierAccessLog(credential_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return a list of all verifier addresses that have accessed a credential.
+    pub fn get_credential_verifiers(env: Env, holder: Address, credential_id: u64) -> Vec<Address> {
+        holder.require_auth();
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.subject != holder {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        env.storage()
+            .instance()
+            .get(&DataKey9::CredentialVerifiers(credential_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Grant explicit consent to a specific verifier.
+    ///
+    /// The holder approves a named verifier to access the credential until
+    /// `expires_at` (0 = no expiry). A consent grant can be revoked later
+    /// via `revoke_verifier_consent`.
+    pub fn grant_verifier_consent(
+        env: Env,
+        holder: Address,
+        verifier: Address,
+        credential_id: u64,
+        expires_at: u64,
+    ) {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.subject != holder {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        let now = env.ledger().timestamp();
+        if expires_at > 0 && expires_at <= now {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        let grant = ConsentGrant {
+            holder: holder.clone(),
+            verifier: verifier.clone(),
+            credential_id,
+            expires_at,
+            granted_at: now,
+            revoked: false,
+            revoked_at: 0,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey9::ConsentGrant(credential_id, verifier.clone()), &grant);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Revoke a previously granted verifier consent.
+    ///
+    /// After revocation the verifier may no longer access the credential
+    /// through delegation or share links created by this holder.
+    /// Also marks all existing access log entries for this verifier as revoked.
+    pub fn revoke_verifier_consent(
+        env: Env,
+        holder: Address,
+        verifier: Address,
+        credential_id: u64,
+    ) {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.subject != holder {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Update the consent grant record if it exists
+        if let Some(mut grant) = env
+            .storage()
+            .instance()
+            .get::<_, ConsentGrant>(&DataKey9::ConsentGrant(credential_id, verifier.clone()))
+        {
+            grant.revoked = true;
+            grant.revoked_at = now;
+            env.storage()
+                .instance()
+                .set(&DataKey9::ConsentGrant(credential_id, verifier.clone()), &grant);
+        }
+
+        // Mark all access log entries for this verifier as revoked
+        let mut log: Vec<VerifierAccessEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey9::VerifierAccessLog(credential_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut updated_log: Vec<VerifierAccessEntry> = Vec::new(&env);
+        for mut entry in log.iter() {
+            if entry.verifier == verifier {
+                entry.access_revoked = true;
+            }
+            updated_log.push_back(entry);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey9::VerifierAccessLog(credential_id), &updated_log);
+
+        // Also revoke the delegation if one exists
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey2::Delegation(credential_id, verifier.clone()))
+        {
+            env.storage()
+                .instance()
+                .remove(&DataKey2::Delegation(credential_id, verifier.clone()));
+        }
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("consent"), symbol_short!("revoked")),
+            ConsentRevokedEventData {
+                credential_id,
+                holder,
+                issuer: verifier,
+                revoked_at: now,
+            },
+        );
+    }
+
+    /// Check whether a verifier has active (non-revoked, non-expired) consent.
+    pub fn has_verifier_consent(
+        env: Env,
+        credential_id: u64,
+        verifier: Address,
+    ) -> bool {
+        let grant: Option<ConsentGrant> = env
+            .storage()
+            .instance()
+            .get(&DataKey9::ConsentGrant(credential_id, verifier));
+
+        match grant {
+            None => false,
+            Some(g) => {
+                if g.revoked {
+                    return false;
+                }
+                if g.expires_at > 0 && env.ledger().timestamp() >= g.expires_at {
+                    return false;
+                }
+                true
+            }
+        }
+    }
+
+    /// Get the consent grant record for a specific verifier + credential pair.
+    pub fn get_verifier_consent(
+        env: Env,
+        credential_id: u64,
+        verifier: Address,
+    ) -> Option<ConsentGrant> {
+        env.storage()
+            .instance()
+            .get(&DataKey9::ConsentGrant(credential_id, verifier))
     }
 }
 
