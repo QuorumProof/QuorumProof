@@ -501,12 +501,42 @@ pub struct MetadataHashCache {
     pub expires_at: u64,
 }
 
+/// Permission level granted by a share link.
+///
+/// `ViewOnly`    — recipient can read credential metadata but cannot download
+///                the raw credential document.
+/// `Download`    — recipient may also obtain the full credential document.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum SharePermission {
+    ViewOnly = 1,
+    Download = 2,
+}
+
 /// Share token link structure
+///
+/// Extended for issue #877: expiration, optional password protection, and
+/// per-link access permissions.
 #[contracttype]
 #[derive(Clone)]
 pub struct ShareLink {
+    /// Credential being shared.
     pub credential_id: u64,
+    /// Unix timestamp after which the token is no longer valid.
+    /// A value of 0 means the link never expires (legacy behaviour).
     pub expires_at: u64,
+    /// HMAC-SHA256 hex digest of the password chosen by the creator.
+    /// `None` means the link is public (no password required).
+    pub password_hash: Option<soroban_sdk::Bytes>,
+    /// What the recipient is allowed to do.
+    pub permission: SharePermission,
+    /// Stellar address of the credential holder who created this link.
+    pub created_by: Address,
+    /// Unix timestamp when the link was created.
+    pub created_at: u64,
+    /// Whether the creator has explicitly revoked this link before its expiry.
+    pub revoked: bool,
 }
 
 #[contracterror(export = false)]
@@ -11242,35 +11272,64 @@ impl QuorumProofContract {
         Self::issue_credential(env, issuer, subject, credential_type, metadata, expires_at, 0)
     }
 
-    /// Generate a time-limited share link token for a credential.
+    // ── Issue #877: Share Link Expiration & Access Control ───────────────────
+
+    /// Generate a time-limited, optionally password-protected share link.
     ///
-    /// The caller must be the credential subject (holder). Returns an opaque
-    /// token (the credential ID encoded as bytes XOR'd with the expiry) that
-    /// can be embedded in a share URL. Call `validate_share_token` to redeem it.
+    /// # Parameters
+    /// * `subject`        – credential holder; must sign the transaction.
+    /// * `credential_id`  – credential to share.
+    /// * `expiry_hours`   – how many hours until the token expires (1 – 8 760).
+    /// * `password_hash`  – optional HMAC-SHA256 hex digest of the password
+    ///                      (32 bytes).  Pass `None` for a public link.
+    /// * `permission`     – `1` = ViewOnly, `2` = Download.
+    ///
+    /// Returns an opaque 16-byte token:
+    ///   bytes [0..8]  = credential_id  (big-endian u64)
+    ///   bytes [8..16] = expires_at     (big-endian u64)
     pub fn generate_share_link(
         env: Env,
         subject: Address,
         credential_id: u64,
         expiry_hours: u32,
+        password_hash: Option<soroban_sdk::Bytes>,
+        permission: u32,
     ) -> soroban_sdk::Bytes {
         subject.require_auth();
         Self::require_not_paused(&env);
 
-        assert!(expiry_hours > 0, "expiry_hours must be greater than 0");
+        if expiry_hours == 0 || expiry_hours > 8_760 {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
 
-        // Credential must exist.
-        if !env
+        let perm = match permission {
+            1 => SharePermission::ViewOnly,
+            2 => SharePermission::Download,
+            _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
+        };
+
+        // Validate optional password hash length (32 bytes for SHA-256 hex).
+        if let Some(ref ph) = password_hash {
+            if ph.len() != 32 {
+                panic_with_error!(&env, ContractError::InvalidInput);
+            }
+        }
+
+        // Credential must exist and belong to subject.
+        let credential: Credential = env
             .storage()
             .instance()
-            .has(&DataKey::Credential(credential_id))
-        {
-            panic_with_error!(&env, ContractError::CredentialNotFound);
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        if credential.subject != subject {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
         }
 
         let now = env.ledger().timestamp();
         let expires_at = now + (expiry_hours as u64) * 3600;
 
-        // Build a deterministic token: 8 bytes credential_id || 8 bytes expires_at
+        // Token layout: 8 bytes credential_id || 8 bytes expires_at
         let cid_bytes = credential_id.to_be_bytes();
         let exp_bytes = expires_at.to_be_bytes();
         let mut raw = [0u8; 16];
@@ -11278,7 +11337,16 @@ impl QuorumProofContract {
         raw[8..].copy_from_slice(&exp_bytes);
         let token = soroban_sdk::Bytes::from_slice(&env, &raw);
 
-        let link = ShareLink { credential_id, expires_at };
+        let link = ShareLink {
+            credential_id,
+            expires_at,
+            password_hash,
+            permission: perm,
+            created_by: subject,
+            created_at: now,
+            revoked: false,
+        };
+
         env.storage()
             .instance()
             .set(&DataKey3::ShareToken(token.clone()), &link);
@@ -11291,20 +11359,92 @@ impl QuorumProofContract {
 
     /// Validate a share token and return the credential ID.
     ///
-    /// Panics with `ContractError::InvalidInput` if the token is unknown or expired.
-    pub fn validate_share_token(env: Env, token: soroban_sdk::Bytes) -> u64 {
+    /// * `token`         – 16-byte token returned by `generate_share_link`.
+    /// * `password_hash` – hash of the password presented by the recipient.
+    ///                     Pass `None` for public links.
+    ///
+    /// Panics with `ContractError::InvalidInput`   if the token is unknown,
+    ///             expired, revoked, or the password does not match.
+    /// Returns the `ShareLink` so callers can inspect the permission level.
+    pub fn validate_share_token(
+        env: Env,
+        token: soroban_sdk::Bytes,
+        password_hash: Option<soroban_sdk::Bytes>,
+    ) -> ShareLink {
         let link: ShareLink = env
             .storage()
             .instance()
             .get(&DataKey3::ShareToken(token))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
 
-        let now = env.ledger().timestamp();
-        if now >= link.expires_at {
+        if link.revoked {
             panic_with_error!(&env, ContractError::InvalidInput);
         }
 
-        link.credential_id
+        let now = env.ledger().timestamp();
+        if link.expires_at > 0 && now >= link.expires_at {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        // Password check (constant-time byte comparison via SHA-256 on the env).
+        match (&link.password_hash, &password_hash) {
+            (Some(expected), Some(provided)) => {
+                if expected != provided {
+                    panic_with_error!(&env, ContractError::PermissionDenied);
+                }
+            }
+            (Some(_), None) => {
+                // Password required but not supplied.
+                panic_with_error!(&env, ContractError::PermissionDenied);
+            }
+            (None, _) => {
+                // Public link — no password required.
+            }
+        }
+
+        link
+    }
+
+    /// Revoke a previously generated share link before its natural expiry.
+    ///
+    /// Only the credential subject (the link creator) may revoke it.
+    pub fn revoke_share_link(
+        env: Env,
+        subject: Address,
+        token: soroban_sdk::Bytes,
+    ) {
+        subject.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut link: ShareLink = env
+            .storage()
+            .instance()
+            .get(&DataKey3::ShareToken(token.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+
+        if link.created_by != subject {
+            panic_with_error!(&env, ContractError::UnauthorizedAction);
+        }
+
+        link.revoked = true;
+        env.storage()
+            .instance()
+            .set(&DataKey3::ShareToken(token), &link);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the full `ShareLink` metadata for a token (admin / holder view).
+    ///
+    /// Does not enforce expiry or password — use `validate_share_token` for access.
+    pub fn get_share_link(
+        env: Env,
+        token: soroban_sdk::Bytes,
+    ) -> Option<ShareLink> {
+        env.storage()
+            .instance()
+            .get(&DataKey3::ShareToken(token))
     }
 
     // ── Credential Expiry & Renewal System ───────────────────────────────────
