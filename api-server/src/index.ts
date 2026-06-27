@@ -7,7 +7,9 @@ import credentialsRouter from './routes/credentials.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
+import graphqlRouter from './routes/graphql.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
+import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { createWsServer } from './ws/server.js';
@@ -56,6 +58,7 @@ app.use('/api/credentials', credentialsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/attestor', attestorRouter);
+app.use('/api/graphql', rbac.requirePermission('credentials:read'), graphqlRouter);
 
 app.get('/health', (_req, res) => {
   res.json({
