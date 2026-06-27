@@ -262,6 +262,7 @@ export function createCredentialsRouter(soroban: SorobanClient) {
   router.get('/search/index-stats', (_req: Request, res: Response) => {
     res.json({
       index_size: searchIndex.getIndexSize(),
+      vocabulary_size: searchIndex.getVocabularySize(),
       cache_size: metadataHashCache.size,
       last_indexed: searchIndex.getLastIndexed(),
       timestamp: new Date().toISOString(),

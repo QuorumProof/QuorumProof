@@ -54,6 +54,24 @@ const METADATA_CACHE_TTL_SECS: u64 = 3_600;
 const DEFAULT_REVOCATION_TIME_LOCK_SECONDS: u64 = 172_800; // 48 hours
 const MAX_REVOCATION_BATCH_SIZE: u32 = 128;
 
+// ── Reputation & staking defaults ────────────────────────────────────────────
+/// Score deducted from an attestor on each confirmed malicious attestation.
+const DEFAULT_REPUTATION_PENALTY_PER_SLASH: u32 = 20;
+/// Score restored per honest attestation.
+const DEFAULT_REPUTATION_REWARD_PER_ATTESTATION: u32 = 1;
+/// Attestor is auto-suspended from all slices when score drops to this level.
+const DEFAULT_REPUTATION_SUSPENSION_THRESHOLD: u32 = 20;
+/// Default stake slash fraction in basis points (10%).
+const DEFAULT_SLASH_FRACTION_BPS: u32 = 1_000;
+/// Starting reputation score for new attestors.
+const INITIAL_REPUTATION_SCORE: u32 = 100;
+
+// ── Multi-round challenge defaults ───────────────────────────────────────────
+/// Default duration of a single challenge voting round (48 hours).
+const DEFAULT_CHALLENGE_ROUND_DURATION_SECONDS: u64 = 172_800;
+/// Maximum voting rounds before a challenge auto-resolves.
+const DEFAULT_MAX_CHALLENGE_ROUNDS: u32 = 3;
+
 const TOPIC_ROLE_GRANTED: &str = "RoleGranted";
 const TOPIC_ROLE_REVOKED: &str = "RoleRevoked";
 const TOPIC_ROLE_DELEGATED: &str = "RoleDelegated";
@@ -754,6 +772,14 @@ pub enum DataKey2 {
     AttestationRequest(u64),
     /// Issue #666: Count of attestation requests
     AttestationRequestCount,
+    /// Extended multi-round challenge state by challenge_id
+    ChallengeExtended(u64),
+    /// Attestor on-chain reputation record
+    AttestorReputation(Address),
+    /// Global attestor reputation scoring config
+    AttestorReputationConfig,
+    /// Attestor stake deposit (address -> u64 token units)
+    AttestorStake(Address),
 }
 
 /// Storage keys for expiry, renewal, proof requests, share tokens, and attestation queue.
@@ -1569,6 +1595,88 @@ pub struct Challenge {
     pub dismiss_votes: Vec<Address>,
 }
 
+// ── Feature: Multi-round challenge voting ─────────────────────────────────────
+
+/// Evidence submitted by any slice member to support or refute a challenge.
+#[contracttype]
+#[derive(Clone)]
+pub struct ChallengeEvidence {
+    /// Address of the member submitting the evidence.
+    pub submitter: Address,
+    /// Hash of the evidence document (arbitrary bytes, off-chain data).
+    pub evidence_hash: soroban_sdk::Bytes,
+    /// `true` = supports uphold (accuses malicious behaviour).
+    /// `false` = supports dismiss (exonerates the accused).
+    pub supports_uphold: bool,
+    /// Unix timestamp when the evidence was submitted.
+    pub submitted_at: u64,
+}
+
+/// Extended challenge record that tracks multiple voting rounds and evidence.
+///
+/// `Challenge` is kept unchanged for backward compatibility.  New functionality
+/// stores the extended state under `DataKey2::ChallengeExtended`.
+#[contracttype]
+#[derive(Clone)]
+pub struct ChallengeExtended {
+    pub challenge_id: u64,
+    /// Current voting round (starts at 1).
+    pub round: u32,
+    /// Max rounds before the challenge auto-resolves by simple majority.
+    pub max_rounds: u32,
+    /// Evidence submitted across all rounds.
+    pub evidence: soroban_sdk::Vec<ChallengeEvidence>,
+    /// Unix timestamp when the current round expires.
+    pub round_expires_at: u64,
+    /// Duration of each round in seconds.
+    pub round_duration_seconds: u64,
+    /// Whether a round has been advanced at least once without resolution.
+    pub advanced: bool,
+}
+
+// ── Feature: Attestor reputation & optional stake slashing ───────────────────
+
+/// On-chain reputation record for an attestor.
+///
+/// Reputation decays with each confirmed penalty and can be partially restored
+/// through subsequent honest attestations.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorReputationRecord {
+    /// Address of the attestor.
+    pub attestor: Address,
+    /// Current reputation score (0 = revoked, 100 = perfect).
+    pub score: u32,
+    /// Total number of honest attestations (incremented on each `attest` call).
+    pub total_attestations: u64,
+    /// Number of confirmed malicious attestations (upheld challenges).
+    pub confirmed_malicious: u64,
+    /// Number of times the attestor has been slashed.
+    pub slash_count: u64,
+    /// Optional staked amount (in smallest token units).  `0` means no stake.
+    pub stake: u64,
+    /// Amount of stake that has been slashed and is pending collection.
+    pub pending_slash_amount: u64,
+    /// Unix timestamp of last score update.
+    pub last_updated_at: u64,
+}
+
+/// Configuration for reputation scoring and stake slashing.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorReputationConfig {
+    /// Score deducted per confirmed malicious attestation (default 20).
+    pub penalty_per_slash: u32,
+    /// Score restored per honest attestation (default 1, capped at 100).
+    pub reward_per_attestation: u32,
+    /// Whether staking is enabled on this contract.
+    pub staking_enabled: bool,
+    /// Fraction of stake slashed on each penalty, in basis points (default 1000 = 10%).
+    pub slash_fraction_bps: u32,
+    /// Minimum score before an attestor is auto-suspended from all slices (default 20).
+    pub suspension_threshold: u32,
+}
+
 /// A message sent within a quorum slice
 #[contracttype]
 #[derive(Clone)]
@@ -1603,12 +1711,34 @@ pub struct RateLimitConfig {
     pub window_seconds: u64,
 }
 
-/// Issue #381: Rate limit tracking per address
+/// Issue #381: Sliding-window rate limit state per address.
+///
+/// Stores the last `max_calls` call timestamps in a fixed-size ring buffer so
+/// that the contract can implement a *true* sliding window: at any point in
+/// time the allowed call count is the number of entries inside
+/// `[now - window_seconds, now]`.
+///
+/// Ring-buffer layout
+/// ------------------
+/// - `timestamps` – circular buffer of recorded call timestamps.
+///   Entries are stored in insertion order; the oldest entry wraps around via
+///   `head` when the buffer is full.
+/// - `head`       – index of the oldest (next-to-overwrite) slot.
+/// - `count`      – number of valid entries currently in the buffer (≤ max_calls).
+///
+/// This replaces the previous fixed-window `(call_count, window_start)` pair.
+/// The storage key (`DataKey2::RateLimitState`) is unchanged so existing
+/// per-address states are invalidated on first use (treated as "no state"
+/// because the deserialization will fail and `unwrap_or` returns `None`).
 #[contracttype]
 #[derive(Clone)]
 pub struct RateLimitState {
-    pub call_count: u32,
-    pub window_start: u64,
+    /// Ring buffer of call timestamps (length == config.max_calls cap, filled up to `count`).
+    pub timestamps: soroban_sdk::Vec<u64>,
+    /// Index of the oldest slot in the ring buffer.
+    pub head: u32,
+    /// Number of valid entries currently stored.
+    pub count: u32,
 }
 
 /// Issue #597: Per-issuer credential issuance quota
@@ -2718,6 +2848,11 @@ impl QuorumProofContract {
 
     /// Check rate limit for an address and update if necessary
     /// Returns true if within rate limit, false if limit exceeded
+    ///
+    /// Uses a **sliding-window** algorithm backed by a ring buffer of the last
+    /// `max_calls` timestamps so that the effective call budget is always
+    /// measured over the most-recent `window_seconds` seconds rather than a
+    /// fixed epoch boundary.
     fn check_rate_limit(env: &Env, address: &Address) -> bool {
         // Whitelisted issuers bypass rate limiting entirely
         if env
@@ -2737,50 +2872,73 @@ impl QuorumProofContract {
             .unwrap_or_else(|| Self::get_rate_limit_config(env));
 
         let now = env.ledger().timestamp();
+        let window_start = now.saturating_sub(config.window_seconds);
+        let capacity = config.max_calls;
 
-        let state: Option<RateLimitState> = env
+        let state_opt: Option<RateLimitState> = env
             .storage()
             .instance()
             .get(&DataKey2::RateLimitState(address.clone()));
 
-        match state {
-            Some(state) => {
-                // Check if we're in the same window
-                if now.saturating_sub(state.window_start) < config.window_seconds {
-                    // Within window, check count
-                    if state.call_count >= config.max_calls {
-                        return false;
-                    }
-                    // Increment count
-                    let new_state = RateLimitState {
-                        call_count: state.call_count.saturating_add(1),
-                        window_start: state.window_start,
-                    };
-                    env.storage()
-                        .instance()
-                        .set(&DataKey2::RateLimitState(address.clone()), &new_state);
-                } else {
-                    // New window, reset count
-                    let new_state = RateLimitState {
-                        call_count: 1,
-                        window_start: now,
-                    };
-                    env.storage()
-                        .instance()
-                        .set(&DataKey2::RateLimitState(address.clone()), &new_state);
-                }
-            }
+        let new_state = match state_opt {
             None => {
-                // First call, initialize state
-                let new_state = RateLimitState {
-                    call_count: 1,
-                    window_start: now,
-                };
-                env.storage()
-                    .instance()
-                    .set(&DataKey2::RateLimitState(address.clone()), &new_state);
+                // First call ever — initialise a single-entry ring buffer.
+                let mut ts = soroban_sdk::Vec::new(env);
+                ts.push_back(now);
+                RateLimitState { timestamps: ts, head: 0, count: 1 }
             }
-        }
+            Some(mut state) => {
+                // ── Step 1: Evict entries that have fallen outside the window ──
+                // We walk `count` entries starting at `head` and discard those
+                // whose timestamp ≤ window_start.
+                let len = state.timestamps.len();
+                let mut evict: u32 = 0;
+                for i in 0..state.count {
+                    let idx = (state.head.saturating_add(i)) % len.max(1);
+                    let ts = state.timestamps.get(idx).unwrap_or(0);
+                    if ts <= window_start {
+                        evict = evict.saturating_add(1);
+                    } else {
+                        break; // Ring buffer is ordered; first in-window entry stops eviction.
+                    }
+                }
+                state.head = (state.head.saturating_add(evict)) % len.max(1);
+                state.count = state.count.saturating_sub(evict);
+
+                // ── Step 2: Reject if the sliding window is already at capacity ──
+                if state.count >= capacity {
+                    // Persist the evicted state before returning so future calls
+                    // don't re-process already-expired entries.
+                    env.storage()
+                        .instance()
+                        .set(&DataKey2::RateLimitState(address.clone()), &state);
+                    env.storage()
+                        .instance()
+                        .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+                    return false;
+                }
+
+                // ── Step 3: Record the current call ──
+                // If the buffer hasn't reached capacity yet we can simply append.
+                // If it has (can only happen when capacity increased since last
+                // call) we overwrite the head slot and advance head.
+                let buf_len = state.timestamps.len();
+                if buf_len < capacity {
+                    // Buffer not yet at full allocation — push a new slot.
+                    state.timestamps.push_back(now);
+                } else {
+                    // Overwrite the slot that `head + count` points to.
+                    let write_idx = (state.head.saturating_add(state.count)) % buf_len;
+                    state.timestamps.set(write_idx, now);
+                }
+                state.count = state.count.saturating_add(1);
+                state
+            }
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::RateLimitState(address.clone()), &new_state);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -2799,6 +2957,48 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .get(&DataKey2::RateLimitState(address))
+    }
+
+    /// Get the number of calls made by `address` within the current sliding window.
+    ///
+    /// This is a read-only view — it does **not** record a call or modify state.
+    pub fn get_rate_limit_usage(env: Env, address: Address) -> u32 {
+        let config: RateLimitConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IssuerRateLimitConfig(address.clone()))
+            .unwrap_or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey2::RateLimitConfig)
+                    .unwrap_or(RateLimitConfig {
+                        max_calls: DEFAULT_RATE_LIMIT_MAX_CALLS,
+                        window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+                    })
+            });
+
+        let now = env.ledger().timestamp();
+        let window_start = now.saturating_sub(config.window_seconds);
+
+        let state: RateLimitState = match env
+            .storage()
+            .instance()
+            .get(&DataKey2::RateLimitState(address))
+        {
+            None => return 0,
+            Some(s) => s,
+        };
+
+        let len = state.timestamps.len();
+        let mut in_window: u32 = 0;
+        for i in 0..state.count {
+            let idx = (state.head.saturating_add(i)) % len.max(1);
+            let ts = state.timestamps.get(idx).unwrap_or(0);
+            if ts > window_start {
+                in_window = in_window.saturating_add(1);
+            }
+        }
+        in_window
     }
 
     // ── Issue #382: Numeric Overflow Protection ───────────────────────────────
@@ -6772,6 +6972,9 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
+        // Award reputation for each honest attestation.
+        Self::reward_attestor_reputation(&env, &attestor);
+
         // Record activity for the holder
         let credential: Credential = env
             .storage()
@@ -9495,6 +9698,8 @@ impl QuorumProofContract {
         if uphold_weight >= required_weight {
             challenge.status = ChallengeStatus::Open; // Temporary to allow slash_attestor call
             Self::slash_attestor(env.clone(), env.current_contract_address(), challenge.slice_id, challenge.accused.clone());
+            // Apply reputation penalty for confirmed malicious attestation.
+            Self::penalise_attestor_reputation(&env, &challenge.accused, challenge.slice_id);
             challenge.status = ChallengeStatus::Upheld;
 
             // Remove accused's attestation from the credential
@@ -10385,6 +10590,474 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::SlashCount(attestor))
             .unwrap_or(0u64)
+    }
+
+    // ── Feature: Attestor reputation penalties & optional stake slashing ─────
+
+    /// Initialise or update the attestor reputation configuration.
+    ///
+    /// Only the contract admin may call this.
+    ///
+    /// # Parameters
+    /// - `admin`: Must equal the stored admin address; must authorise.
+    /// - `penalty_per_slash`: Score deducted per confirmed malicious attestation (1–100).
+    /// - `reward_per_attestation`: Score restored per honest attestation (1–100).
+    /// - `staking_enabled`: Whether attestors can stake tokens.
+    /// - `slash_fraction_bps`: Fraction of stake slashed in basis points (0–10000).
+    /// - `suspension_threshold`: Minimum score before auto-suspension (0–99).
+    pub fn set_attestor_reputation_config(
+        env: Env,
+        admin: Address,
+        penalty_per_slash: u32,
+        reward_per_attestation: u32,
+        staking_enabled: bool,
+        slash_fraction_bps: u32,
+        suspension_threshold: u32,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "only admin can configure reputation");
+        assert!(penalty_per_slash > 0 && penalty_per_slash <= 100, "penalty_per_slash out of range");
+        assert!(reward_per_attestation > 0 && reward_per_attestation <= 100, "reward_per_attestation out of range");
+        assert!(slash_fraction_bps <= 10_000, "slash_fraction_bps must be <= 10000");
+        assert!(suspension_threshold < 100, "suspension_threshold must be < 100");
+
+        let config = AttestorReputationConfig {
+            penalty_per_slash,
+            reward_per_attestation,
+            staking_enabled,
+            slash_fraction_bps,
+            suspension_threshold,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorReputationConfig, &config);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the current attestor reputation configuration.
+    pub fn get_attestor_reputation_config(env: Env) -> AttestorReputationConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey2::AttestorReputationConfig)
+            .unwrap_or(AttestorReputationConfig {
+                penalty_per_slash: DEFAULT_REPUTATION_PENALTY_PER_SLASH,
+                reward_per_attestation: DEFAULT_REPUTATION_REWARD_PER_ATTESTATION,
+                staking_enabled: false,
+                slash_fraction_bps: DEFAULT_SLASH_FRACTION_BPS,
+                suspension_threshold: DEFAULT_REPUTATION_SUSPENSION_THRESHOLD,
+            })
+    }
+
+    /// Get the full reputation record for an attestor.
+    ///
+    /// Returns a default record with `score = 100` and all counters at zero
+    /// if the attestor has never attested or been penalised.
+    pub fn get_attestor_reputation_record(env: Env, attestor: Address) -> AttestorReputationRecord {
+        env.storage()
+            .instance()
+            .get(&DataKey2::AttestorReputation(attestor.clone()))
+            .unwrap_or(AttestorReputationRecord {
+                attestor,
+                score: INITIAL_REPUTATION_SCORE,
+                total_attestations: 0,
+                confirmed_malicious: 0,
+                slash_count: 0,
+                stake: 0,
+                pending_slash_amount: 0,
+                last_updated_at: 0,
+            })
+    }
+
+    /// Internal helper: load or create an attestor reputation record.
+    fn load_or_init_reputation(env: &Env, attestor: &Address) -> AttestorReputationRecord {
+        env.storage()
+            .instance()
+            .get(&DataKey2::AttestorReputation(attestor.clone()))
+            .unwrap_or(AttestorReputationRecord {
+                attestor: attestor.clone(),
+                score: INITIAL_REPUTATION_SCORE,
+                total_attestations: 0,
+                confirmed_malicious: 0,
+                slash_count: 0,
+                stake: 0,
+                pending_slash_amount: 0,
+                last_updated_at: 0,
+            })
+    }
+
+    /// Internal helper: award a reputation point for an honest attestation.
+    fn reward_attestor_reputation(env: &Env, attestor: &Address) {
+        let config = Self::get_attestor_reputation_config(env.clone());
+        let mut rec = Self::load_or_init_reputation(env, attestor);
+        rec.total_attestations = rec.total_attestations.saturating_add(1);
+        rec.score = (rec.score.saturating_add(config.reward_per_attestation)).min(100);
+        rec.last_updated_at = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorReputation(attestor.clone()), &rec);
+    }
+
+    /// Internal helper: apply a reputation penalty for a confirmed malicious attestation.
+    ///
+    /// If staking is enabled the configured fraction of the attestor's stake is
+    /// moved to `pending_slash_amount` (to be collected by the admin).
+    /// If the resulting score falls at or below `suspension_threshold` the
+    /// attestor is suspended in the given slice.
+    fn penalise_attestor_reputation(env: &Env, attestor: &Address, slice_id: u64) {
+        let config = Self::get_attestor_reputation_config(env.clone());
+        let mut rec = Self::load_or_init_reputation(env, attestor);
+
+        // Deduct reputation score.
+        rec.score = rec.score.saturating_sub(config.penalty_per_slash);
+        rec.confirmed_malicious = rec.confirmed_malicious.saturating_add(1);
+        rec.slash_count = rec.slash_count.saturating_add(1);
+
+        // Optionally slash stake.
+        if config.staking_enabled && rec.stake > 0 {
+            let slash_amount = rec
+                .stake
+                .saturating_mul(config.slash_fraction_bps as u64)
+                / 10_000;
+            rec.stake = rec.stake.saturating_sub(slash_amount);
+            rec.pending_slash_amount = rec.pending_slash_amount.saturating_add(slash_amount);
+        }
+
+        rec.last_updated_at = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorReputation(attestor.clone()), &rec);
+
+        // Auto-suspend from the slice if score is at or below threshold.
+        if rec.score <= config.suspension_threshold {
+            env.storage().instance().set(
+                &DataKey2::SuspendedAttestor(slice_id, attestor.clone()),
+                &true,
+            );
+        }
+    }
+
+    /// Deposit stake for the calling attestor.
+    ///
+    /// Staking is purely on-chain accounting in this implementation (no token
+    /// transfer).  A future version may integrate with a token contract.
+    ///
+    /// # Parameters
+    /// - `attestor`: The attestor depositing stake; must authorise.
+    /// - `amount`: Amount of units to add to the attestor's stake.
+    pub fn deposit_attestor_stake(env: Env, attestor: Address, amount: u64) {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+        assert!(amount > 0, "stake amount must be greater than zero");
+
+        let config = Self::get_attestor_reputation_config(env.clone());
+        assert!(config.staking_enabled, "staking is not enabled");
+
+        let mut rec = Self::load_or_init_reputation(&env, &attestor);
+        rec.stake = rec.stake.saturating_add(amount);
+        rec.last_updated_at = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorReputation(attestor), &rec);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Withdraw un-slashed stake.
+    ///
+    /// The attestor can withdraw any stake that has not been slashed.
+    ///
+    /// # Parameters
+    /// - `attestor`: The attestor; must authorise.
+    /// - `amount`: Units to withdraw.  Must not exceed current stake.
+    pub fn withdraw_attestor_stake(env: Env, attestor: Address, amount: u64) {
+        attestor.require_auth();
+        Self::require_not_paused(&env);
+        assert!(amount > 0, "withdrawal amount must be greater than zero");
+
+        let config = Self::get_attestor_reputation_config(env.clone());
+        assert!(config.staking_enabled, "staking is not enabled");
+
+        let mut rec = Self::load_or_init_reputation(&env, &attestor);
+        assert!(rec.stake >= amount, "insufficient stake to withdraw");
+        rec.stake = rec.stake.saturating_sub(amount);
+        rec.last_updated_at = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorReputation(attestor), &rec);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Admin collects pending slashed stake from an attestor's record.
+    ///
+    /// This zeroes `pending_slash_amount` and returns the collected amount.
+    ///
+    /// # Parameters
+    /// - `admin`: Must equal the stored admin and must authorise.
+    /// - `attestor`: The attestor whose slashed stake to collect.
+    ///
+    /// # Returns
+    /// The amount collected (may be zero if nothing was pending).
+    pub fn collect_slashed_stake(env: Env, admin: Address, attestor: Address) -> u64 {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "only admin can collect slashed stake");
+
+        let mut rec = Self::load_or_init_reputation(&env, &attestor);
+        let collected = rec.pending_slash_amount;
+        rec.pending_slash_amount = 0;
+        rec.last_updated_at = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorReputation(attestor), &rec);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        collected
+    }
+
+    // ── Feature: Multi-round challenge voting with evidence ──────────────────
+
+    /// Submit evidence to an open challenge.
+    ///
+    /// Any member of the relevant quorum slice may submit evidence in support of
+    /// either the uphold or dismiss side.  Evidence is recorded on-chain as a
+    /// hash of an off-chain document.  Multiple evidence submissions are allowed
+    /// per round; they are appended chronologically.
+    ///
+    /// # Parameters
+    /// - `submitter`: Slice member submitting the evidence; must authorise.
+    /// - `challenge_id`: The challenge to attach evidence to.
+    /// - `evidence_hash`: Hash of the off-chain evidence document.
+    /// - `supports_uphold`: `true` = evidence accuses accused; `false` = exonerates.
+    ///
+    /// # Panics
+    /// Panics with `ChallengeNotFound` if the challenge does not exist.
+    /// Panics with `ChallengeResolved` if the challenge is already resolved.
+    /// Panics with `NotInSlice` if the submitter is not in the relevant slice.
+    pub fn submit_challenge_evidence(
+        env: Env,
+        submitter: Address,
+        challenge_id: u64,
+        evidence_hash: soroban_sdk::Bytes,
+        supports_uphold: bool,
+    ) {
+        submitter.require_auth();
+        Self::require_not_paused(&env);
+        assert!(!evidence_hash.is_empty(), "evidence_hash cannot be empty");
+
+        let challenge: Challenge = env
+            .storage()
+            .instance()
+            .get(&DataKey::Challenge(challenge_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ChallengeNotFound));
+
+        if challenge.status != ChallengeStatus::Open {
+            panic_with_error!(&env, ContractError::ChallengeResolved);
+        }
+
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(challenge.slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        if !slice.attestors.iter().any(|a| a == submitter) {
+            panic_with_error!(&env, ContractError::NotInSlice);
+        }
+
+        // Load or initialise extended state.
+        let mut ext: ChallengeExtended = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ChallengeExtended(challenge_id))
+            .unwrap_or(ChallengeExtended {
+                challenge_id,
+                round: 1,
+                max_rounds: DEFAULT_MAX_CHALLENGE_ROUNDS,
+                evidence: soroban_sdk::Vec::new(&env),
+                round_expires_at: env.ledger().timestamp() + DEFAULT_CHALLENGE_ROUND_DURATION_SECONDS,
+                round_duration_seconds: DEFAULT_CHALLENGE_ROUND_DURATION_SECONDS,
+                advanced: false,
+            });
+
+        let ev = ChallengeEvidence {
+            submitter,
+            evidence_hash,
+            supports_uphold,
+            submitted_at: env.ledger().timestamp(),
+        };
+        ext.evidence.push_back(ev);
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::ChallengeExtended(challenge_id), &ext);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Advance the challenge to the next voting round.
+    ///
+    /// If the current round has expired without resolution and the maximum number
+    /// of rounds has not been reached, any slice member may call this to open a
+    /// new round.  If the maximum rounds have been exhausted the challenge
+    /// auto-resolves by simple majority vote weight.
+    ///
+    /// # Parameters
+    /// - `caller`: Any slice member; must authorise.
+    /// - `challenge_id`: The challenge to advance.
+    ///
+    /// # Panics
+    /// Panics with `ChallengeNotFound`, `ChallengeResolved`, or `NotInSlice`.
+    /// Panics if the current round has not yet expired.
+    pub fn advance_challenge_round(env: Env, caller: Address, challenge_id: u64) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut challenge: Challenge = env
+            .storage()
+            .instance()
+            .get(&DataKey::Challenge(challenge_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ChallengeNotFound));
+
+        if challenge.status != ChallengeStatus::Open {
+            panic_with_error!(&env, ContractError::ChallengeResolved);
+        }
+
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(challenge.slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        if !slice.attestors.iter().any(|a| a == caller) {
+            panic_with_error!(&env, ContractError::NotInSlice);
+        }
+
+        let mut ext: ChallengeExtended = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ChallengeExtended(challenge_id))
+            .unwrap_or(ChallengeExtended {
+                challenge_id,
+                round: 1,
+                max_rounds: DEFAULT_MAX_CHALLENGE_ROUNDS,
+                evidence: soroban_sdk::Vec::new(&env),
+                round_expires_at: env.ledger().timestamp(),
+                round_duration_seconds: DEFAULT_CHALLENGE_ROUND_DURATION_SECONDS,
+                advanced: false,
+            });
+
+        let now = env.ledger().timestamp();
+        assert!(
+            now >= ext.round_expires_at,
+            "current round has not yet expired"
+        );
+
+        // Helper: weighted vote sum reused from vote_on_challenge.
+        let weighted_sum = |votes: &soroban_sdk::Vec<Address>| -> u32 {
+            let mut total: u32 = 0;
+            for v in votes.iter() {
+                for (i, a) in slice.attestors.iter().enumerate() {
+                    if a == v {
+                        total =
+                            total.saturating_add(slice.weights.get(i as u32).unwrap_or(0));
+                        break;
+                    }
+                }
+            }
+            total
+        };
+
+        let required_weight = Self::required_weight(&env, &slice);
+        let uphold_weight = weighted_sum(&challenge.uphold_votes);
+        let dismiss_weight = weighted_sum(&challenge.dismiss_votes);
+
+        if ext.round >= ext.max_rounds || uphold_weight >= required_weight || dismiss_weight >= required_weight {
+            // Auto-resolve by whichever side currently leads (or uphold on tie).
+            if uphold_weight >= dismiss_weight {
+                // Uphold: penalise the accused and remove attestation.
+                Self::penalise_attestor_reputation(&env, &challenge.accused, challenge.slice_id);
+                // Also perform legacy slash (suspends in slice + increments SlashCount).
+                env.storage().instance().set(
+                    &DataKey2::SuspendedAttestor(challenge.slice_id, challenge.accused.clone()),
+                    &true,
+                );
+                let count: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::SlashCount(challenge.accused.clone()))
+                    .unwrap_or(0u64);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::SlashCount(challenge.accused.clone()), &(count + 1));
+
+                // Remove the accused's attestation from the credential.
+                let attestors: Vec<Address> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Attestors(challenge.credential_id))
+                    .unwrap_or(Vec::new(&env));
+                let mut retained: Vec<Address> = Vec::new(&env);
+                for a in attestors.iter() {
+                    if a != challenge.accused {
+                        retained.push_back(a);
+                    }
+                }
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Attestors(challenge.credential_id), &retained);
+
+                challenge.status = ChallengeStatus::Upheld;
+            } else {
+                challenge.status = ChallengeStatus::Dismissed;
+            }
+            env.storage()
+                .instance()
+                .remove(&DataKey::ActiveChallenge(challenge.credential_id, challenge.accused.clone()));
+        } else {
+            // Open a new round.
+            ext.round = ext.round.saturating_add(1);
+            ext.round_expires_at = now.saturating_add(ext.round_duration_seconds);
+            ext.advanced = true;
+            // Reset votes for the new round (slates cleared, members vote fresh).
+            challenge.uphold_votes = Vec::new(&env);
+            challenge.dismiss_votes = Vec::new(&env);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Challenge(challenge_id), &challenge);
+        env.storage()
+            .instance()
+            .set(&DataKey2::ChallengeExtended(challenge_id), &ext);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the extended challenge state (multi-round info + evidence list).
+    ///
+    /// Returns `None` if no extended state has been created yet (i.e. no
+    /// evidence has been submitted and no round advancement has occurred).
+    pub fn get_challenge_extended(env: Env, challenge_id: u64) -> Option<ChallengeExtended> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::ChallengeExtended(challenge_id))
     }
 
     // ── Feature #374: Slice Member Communication Channel ──────────────────────────
@@ -16629,7 +17302,8 @@ mod feature_tests {
         // Check rate limit state
         let state = client.get_rate_limit_state(&issuer);
         assert!(state.is_some());
-        assert_eq!(state.unwrap().call_count, 1);
+        // Sliding window: one call recorded means count == 1
+        assert_eq!(state.unwrap().count, 1);
     }
 
     #[test]
@@ -16659,7 +17333,8 @@ mod feature_tests {
             client.issue_credential(&issuer, &subject, &ctype, &metadata, &None, &0u64);
         }
         let state = client.get_rate_limit_state(&issuer);
-        assert_eq!(state.unwrap().call_count, 5);
+        // Sliding window: five calls recorded means count == 5
+        assert_eq!(state.unwrap().count, 5);
     }
 
     #[test]
