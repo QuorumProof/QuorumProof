@@ -20,8 +20,8 @@ const Profile = lazy(() => import('./pages/Profile').then(module => ({ default: 
 const CredentialCompare = lazy(() => import('./pages/CredentialCompare').then(module => ({ default: module.default })));
 const Help = lazy(() => import('./pages/Help').then(module => ({ default: module.default })));
 const CredentialSharing = lazy(() => import('./pages/CredentialSharing').then(module => ({ default: module.default })));
-const CredentialMarketplace = lazy(() => import('./pages/CredentialMarketplace').then(module => ({ default: module.default })));
-const GdprRequest = lazy(() => import('./pages/GdprRequest').then(module => ({ default: module.default })));
+const CredentialRecovery = lazy(() => import('./pages/CredentialRecovery').then(module => ({ default: module.default })));
+const AttestorRecoveryApprovals = lazy(() => import('./pages/AttestorRecoveryApprovals').then(module => ({ default: module.default })));
 
 const LoadingFallback = () => (
   <div className="flex items-center justify-center h-full">
@@ -67,8 +67,8 @@ function AppContent() {
           <Route path="/profile" element={<WalletGuard><Profile /></WalletGuard>} />
           <Route path="/compare" element={<CredentialCompare />} />
           <Route path="/share" element={<WalletGuard><CredentialSharing /></WalletGuard>} />
-          <Route path="/marketplace" element={<CredentialMarketplace />} />
-          <Route path="/gdpr" element={<WalletGuard><GdprRequest /></WalletGuard>} />
+          <Route path="/recover" element={<CredentialRecovery />} />
+          <Route path="/attestor/recovery-approvals" element={<WalletGuard><AttestorRecoveryApprovals /></WalletGuard>} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>
