@@ -9,6 +9,9 @@ import {
 interface CredentialCardProps {
   data: CredCardData;
   sliceId: bigint | null;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggle?: (id: string) => void;
 }
 
 const STATUS_CONFIG = {
@@ -18,7 +21,7 @@ const STATUS_CONFIG = {
   expired:  { label: 'Expired',  icon: '⏰', badgeClass: 'badge--gray',  headerMod: 'expired' },
 };
 
-export function CredentialCard({ data, sliceId }: CredentialCardProps) {
+export function CredentialCard({ data, sliceId, selectable, selected, onToggle }: CredentialCardProps) {
   const { credential, attested, slice, expired, sliceError, credError } = data;
   const navigate = useNavigate();
 
@@ -28,27 +31,56 @@ export function CredentialCard({ data, sliceId }: CredentialCardProps) {
   const truncId = idStr.length > 14 ? idStr.slice(0, 6) + '…' + idStr.slice(-4) : idStr;
   const isRevoked = status === 'revoked';
 
-  function handleNavigate() {
-    navigate(`/credential/${credential.id}`);
+  function handleClick(e: React.MouseEvent) {
+    if (selectable) {
+      onToggle?.(idStr);
+    } else {
+      navigate(`/credential/${credential.id}`);
+    }
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      handleNavigate();
+      if (selectable) {
+        onToggle?.(idStr);
+      } else {
+        navigate(`/credential/${credential.id}`);
+      }
     }
+  }
+
+  function handleViewDetails(e: React.MouseEvent) {
+    e.stopPropagation();
+    navigate(`/credential/${credential.id}`);
   }
 
   return (
     <div
-      className={`cred-card${isRevoked ? ' cred-card--revoked' : ''}`}
-      role="article"
+      className={[
+        'cred-card',
+        isRevoked ? 'cred-card--revoked' : '',
+        selectable ? 'cred-card--selectable' : '',
+        selected ? 'cred-card--selected' : '',
+      ].filter(Boolean).join(' ')}
+      role={selectable ? 'checkbox' : 'article'}
+      aria-checked={selectable ? selected : undefined}
       tabIndex={0}
-      aria-label={`${credTypeLabel(credential.credential_type)} credential ${truncId}, status: ${label}`}
-      onClick={handleNavigate}
+      aria-label={`${credTypeLabel(credential.credential_type)} credential ${truncId}, status: ${label}${selectable ? (selected ? ', selected' : ', not selected') : ''}`}
+      onClick={handleClick}
       onKeyDown={handleKeyDown}
       style={{ cursor: 'pointer' }}
     >
+      {/* Selection checkbox */}
+      {selectable && (
+        <div
+          className={`cred-card__checkbox${selected ? ' cred-card__checkbox--checked' : ''}`}
+          aria-hidden="true"
+        >
+          {selected ? '✓' : ''}
+        </div>
+      )}
+
       {/* Header */}
       <div className={`cred-card__header cred-card__header--${headerMod}`}>
         <div className="cred-card__type">{credTypeLabel(credential.credential_type)}</div>
@@ -140,7 +172,17 @@ export function CredentialCard({ data, sliceId }: CredentialCardProps) {
 
       {/* Footer */}
       <div className="cred-card__footer" style={{ fontSize: '12px', color: 'var(--text-muted)', textAlign: 'center' }}>
-        Click to view details →
+        {selectable ? (
+          <button
+            className="btn btn--ghost btn--sm"
+            style={{ fontSize: '11px', padding: '4px 10px' }}
+            onClick={handleViewDetails}
+          >
+            View details →
+          </button>
+        ) : (
+          'Click to view details →'
+        )}
       </div>
     </div>
   );
