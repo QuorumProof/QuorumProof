@@ -1758,6 +1758,7 @@ checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 name = "zk_verifier"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "soroban-sdk",
 ]
 
