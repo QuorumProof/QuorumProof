@@ -911,6 +911,33 @@ pub enum DataKey7 {
     DidMethod,
 }
 
+/// Storage keys for reputation scoring, credential transfers, and expiry management.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey8 {
+    /// Full reputation score record per attestor address.
+    AttestorReputationScore(Address),
+    /// Allowed recipient restriction for a credential transfer (credential_id -> Address).
+    CredentialTransferRecipient(u64),
+}
+
+/// Detailed attestor reputation score tracking speed, pass rate, and dispute ratio.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorReputationScore {
+    /// Total attestations submitted by this attestor.
+    pub total_attestations: u64,
+    /// Attestations where the attested credential later passed verification.
+    pub passed_verifications: u64,
+    /// Attestations that were subsequently disputed.
+    pub disputed_attestations: u64,
+    /// Sum of (attested_at - credential_issued_at) across all attestations, in seconds.
+    /// Divide by total_attestations to get average attestation speed.
+    pub total_speed_secs: u64,
+    /// Timestamp of the last attestation by this attestor.
+    pub last_attested_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct CredentialTypeDef {
