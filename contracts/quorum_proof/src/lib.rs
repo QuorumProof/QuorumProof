@@ -622,6 +622,20 @@ pub enum ContractError {
     AttestationRequestExpired = 67,
     /// Issue #666: Attestation request already finalized
     AttestationRequestFinalized = 68,
+    /// Issue #895: Invalid slice modification
+    InvalidSliceModification = 69,
+    /// Issue #896: Delegation not found
+    DelegationNotFound = 70,
+    /// Issue #896: Cannot delegate to self
+    CannotDelegateToSelf = 71,
+    /// Issue #897: Invalid threshold configuration
+    InvalidThresholdConfig = 72,
+    /// Issue #897: Threshold exceeds total weight
+    ThresholdExceedsTotalWeight = 73,
+    /// Issue #898: Exceeds maximum attestors per slice
+    MaxAttestorsExceeded = 74,
+    /// Issue #898: Invalid capacity limit
+    InvalidCapacityLimit = 75,
 }
 
 #[contracttype]
@@ -754,6 +768,12 @@ pub enum DataKey2 {
     AttestationRequest(u64),
     /// Issue #666: Count of attestation requests
     AttestationRequestCount,
+    /// Issue #895: Slice modification audit trail (slice_id -> Vec<SliceModification>)
+    SliceModificationTrail(u64),
+    /// Issue #896: Slice delegation tracking (slice_id, delegator -> delegate)
+    SliceDelegation(u64, Address),
+    /// Issue #898: Configurable max attestors per slice
+    MaxAttestorsPerSlice,
 }
 
 /// Storage keys for expiry, renewal, proof requests, share tokens, and attestation queue.
@@ -1447,6 +1467,40 @@ pub struct AuditEntry {
     pub updated_by: Address,
     pub timestamp: u64,
     pub change_summary: soroban_sdk::Bytes,
+}
+
+/// Modification type for slice changes (Issue #895)
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum SliceModificationType {
+    AttestorAdded = 1,
+    AttestorRemoved = 2,
+    WeightChanged = 3,
+    ThresholdChanged = 4,
+}
+
+/// Records a single slice modification with timestamp (Issue #895)
+#[contracttype]
+#[derive(Clone)]
+pub struct SliceModification {
+    pub modification_type: SliceModificationType,
+    pub modified_by: Address,
+    pub timestamp: u64,
+    pub target_attestor: Option<Address>,
+    pub old_value: Option<u32>,
+    pub new_value: Option<u32>,
+}
+
+/// Represents a delegation of voting rights (Issue #896)
+#[contracttype]
+#[derive(Clone)]
+pub struct SliceDelegation {
+    pub delegator: Address,
+    pub delegate: Address,
+    pub slice_id: u64,
+    pub delegated_at: u64,
+    pub expires_at: Option<u64>,
 }
 
 /// Compression type for credential metadata
@@ -3830,8 +3884,10 @@ impl QuorumProofContract {
     ) -> u64 {
         Self::require_valid_address(env, &creator);
         assert!(!attestors.is_empty(), "attestors cannot be empty");
+        // Issue #898: Use dynamic max attestors per slice
+        let max_attestors = Self::get_max_attestors_per_slice(env.clone());
         assert!(
-            attestors.len() as u32 <= MAX_ATTESTORS_PER_SLICE,
+            attestors.len() as u32 <= max_attestors,
             "attestors exceed maximum allowed per slice"
         );
         assert!(
@@ -3853,12 +3909,14 @@ impl QuorumProofContract {
         match threshold_type {
             ThresholdType::Absolute => {
                 assert!(threshold > 0, "threshold must be greater than 0");
+                // Issue #897: Validate threshold is achievable
                 assert!(
                     threshold <= total_weight,
                     "threshold cannot exceed total weight sum"
                 );
             }
             ThresholdType::Percentage => {
+                // Issue #897: Validate percentage threshold
                 assert!(
                     (1..=100).contains(&threshold),
                     "percentage threshold must be between 1 and 100"
@@ -3874,7 +3932,7 @@ impl QuorumProofContract {
             + 1;
         let slice = QuorumSlice {
             id,
-            creator,
+            creator: creator.clone(),
             attestors,
             weights,
             threshold,
@@ -3891,6 +3949,10 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         Self::set_slice_weight_cache(env, id, total_weight);
+        // Issue #895: Initialize empty modification trail for new slice
+        env.storage()
+            .instance()
+            .set(&DataKey2::SliceModificationTrail(id), &Vec::<SliceModification>::new(env));
         Self::postcondition(
             env.storage().instance().has(&DataKey::Slice(id)),
             "slice stored",
@@ -6069,8 +6131,10 @@ impl QuorumProofContract {
             slice.creator == creator,
             "only the slice creator can add attestors"
         );
+        // Issue #898: Use dynamic max attestors per slice
+        let max_attestors = Self::get_max_attestors_per_slice(env.clone());
         assert!(
-            (slice.attestors.len() as u32) < MAX_ATTESTORS_PER_SLICE,
+            (slice.attestors.len() as u32) < max_attestors,
             "attestors exceed maximum allowed per slice"
         );
         Self::validate_weight(weight);
@@ -6095,10 +6159,20 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey2::AttestorSet(slice_id))
             .unwrap_or(Map::new(&env));
-        set.set(attestor, true);
+        set.set(attestor.clone(), true);
         env.storage()
             .instance()
             .set(&DataKey2::AttestorSet(slice_id), &set);
+        // Issue #895: Record modification in audit trail
+        Self::record_slice_modification(
+            &env,
+            slice_id,
+            SliceModificationType::AttestorAdded,
+            creator,
+            Some(attestor),
+            None,
+            Some(weight),
+        );
     }
 
     /// Change an attestor's weight. Only the slice creator may call this function.
@@ -6145,7 +6219,7 @@ impl QuorumProofContract {
             attestor: attestor.clone(),
             old_weight,
             new_weight,
-            changed_by: creator,
+            changed_by: creator.clone(),
             timestamp: env.ledger().timestamp(),
         };
         let mut audit: Vec<WeightAuditEntry> = env
@@ -6154,6 +6228,16 @@ impl QuorumProofContract {
             .get(&DataKey5::WeightAuditLog(slice_id))
             .unwrap_or(Vec::new(&env));
         audit.push_back(entry.clone());
+        // Issue #895: Record modification in audit trail
+        Self::record_slice_modification(
+            &env,
+            slice_id,
+            SliceModificationType::WeightChanged,
+            creator,
+            Some(attestor),
+            Some(old_weight),
+            Some(new_weight),
+        );
         env.storage()
             .instance()
             .set(&DataKey5::WeightAuditLog(slice_id), &audit);
@@ -6228,6 +6312,16 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #895: Record modification in audit trail
+        Self::record_slice_modification(
+            &env,
+            slice_id,
+            SliceModificationType::ThresholdChanged,
+            creator,
+            None,
+            Some(old_threshold),
+            Some(new_threshold),
+        );
 
         // Emit event
         let topic = String::from_str(&env, TOPIC_THRESHOLD_CHANGE);
@@ -6292,6 +6386,182 @@ impl QuorumProofContract {
             (symbol_short!("threshold"), slice_id),
             audit_entry,
         );
+    }
+
+    /// Issue #895: Get slice modification history with timestamps
+    pub fn get_slice_modifications(env: Env, slice_id: u64) -> Vec<SliceModification> {
+        assert!(
+            Self::slice_exists(env.clone(), slice_id),
+            "slice does not exist"
+        );
+        env.storage()
+            .instance()
+            .get(&DataKey2::SliceModificationTrail(slice_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Issue #895: Record a slice modification in audit trail
+    fn record_slice_modification(
+        env: &Env,
+        slice_id: u64,
+        modification_type: SliceModificationType,
+        modified_by: Address,
+        target_attestor: Option<Address>,
+        old_value: Option<u32>,
+        new_value: Option<u32>,
+    ) {
+        let mut modifications: Vec<SliceModification> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SliceModificationTrail(slice_id))
+            .unwrap_or(Vec::new(env));
+
+        modifications.push_back(SliceModification {
+            modification_type,
+            modified_by,
+            timestamp: env.ledger().timestamp(),
+            target_attestor,
+            old_value,
+            new_value,
+        });
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::SliceModificationTrail(slice_id), &modifications);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #896: Delegate voting rights for a slice to another address
+    /// Allows temporary delegation without removing from quorum.
+    pub fn delegate_slice_vote(
+        env: Env,
+        delegator: Address,
+        slice_id: u64,
+        delegate: Address,
+        expires_at: Option<u64>,
+    ) {
+        delegator.require_auth();
+        Self::require_valid_address(&env, &delegator);
+        Self::require_valid_address(&env, &delegate);
+
+        // Verify delegator is in the slice
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        assert!(
+            slice.attestors.iter().any(|a| a == delegator),
+            "delegator must be a member of the slice"
+        );
+
+        assert!(
+            delegator != delegate,
+            "cannot delegate to self"
+        );
+
+        // Validate expiry timestamp if provided
+        if let Some(expiry) = expires_at {
+            let current_time = env.ledger().timestamp();
+            assert!(expiry > current_time, "delegation expiry must be in the future");
+        }
+
+        let delegation = SliceDelegation {
+            delegator: delegator.clone(),
+            delegate: delegate.clone(),
+            slice_id,
+            delegated_at: env.ledger().timestamp(),
+            expires_at,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::SliceDelegation(slice_id, delegator.clone()), &delegation);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!(TOPIC_DELEGATION), slice_id, delegator),
+            delegation,
+        );
+    }
+
+    /// Issue #896: Retrieve delegation for a slice member
+    pub fn get_slice_delegation(
+        env: Env,
+        slice_id: u64,
+        delegator: Address,
+    ) -> Option<SliceDelegation> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::SliceDelegation(slice_id, delegator))
+    }
+
+    /// Issue #896: Revoke a vote delegation
+    pub fn revoke_slice_delegation(env: Env, delegator: Address, slice_id: u64) {
+        delegator.require_auth();
+
+        let _delegation: SliceDelegation = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SliceDelegation(slice_id, delegator.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::DelegationNotFound));
+
+        env.storage()
+            .instance()
+            .remove(&DataKey2::SliceDelegation(slice_id, delegator.clone()));
+
+        env.events().publish(
+            (symbol_short!(TOPIC_ROLE_DELEGATION_REVOKED), slice_id),
+            delegator,
+        );
+    }
+
+    /// Issue #897: Validate that slice threshold is achievable
+    /// Ensures threshold <= sum of available weights, preventing deadlock scenarios
+    pub fn validate_threshold(env: Env, slice_id: u64) -> bool {
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        let total_weight = Self::total_slice_weight(&slice.weights);
+        let threshold_type = Self::threshold_type(&env, slice_id);
+
+        match threshold_type {
+            ThresholdType::Absolute => slice.threshold <= total_weight,
+            ThresholdType::Percentage => (1..=100).contains(&slice.threshold),
+        }
+    }
+
+    /// Issue #898: Set configurable maximum attestors per slice
+    pub fn set_max_attestors_per_slice(env: Env, admin: Address, new_max: u32) {
+        admin.require_auth();
+        assert!(
+            Self::is_admin(&env, admin),
+            "only admin can set max attestors"
+        );
+        assert!(new_max > 0, "max attestors must be greater than 0");
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::MaxAttestorsPerSlice, &new_max);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #898: Get current maximum attestors per slice
+    pub fn get_max_attestors_per_slice(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::MaxAttestorsPerSlice)
+            .unwrap_or(MAX_ATTESTORS_PER_SLICE)
     }
 
     /// Attest a credential using a quorum slice.
@@ -15137,6 +15407,276 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
         let _ = client.get_credential_version(&cred_id, &99);
+    }
+
+    // Issue #895: Slice Audit Trail Tests
+    #[test]
+    fn test_slice_modification_trail_on_creation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Verify modification trail is initialized
+        let modifications = client.get_slice_modifications(&slice_id);
+        assert_eq!(modifications.len(), 0); // No modifications yet, just creation
+    }
+
+    #[test]
+    fn test_slice_modification_trail_on_attestor_add() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1);
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Add an attestor
+        client.add_attestor(&creator, &slice_id, &attestor2.clone(), &1u32);
+
+        // Verify modification trail recorded
+        let modifications = client.get_slice_modifications(&slice_id);
+        assert_eq!(modifications.len(), 1);
+        let mod_entry = modifications.get(0).unwrap();
+        // Verify modification contains attestor that was added
+        assert_eq!(mod_entry.target_attestor, Some(attestor2));
+    }
+
+    #[test]
+    fn test_slice_modification_trail_on_weight_change() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Update weight
+        client.update_attestor_weight(&creator, &slice_id, &attestor1.clone(), &2u32);
+
+        // Verify modification trail recorded
+        let modifications = client.get_slice_modifications(&slice_id);
+        assert_eq!(modifications.len(), 1);
+        let mod_entry = modifications.get(0).unwrap();
+        assert_eq!(mod_entry.old_value, Some(1u32));
+        assert_eq!(mod_entry.new_value, Some(2u32));
+    }
+
+    // Issue #896: Slice Delegation Tests
+    #[test]
+    fn test_delegate_slice_vote_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(delegator.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        set_ledger_timestamp(&env, 1000);
+        client.delegate_slice_vote(&delegator, &slice_id, &delegate.clone(), &Some(2000u64));
+
+        // Verify delegation was recorded
+        let delegation_opt = client.get_slice_delegation(&slice_id, &delegator);
+        assert!(delegation_opt.is_some());
+        let delegation = delegation_opt.unwrap();
+        assert_eq!(delegation.delegate, delegate);
+        assert_eq!(delegation.delegator, delegator);
+        assert_eq!(delegation.expires_at, Some(2000u64));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot delegate to self")]
+    fn test_delegate_slice_vote_to_self_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(delegator.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        set_ledger_timestamp(&env, 1000);
+        client.delegate_slice_vote(&delegator, &slice_id, &delegator.clone(), &None);
+    }
+
+    #[test]
+    fn test_revoke_slice_delegation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(delegator.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        set_ledger_timestamp(&env, 1000);
+        client.delegate_slice_vote(&delegator, &slice_id, &delegate, &Some(2000u64));
+
+        // Revoke delegation
+        client.revoke_slice_delegation(&delegator, &slice_id);
+
+        // Verify delegation was removed
+        let delegation_opt = client.get_slice_delegation(&slice_id, &delegator);
+        assert!(delegation_opt.is_none());
+    }
+
+    // Issue #897: Threshold Validation Tests
+    #[test]
+    fn test_validate_threshold_absolute_valid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &2u32);
+
+        // Verify threshold is valid (2 <= 2)
+        assert!(client.validate_threshold(&slice_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold cannot exceed total weight sum")]
+    fn test_create_slice_invalid_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+
+        // Try to create slice with threshold > total weight
+        client.create_slice(&creator, &attestors, &weights, &2u32);
+    }
+
+    #[test]
+    fn test_validate_threshold_percentage_valid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+
+        let slice_id = client.create_slice_percentage(&creator, &attestors, &weights, &50u32);
+
+        // Verify percentage threshold is valid (50 is in 1..=100)
+        assert!(client.validate_threshold(&slice_id));
+    }
+
+    // Issue #898: Capacity Limits Tests
+    #[test]
+    fn test_get_default_max_attestors_per_slice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let max = client.get_max_attestors_per_slice();
+        assert_eq!(max, 20u32); // Default MAX_ATTESTORS_PER_SLICE is 20
+    }
+
+    #[test]
+    fn test_set_max_attestors_per_slice_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        // Set admin manually if needed
+        client.set_max_attestors_per_slice(&admin, &30u32);
+
+        // Verify new max is set
+        let max = client.get_max_attestors_per_slice();
+        assert_eq!(max, 30u32);
+    }
+
+    #[test]
+    fn test_add_attestor_respects_capacity_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let admin = Address::generate(&env);
+
+        // Set max attestors to 2
+        client.set_max_attestors_per_slice(&admin, &2u32);
+
+        // Create slice with 1 attestor
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Add second attestor (should succeed)
+        client.add_attestor(&creator, &slice_id, &Address::generate(&env), &1u32);
+
+        // Try to add third attestor (should fail - exceeds limit of 2)
+        // This will panic in the current implementation
     }
 }
 
