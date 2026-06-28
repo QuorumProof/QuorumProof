@@ -53,6 +53,12 @@ export function Navbar() {
             Slice Builder
           </Link>
           <Link
+            to="/recover"
+            className={`nav-link${location.pathname === '/recover' ? ' active' : ''}`}
+          >
+            Recover
+          </Link>
+          <Link
             to="/help"
             className={`nav-link${location.pathname === '/help' ? ' active' : ''}`}
           >
