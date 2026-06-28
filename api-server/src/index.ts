@@ -55,6 +55,8 @@ app.use((req, _res, next) => {
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
+app.use('/api/credentials', shareLinksRouter); // #877 share links
+app.use('/api/credentials', consentRouter); // #881 consent management
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/attestor', attestorRouter);
