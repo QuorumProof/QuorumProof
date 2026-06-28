@@ -109,3 +109,39 @@ describe('GET /api/reports/usage', () => {
     expect(fn.errorRate).toBeCloseTo(0.3333, 2);
   });
 });
+
+describe('GET /api/reports/audit', () => {
+  beforeEach(() => mockSimulateCall.mockReset());
+
+  it('returns audit report with summary counts grouped by action', async () => {
+    mockSimulateCall.mockResolvedValueOnce([
+      { id: 1, action: 1, credential_id: '10', actor: 'G1' },
+      { id: 2, action: 1, credential_id: '11', actor: 'G1' },
+      { id: 3, action: 2, credential_id: '10', actor: 'G1' },
+      { id: 4, action: 3, credential_id: '10', actor: 'G2' },
+    ]);
+
+    const res = await request(app).get('/api/reports/audit');
+    expect(res.status).toBe(200);
+    expect(res.body.summary.issued).toBe(2);
+    expect(res.body.summary.revoked).toBe(1);
+    expect(res.body.summary.attested).toBe(1);
+    expect(res.body.summary.total).toBe(4);
+    expect(res.body.byCategory).toHaveProperty('CredentialIssued');
+    expect(res.body.byCategory.CredentialIssued.count).toBe(2);
+  });
+
+  it('returns empty summary when no audit entries exist', async () => {
+    mockSimulateCall.mockResolvedValueOnce([]);
+    const res = await request(app).get('/api/reports/audit');
+    expect(res.status).toBe(200);
+    expect(res.body.summary.total).toBe(0);
+    expect(res.body.byCategory).toEqual({});
+  });
+
+  it('returns 500 when soroban call fails', async () => {
+    mockSimulateCall.mockRejectedValueOnce(new Error('soroban error'));
+    const res = await request(app).get('/api/reports/audit');
+    expect(res.status).toBe(500);
+  });
+});
