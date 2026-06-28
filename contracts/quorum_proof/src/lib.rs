@@ -11889,6 +11889,337 @@ impl QuorumProofContract {
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         processed
     }
+
+    // ── Issue #891: Credential Metadata Encryption Helper ────────────────────
+
+    /// Return the encrypted data key stored for a specific party on a credential.
+    ///
+    /// The issuer uses this to confirm which parties have been granted access
+    /// and to retrieve the encrypted key blob they need for off-chain decryption.
+    ///
+    /// # Errors
+    /// - `DecryptionKeyNotFound` if no encrypted metadata exists for the credential
+    ///   or if the party has not been granted access.
+    pub fn get_decryption_key(
+        env: Env,
+        credential_id: CredentialId,
+        party: Address,
+    ) -> Bytes {
+        let stored: EncryptedCredentialMetadata = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialMetadataCiphertext(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::DecryptionKeyNotFound));
+        stored
+            .encrypted_keys
+            .get(party)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::DecryptionKeyNotFound))
+    }
+
+    // ── Issue #892: Batch Attestation Status Checks ───────────────────────────
+
+    /// Check attestation status for multiple (credential_id, slice_id) pairs in one call.
+    ///
+    /// Returns a `Vec<bool>` of the same length as the input, where each element
+    /// corresponds to `is_attested(credential_id, slice_id)` for that pair.
+    pub fn batch_is_attested(env: Env, pairs: Vec<(u64, u64)>) -> Vec<bool> {
+        let mut results: Vec<bool> = Vec::new(&env);
+        for pair in pairs.iter() {
+            let (credential_id, slice_id) = pair;
+            // Reuse the same logic as is_attested but without panicking on missing entries.
+            let attested = env
+                .storage()
+                .instance()
+                .get::<DataKey, Credential>(&DataKey::Credential(credential_id))
+                .map(|credential| {
+                    if credential.revoked || credential.suspended {
+                        return false;
+                    }
+                    if let Some(exp) = credential.expires_at {
+                        if env.ledger().timestamp() >= exp {
+                            return false;
+                        }
+                    }
+                    let slice_opt: Option<QuorumSlice> = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Slice(slice_id));
+                    let slice = match slice_opt {
+                        Some(s) => s,
+                        None => return false,
+                    };
+                    let records: Vec<AttestationRecord> = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Attestors(credential_id))
+                        .unwrap_or(Vec::new(&env));
+                    let now = env.ledger().timestamp();
+                    let mut total_attested_weight: u32 = 0;
+                    for rec in records.iter() {
+                        if !rec.attestation_value {
+                            continue;
+                        }
+                        if let Some(exp) = rec.expires_at {
+                            if now >= exp {
+                                continue;
+                            }
+                        }
+                        let w: u32 = env
+                            .storage()
+                            .instance()
+                            .get(&DataKey5::AttestationWeight(
+                                credential_id,
+                                slice_id,
+                                rec.attestor.clone(),
+                            ))
+                            .unwrap_or(0u32);
+                        total_attested_weight = total_attested_weight.saturating_add(w);
+                    }
+                    total_attested_weight >= slice.threshold
+                })
+                .unwrap_or(false);
+            results.push_back(attested);
+        }
+        results
+    }
+
+    // ── Issue #893: Dynamic Quorum Slice Rebalancing ──────────────────────────
+
+    /// Atomically update all attestor weights and the threshold for a quorum slice.
+    ///
+    /// `new_weights` must have the same length as the current attestor list and
+    /// each weight must be ≥ 1. The new threshold must not exceed the resulting
+    /// total weight (for absolute slices).
+    ///
+    /// All changes are recorded in the weight and threshold audit logs.
+    pub fn rebalance_slice(
+        env: Env,
+        creator: Address,
+        slice_id: u64,
+        new_weights: Vec<u32>,
+        new_threshold: u32,
+    ) {
+        creator.require_auth();
+        Self::require_not_paused(&env);
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+        assert!(
+            slice.creator == creator,
+            "only the slice creator can rebalance"
+        );
+        assert!(
+            new_weights.len() == slice.attestors.len(),
+            "weights length must match attestor count"
+        );
+        assert!(new_threshold >= 1, "threshold must be at least 1");
+
+        // Validate each weight and accumulate total
+        let mut new_total: u32 = 0;
+        for w in new_weights.iter() {
+            Self::validate_weight(w);
+            new_total = new_total.saturating_add(w);
+        }
+
+        // For absolute slices the threshold must be reachable
+        if Self::threshold_type(&env, slice_id) == ThresholdType::Absolute {
+            assert!(new_threshold <= new_total, "threshold exceeds total weight");
+        } else {
+            assert!(new_threshold <= 100, "percentage threshold must be 1-100");
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Record a weight audit entry for each changed attestor
+        let mut weight_audit: Vec<WeightAuditEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey5::WeightAuditLog(slice_id))
+            .unwrap_or(Vec::new(&env));
+        for i in 0..slice.attestors.len() {
+            let old_w = slice.weights.get(i as u32).unwrap_or(0);
+            let new_w = new_weights.get(i as u32).unwrap_or(0);
+            if old_w != new_w {
+                weight_audit.push_back(WeightAuditEntry {
+                    slice_id,
+                    attestor: slice.attestors.get(i as u32).unwrap(),
+                    old_weight: old_w,
+                    new_weight: new_w,
+                    changed_by: creator.clone(),
+                    timestamp: now,
+                });
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey5::WeightAuditLog(slice_id), &weight_audit);
+
+        // Record threshold audit entry if threshold changed
+        if slice.threshold != new_threshold {
+            let mut threshold_audit: Vec<ThresholdAuditEntry> = env
+                .storage()
+                .instance()
+                .get(&DataKey5::ThresholdAuditLog(slice_id))
+                .unwrap_or(Vec::new(&env));
+            threshold_audit.push_back(ThresholdAuditEntry {
+                slice_id,
+                old_threshold: slice.threshold,
+                new_threshold,
+                changed_by: creator.clone(),
+                timestamp: now,
+            });
+            env.storage()
+                .instance()
+                .set(&DataKey5::ThresholdAuditLog(slice_id), &threshold_audit);
+        }
+
+        // Apply changes atomically
+        slice.weights = new_weights;
+        slice.threshold = new_threshold;
+        env.storage()
+            .instance()
+            .set(&DataKey::Slice(slice_id), &slice);
+        Self::set_slice_weight_cache(&env, slice_id, new_total);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("rebalance"), symbol_short!("slice")),
+            (slice_id, new_threshold),
+        );
+    }
+
+    // ── Issue #894: Slice Fork Detection and Resolution ───────────────────────
+
+    /// Resolve a detected fork on a (credential_id, slice_id) pair using quorum voting.
+    ///
+    /// The canonical state is determined by whichever attestation value accumulates
+    /// enough weight to meet the slice threshold. If `true` side meets the threshold
+    /// it wins; otherwise `false` wins (or the side with the higher total weight when
+    /// neither meets threshold). Conflicting attestations on the losing side are
+    /// overwritten to match the canonical value and the fork status is cleared.
+    ///
+    /// # Errors
+    /// - `NoForkExists` if no fork is recorded for this pair.
+    /// - `SliceNotFound` / `CredentialNotFound` if the entities do not exist.
+    pub fn resolve_fork(
+        env: Env,
+        resolver: Address,
+        credential_id: u64,
+        slice_id: u64,
+    ) -> bool {
+        resolver.require_auth();
+        Self::require_not_paused(&env);
+
+        // Require an existing fork record
+        let _fork_info: ForkInfo = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ForkInfo(credential_id, slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoForkExists));
+
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Build O(1) membership map
+        let mut slice_set: Map<Address, bool> = Map::new(&env);
+        for i in 0..slice.attestors.len() {
+            let attestor = slice.attestors.get(i as u32).unwrap();
+            slice_set.set(attestor, true);
+        }
+
+        let records: Vec<AttestationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Tally weighted votes from slice members
+        let now = env.ledger().timestamp();
+        let mut weight_true: u32 = 0;
+        let mut weight_false: u32 = 0;
+        for rec in records.iter() {
+            if slice_set.get(rec.attestor.clone()).is_none() {
+                continue;
+            }
+            if let Some(exp) = rec.expires_at {
+                if now >= exp {
+                    continue;
+                }
+            }
+            let w: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey5::AttestationWeight(
+                    credential_id,
+                    slice_id,
+                    rec.attestor.clone(),
+                ))
+                .unwrap_or(1u32);
+            if rec.attestation_value {
+                weight_true = weight_true.saturating_add(w);
+            } else {
+                weight_false = weight_false.saturating_add(w);
+            }
+        }
+
+        // Canonical value: true side wins if it meets threshold; otherwise false side wins
+        // (or whichever side has more weight when neither meets threshold)
+        let canonical = if weight_true >= slice.threshold {
+            true
+        } else if weight_false >= slice.threshold {
+            false
+        } else {
+            weight_true >= weight_false
+        };
+
+        // Rewrite losing attestations to match canonical value
+        let mut updated_records: Vec<AttestationRecord> = Vec::new(&env);
+        for mut rec in records.iter() {
+            if slice_set.get(rec.attestor.clone()).is_some()
+                && rec.attestation_value != canonical
+            {
+                rec.attestation_value = canonical;
+            }
+            updated_records.push_back(rec);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Attestors(credential_id), &updated_records);
+
+        // Mark fork as resolved
+        env.storage().instance().set(
+            &DataKey2::ForkStatus(credential_id, slice_id),
+            &ForkStatus::ForkResolved,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let resolution = if canonical {
+            soroban_sdk::String::from_str(&env, "true")
+        } else {
+            soroban_sdk::String::from_str(&env, "false")
+        };
+        env.events().publish(
+            (symbol_short!("fork"), symbol_short!("resolved")),
+            ForkResolvedEventData {
+                credential_id,
+                slice_id,
+                resolution,
+                resolved_at: now,
+            },
+        );
+
+        canonical
+    }
 }
 
 #[cfg(test)]
