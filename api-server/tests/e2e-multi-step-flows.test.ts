@@ -133,6 +133,22 @@ class MockSorobanState {
     return true;
   }
 
+  suspendCredential(credentialId: bigint, actor: string): boolean {
+    const cred = this.credentials.get(credentialId);
+    if (!cred || cred.status !== 'active') return false;
+    cred.status = 'suspended';
+    this.addAuditEntry(ACTION.CredentialSuspended, credentialId, actor);
+    return true;
+  }
+
+  renewCredential(credentialId: bigint, actor: string): boolean {
+    const cred = this.credentials.get(credentialId);
+    if (!cred || cred.status !== 'suspended') return false;
+    cred.status = 'active';
+    this.addAuditEntry(ACTION.CredentialRenewed, credentialId, actor);
+    return true;
+  }
+
   isAttested(credentialId: bigint, sliceId: bigint): boolean {
     const cred = this.credentials.get(credentialId);
     if (!cred) throw new Error(`CredentialNotFound: ${credentialId}`);
@@ -820,5 +836,124 @@ describe('Flow 8: Input validation guards across the pipeline', () => {
       .post('/api/notifications/send')
       .send({ address: 'G1', event: 'made_up_event', credential_id: 1 });
     expect(res.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flow 9: Issue → Attest → Suspend → Verify (fails) → Renew → Verify (passes)
+// ---------------------------------------------------------------------------
+
+describe('Flow 9: Credential suspension and renewal lifecycle', () => {
+  it('returns attested=false while credential is suspended and true again after renewal', async () => {
+    const sliceId = state.addSlice('Suspend Panel', 1, ['G1']);
+    const credId = state.issueCredential('GISSUER1', 'GSUBJECT_SUSPEND', 1);
+    state.attestCredential(credId, sliceId, 'G1');
+
+    const activeRes = await request(app)
+      .post('/api/credentials/verify-batch')
+      .send({ credential_ids: [Number(credId)], slice_id: Number(sliceId) });
+    expect(activeRes.body.results[0].attested).toBe(true);
+
+    state.suspendCredential(credId, 'GADMIN1');
+
+    const suspendedRes = await request(app)
+      .post('/api/credentials/verify-batch')
+      .send({ credential_ids: [Number(credId)], slice_id: Number(sliceId) });
+    expect(suspendedRes.status).toBe(200);
+    expect(suspendedRes.body.results[0].attested).toBe(false);
+
+    state.renewCredential(credId, 'GADMIN1');
+
+    const renewedRes = await request(app)
+      .post('/api/credentials/verify-batch')
+      .send({ credential_ids: [Number(credId)], slice_id: Number(sliceId) });
+    expect(renewedRes.status).toBe(200);
+    expect(renewedRes.body.results[0].attested).toBe(true);
+  });
+
+  it('records Suspended and Renewed events in the audit trail in order', async () => {
+    const sliceId = state.addSlice('Suspend Audit Panel', 1, ['G1']);
+    const credId = state.issueCredential('GISSUER1', 'GSUBJECT_TRAIL', 1);
+    state.attestCredential(credId, sliceId, 'G1');
+    state.suspendCredential(credId, 'GADMIN1');
+    state.renewCredential(credId, 'GADMIN1');
+
+    const auditRes = await request(app)
+      .get(`/api/audit/entries?credential_id=${credId}`);
+    expect(auditRes.status).toBe(200);
+
+    const actions = auditRes.body.data.map((e: { action: number }) => e.action);
+    expect(actions).toContain(ACTION.CredentialIssued);
+    expect(actions).toContain(ACTION.CredentialAttested);
+    expect(actions).toContain(ACTION.CredentialSuspended);
+    expect(actions).toContain(ACTION.CredentialRenewed);
+
+    const suspendedIdx = actions.indexOf(ACTION.CredentialSuspended);
+    const renewedIdx = actions.indexOf(ACTION.CredentialRenewed);
+    expect(suspendedIdx).toBeLessThan(renewedIdx);
+  });
+
+  it('suspended credential cannot be re-attested by a new slice', async () => {
+    const sliceA = state.addSlice('Primary Panel', 1, ['G1']);
+    const sliceB = state.addSlice('Secondary Panel', 1, ['G2']);
+    const credId = state.issueCredential('GISSUER1', 'GSUBJECT_NO_REATTEST', 1);
+    state.attestCredential(credId, sliceA, 'G1');
+    state.suspendCredential(credId, 'GADMIN1');
+
+    const didAttest = state.attestCredential(credId, sliceB, 'G2');
+    expect(didAttest).toBe(false);
+
+    const verifyRes = await request(app)
+      .post('/api/credentials/verify-batch')
+      .send({ credential_ids: [Number(credId)], slice_id: Number(sliceB) });
+    expect(verifyRes.body.results[0].attested).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flow 10: Issue → Attest → notarize batch → verify Merkle integrity on each
+// ---------------------------------------------------------------------------
+
+describe('Flow 10: Notarized batch audit integrity across multiple credentials', () => {
+  it('verifies Merkle root for a batch covering three full credential lifecycles', async () => {
+    const sliceId = state.addSlice('Merkle Panel', 1, ['G1']);
+    const creds = [
+      state.issueCredential('GISSUER1', 'GSUB_M1', 1),
+      state.issueCredential('GISSUER1', 'GSUB_M2', 2),
+      state.issueCredential('GISSUER1', 'GSUB_M3', 3),
+    ];
+    creds.forEach(id => state.attestCredential(id, sliceId, 'G1'));
+    state.revokeCredential(creds[2], 'GADMIN1');
+
+    const firstId = 1n;
+    const lastId = state['nextEntryId'] - 1n;
+    const notarization = state.notarize(firstId, lastId);
+
+    const verifyRes = await request(app)
+      .post('/api/audit/verify')
+      .send({ batch_id: Number(notarization.batch_id) });
+
+    expect(verifyRes.status).toBe(200);
+    expect(verifyRes.body.valid).toBe(true);
+    expect(verifyRes.body.entry_count).toBeGreaterThanOrEqual(7);
+  });
+
+  it('export for a notarized batch contains entries for every credential in the batch', async () => {
+    const sliceId = state.addSlice('Export Merkle Panel', 1, ['G1']);
+    const credA = state.issueCredential('GISSUER2', 'GSUB_EA', 1);
+    const credB = state.issueCredential('GISSUER2', 'GSUB_EB', 2);
+    state.attestCredential(credA, sliceId, 'G1');
+    state.attestCredential(credB, sliceId, 'G1');
+
+    const exportRes = await request(app)
+      .get('/api/audit/export?format=json');
+
+    expect(exportRes.status).toBe(200);
+    expect(Array.isArray(exportRes.body)).toBe(true);
+
+    const credentialIds = exportRes.body.map((e: { credential_id: string | number }) =>
+      BigInt(e.credential_id));
+    expect(credentialIds).toContain(credA);
+    expect(credentialIds).toContain(credB);
   });
 });
