@@ -44,8 +44,18 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
   }
 
   try {
+    // Legacy attestation count (raw count from on-chain AttestorCount key)
     const score = await simulateCall('get_attestor_reputation', [addressVal(address)]);
     const scoreNum = typeof score === 'bigint' ? Number(score) : (typeof score === 'number' ? score : 0);
+
+    // Full reputation record including penalty/stake data (new feature)
+    let reputationRecord: Record<string, unknown> | null = null;
+    try {
+      const rec = await simulateCall('get_attestor_reputation_record', [addressVal(address)]);
+      reputationRecord = serializeBigInt(rec) as Record<string, unknown>;
+    } catch {
+      // Contract may not have this method yet — fall back gracefully
+    }
 
     // Derive attestation stats from the analytics event log
     const endDate = new Date().toISOString().split('T')[0];
@@ -62,7 +72,10 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
 
     res.json({
       address,
-      score: scoreNum,
+      // Legacy field: raw attestation count used as a basic reputation proxy
+      attestation_count_score: scoreNum,
+      // New reputation record (null when contract doesn't support it yet)
+      reputation: reputationRecord,
       attestation_count: attestedCount,
       total_activity: totalActivity,
       success_rate: totalActivity > 0 ? attestedCount / totalActivity : null,
@@ -74,11 +87,12 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
     for (let i = 0; i < address.length; i++) {
       hash = (hash * 31 + address.charCodeAt(i)) >>> 0;
     }
-    const score = 40 + (hash % 61);
+    const fallbackScore = 40 + (hash % 61);
 
     res.json({
       address,
-      score,
+      attestation_count_score: fallbackScore,
+      reputation: null,
       attestation_count: 0,
       total_activity: 0,
       success_rate: null,
