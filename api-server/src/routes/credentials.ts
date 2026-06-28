@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { SearchIndex, type SearchOptions, type CredentialRecord as SearchCredentialRecord } from '../searchIndex.js';
 import { MetadataHashCache } from '../services/metadataHashCache.js';
+import { ShardedCredentialStore } from '../services/shardedStorage.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -28,6 +29,7 @@ export function createCredentialsRouter(soroban: SorobanClient) {
   const router = Router();
   const searchIndex = new SearchIndex();
   const metadataHashCache = new MetadataHashCache();
+  const shardedStore = new ShardedCredentialStore();
   let indexedCredentials: Set<string> = new Set();
 
   /**
@@ -47,8 +49,8 @@ export function createCredentialsRouter(soroban: SorobanClient) {
           credRecord.id = String(credRecord.id || i);
           allCredentials.push(credRecord);
           indexedCredentials.add(credRecord.id);
-          // Populate metadata hash cache
           metadataHashCache.set(credRecord.id, credRecord.metadata_hash, cred as Record<string, unknown>);
+          shardedStore.set(credRecord);
         } catch {
           // skip missing/expired credentials
         }
@@ -242,6 +244,7 @@ export function createCredentialsRouter(soroban: SorobanClient) {
   router.post('/search/refresh-index', async (req: Request, res: Response) => {
     try {
       metadataHashCache.invalidateAll();
+      shardedStore.clear();
       await populateIndex();
       res.json({
         success: true,
@@ -265,6 +268,109 @@ export function createCredentialsRouter(soroban: SorobanClient) {
       cache_size: metadataHashCache.size,
       last_indexed: searchIndex.getLastIndexed(),
       timestamp: new Date().toISOString(),
+    });
+  });
+
+  /**
+   * GET /api/credentials/crl
+   * #866 — Export revoked credentials as a CRL in X.509-compatible JSON structure.
+   * Query params:
+   *   - issuer: CRL issuer identifier (default: "QuorumProof")
+   *   - format: "json" (default) | "pem" (base64-encoded JSON in PEM envelope)
+   */
+  router.get('/crl', async (req: Request, res: Response) => {
+    const issuerName = typeof req.query.issuer === 'string' ? req.query.issuer : 'QuorumProof';
+    const format = typeof req.query.format === 'string' ? req.query.format : 'json';
+
+    if (!['json', 'pem'].includes(format)) {
+      res.status(400).json({ error: 'format must be "json" or "pem"' });
+      return;
+    }
+
+    try {
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+
+      const revokedCertificates: Array<{
+        serialNumber: string;
+        revocationDate: string;
+        reason: string;
+      }> = [];
+
+      for (let i = 1; i <= total; i++) {
+        try {
+          const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          const record = serializeBigInt(cred) as CredentialRecord;
+          if (record.revoked) {
+            revokedCertificates.push({
+              serialNumber: String(record.id || i),
+              revocationDate: record.updated_at ?? new Date().toISOString(),
+              reason: 'unspecified',
+            });
+          }
+        } catch {
+          // skip inaccessible credentials
+        }
+      }
+
+      const thisUpdate = new Date().toISOString();
+      const nextUpdateDate = new Date();
+      nextUpdateDate.setUTCDate(nextUpdateDate.getUTCDate() + 7);
+
+      const crl = {
+        version: 2,
+        issuer: issuerName,
+        thisUpdate,
+        nextUpdate: nextUpdateDate.toISOString(),
+        revokedCertificates,
+        totalRevoked: revokedCertificates.length,
+      };
+
+      if (format === 'pem') {
+        const b64 = Buffer.from(JSON.stringify(crl)).toString('base64');
+        const lines = b64.match(/.{1,64}/g) ?? [];
+        const pem = ['-----BEGIN X509 CRL-----', ...lines, '-----END X509 CRL-----'].join('\n');
+        res.type('text/plain').send(pem);
+        return;
+      }
+
+      res.json(crl);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  /**
+   * GET /api/credentials/shards/stats
+   * #867 — Return sharded storage distribution statistics.
+   */
+  router.get('/shards/stats', (_req: Request, res: Response) => {
+    res.json({
+      shard_count: shardedStore.shardCount,
+      total_credentials: shardedStore.totalSize,
+      shards: shardedStore.getShardStats(),
+    });
+  });
+
+  /**
+   * GET /api/credentials/shards/by-subject
+   * #867 — Fetch credentials for a subject address directly from its shard.
+   * Query params:
+   *   - subject: subject Stellar address (required)
+   */
+  router.get('/shards/by-subject', (_req: Request, res: Response) => {
+    const { subject } = _req.query;
+    if (!subject || typeof subject !== 'string') {
+      res.status(400).json({ error: 'subject query parameter required' });
+      return;
+    }
+    const credentials = shardedStore.getBySubject(subject);
+    res.json({
+      subject,
+      shard_index: shardedStore.getShardIndex(subject),
+      count: credentials.length,
+      credentials,
     });
   });
 

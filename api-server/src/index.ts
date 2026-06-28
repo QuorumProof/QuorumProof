@@ -9,6 +9,7 @@ import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
 import recoveryRouter from './routes/recovery.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
+import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { createWsServer } from './ws/server.js';
