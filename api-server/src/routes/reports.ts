@@ -152,6 +152,77 @@ export function createReportsRouter(soroban: SorobanClient) {
     res.json(getUsageReport());
   });
 
+  /**
+   * GET /api/reports/audit
+   * Audit compliance report: summarises credential issuance, verification (attestation),
+   * and revocation events pulled from the on-chain audit log.
+   * Query params:
+   *   - limit: max entries to scan (default: 200, max: 1000)
+   */
+  router.get('/audit', async (req: Request, res: Response) => {
+    const limit = Math.min(
+      1000,
+      Math.max(1, parseInt(String(req.query.limit ?? '200'), 10) || 200)
+    );
+
+    type AuditEntry = {
+      id?: unknown;
+      action?: unknown;
+      credential_id?: unknown;
+      actor?: unknown;
+      timestamp?: unknown;
+    };
+
+    const ACTION_LABELS: Record<string, string> = {
+      '1': 'CredentialIssued',
+      '2': 'CredentialRevoked',
+      '3': 'CredentialAttested',
+      '4': 'CredentialSuspended',
+      '5': 'CredentialRenewed',
+      '6': 'SbtMinted',
+      '7': 'SbtBurned',
+    };
+
+    try {
+      const raw = await soroban.simulateCall('get_entries', [
+        soroban.u64Val(1),
+        { u32: limit } as unknown as ReturnType<typeof SimulateCallType>,
+      ]);
+      const entries = (Array.isArray(raw) ? raw : []) as AuditEntry[];
+      const serialized = serializeBigInt(entries) as AuditEntry[];
+
+      const issued = serialized.filter((e) => String(e.action) === '1');
+      const revoked = serialized.filter((e) => String(e.action) === '2');
+      const attested = serialized.filter((e) => String(e.action) === '3');
+      const suspended = serialized.filter((e) => String(e.action) === '4');
+
+      const byCategoryMap: Record<string, AuditEntry[]> = {};
+      for (const entry of serialized) {
+        const label = ACTION_LABELS[String(entry.action)] ?? `Action_${entry.action}`;
+        if (!byCategoryMap[label]) byCategoryMap[label] = [];
+        byCategoryMap[label].push(entry);
+      }
+      const byCategory = Object.fromEntries(
+        Object.entries(byCategoryMap).map(([k, v]) => [k, { count: v.length, recentEntries: v.slice(-5) }])
+      );
+
+      res.json({
+        generatedAt: new Date().toISOString(),
+        scannedEntries: serialized.length,
+        summary: {
+          issued: issued.length,
+          revoked: revoked.length,
+          attested: attested.length,
+          suspended: suspended.length,
+          total: serialized.length,
+        },
+        byCategory,
+      });
+    } catch (err: unknown) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   return router;
 }
 
