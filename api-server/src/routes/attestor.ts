@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { simulateCall, u64Val, addressVal } from '../soroban.js';
 import { metricsStore } from '../services/metrics.js';
+import { liveDashboard } from '../services/liveDashboard.js';
 
 const router = Router();
 
@@ -136,6 +137,7 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Attestation failed';
       results.push({ credential_id: credId, success: false, error: msg });
+      liveDashboard.recordAttestation(false);
     }
   }
 
