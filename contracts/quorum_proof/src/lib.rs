@@ -1012,6 +1012,19 @@ pub struct CredentialTypeDef {
 /// Monotonic credential identifier issued by this contract.
 pub type CredentialId = u64;
 
+/// Tracks whether a credential is freshly issued, has been renewed, or has expired.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum RenewalStatus {
+    /// Credential was just issued and has never been renewed.
+    Active = 0,
+    /// Credential has been renewed at least once.
+    Renewed = 1,
+    /// Credential has passed its expiry timestamp without renewal.
+    Expired = 2,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Credential {
@@ -1024,6 +1037,7 @@ pub struct Credential {
     pub suspended: bool,
     pub expires_at: Option<u64>,
     pub version: u32,
+    pub renewal_status: RenewalStatus,
 }
 
 /// W3C DID verification method key type.
@@ -4531,6 +4545,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            renewal_status: RenewalStatus::Active,
         };
         env.storage()
             .instance()
@@ -4689,6 +4704,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            renewal_status: RenewalStatus::Active,
         };
         env.storage()
             .instance()
@@ -5115,6 +5131,31 @@ impl QuorumProofContract {
             );
         }
         credential
+    }
+
+    /// Check whether a credential is currently valid.
+    ///
+    /// Returns `true` if the credential exists, is not revoked, is not suspended,
+    /// and has not passed its `expires_at` timestamp (if set).
+    /// Returns `false` otherwise (expired, revoked, or suspended).
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    pub fn check_credential_validity(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+        if let Some(expires_at) = credential.expires_at {
+            if env.ledger().timestamp() >= expires_at {
+                return false;
+            }
+        }
+        true
     }
 
     /// Update the metadata hash of a credential and increment its version.
@@ -6189,6 +6230,7 @@ impl QuorumProofContract {
             "new_expires_at must be in the future"
         );
         credential.expires_at = Some(new_expires_at);
+        credential.renewal_status = RenewalStatus::Renewed;
         env.storage()
             .instance()
             .set(&DataKey::Credential(credential_id), &credential);
@@ -20480,6 +20522,167 @@ mod doc_tests {
                 assert_eq!(count, 0);
             }
         }
+    }
+
+    // ── Expiry enforcement and renewal tests ──────────────────────────────────
+
+    #[test]
+    fn test_check_credential_validity_active() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"hash"),
+            &Some(2_000u64),
+            &1u64,
+        );
+        assert!(client.check_credential_validity(&id));
+    }
+
+    #[test]
+    fn test_check_credential_validity_expired() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"hash"),
+            &Some(2_000u64),
+            &1u64,
+        );
+        set_ledger_timestamp(&env, 3_000);
+        assert!(!client.check_credential_validity(&id));
+    }
+
+    #[test]
+    fn test_check_credential_validity_no_expiry() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"hash"),
+            &None,
+            &1u64,
+        );
+        set_ledger_timestamp(&env, 999_999);
+        assert!(client.check_credential_validity(&id));
+    }
+
+    #[test]
+    fn test_check_credential_validity_revoked() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"hash"),
+            &Some(9_000u64),
+            &1u64,
+        );
+        client.revoke_credential(&issuer, &id);
+        assert!(!client.check_credential_validity(&id));
+    }
+
+    #[test]
+    fn test_renewal_sets_renewed_status() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"hash"),
+            &Some(2_000u64),
+            &1u64,
+        );
+        // Before renewal: status should be Active
+        let cred_before = env
+            .storage()
+            .instance()
+            .get::<DataKey, Credential>(&DataKey::Credential(id))
+            .unwrap();
+        assert_eq!(cred_before.renewal_status, RenewalStatus::Active);
+
+        client.renew_credential(&issuer, &id, &5_000u64);
+
+        let cred_after = env
+            .storage()
+            .instance()
+            .get::<DataKey, Credential>(&DataKey::Credential(id))
+            .unwrap();
+        assert_eq!(cred_after.renewal_status, RenewalStatus::Renewed);
+        assert_eq!(cred_after.expires_at, Some(5_000u64));
+    }
+
+    #[test]
+    fn test_renewal_extends_validity() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"hash"),
+            &Some(2_000u64),
+            &1u64,
+        );
+        // Advance past original expiry
+        set_ledger_timestamp(&env, 2_500);
+        // Renew to future timestamp
+        client.renew_credential(&issuer, &id, &10_000u64);
+        // Now validity should be true again
+        assert!(client.check_credential_validity(&id));
+    }
+
+    #[test]
+    fn test_is_attested_rejects_expired_credential() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        set_ledger_timestamp(&env, 1_000);
+        let id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &Bytes::from_slice(&env, b"hash"),
+            &Some(2_000u64),
+            &1u64,
+        );
+        let mut attestors_vec = Vec::new(&env);
+        attestors_vec.push_back(attestor.clone());
+        let slice_id = client.create_slice(&issuer, &attestors_vec, &1u32);
+        client.attest(&attestor, &id, &slice_id);
+        // Before expiry: attested
+        assert!(client.is_attested(&id, &slice_id));
+        // Advance past expiry
+        set_ledger_timestamp(&env, 3_000);
+        assert!(!client.is_attested(&id, &slice_id));
     }
 }
 
