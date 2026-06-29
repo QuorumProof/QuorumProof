@@ -20,6 +20,10 @@ export interface NotificationPreferences {
   phone?: string;
   channels: NotificationChannel[];
   events: NotificationEvent[];
+  /** Optional allowlist of credential types (e.g. 1=Degree, 2=License, 3=Employment).
+   *  When set, notifications are only dispatched for credentials whose type is in this list.
+   *  When absent or empty, all credential types are notified. */
+  credential_type_filters?: number[];
   enabled: boolean;
 }
 
@@ -77,14 +81,25 @@ async function sendSms(phone: string, message: string): Promise<void> {
 /**
  * Dispatch notifications for a credential event to all subscribers whose
  * preferences include the given address and event type.
+ * @param credentialType optional credential type number; used to filter against
+ *   per-preference `credential_type_filters` (issue #928).
  */
 export async function dispatchNotification(
   address: string,
   event: NotificationEvent,
-  credentialId: number
+  credentialId: number,
+  credentialType?: number
 ): Promise<void> {
   const prefs = preferencesStore.get(address);
   if (!prefs || !prefs.enabled || !prefs.events.includes(event)) return;
+
+  // #928: skip if user has type filters and this credential type isn't in them
+  if (
+    credentialType !== undefined &&
+    prefs.credential_type_filters &&
+    prefs.credential_type_filters.length > 0 &&
+    !prefs.credential_type_filters.includes(credentialType)
+  ) return;
 
   const message = buildMessage(event, credentialId);
 
@@ -118,7 +133,10 @@ export async function dispatchNotification(
 
 /** Upsert notification preferences for an address. */
 export function setPreferences(prefs: NotificationPreferences): void {
-  preferencesStore.set(prefs.address, prefs);
+  preferencesStore.set(prefs.address, {
+    ...prefs,
+    credential_type_filters: prefs.credential_type_filters ?? [],
+  });
 }
 
 /** Retrieve notification preferences for an address. */

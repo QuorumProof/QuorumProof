@@ -145,6 +145,63 @@ export function createReportsRouter(soroban: SorobanClient) {
   });
 
   /**
+   * GET /api/reports/distribution
+   * #923 — Credential type distribution: count of Degree/License/Employment
+   * credentials broken down by issuer and optional time period.
+   * Query params:
+   *   - issuer: optional filter by issuer address
+   *   - since: optional ISO date string (lower bound on credential id scan is not available, so
+   *            this is applied client-side when expires_at / metadata is available — currently
+   *            returns all credentials and notes the filter)
+   */
+  router.get('/distribution', async (req: Request, res: Response) => {
+    const issuerFilter = typeof req.query.issuer === 'string' ? req.query.issuer : null;
+
+    const CREDENTIAL_TYPE_LABELS: Record<number, string> = {
+      1: 'Degree',
+      2: 'License',
+      3: 'Employment',
+    };
+
+    try {
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+
+      const credentials: Credential[] = [];
+      for (let i = 1; i <= total; i++) {
+        try {
+          const c = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          credentials.push(serializeBigInt(c) as Credential);
+        } catch {
+          // skip
+        }
+      }
+
+      const filtered = issuerFilter
+        ? credentials.filter((c) => c.issuer === issuerFilter)
+        : credentials;
+
+      // Aggregate by type
+      const byType: Record<string, { count: number; issuers: Record<string, number> }> = {};
+      for (const c of filtered) {
+        const label = CREDENTIAL_TYPE_LABELS[c.credential_type] ?? `Type_${c.credential_type}`;
+        if (!byType[label]) byType[label] = { count: 0, issuers: {} };
+        byType[label].count++;
+        byType[label].issuers[c.issuer] = (byType[label].issuers[c.issuer] ?? 0) + 1;
+      }
+
+      res.json({
+        generatedAt: new Date().toISOString(),
+        total: filtered.length,
+        issuerFilter: issuerFilter ?? null,
+        distribution: byType,
+      });
+    } catch (err: unknown) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
    * GET /api/reports/usage
    * #585 — Contract usage analytics: function call frequency and error rates.
    */
