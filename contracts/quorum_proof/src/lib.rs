@@ -724,6 +724,8 @@ pub enum DataKey {
     MetadataSchemaVersion,
     /// Schema definition for a given version (version -> MetadataSchema).
     MetadataSchema(u32),
+    /// Issue #984: Tracks how many attestors have attested a given credential (credential_id -> u32).
+    CredentialAttestationCount(u64),
 }
 
 #[contracttype]
@@ -1024,6 +1026,8 @@ pub struct Credential {
     pub suspended: bool,
     pub expires_at: Option<u64>,
     pub version: u32,
+    /// Minimum number of attestations required before this credential is considered valid.
+    pub required_attestations: u32,
 }
 
 /// W3C DID verification method key type.
@@ -4531,6 +4535,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            required_attestations: 1,
         };
         env.storage()
             .instance()
@@ -4689,6 +4694,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            required_attestations: 1,
         };
         env.storage()
             .instance()
@@ -7338,6 +7344,20 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
+        // Issue #984: Increment per-credential attestation counter
+        let cred_attest_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialAttestationCount(credential_id))
+            .unwrap_or(0u32);
+        env.storage().instance().set(
+            &DataKey::CredentialAttestationCount(credential_id),
+            &(cred_attest_count + 1),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Award reputation for each honest attestation.
         Self::reward_attestor_reputation(&env, &attestor);
 
@@ -8482,6 +8502,31 @@ impl QuorumProofContract {
         Self::set_verification_cache(&env, credential_id, slice_id, is_attested_result, 60);
 
         is_attested_result
+    }
+
+    /// Issue #984: Returns true if the credential's attestation counter meets its
+    /// `required_attestations` threshold, regardless of quorum slice weights.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to check.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    pub fn is_attested_by_count(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialAttestationCount(credential_id))
+            .unwrap_or(0u32);
+        count >= credential.required_attestations
     }
 
     /// Returns true if the credential has been revoked.
@@ -15308,6 +15353,110 @@ mod tests {
         assert_eq!(client.get_attestation_count(&cred_id), 1);
         client.attest(&attestor2, &cred_id, &slice_id, &true, &None);
         assert_eq!(client.get_attestation_count(&cred_id), 2);
+    }
+
+    // --- Issue #984: multi-level attestation threshold tests ---
+
+    #[test]
+    fn test_is_attested_by_count_false_before_any_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        // default required_attestations is 1; no attestations yet → false
+        assert!(!client.is_attested_by_count(&cred_id));
+    }
+
+    #[test]
+    fn test_is_attested_by_count_true_after_one_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+        // required_attestations == 1 and count == 1 → true
+        assert!(client.is_attested_by_count(&cred_id));
+    }
+
+    #[test]
+    fn test_is_attested_by_count_requires_multiple_signatures() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let attestor3 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        // Manually raise required_attestations to 3 by setting via storage
+        // (simulating an issuer that raised the bar after issuance)
+        let mut cred: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(cred_id))
+            .unwrap();
+        cred.required_attestations = 3;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(cred_id), &cred);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor1.clone());
+        attestors.push_back(attestor2.clone());
+        attestors.push_back(attestor3.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        // 0 attestations → false
+        assert!(!client.is_attested_by_count(&cred_id));
+        client.attest(&attestor1, &cred_id, &slice_id, &true, &None);
+        // 1 of 3 → false
+        assert!(!client.is_attested_by_count(&cred_id));
+        client.attest(&attestor2, &cred_id, &slice_id, &true, &None);
+        // 2 of 3 → false
+        assert!(!client.is_attested_by_count(&cred_id));
+        client.attest(&attestor3, &cred_id, &slice_id, &true, &None);
+        // 3 of 3 → true
+        assert!(client.is_attested_by_count(&cred_id));
+    }
+
+    #[test]
+    fn test_is_attested_by_count_false_for_revoked_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+        assert!(client.is_attested_by_count(&cred_id));
+        client.revoke_credential(&issuer, &cred_id);
+        assert!(!client.is_attested_by_count(&cred_id));
     }
 
     // --- holder notification tests ---
