@@ -47,6 +47,62 @@
   --transition: 0.2s ease;
 }
 
+/* ---- Light Mode Overrides ---- */
+[data-theme="light"] {
+  --bg-base: #f4f5f7;
+  --bg-surface: #ffffff;
+  --bg-card: #ffffff;
+  --bg-glass: rgba(255, 255, 255, 0.8);
+  --bg-input: #f0f1f5;
+  --bg-hover: rgba(99, 102, 241, 0.06);
+
+  --text-primary: #0f1117;
+  --text-secondary: #52566b;
+  --text-muted: #9499b5;
+  --border: rgba(0, 0, 0, 0.09);
+  --border-active: rgba(99, 102, 241, 0.5);
+
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --shadow-glow: 0 0 40px rgba(99, 102, 241, 0.15);
+}
+
+[data-theme="light"] body::before {
+  background: radial-gradient(ellipse, rgba(99, 102, 241, 0.06) 0%, transparent 70%);
+}
+
+[data-theme="light"] .navbar {
+  background: rgba(244, 245, 247, 0.9);
+}
+
+[data-theme="light"] .verify-hero__title {
+  background: linear-gradient(135deg, #0f1117 0%, #52566b 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+[data-theme="light"] .skeleton-loader::after {
+  background: linear-gradient(90deg, transparent, rgba(0,0,0,0.04), transparent);
+}
+
+/* Theme toggle button */
+.theme-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 8px;
+  transition: border-color var(--transition), color var(--transition), background var(--transition);
+}
+
+.theme-toggle:hover {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: var(--bg-hover);
+}
+
 /* ---- Reset ---- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 

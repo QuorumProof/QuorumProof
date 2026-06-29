@@ -10,6 +10,23 @@ import './styles.css';
 import { renderVerifyPage } from './verify.js';
 import { renderDashboardPage } from './dashboard.js';
 
+// ── Theme initialisation (run before first render to avoid flash) ─────────
+function initTheme() {
+  const stored = localStorage.getItem('qp-theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = stored ?? (prefersDark ? 'dark' : 'light');
+  document.documentElement.dataset.theme = theme;
+
+  // Keep in sync when the OS preference changes (only if no manual override)
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    if (!localStorage.getItem('qp-theme')) {
+      document.documentElement.dataset.theme = e.matches ? 'dark' : 'light';
+    }
+  });
+}
+
+initTheme();
+
 const app = document.getElementById('app');
 
 function route() {

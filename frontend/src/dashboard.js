@@ -57,7 +57,10 @@ export function renderNavbar(activeRoute) {
           <a href="/dashboard" class="nav-link ${activeRoute === '/dashboard' ? 'active' : ''}" data-route="/dashboard">Dashboard</a>
           <a href="/verify" class="nav-link ${activeRoute === '/verify' ? 'active' : ''}" data-route="/verify">Verify</a>
         </div>
-        <div class="navbar__right">
+        <div class="navbar__right" style="display:flex;align-items:center;gap:12px;">
+          <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">
+            ${document.documentElement.dataset.theme === 'light' ? '🌙' : '☀️'}
+          </button>
           <span class="navbar__badge">${NETWORK}</span>
         </div>
       </div>
@@ -72,6 +75,18 @@ export function bindNavbarLinks(container) {
       e.preventDefault();
       navigateTo(link.dataset.route);
     });
+  });
+}
+
+export function bindThemeToggle(container) {
+  const btn = container.querySelector('#theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const isLight = document.documentElement.dataset.theme === 'light';
+    const next = isLight ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('qp-theme', next);
+    btn.textContent = next === 'light' ? '🌙' : '☀️';
   });
 }
 
@@ -131,8 +146,7 @@ export function renderDashboardPage(container) {
   `;
 
   bindNavbarLinks(container);
-
-  const btnConnect = container.querySelector('#btn-connect');
+  bindThemeToggle(container);
   const btnDisconnect = container.querySelector('#btn-disconnect');
   const inputWallet = container.querySelector('#input-wallet');
 

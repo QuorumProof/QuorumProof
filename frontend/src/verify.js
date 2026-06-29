@@ -21,7 +21,7 @@ import {
   NETWORK,
 } from './stellar.js';
 
-import { renderNavbar, bindNavbarLinks } from './dashboard.js';
+import { renderNavbar, bindNavbarLinks, bindThemeToggle } from './dashboard.js';
 
 // ── Credential type labels ──────────────────────────────────────────────────
 const CREDENTIAL_TYPES = {
@@ -143,8 +143,7 @@ export function renderVerifyPage(container) {
   `;
 
   bindNavbarLinks(container);
-
-  // ── Wire up tabs ────────────────────────────────────────────────────────
+  bindThemeToggle(container);
   const tabId   = container.querySelector('#tab-id');
   const tabAddr = container.querySelector('#tab-addr');
   const panelId   = container.querySelector('#panel-id');
