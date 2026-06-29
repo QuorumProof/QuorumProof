@@ -12,7 +12,8 @@ import {
   thresholdPercent,
   consensusSummary,
 } from '../lib/sliceBuilderUtils';
-import type { AttestorEntry } from '../lib/sliceBuilderUtils';
+import type { AttestorEntry, SliceDraft } from '../lib/sliceBuilderUtils';
+import { SliceImportExport } from './SliceImportExport';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -307,6 +308,12 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
     clearDraft();
   }
 
+  function handleImport(draft: SliceDraft) {
+    setAttestors(draft.attestors.map((a) => ({ ...a, id: a.id || crypto.randomUUID() })));
+    setThreshold(draft.threshold);
+    setAddrError(''); setThresholdError(''); setSubmitError(''); setSuccess(null);
+  }
+
   // ── Success screen ─────────────────────────────────────────────────────────
   if (success) {
     return (
@@ -537,6 +544,14 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
       )}
 
       {attestors.length > 0 && <div className="divider" />}
+
+      {/* ── Import / Export ── */}
+      <SliceImportExport
+        slice={attestors.length > 0 ? { attestors, threshold } : null}
+        onImport={handleImport}
+      />
+
+      <div className="divider" />
 
       {/* ── Submit ── */}
       {submitError && (
