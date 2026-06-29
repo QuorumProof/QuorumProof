@@ -67,7 +67,7 @@ router.post('/send', validate(schemas.notificationSend), async (req: Request, re
     timestamp: new Date().toISOString(),
   });
 
-  await dispatchNotification(address, event, credential_id);
+  await dispatchNotification(address, event, credential_id, issuer);
   res.json({ success: true, ws_recipients: wsRecipients });
 });
 
