@@ -3,7 +3,6 @@ import type { ChangeEvent, FormEvent, KeyboardEvent } from 'react';
 import { createSlice } from '../lib/contracts/quorumProof';
 import { useToast } from '../context/ToastContext';
 import {
-  PRESETS,
   saveDraft,
   loadDraft,
   clearDraft,
@@ -13,6 +12,7 @@ import {
   consensusSummary,
 } from '../lib/sliceBuilderUtils';
 import type { AttestorEntry } from '../lib/sliceBuilderUtils';
+import { SliceTemplateLibrary } from './SliceTemplateLibrary';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -209,6 +209,18 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
   const [submitError, setSubmitError] = useState('');
   const [success, setSuccess] = useState<{ sliceId: bigint } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+
+  const handleApplyTemplate = useCallback(
+    (templateAttestors: Omit<AttestorEntry, 'id'>[], templateThreshold: number) => {
+      setAttestors(templateAttestors.map((a) => ({ ...a, id: crypto.randomUUID() })));
+      setThreshold(templateThreshold);
+      setAddrError('');
+      setThresholdError('');
+      setShowTemplates(false);
+    },
+    [],
+  );
 
   // ── Auto-save draft ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -260,15 +272,6 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
       if (threshold > newTw && newTw > 0) setThreshold(newTw);
       return next;
     });
-  }
-
-  function handlePreset(presetId: string) {
-    const preset = PRESETS.find((p) => p.id === presetId);
-    if (!preset) return;
-    setAttestors(preset.attestors.map((a) => ({ ...a, id: crypto.randomUUID() })));
-    setThreshold(preset.threshold);
-    setAddrError('');
-    setThresholdError('');
   }
 
   function handleCopyUrl() {
@@ -331,26 +334,27 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
   return (
     <div className="qsb">
 
-      {/* ── Presets ── */}
-      <section className="qsb__section" aria-label="Preset templates">
+      {/* ── Template Library ── */}
+      <section className="qsb__section" aria-label="Slice template library">
         <div className="qsb__section-header">
-          <span className="detail-card__title">Preset Templates</span>
-          <Tooltip text="Start with a recommended configuration for common trust scenarios." />
+          <span className="detail-card__title">Templates</span>
+          <Tooltip text="Browse pre-built slice configurations and apply one as your starting point." />
         </div>
-        <div className="qsb__presets">
-          {PRESETS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              className="qsb__preset-btn"
-              onClick={() => handlePreset(p.id)}
-              title={p.description}
-              aria-label={`Apply preset: ${p.label}`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          style={{ width: '100%', marginBottom: showTemplates ? 16 : 0 }}
+          onClick={() => setShowTemplates((v) => !v)}
+          aria-expanded={showTemplates}
+          aria-controls="stl-panel"
+        >
+          {showTemplates ? '▲ Hide Templates' : '▼ Browse Templates'}
+        </button>
+        {showTemplates && (
+          <div id="stl-panel">
+            <SliceTemplateLibrary onApply={handleApplyTemplate} />
+          </div>
+        )}
       </section>
 
       <div className="divider" />
