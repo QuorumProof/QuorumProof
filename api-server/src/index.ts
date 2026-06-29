@@ -4,11 +4,14 @@ import compression from 'compression';
 import zlib from 'zlib';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
+import shareLinksRouter from './routes/shareLinks.js';
+import consentRouter from './routes/consent.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
 import recoveryRouter from './routes/recovery.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
+import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
@@ -25,6 +28,8 @@ app.use(ddosProtection);
 app.use(express.json({ limit: '100kb' }));
 
 const requestSigning = createRequestSigning();
+const requestDeduplication = createRequestDeduplication({ ttlMs: 100, enabled: true });
+app.use('/api', requestDeduplication);
 app.use('/api', requestSigning);
 
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
