@@ -5,7 +5,20 @@ export interface CredentialEvent {
   issuer?: string;
   subject?: string;
   attestor?: string;
+  /** Time in milliseconds from credential issuance to first attestation. */
+  attestation_time_ms?: number;
+  /** Whether this event is associated with a dispute. */
+  disputed?: boolean;
   metadata?: Record<string, unknown>;
+}
+
+export interface IssuerMetrics {
+  issuer: string;
+  credentials_issued: number;
+  avg_attestation_time_ms: number | null;
+  dispute_rate: number;
+  reputation_trend: { date: string; issued_count: number }[];
+  period_days: number;
 }
 
 export interface HourlyMetrics {
@@ -351,6 +364,49 @@ class MetricsStore {
       total_events: this.eventLog.length,
       total_days: this.dailyMetrics.size,
       retention_days: RETENTION_DAYS,
+    };
+  }
+
+  getIssuerMetrics(issuer: string, periodDays = 30): IssuerMetrics {
+    const endMs = Date.now();
+    const startMs = endMs - periodDays * 24 * 60 * 60 * 1000;
+
+    const issuerEvents = this.eventLog.filter(
+      (e) => e.issuer === issuer && new Date(e.timestamp).getTime() >= startMs
+    );
+
+    const issuedEvents = issuerEvents.filter((e) => e.type === 'issued');
+    const credentials_issued = issuedEvents.length;
+
+    const attestationTimes = issuerEvents
+      .filter((e) => e.type === 'attested' && e.attestation_time_ms != null)
+      .map((e) => e.attestation_time_ms as number);
+    const avg_attestation_time_ms =
+      attestationTimes.length > 0
+        ? attestationTimes.reduce((a, b) => a + b, 0) / attestationTimes.length
+        : null;
+
+    const disputedCount = issuerEvents.filter((e) => e.disputed).length;
+    const dispute_rate =
+      credentials_issued > 0 ? +(disputedCount / credentials_issued).toFixed(4) : 0;
+
+    // Build a daily issued count map for the reputation trend
+    const dailyMap: Map<string, number> = new Map();
+    for (const e of issuedEvents) {
+      const day = e.timestamp.split('T')[0];
+      dailyMap.set(day, (dailyMap.get(day) ?? 0) + 1);
+    }
+    const reputation_trend = Array.from(dailyMap.entries())
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([date, issued_count]) => ({ date, issued_count }));
+
+    return {
+      issuer,
+      credentials_issued,
+      avg_attestation_time_ms,
+      dispute_rate,
+      reputation_trend,
+      period_days: periodDays,
     };
   }
 
