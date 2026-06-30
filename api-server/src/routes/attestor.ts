@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { simulateCall, u64Val, addressVal } from '../soroban.js';
 import { metricsStore } from '../services/metrics.js';
+import { liveDashboard } from '../services/liveDashboard.js';
 
 const router = Router();
 
@@ -65,7 +66,7 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
       return d.toISOString().split('T')[0];
     })();
 
-    const events = metricsStore.getEventLog(startDate, endDate);
+    const events = metricsStore.getEventLog({ startDate, endDate });
     const myEvents = events.filter((e) => e.attestor === address);
     const attestedCount = myEvents.filter((e) => e.type === 'attested').length;
     const totalActivity = myEvents.length;
@@ -136,6 +137,7 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Attestation failed';
       results.push({ credential_id: credId, success: false, error: msg });
+      liveDashboard.recordAttestation(false);
     }
   }
 

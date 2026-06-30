@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ChangeEvent, FormEvent, KeyboardEvent } from 'react';
 import { createSlice } from '../lib/contracts/quorumProof';
+import { SliceRecommendationPanel } from './SliceRecommendationPanel';
+import type { RecommendationContext, SliceRecommendation } from '../lib/sliceRecommendation';
 import { useToast } from '../context/ToastContext';
 import {
-  PRESETS,
   saveDraft,
   loadDraft,
   clearDraft,
@@ -12,8 +13,8 @@ import {
   thresholdPercent,
   consensusSummary,
 } from '../lib/sliceBuilderUtils';
-import type { AttestorEntry, SliceDraft } from '../lib/sliceBuilderUtils';
-import { SliceImportExport } from './SliceImportExport';
+import type { AttestorEntry } from '../lib/sliceBuilderUtils';
+import { SliceSimulator } from './SliceSimulator';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,24 @@ const KNOWN_ATTESTORS = [
   { address: 'GABC5EMPLOYER555555555555555555555555555555555555555555E', role: 'Employer', label: 'Acme Corp' },
   { address: 'GABC6EMPLOYER666666666666666666666666666666666666666666F', role: 'Employer', label: 'GlobalTech Ltd' },
 ];
+
+/** Attestor candidates enriched with reputation for the recommendation engine */
+const RECOMMENDATION_CANDIDATES = KNOWN_ATTESTORS.map((a, i) => ({
+  address: a.address,
+  role: a.role,
+  reputationScore: [90, 85, 80, 75, 70, 65][i] ?? 60,
+  available: true,
+}));
+
+const CREDENTIAL_TYPE_OPTIONS = [
+  { value: 1, label: '🎓 Degree' },
+  { value: 2, label: '🏛️ License' },
+  { value: 3, label: '💼 Employment' },
+  { value: 4, label: '📜 Certification' },
+  { value: 5, label: '🔬 Research' },
+];
+
+const INDUSTRY_OPTIONS = ['civil', 'mechanical', 'electrical', 'software', 'biomedical', 'chemical', 'aerospace'];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -210,6 +229,11 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
   const [submitError, setSubmitError] = useState('');
   const [success, setSuccess] = useState<{ sliceId: bigint } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showSim, setShowSim] = useState(false);
+
+  // ── Recommendation context ─────────────────────────────────────────────────
+  const [credentialType, setCredentialType] = useState<number | undefined>(undefined);
+  const [industry, setIndustry] = useState<string>('');
 
   // ── Auto-save draft ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -263,15 +287,6 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
     });
   }
 
-  function handlePreset(presetId: string) {
-    const preset = PRESETS.find((p) => p.id === presetId);
-    if (!preset) return;
-    setAttestors(preset.attestors.map((a) => ({ ...a, id: crypto.randomUUID() })));
-    setThreshold(preset.threshold);
-    setAddrError('');
-    setThresholdError('');
-  }
-
   function handleCopyUrl() {
     const url = encodeSliceToUrl({ attestors, threshold });
     navigator.clipboard.writeText(url).then(() => {
@@ -308,10 +323,17 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
     clearDraft();
   }
 
-  function handleImport(draft: SliceDraft) {
-    setAttestors(draft.attestors.map((a) => ({ ...a, id: a.id || crypto.randomUUID() })));
-    setThreshold(draft.threshold);
-    setAddrError(''); setThresholdError(''); setSubmitError(''); setSuccess(null);
+  function handleAcceptRecommendation(rec: SliceRecommendation) {
+    const entries = rec.attestors.map((a) => ({
+      id: crypto.randomUUID(),
+      address: a.address,
+      role: a.role,
+      weight: 1,
+    }));
+    setAttestors(entries);
+    setThreshold(rec.threshold);
+    setAddrError('');
+    setThresholdError('');
   }
 
   // ── Success screen ─────────────────────────────────────────────────────────
@@ -338,26 +360,83 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
   return (
     <div className="qsb">
 
-      {/* ── Presets ── */}
-      <section className="qsb__section" aria-label="Preset templates">
+      {/* ── Template Library ── */}
+      <section className="qsb__section" aria-label="Slice template library">
         <div className="qsb__section-header">
-          <span className="detail-card__title">Preset Templates</span>
-          <Tooltip text="Start with a recommended configuration for common trust scenarios." />
+          <span className="detail-card__title">Templates</span>
+          <Tooltip text="Browse pre-built slice configurations and apply one as your starting point." />
         </div>
-        <div className="qsb__presets">
-          {PRESETS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              className="qsb__preset-btn"
-              onClick={() => handlePreset(p.id)}
-              title={p.description}
-              aria-label={`Apply preset: ${p.label}`}
-            >
-              {p.label}
-            </button>
-          ))}
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          style={{ width: '100%', marginBottom: showTemplates ? 16 : 0 }}
+          onClick={() => setShowTemplates((v) => !v)}
+          aria-expanded={showTemplates}
+          aria-controls="stl-panel"
+        >
+          {showTemplates ? '▲ Hide Templates' : '▼ Browse Templates'}
+        </button>
+        {showTemplates && (
+          <div id="stl-panel">
+            <SliceTemplateLibrary onApply={handleApplyTemplate} />
+          </div>
+        )}
+      </section>
+
+      <div className="divider" />
+
+      {/* ── Smart Recommendations ── */}
+      <section className="qsb__section" aria-label="Smart recommendations">
+        <div className="qsb__section-header">
+          <span className="detail-card__title">Smart Recommendations</span>
+          <Tooltip text="Get a tailored slice suggestion based on your credential type, industry, and past attestation patterns." />
         </div>
+        <div className="qsb__row2" style={{ marginBottom: 12 }}>
+          <div className="form-row" style={{ marginBottom: 0 }}>
+            <label htmlFor="qsb-cred-type" className="form-label">Credential Type</label>
+            <div className="input-wrap">
+              <select
+                id="qsb-cred-type"
+                value={credentialType ?? ''}
+                onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+                  setCredentialType(e.target.value ? Number(e.target.value) : undefined)
+                }
+                aria-label="Credential type for recommendation"
+              >
+                <option value="">Any</option>
+                {CREDENTIAL_TYPE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="form-row" style={{ marginBottom: 0 }}>
+            <label htmlFor="qsb-industry" className="form-label">Industry</label>
+            <div className="input-wrap">
+              <select
+                id="qsb-industry"
+                value={industry}
+                onChange={(e: ChangeEvent<HTMLSelectElement>) => setIndustry(e.target.value)}
+                aria-label="Industry for recommendation"
+              >
+                <option value="">Any</option>
+                {INDUSTRY_OPTIONS.map((ind) => (
+                  <option key={ind} value={ind}>{ind}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+        <SliceRecommendationPanel
+          candidates={RECOMMENDATION_CANDIDATES}
+          onAccept={handleAcceptRecommendation}
+          context={
+            {
+              credentialType: credentialType,
+              industry: industry || undefined,
+            } satisfies RecommendationContext
+          }
+        />
       </section>
 
       <div className="divider" />
@@ -521,6 +600,32 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
       </section>
 
       <div className="divider" />
+
+      {/* ── Simulate / Preview ── */}
+      {attestors.length > 0 && (
+        <section className="qsb__section" aria-label="Simulate attestation scenarios">
+          <div className="qsb__section-header">
+            <span className="detail-card__title">Simulate / Preview</span>
+            <Tooltip text="Preview which signing scenarios would reach consensus, and how resilient the slice is, before you create it." />
+          </div>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            style={{ width: '100%' }}
+            aria-expanded={showSim}
+            onClick={() => setShowSim((s) => !s)}
+          >
+            {showSim ? 'Hide simulator' : '🧪 Preview attestation outcomes'}
+          </button>
+          {showSim && (
+            <div style={{ marginTop: 16 }}>
+              <SliceSimulator attestors={attestors} threshold={threshold} />
+            </div>
+          )}
+        </section>
+      )}
+
+      {attestors.length > 0 && <div className="divider" />}
 
       {/* ── Share ── */}
       {attestors.length > 0 && (
