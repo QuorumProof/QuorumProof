@@ -8057,6 +8057,20 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
+        // Issue #984: Increment per-credential attestation counter
+        let cred_attest_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialAttestationCount(credential_id))
+            .unwrap_or(0u32);
+        env.storage().instance().set(
+            &DataKey::CredentialAttestationCount(credential_id),
+            &(cred_attest_count + 1),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Award reputation for each honest attestation.
         Self::reward_attestor_reputation(&env, &attestor);
 
@@ -9201,6 +9215,31 @@ impl QuorumProofContract {
         Self::set_verification_cache(&env, credential_id, slice_id, is_attested_result, 60);
 
         is_attested_result
+    }
+
+    /// Issue #984: Returns true if the credential's attestation counter meets its
+    /// `required_attestations` threshold, regardless of quorum slice weights.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to check.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    pub fn is_attested_by_count(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialAttestationCount(credential_id))
+            .unwrap_or(0u32);
+        count >= credential.required_attestations
     }
 
     /// Returns true if the credential has been revoked.
