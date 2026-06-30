@@ -684,6 +684,12 @@ pub enum ContractError {
     MaxAttestorsExceeded = 74,
     /// Issue #898: Invalid capacity limit
     InvalidCapacityLimit = 75,
+    /// Issue #876: Credential type already registered
+    CredentialTypeAlreadyExists = 76,
+    /// Issue #876: Credential type version mismatch during migration
+    CredentialTypeVersionMismatch = 77,
+    /// Issue #876: Credential type version not found in history
+    CredentialTypeVersionNotFound = 78,
 }
 
 #[contracttype]
@@ -822,6 +828,12 @@ pub enum DataKey2 {
     SliceDelegation(u64, Address),
     /// Issue #898: Configurable max attestors per slice
     MaxAttestorsPerSlice,
+    /// Issue #876: Which version of the credential type definition a credential was issued against
+    CredentialTypeDefVersion(u64),
+    /// Issue #876: Historical versions of a credential type definition (type_id -> Vec<CredentialTypeDef>)
+    CredentialTypeVersionHistory(u32),
+    /// Issue #876: Migration record for credential type version changes (type_id -> CredentialTypeMigration)
+    CredentialTypeMigration(u32),
 }
 
 /// Storage keys for issue #881: consent management.
@@ -1007,6 +1019,21 @@ pub struct CredentialTypeDef {
     /// Optional parent type ID for hierarchy support.
     /// Enables credential type inheritance and verification rule composition.
     pub parent_type: Option<u32>,
+    /// Monotonically increasing version number, bumped on every update.
+    pub version: u32,
+}
+
+/// Record of a credential type migration batch.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialTypeMigration {
+    pub type_id: u32,
+    pub from_version: u32,
+    pub to_version: u32,
+    pub migrated_count: u32,
+    pub completed: bool,
+    pub started_at: u64,
+    pub completed_at: Option<u64>,
 }
 
 /// Monotonic credential identifier issued by this contract.
@@ -4580,6 +4607,24 @@ impl QuorumProofContract {
         // Update metrics
         Self::update_credential_metrics(&env, id, "credential");
 
+        // Issue #876: Store the credential type definition version at issuance
+        if env.storage().instance().has(&DataKey::CredentialType(credential_type)) {
+            let type_def: CredentialTypeDef = env.storage()
+                .instance()
+                .get(&DataKey::CredentialType(credential_type))
+                .unwrap();
+            env.storage()
+                .instance()
+                .set(&DataKey2::CredentialTypeDefVersion(id), &type_def.version);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey2::CredentialTypeDefVersion(id), &0u32);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Post-condition: credential must be stored
         Self::postcondition(
             env.storage().instance().has(&DataKey::Credential(id)),
@@ -4750,6 +4795,24 @@ impl QuorumProofContract {
         if active_schema > 0 {
             Self::set_credential_metadata_schema(env, id, active_schema);
         }
+
+        // Issue #876: Store the credential type definition version at issuance
+        if env.storage().instance().has(&DataKey::CredentialType(credential_type)) {
+            let type_def: CredentialTypeDef = env.storage()
+                .instance()
+                .get(&DataKey::CredentialType(credential_type))
+                .unwrap();
+            env.storage()
+                .instance()
+                .set(&DataKey2::CredentialTypeDefVersion(id), &type_def.version);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey2::CredentialTypeDefVersion(id), &0u32);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
         id
     }
@@ -9017,7 +9080,7 @@ impl QuorumProofContract {
     /// # Panics
     /// Panics with `ContractError::InvalidParentType` if parent_type is provided but not registered.
     /// Panics with `ContractError::CircularHierarchy` if setting parent_type would create a cycle.
-    /// Does not panic on duplicate registration; overwrites the existing entry.
+    /// Panics with `ContractError::CredentialTypeAlreadyExists` if the type has already been registered.
     pub fn register_credential_type(
         env: Env,
         admin: Address,
@@ -9034,6 +9097,11 @@ impl QuorumProofContract {
             .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
 
+        // Reject duplicate registration
+        if env.storage().instance().has(&DataKey::CredentialType(type_id)) {
+            panic_with_error!(&env, ContractError::CredentialTypeAlreadyExists);
+        }
+
         // Validate parent_type if provided
         if let Some(parent) = parent_type {
             if !Self::parent_type_exists(&env, parent) {
@@ -9049,6 +9117,7 @@ impl QuorumProofContract {
             name,
             description,
             parent_type,
+            version: 1,
         };
         env.storage()
             .instance()
@@ -9165,6 +9234,367 @@ impl QuorumProofContract {
     pub fn is_credential_type_child_of(env: Env, child_id: u32, parent_id: u32) -> bool {
         let ancestors = Self::get_credential_type_ancestors(env, child_id);
         ancestors.iter().any(|ancestor| ancestor == parent_id)
+    }
+
+    // ── Issue #876: Credential Type Versioning ───────────────────────────
+
+    /// Update an existing credential type definition, creating a new version.
+    /// Only the admin may call this. The previous version is preserved in the version history.
+    ///
+    /// # Parameters
+    /// - `admin`: The admin address; must authorize this call.
+    /// - `type_id`: The credential type to update.
+    /// - `name`: New human-readable name.
+    /// - `description`: New description.
+    /// - `parent_type`: New optional parent type ID.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialTypeNotFound` if the type has not been registered.
+    /// Panics with `ContractError::InvalidParentType` if parent_type is provided but not registered.
+    /// Panics with `ContractError::CircularHierarchy` if setting parent_type would create a cycle.
+    pub fn update_credential_type(
+        env: Env,
+        admin: Address,
+        type_id: u32,
+        name: soroban_sdk::String,
+        description: soroban_sdk::String,
+        parent_type: Option<u32>,
+    ) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        let current: CredentialTypeDef = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialType(type_id))
+            .expect("credential type not registered");
+
+        // Validate parent_type if provided
+        if let Some(parent) = parent_type {
+            if !Self::parent_type_exists(&env, parent) {
+                panic_with_error!(&env, ContractError::InvalidParentType);
+            }
+            if Self::would_create_cycle(&env, type_id, parent) {
+                panic_with_error!(&env, ContractError::CircularHierarchy);
+            }
+        }
+
+        // Save current definition to version history before updating
+        let mut history: Vec<CredentialTypeDef> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeVersionHistory(type_id))
+            .unwrap_or(Vec::new(&env));
+        history.push_back(current.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey2::CredentialTypeVersionHistory(type_id), &history);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let new_version = current.version + 1;
+        let new_def = CredentialTypeDef {
+            type_id,
+            name,
+            description,
+            parent_type,
+            version: new_version,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialType(type_id), &new_def);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Update parent relationship if changed
+        let old_parent = current.parent_type;
+        if old_parent != parent_type {
+            // Remove from old parent's children list
+            if let Some(old_p) = old_parent {
+                let mut old_children: Vec<u32> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey2::CredentialTypeChildren(old_p))
+                    .unwrap_or(Vec::new(&env));
+                old_children = old_children
+                    .iter()
+                    .filter(|child| *child != type_id)
+                    .collect();
+                env.storage()
+                    .instance()
+                    .set(&DataKey2::CredentialTypeChildren(old_p), &old_children);
+                env.storage()
+                    .instance()
+                    .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            }
+
+            // Set new parent relationship
+            if let Some(new_p) = parent_type {
+                env.storage()
+                    .instance()
+                    .set(&DataKey2::CredentialTypeParent(type_id), &new_p);
+                env.storage()
+                    .instance()
+                    .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+                let mut new_children: Vec<u32> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey2::CredentialTypeChildren(new_p))
+                    .unwrap_or(Vec::new(&env));
+                if !new_children.iter().any(|child| *child == type_id) {
+                    new_children.push_back(type_id);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey2::CredentialTypeChildren(new_p), &new_children);
+                    env.storage()
+                        .instance()
+                        .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+                }
+            } else {
+                // No parent — remove parent tracking
+                env.storage()
+                    .instance()
+                    .remove(&DataKey2::CredentialTypeParent(type_id));
+            }
+        }
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("upd_type").into_val(&env));
+        env.events().publish(topics, (type_id, new_version));
+    }
+
+    /// Return the current version number of a registered credential type.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// The current version number. Panics if the type is not registered.
+    pub fn get_credential_type_version(env: Env, type_id: u32) -> u32 {
+        let def = Self::get_credential_type(env, type_id);
+        def.version
+    }
+
+    /// Return the definition of a credential type at a specific historical version.
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    /// - `version`: The historical version number to retrieve.
+    ///
+    /// # Returns
+    /// The `CredentialTypeDef` for that version.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialTypeVersionNotFound` if the version is not in history.
+    pub fn get_credential_type_at_version(env: Env, type_id: u32, version: u32) -> CredentialTypeDef {
+        let current = Self::get_credential_type(env.clone(), type_id);
+        if current.version == version {
+            return current;
+        }
+        let history: Vec<CredentialTypeDef> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeVersionHistory(type_id))
+            .unwrap_or(Vec::new(&env));
+        for hist_def in history.iter() {
+            if hist_def.version == version {
+                return hist_def;
+            }
+        }
+        panic_with_error!(&env, ContractError::CredentialTypeVersionNotFound);
+    }
+
+    /// Return the full version history of a credential type.
+    /// The history contains all previous versions (not including the current one).
+    ///
+    /// # Parameters
+    /// - `type_id`: The credential type to query.
+    ///
+    /// # Returns
+    /// Vec of historical `CredentialTypeDef`s ordered from oldest to newest.
+    /// Empty vec if no updates have been made since registration.
+    pub fn get_credential_type_history(env: Env, type_id: u32) -> Vec<CredentialTypeDef> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeVersionHistory(type_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Return the credential type definition version that a specific credential was issued against.
+    /// Returns 1 for credentials issued before type versioning was enabled.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to query.
+    ///
+    /// # Returns
+    /// The credential type definition version number.
+    pub fn get_credential_type_def_version(env: Env, credential_id: u64) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeDefVersion(credential_id))
+            .unwrap_or(1u32)
+    }
+
+    /// Migrate a single credential to use a newer version of its credential type definition.
+    /// Only the admin may call this.
+    ///
+    /// # Parameters
+    /// - `admin`: The admin address; must authorize this call.
+    /// - `credential_id`: The credential to migrate.
+    /// - `target_version`: The target credential type version to migrate to.
+    ///
+    /// # Panics
+    /// Panics if the credential does not exist.
+    /// Panics with `ContractError::CredentialTypeVersionMismatch` if target_version <= current version
+    /// or if the target_version does not exist in the type's history.
+    pub fn migrate_credential_type_version(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        target_version: u32,
+    ) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .expect("credential not found");
+
+        let current_type_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeDefVersion(credential_id))
+            .unwrap_or(1u32);
+
+        assert!(
+            target_version > current_type_version,
+            "target version must be greater than current version"
+        );
+
+        // Verify the target version exists (either as current or in history)
+        let current_def = Self::get_credential_type(env.clone(), credential.credential_type);
+        if target_version > current_def.version {
+            panic_with_error!(&env, ContractError::CredentialTypeVersionMismatch);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::CredentialTypeDefVersion(credential_id), &target_version);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("migr_typ").into_val(&env));
+        env.events().publish(topics, (credential_id, target_version));
+    }
+
+    /// Batch-migrate credentials of a given credential type to a newer type definition version.
+    /// Only the admin may call this.
+    ///
+    /// Processes credentials with IDs in [start_id, end_id].
+    /// For each credential of the matching type whose type version < target_version:
+    ///   - Updates the stored type version reference
+    ///
+    /// # Parameters
+    /// - `admin`: The admin address; must authorize this call.
+    /// - `type_id`: The credential type whose credentials should be migrated.
+    /// - `target_version`: The target credential type version to migrate to.
+    /// - `start_id`: Start of credential ID range (inclusive).
+    /// - `end_id`: End of credential ID range (inclusive).
+    ///
+    /// # Returns
+    /// The number of credentials migrated.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialTypeVersionMismatch` if the target version does not exist.
+    pub fn batch_migrate_credential_type(
+        env: Env,
+        admin: Address,
+        type_id: u32,
+        target_version: u32,
+        start_id: u64,
+        end_id: u64,
+    ) -> u32 {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        // Verify the target version exists (either as current or in history)
+        let current_def = Self::get_credential_type(env.clone(), type_id);
+        if target_version > current_def.version {
+            panic_with_error!(&env, ContractError::CredentialTypeVersionMismatch);
+        }
+
+        assert!(end_id >= start_id, "end_id must be >= start_id");
+
+        let mut migrated: u32 = 0;
+        let started_at = env.ledger().timestamp();
+
+        for id in start_id..=end_id {
+            if !env.storage().instance().has(&DataKey::Credential(id)) {
+                continue;
+            }
+            let credential: Credential = env
+                .storage()
+                .instance()
+                .get(&DataKey::Credential(id))
+                .unwrap();
+            if credential.credential_type != type_id {
+                continue;
+            }
+            let current_version: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::CredentialTypeDefVersion(id))
+                .unwrap_or(1u32);
+            if current_version >= target_version {
+                continue;
+            }
+            env.storage()
+                .instance()
+                .set(&DataKey2::CredentialTypeDefVersion(id), &target_version);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            migrated += 1;
+        }
+
+        let migration_record = CredentialTypeMigration {
+            type_id,
+            from_version: current_def.version,
+            to_version: target_version,
+            migrated_count: migrated,
+            completed: true,
+            started_at,
+            completed_at: Some(env.ledger().timestamp()),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey2::CredentialTypeMigration(type_id), &migration_record);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("btch_mig").into_val(&env));
+        env.events().publish(topics, (type_id, target_version, migrated));
+
+        migrated
+    }
+
+    /// Return the credential type migration record for a given type_id, if one exists.
+    pub fn get_credential_type_migration(env: Env, type_id: u32) -> Option<CredentialTypeMigration> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::CredentialTypeMigration(type_id))
     }
 
     /// Get all credential types whose verification rules should be applied to a given type.
@@ -15132,6 +15562,7 @@ mod tests {
         let def = client.get_credential_type(&1u32);
         assert_eq!(def.type_id, 1u32);
         assert_eq!(def.name, name);
+        assert_eq!(def.version, 1u32);
     }
 
     #[test]
@@ -15144,7 +15575,7 @@ mod tests {
     }
 
     #[test]
-    fn test_register_credential_type_overwrites() {
+    fn test_update_credential_type_increments_version() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin) = setup(&env);
@@ -15154,10 +15585,14 @@ mod tests {
         let desc = String::from_str(&env, "desc");
 
         client.register_credential_type(&admin, &1u32, &name_v1, &desc, &None);
-        client.register_credential_type(&admin, &1u32, &name_v2, &desc, &None);
+        let def_v1 = client.get_credential_type(&1u32);
+        assert_eq!(def_v1.name, name_v1);
+        assert_eq!(def_v1.version, 1u32);
 
-        let def = client.get_credential_type(&1u32);
-        assert_eq!(def.name, name_v2);
+        client.update_credential_type(&admin, &1u32, &name_v2, &desc, &None);
+        let def_v2 = client.get_credential_type(&1u32);
+        assert_eq!(def_v2.name, name_v2);
+        assert_eq!(def_v2.version, 2u32);
     }
 
     #[test]
@@ -17502,6 +17937,7 @@ mod feature_tests {
         assert_eq!(ctype.name, name);
         assert_eq!(ctype.description, desc);
         assert_eq!(ctype.parent_type, None);
+        assert_eq!(ctype.version, 1u32);
     }
 
     #[test]
@@ -17523,6 +17959,7 @@ mod feature_tests {
         // Verify child has correct parent
         let child = client.get_credential_type(&2u32);
         assert_eq!(child.parent_type, Some(1u32));
+        assert_eq!(child.version, 1u32);
     }
 
     #[test]
@@ -17558,7 +17995,7 @@ mod feature_tests {
         // Try to update A with B as parent (would create cycle)
         let name_a_new = String::from_str(&env, "Type A Updated");
         let desc_a_new = String::from_str(&env, "Type A Updated");
-        client.register_credential_type(&admin, &1u32, &name_a_new, &desc_a_new, &Some(2u32));
+        client.update_credential_type(&admin, &1u32, &name_a_new, &desc_a_new, &Some(2u32));
     }
 
     #[test]
@@ -17785,13 +18222,346 @@ mod feature_tests {
         let parent = client.get_credential_type_parent(&2u32);
         assert_eq!(parent, Some(1u32));
 
-        // Overwrite parent type with new description (no parent change)
+        // Update parent type with new description (no parent change)
         let new_desc = String::from_str(&env, "Updated description");
-        client.register_credential_type(&admin, &1u32, &name, &new_desc, &None);
+        client.update_credential_type(&admin, &1u32, &name, &new_desc, &None);
 
         // Child relationship should still exist
         let parent_after = client.get_credential_type_parent(&2u32);
         assert_eq!(parent_after, Some(1u32));
+        // Parent version should have been bumped
+        let parent_def = client.get_credential_type(&1u32);
+        assert_eq!(parent_def.version, 2u32);
+    }
+
+    // ── Credential Type Versioning Tests (Issue #876) ──
+
+    #[test]
+    fn test_register_credential_type_sets_version_1() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        let def = client.get_credential_type(&1u32);
+        assert_eq!(def.version, 1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialTypeAlreadyExists")]
+    fn test_register_credential_type_duplicate_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+    }
+
+    #[test]
+    fn test_update_credential_type_bumps_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Original");
+        let desc = String::from_str(&env, "desc");
+        let new_name = String::from_str(&env, "Updated");
+        let new_desc = String::from_str(&env, "new desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.update_credential_type(&admin, &1u32, &new_name, &new_desc, &None);
+
+        let def = client.get_credential_type(&1u32);
+        assert_eq!(def.version, 2u32);
+        assert_eq!(def.name, new_name);
+        assert_eq!(def.description, new_desc);
+    }
+
+    #[test]
+    fn test_get_credential_type_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        assert_eq!(client.get_credential_type_version(&1u32), 1u32);
+
+        let new_name = String::from_str(&env, "Updated");
+        client.update_credential_type(&admin, &1u32, &new_name, &desc, &None);
+        assert_eq!(client.get_credential_type_version(&1u32), 2u32);
+    }
+
+    #[test]
+    fn test_get_credential_type_at_version_current() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        let def = client.get_credential_type_at_version(&1u32, &1u32);
+        assert_eq!(def.version, 1u32);
+        assert_eq!(def.name, name);
+    }
+
+    #[test]
+    fn test_get_credential_type_at_version_historical() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name_v1 = String::from_str(&env, "V1 Name");
+        let name_v2 = String::from_str(&env, "V2 Name");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name_v1, &desc, &None);
+        client.update_credential_type(&admin, &1u32, &name_v2, &desc, &None);
+
+        let def_v1 = client.get_credential_type_at_version(&1u32, &1u32);
+        assert_eq!(def_v1.version, 1u32);
+        assert_eq!(def_v1.name, name_v1);
+
+        let def_v2 = client.get_credential_type_at_version(&1u32, &2u32);
+        assert_eq!(def_v2.version, 2u32);
+        assert_eq!(def_v2.name, name_v2);
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialTypeVersionNotFound")]
+    fn test_get_credential_type_at_version_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.get_credential_type_at_version(&1u32, &99u32);
+    }
+
+    #[test]
+    fn test_get_credential_type_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name_v1 = String::from_str(&env, "V1");
+        let name_v2 = String::from_str(&env, "V2");
+        let name_v3 = String::from_str(&env, "V3");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name_v1, &desc, &None);
+        client.update_credential_type(&admin, &1u32, &name_v2, &desc, &None);
+        client.update_credential_type(&admin, &1u32, &name_v3, &desc, &None);
+
+        let history = client.get_credential_type_history(&1u32);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.get(0).unwrap().version, 1u32);
+        assert_eq!(history.get(0).unwrap().name, name_v1);
+        assert_eq!(history.get(1).unwrap().version, 2u32);
+        assert_eq!(history.get(1).unwrap().name, name_v2);
+    }
+
+    #[test]
+    fn test_get_credential_type_def_version_after_issuance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let type_version = client.get_credential_type_def_version(&cred_id);
+        assert_eq!(type_version, 1u32);
+    }
+
+    #[test]
+    fn test_migrate_credential_type_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name_v1 = String::from_str(&env, "V1");
+        let name_v2 = String::from_str(&env, "V2");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name_v1, &desc, &None);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        // Update the type definition
+        client.update_credential_type(&admin, &1u32, &name_v2, &desc, &None);
+
+        // Migrate credential to version 2
+        client.migrate_credential_type_version(&admin, &cred_id, &2u32);
+
+        let type_version = client.get_credential_type_def_version(&cred_id);
+        assert_eq!(type_version, 2u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential not found")]
+    fn test_migrate_credential_type_version_nonexistent_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.migrate_credential_type_version(&admin, &999u64, &2u32);
+    }
+
+    #[test]
+    fn test_batch_migrate_credential_type() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name_v1 = String::from_str(&env, "V1");
+        let name_v2 = String::from_str(&env, "V2");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name_v1, &desc, &None);
+        client.register_credential_type(&admin, &2u32, &name_v1, &desc, &None);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let cred_id3 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+
+        // Update type 1 to v2
+        client.update_credential_type(&admin, &1u32, &name_v2, &desc, &None);
+
+        // Batch migrate all type 1 credentials
+        let migrated = client.batch_migrate_credential_type(&admin, &1u32, &2u32, &1u64, &cred_id3);
+        assert_eq!(migrated, 2u32);
+
+        assert_eq!(client.get_credential_type_def_version(&cred_id1), 2u32);
+        assert_eq!(client.get_credential_type_def_version(&cred_id2), 2u32);
+        // cred_id3 is type 2, should NOT have been migrated
+        assert_eq!(client.get_credential_type_def_version(&cred_id3), 1u32);
+    }
+
+    #[test]
+    fn test_update_credential_type_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name_v1 = String::from_str(&env, "V1");
+        let name_v2 = String::from_str(&env, "V2");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name_v1, &desc, &None);
+        client.update_credential_type(&admin, &1u32, &name_v2, &desc, &None);
+
+        let events = env.events().all();
+        let update_event = events.iter().find(|(_, topics, _)| {
+            if let Some(first) = topics.get(0) {
+                soroban_sdk::Symbol::from_val(&env, &first) == symbol_short!("upd_type")
+            } else {
+                false
+            }
+        });
+        assert!(update_event.is_some(), "upd_type event not emitted");
+    }
+
+    #[test]
+    fn test_update_credential_type_changes_parent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        client.register_credential_type(&admin, &2u32, &name, &desc, &None);
+
+        // Update type 2 to be child of type 1
+        client.update_credential_type(&admin, &2u32, &name, &desc, &Some(1u32));
+        assert_eq!(client.get_credential_type_parent(&2u32), Some(1u32));
+
+        // Update type 2 to remove parent
+        client.update_credential_type(&admin, &2u32, &name, &desc, &None);
+        assert_eq!(client.get_credential_type_parent(&2u32), None);
+    }
+
+    #[test]
+    fn test_get_credential_type_migration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Type");
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+        let migration = client.get_credential_type_migration(&1u32);
+        assert!(migration.is_none());
+
+        client.update_credential_type(&admin, &1u32, &name, &desc, &None);
+        let migration_after = client.batch_migrate_credential_type(&admin, &1u32, &2u32, &0u64, &0u64);
+        assert_eq!(migration_after, 0u32);
+    }
+
+    #[test]
+    fn test_multiple_updates_track_full_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let names: Vec<soroban_sdk::String> = (0..5)
+            .map(|i| String::from_str(&env, &format!("V{}", i + 1)))
+            .collect();
+        let desc = String::from_str(&env, "desc");
+
+        client.register_credential_type(&admin, &1u32, &names.get(0).unwrap(), &desc, &None);
+        for i in 1..5 {
+            client.update_credential_type(&admin, &1u32, &names.get(i).unwrap(), &desc, &None);
+        }
+
+        let def = client.get_credential_type(&1u32);
+        assert_eq!(def.version, 5u32);
+        assert_eq!(def.name, names.get(4).unwrap());
+
+        // All 4 previous versions should be in history
+        let history = client.get_credential_type_history(&1u32);
+        assert_eq!(history.len(), 4);
+        for i in 0..4 {
+            assert_eq!(history.get(i).unwrap().version, (i + 1) as u32);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "CredentialTypeNotFound")]
+    fn test_update_unregistered_type_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let name = String::from_str(&env, "Name");
+        let desc = String::from_str(&env, "desc");
+        client.update_credential_type(&_admin, &99u32, &name, &desc, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "PermissionDenied")]
+    fn test_update_credential_type_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let name = String::from_str(&env, "Name");
+        let desc = String::from_str(&env, "desc");
+        client.register_credential_type(&admin, &1u32, &name, &desc, &None);
+
+        let non_admin = Address::generate(&env);
+        client.update_credential_type(&non_admin, &1u32, &name, &desc, &None);
     }
 
     #[test]
