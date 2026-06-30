@@ -15,11 +15,13 @@ mod proptest_quorum_slices {
     }
 
     proptest! {
-        /// Property: threshold cannot exceed attestor count after creation.
+        /// Property: any absolute threshold up to total weight is accepted, including
+        /// thresholds greater than the number of attestors.
         #[test]
-        fn prop_threshold_le_attestor_count(
+        fn prop_threshold_le_total_weight(
             n_attestors in 1usize..=10,
-            threshold_offset in 0u32..10,
+            generated_weights in prop::collection::vec(1u32..=100, 1..=10),
+            threshold_seed in any::<u32>(),
         ) {
             let env = Env::default();
             let client = setup(&env);
@@ -27,18 +29,50 @@ mod proptest_quorum_slices {
 
             let mut attestors = soroban_sdk::Vec::new(&env);
             let mut weights = soroban_sdk::Vec::new(&env);
-            for _ in 0..n_attestors {
+            let mut total_weight = 0u32;
+            for index in 0..n_attestors {
                 attestors.push_back(Address::generate(&env));
-                weights.push_back(1u32);
+                let weight = generated_weights[index % generated_weights.len()];
+                weights.push_back(weight);
+                total_weight += weight;
             }
-            let total_weight = n_attestors as u32;
-            let threshold = (threshold_offset % total_weight) + 1;
+            let threshold = (threshold_seed % total_weight) + 1;
 
             let slice_id = client.create_slice(&creator, &attestors, &weights, &threshold);
             let slice = client.get_slice(&slice_id);
 
-            prop_assert!(slice.threshold <= slice.attestors.len() as u32);
             prop_assert!(slice.threshold <= total_weight);
+            prop_assert_eq!(slice.weights.len(), slice.attestors.len());
+        }
+
+        /// Property: effective percentage thresholds are monotonic and always in range.
+        #[test]
+        fn prop_percentage_threshold_is_monotonic(
+            weights_input in prop::collection::vec(1u32..=100, 1..=20),
+            low in 1u32..=100,
+            high in 1u32..=100,
+        ) {
+            let env = Env::default();
+            let client = setup(&env);
+            let creator = Address::generate(&env);
+            let mut attestors = soroban_sdk::Vec::new(&env);
+            let mut weights = soroban_sdk::Vec::new(&env);
+            let mut total = 0u32;
+            for weight in weights_input {
+                attestors.push_back(Address::generate(&env));
+                weights.push_back(weight);
+                total += weight;
+            }
+            let lower = low.min(high);
+            let upper = low.max(high);
+            let lower_id = client.create_slice_percentage(&creator, &attestors, &weights, &lower);
+            let upper_id = client.create_slice_percentage(&creator, &attestors, &weights, &upper);
+            let lower_required = client.get_slice_threshold_config(&lower_id).required_weight;
+            let upper_required = client.get_slice_threshold_config(&upper_id).required_weight;
+
+            prop_assert!(lower_required >= 1);
+            prop_assert!(upper_required <= total);
+            prop_assert!(lower_required <= upper_required);
         }
 
         /// Property: slice ID is always positive and monotonically increasing.

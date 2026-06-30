@@ -19,3 +19,4 @@ proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 
 [features]
 testutils = ["soroban-sdk/testutils", "sbt_registry/testutils", "zk_verifier/testutils"]
+legacy-tests = []
