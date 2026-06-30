@@ -196,6 +196,27 @@ pub struct SbtActivityEntry {
     pub timestamp: u64,
 }
 
+/// Issue #987: A record of a verifier (e.g. an employer or university) accessing a
+/// credential for a hiring/enrollment decision. One entry is appended to the
+/// credential's access log each time `track_credential_access` is called.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialAccessEntry {
+    /// The verifier address that accessed the credential.
+    pub accessor: Address,
+    /// Ledger timestamp when the access occurred.
+    pub timestamp: u64,
+    /// Micropayment (in stroops) accrued to the credential holder for this access.
+    /// Stubbed at `CREDENTIAL_ACCESS_MICROPAYMENT` until a payment rail is wired up.
+    pub payment: i128,
+}
+
+/// Issue #987: Flat micropayment (in stroops) accrued to a credential holder each
+/// time a verifier accesses their credential. Stubbed at 0 until a real payment
+/// rail (e.g. a token-contract transfer) is connected; see
+/// `settle_access_micropayment`.
+const CREDENTIAL_ACCESS_MICROPAYMENT: i128 = 0;
+
 #[contract]
 pub struct SbtRegistryContract;
 
@@ -1456,6 +1477,92 @@ impl SbtRegistryContract {
             .get(&DataKey::SbtActivityLog(sbt_id))
             .unwrap_or(Vec::new(&env))
     }
+
+    // ── Issue #987: Credential Holder Earnings Tracking ─────────────────────────
+
+    /// Record that a verifier (employer/university) accessed a credential, and
+    /// accrue an optional micropayment to the credential holder.
+    ///
+    /// Verifier-only: the `accessor` must authorize this call via `require_auth`, so a
+    /// verifier can only record their own access events and cannot forge entries on
+    /// another verifier's behalf. The credential is checked for existence and
+    /// revocation (via the linked `quorum_proof` contract) before any entry is written.
+    ///
+    /// Each call appends a [`CredentialAccessEntry`] to the credential's access log,
+    /// which the holder can later read via [`get_credential_access_log`]. A
+    /// `cred_access` event is emitted for off-chain indexers.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential being accessed.
+    /// - `accessor`: The verifier address recording the access; must authorize the call.
+    ///
+    /// # Panics
+    /// Panics if the credential does not exist or is revoked in `quorum_proof`.
+    pub fn track_credential_access(env: Env, credential_id: u64, accessor: Address) {
+        // Verifier-only: the accessor must sign this call.
+        accessor.require_auth();
+
+        // Verify the credential exists and is not revoked before logging access.
+        // Uses env.invoke_contract to avoid a circular crate dependency with quorum_proof.
+        let qp_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+        // is_revoked panics with CredentialNotFound if the credential doesn't exist.
+        let revoked: bool = env.invoke_contract(
+            &qp_id,
+            &Symbol::new(&env, "is_revoked"),
+            soroban_sdk::vec![&env, credential_id.into_val(&env)],
+        );
+        assert!(!revoked, "credential is revoked");
+
+        // Settle (currently stubbed) micropayment owed to the holder for this access.
+        let payment = Self::settle_access_micropayment(&env, credential_id, &accessor);
+
+        let key = DataKey::CredentialAccessLog(credential_id);
+        let mut log: Vec<CredentialAccessEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+        log.push_back(CredentialAccessEntry {
+            accessor: accessor.clone(),
+            timestamp: env.ledger().timestamp(),
+            payment,
+        });
+        env.storage().persistent().set(&key, &log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("access").into_val(&env));
+        topics.push_back(credential_id.into_val(&env));
+        env.events().publish(topics, (accessor, payment));
+    }
+
+    /// Issue #987: Compute (and, in a future implementation, transfer) the
+    /// micropayment owed to a credential holder when a verifier accesses their
+    /// credential.
+    ///
+    /// Stub: returns a flat [`CREDENTIAL_ACCESS_MICROPAYMENT`] without moving any
+    /// funds. A real implementation would invoke a token contract to transfer the
+    /// amount from the verifier to the credential holder.
+    fn settle_access_micropayment(_env: &Env, _credential_id: u64, _accessor: &Address) -> i128 {
+        // TODO(#987): wire up an actual token transfer from verifier to holder.
+        CREDENTIAL_ACCESS_MICROPAYMENT
+    }
+
+    /// Return the full credential access log — every verifier access recorded via
+    /// [`track_credential_access`], in chronological order. Returns an empty vec for
+    /// a credential that has never been accessed.
+    pub fn get_credential_access_log(env: Env, credential_id: u64) -> Vec<CredentialAccessEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CredentialAccessLog(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
 }
 
 #[cfg(test)]
@@ -2704,10 +2811,10 @@ mod tests {
         let _ = client.get_token(&token_id);
     }
 
-    // ── Issue #447: Credential Holder Consent Tracking ──────────────────────────────────────
+    // ── Issue #987: Credential Holder Earnings Tracking ─────────────────────────
 
     #[test]
-    fn test_get_credential_access_log() {
+    fn test_credential_access_log_empty_by_default() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
@@ -2716,16 +2823,13 @@ mod tests {
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&owner, &cred_id, &uri);
 
-        // CredentialAccessLog is not yet implemented; activity log is available instead.
-        let log = client.get_sbt_activity_log(&token_id);
-        assert_eq!(log.len(), 1); // mint entry
+        // No accesses recorded yet.
+        assert_eq!(client.get_credential_access_log(&cred_id).len(), 0);
     }
 
     #[test]
-    fn test_get_credential_access_log_unauthorized() {
+    fn test_track_credential_access_records_entry() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
@@ -2735,10 +2839,83 @@ mod tests {
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
-        let token_id = client.mint(&owner, &cred_id, &uri);
+        let _token_id = client.mint(&owner, &cred_id, &uri);
 
-        // Activity log is public; any caller can read it.
-        let _ = client.get_sbt_activity_log(&token_id);
+        let verifier = Address::generate(&env);
+        client.track_credential_access(&cred_id, &verifier);
+
+        let log = client.get_credential_access_log(&cred_id);
+        assert_eq!(log.len(), 1);
+        let entry = log.get(0).unwrap();
+        assert_eq!(entry.accessor, verifier);
+        // Micropayment is stubbed at zero for now.
+        assert_eq!(entry.payment, CREDENTIAL_ACCESS_MICROPAYMENT);
+    }
+
+    #[test]
+    fn test_track_credential_access_appends_multiple() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let _token_id = client.mint(&owner, &cred_id, &uri);
+
+        let verifier1 = Address::generate(&env);
+        let verifier2 = Address::generate(&env);
+        client.track_credential_access(&cred_id, &verifier1);
+        client.track_credential_access(&cred_id, &verifier2);
+
+        let log = client.get_credential_access_log(&cred_id);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log.get(0).unwrap().accessor, verifier1);
+        assert_eq!(log.get(1).unwrap().accessor, verifier2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_track_credential_access_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let _token_id = client.mint(&owner, &cred_id, &uri);
+
+        // Clear all mocked authorizations: the verifier has NOT authorized this call,
+        // so the verifier-only require_auth must reject it.
+        env.set_auths(&[]);
+        let verifier = Address::generate(&env);
+        client.track_credential_access(&cred_id, &verifier);
+    }
+
+    #[test]
+    #[should_panic(expected = "credential is revoked")]
+    fn test_track_credential_access_revoked_credential_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let _token_id = client.mint(&owner, &cred_id, &uri);
+
+        // Revoke the credential, then attempt to log access — must be rejected.
+        qp_client.revoke_credential(&issuer, &cred_id);
+
+        let verifier = Address::generate(&env);
+        client.track_credential_access(&cred_id, &verifier);
     }
 
     // --- Blacklist tests ---
