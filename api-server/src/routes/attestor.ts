@@ -66,7 +66,7 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
       return d.toISOString().split('T')[0];
     })();
 
-    const events = metricsStore.getEventLog(startDate, endDate);
+    const events = metricsStore.getEventLog({ startDate, endDate });
     const myEvents = events.filter((e) => e.attestor === address);
     const attestedCount = myEvents.filter((e) => e.type === 'attested').length;
     const totalActivity = myEvents.length;
