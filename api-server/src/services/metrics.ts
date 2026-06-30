@@ -1,3 +1,5 @@
+import { liveDashboard } from './liveDashboard.js';
+
 export interface CredentialEvent {
   type: 'issued' | 'attested' | 'revoked' | 'suspended' | 'verified';
   credential_id: string;
@@ -152,6 +154,8 @@ class MetricsStore {
   recordEvent(event: CredentialEvent): void {
     this.eventLog.push(event);
     this.aggregateToHourly(event);
+    if (event.type === 'issued') liveDashboard.recordIssuance();
+    else if (event.type === 'attested') liveDashboard.recordAttestation(true);
   }
 
   private aggregateToHourly(event: CredentialEvent): void {
