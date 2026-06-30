@@ -724,6 +724,7 @@ pub enum DataKey {
     MetadataSchemaVersion,
     /// Schema definition for a given version (version -> MetadataSchema).
     MetadataSchema(u32),
+    VerificationLog(u64),
 }
 
 #[contracttype]
@@ -1140,6 +1141,26 @@ pub enum RevocationAuditAction {
     Finalized = 5,
     /// Issuer-initiated revocation cancelled within time-lock
     Cancelled = 6,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerificationLogEntry {
+    pub verifier: Address,
+    pub credential_id: u64,
+    pub claim_type: u32,
+    pub timestamp: u64,
+    pub success: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerificationAttemptEventData {
+    pub verifier: Address,
+    pub credential_id: u64,
+    pub claim_type: u32,
+    pub timestamp: u64,
+    pub success: bool,
 }
 
 #[contracttype]
@@ -12117,7 +12138,8 @@ impl QuorumProofContract {
 
     /// Issue #539: Verify a credential and update holder reputation.
     /// This is a wrapper around is_attested that tracks verification attempts.
-    pub fn verify_credential(env: Env, credential_id: u64, slice_id: u64) -> bool {
+    pub fn verify_credential(env: Env, verifier: Address, credential_id: u64, slice_id: u64) -> bool {
+        verifier.require_auth();
         let credential: Credential = env
             .storage()
             .instance()
@@ -12128,8 +12150,42 @@ impl QuorumProofContract {
         
         // Record verification attempt for holder reputation
         Self::record_verification_attempt(&env, credential.subject, verification_result);
+
+        let timestamp = env.ledger().timestamp();
+        let log_entry = VerificationLogEntry {
+            verifier: verifier.clone(),
+            credential_id,
+            claim_type: credential.credential_type,
+            timestamp,
+            success: verification_result,
+        };
+
+        let mut history: Vec<VerificationLogEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationLog(credential_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        
+        history.push_back(log_entry);
+        env.storage().instance().set(&DataKey::VerificationLog(credential_id), &history);
+
+        let event_data = VerificationAttemptEventData {
+            verifier,
+            credential_id,
+            claim_type: credential.credential_type,
+            timestamp,
+            success: verification_result,
+        };
+        env.events().publish((symbol_short!("verify"), credential_id), event_data);
         
         verification_result
+    }
+
+    pub fn get_verification_history(env: Env, credential_id: u64) -> Vec<VerificationLogEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::VerificationLog(credential_id))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // ── Issue #522: Credential holder consent tracking ────────────────────────
@@ -13604,7 +13660,7 @@ mod tests {
         let weights = vec![&env, 1u32];
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
         client.attest(&attestor, &cred_id, &slice_id, &true, &None);
-        assert!(client.verify_credential(&cred_id, &slice_id));
+        assert!(client.verify_credential(&issuer, &cred_id, &slice_id));
 
         let request_id = client.initiate_revocation_with_lock(
             &issuer,
@@ -13614,7 +13670,7 @@ mod tests {
         );
         set_ledger_timestamp(&env, 2);
         client.finalize_revocation_request(&issuer, &request_id);
-        assert!(!client.verify_credential(&cred_id, &slice_id));
+        assert!(!client.verify_credential(&issuer, &cred_id, &slice_id));
     }
 
     #[test]
@@ -20480,6 +20536,35 @@ mod doc_tests {
                 assert_eq!(count, 0);
             }
         }
+    }
+
+    #[test]
+    fn test_verification_audit_log() {
+        let env = Env::default();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let verifier = Address::generate(&env);
+
+        let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 1u32];
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        set_ledger_timestamp(&env, 1000);
+        let result = client.verify_credential(&verifier, &cred_id, &slice_id);
+        assert!(result);
+
+        let history = client.get_verification_history(&cred_id);
+        assert_eq!(history.len(), 1);
+        let log = history.get(0).unwrap();
+        assert_eq!(log.verifier, verifier);
+        assert_eq!(log.credential_id, cred_id);
+        assert_eq!(log.claim_type, 1);
+        assert_eq!(log.timestamp, 1000);
+        assert_eq!(log.success, true);
     }
 }
 
