@@ -4,12 +4,16 @@ import compression from 'compression';
 import zlib from 'zlib';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
+import shareLinksRouter from './routes/shareLinks.js';
+import consentRouter from './routes/consent.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
 import issuerRouter from './routes/issuer.js';
 import recoveryRouter from './routes/recovery.js';
+import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
+import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
@@ -26,6 +30,8 @@ app.use(ddosProtection);
 app.use(express.json({ limit: '100kb' }));
 
 const requestSigning = createRequestSigning();
+const requestDeduplication = createRequestDeduplication({ ttlMs: 100, enabled: true });
+app.use('/api', requestDeduplication);
 app.use('/api', requestSigning);
 
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
@@ -42,6 +48,7 @@ const apiRateLimiter = createRateLimiter({
 });
 
 app.use('/api', apiRateLimiter);
+app.use(cacheControl);
 
 app.use((req, _res, next) => {
   console.log(JSON.stringify({
@@ -63,6 +70,7 @@ app.use('/api/analytics', analyticsRouter);
 app.use('/api/attestor', attestorRouter);
 app.use('/api/issuer', issuerRouter);
 app.use('/api/recovery', recoveryRouter);
+app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -84,4 +92,25 @@ createWsServer(httpServer, '/ws');
 httpServer.listen(PORT, () => console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`));
 
 export { broadcastEvent };
+
+// #926: fire webhooks for credential events alongside WS broadcast
+const _origBroadcast = broadcastEvent;
+function broadcastEventWithWebhooks(...args: Parameters<typeof _origBroadcast>) {
+  const result = _origBroadcast(...args);
+  const [event] = args;
+  const webhookEvents = ['credential_issued', 'credential_attested', 'credential_revoked'] as const;
+  if (webhookEvents.includes(event.type as typeof webhookEvents[number])) {
+    dispatchWebhookEvent({
+      event: event.type,
+      credential_id: event.credential_id,
+      issuer: event.issuer,
+      holder: event.holder,
+      attestor: event.attestor,
+      timestamp: event.timestamp ?? new Date().toISOString(),
+    });
+  }
+  return result;
+}
+
+export { broadcastEventWithWebhooks as broadcastEventAndWebhooks };
 export default app;

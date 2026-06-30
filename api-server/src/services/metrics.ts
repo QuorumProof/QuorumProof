@@ -1,24 +1,24 @@
+import { liveDashboard } from './liveDashboard.js';
+
 export interface CredentialEvent {
-  type: 'issued' | 'attested' | 'revoked' | 'suspended' | 'verified';
+  type: 'issued' | 'attested' | 'revoked' | 'suspended' | 'verified' | 'disputed';
   credential_id: string;
   timestamp: string;
   issuer?: string;
   subject?: string;
   attestor?: string;
-  /** Time in milliseconds from credential issuance to first attestation. */
-  attestation_time_ms?: number;
-  /** Whether this event is associated with a dispute. */
-  disputed?: boolean;
+  /** For 'attested' events paired with a prior 'issued': ms elapsed since issuance */
+  attestation_duration_ms?: number;
   metadata?: Record<string, unknown>;
 }
 
 export interface IssuerMetrics {
   issuer: string;
+  period_days: number;
   credentials_issued: number;
   avg_attestation_time_ms: number | null;
   dispute_rate: number;
-  reputation_trend: { date: string; issued_count: number }[];
-  period_days: number;
+  reputation_trend: { date: string; issued: number; disputed: number }[];
 }
 
 export interface HourlyMetrics {
@@ -154,7 +154,7 @@ function normalizeDateInput(input: string): string | null {
 }
 
 function isValidEventType(type: string): boolean {
-  return ['issued', 'attested', 'revoked', 'suspended', 'verified'].includes(type);
+  return ['issued', 'attested', 'revoked', 'suspended', 'verified', 'disputed'].includes(type);
 }
 
 class MetricsStore {
@@ -165,6 +165,8 @@ class MetricsStore {
   recordEvent(event: CredentialEvent): void {
     this.eventLog.push(event);
     this.aggregateToHourly(event);
+    if (event.type === 'issued') liveDashboard.recordIssuance();
+    else if (event.type === 'attested') liveDashboard.recordAttestation(true);
   }
 
   private aggregateToHourly(event: CredentialEvent): void {
@@ -368,45 +370,43 @@ class MetricsStore {
   }
 
   getIssuerMetrics(issuer: string, periodDays = 30): IssuerMetrics {
-    const endMs = Date.now();
-    const startMs = endMs - periodDays * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const windowStart = now - periodDays * 24 * 60 * 60 * 1000;
 
     const issuerEvents = this.eventLog.filter(
-      (e) => e.issuer === issuer && new Date(e.timestamp).getTime() >= startMs
+      (e) => new Date(e.timestamp).getTime() >= windowStart && e.issuer === issuer
     );
 
-    const issuedEvents = issuerEvents.filter((e) => e.type === 'issued');
-    const credentials_issued = issuedEvents.length;
+    const credentials_issued = issuerEvents.filter((e) => e.type === 'issued').length;
+    const disputes = issuerEvents.filter((e) => e.type === 'disputed').length;
+    const dispute_rate = credentials_issued > 0 ? disputes / credentials_issued : 0;
 
-    const attestationTimes = issuerEvents
-      .filter((e) => e.type === 'attested' && e.attestation_time_ms != null)
-      .map((e) => e.attestation_time_ms as number);
+    // Compute avg attestation time from events that carry attestation_duration_ms
+    const durations = issuerEvents
+      .filter((e) => e.type === 'attested' && e.attestation_duration_ms != null)
+      .map((e) => e.attestation_duration_ms as number);
     const avg_attestation_time_ms =
-      attestationTimes.length > 0
-        ? attestationTimes.reduce((a, b) => a + b, 0) / attestationTimes.length
-        : null;
+      durations.length > 0 ? durations.reduce((s, d) => s + d, 0) / durations.length : null;
 
-    const disputedCount = issuerEvents.filter((e) => e.disputed).length;
-    const dispute_rate =
-      credentials_issued > 0 ? +(disputedCount / credentials_issued).toFixed(4) : 0;
-
-    // Build a daily issued count map for the reputation trend
-    const dailyMap: Map<string, number> = new Map();
-    for (const e of issuedEvents) {
-      const day = e.timestamp.split('T')[0];
-      dailyMap.set(day, (dailyMap.get(day) ?? 0) + 1);
+    // Daily reputation trend: group issued/disputed by date
+    const byDate: Record<string, { issued: number; disputed: number }> = {};
+    for (const e of issuerEvents) {
+      const date = e.timestamp.slice(0, 10);
+      if (!byDate[date]) byDate[date] = { issued: 0, disputed: 0 };
+      if (e.type === 'issued') byDate[date].issued++;
+      if (e.type === 'disputed') byDate[date].disputed++;
     }
-    const reputation_trend = Array.from(dailyMap.entries())
-      .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([date, issued_count]) => ({ date, issued_count }));
+    const reputation_trend = Object.entries(byDate)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, counts]) => ({ date, ...counts }));
 
     return {
       issuer,
+      period_days: periodDays,
       credentials_issued,
       avg_attestation_time_ms,
       dispute_rate,
       reputation_trend,
-      period_days: periodDays,
     };
   }
 
