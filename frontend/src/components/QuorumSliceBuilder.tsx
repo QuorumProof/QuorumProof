@@ -650,6 +650,14 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
 
       {attestors.length > 0 && <div className="divider" />}
 
+      {/* ── Import / Export ── */}
+      <SliceImportExport
+        slice={attestors.length > 0 ? { attestors, threshold } : null}
+        onImport={handleImport}
+      />
+
+      <div className="divider" />
+
       {/* ── Submit ── */}
       {submitError && (
         <div className="error-card" role="alert" style={{ marginBottom: 12 }}>
