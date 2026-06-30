@@ -22,6 +22,10 @@ pub enum ContractError {
     InvalidGuardian = 7,
     NotWhitelisted = 8,
     HolderBlacklisted = 9,
+    /// Caller is not the SBT holder (burn_sbt is holder-only).
+    UnauthorizedBurn = 10,
+    /// The supplied proof_of_residency is empty or structurally invalid.
+    InvalidProof = 11,
 }
 
 #[contracttype]
@@ -193,6 +197,20 @@ pub struct SbtActivityEntry {
     /// The address that performed the action.
     pub actor: Address,
     /// Ledger timestamp when the action occurred.
+    pub timestamp: u64,
+}
+
+/// Event emitted when an SBT is burned by its holder via `burn_sbt`.
+///
+/// Published as the event data with topic `["burn_sbt", sbt_id]`.
+#[contracttype]
+#[derive(Clone)]
+pub struct BurnEvent {
+    /// The SBT token ID that was burned.
+    pub sbt_id: u64,
+    /// The address that held (and burned) the SBT.
+    pub holder: Address,
+    /// Ledger timestamp when the burn occurred.
     pub timestamp: u64,
 }
 
@@ -560,52 +578,84 @@ impl SbtRegistryContract {
             .set(&DataKey::QuorumProofId, &quorum_proof_id);
     }
 
-    /// Burn a soulbound token. Callable by the token owner or the contract admin.
+    /// Burn a soulbound token. Callable by the token holder only.
     ///
-    /// Removes Token, Owner, and OwnerTokens storage entries and emits a `burn` event.
-    pub fn burn_sbt(env: Env, caller: Address, token_id: u64) {
-        caller.require_auth();
+    /// The caller must provide a `proof_of_residency` — a non-empty byte string
+    /// that demonstrates they still possess the underlying credential (stub: any
+    /// non-empty `Bytes` is accepted; real ZK verification is tracked in #ZK-IMPL).
+    ///
+    /// On success:
+    /// - Token, Owner, OwnerTokens, Delegation, and OwnerCredential entries are removed.
+    /// - A `BurnEvent` is emitted with `sbt_id`, `holder`, and `timestamp`.
+    /// - A notification and activity-log entry are written.
+    ///
+    /// # Parameters
+    /// - `holder`: The token owner; must authorize this call.
+    /// - `sbt_id`: The ID of the SBT to burn.
+    /// - `proof_of_residency`: Non-empty bytes proving the holder retains the
+    ///   underlying credential. Empty bytes are rejected with `InvalidProof`.
+    ///
+    /// # Errors
+    /// - `ContractError::TokenNotFound` — no SBT with that ID exists.
+    /// - `ContractError::UnauthorizedBurn` — caller is not the SBT holder.
+    /// - `ContractError::InvalidProof` — `proof_of_residency` is empty.
+    pub fn burn_sbt(env: Env, holder: Address, sbt_id: u64, proof_of_residency: Bytes) {
+        holder.require_auth();
+
+        // Validate proof is non-empty (stub: any non-empty bytes accepted).
+        if proof_of_residency.is_empty() {
+            panic_with_error!(&env, ContractError::InvalidProof);
+        }
+
         let token: SoulboundToken = env
             .storage()
             .persistent()
-            .get(&DataKey::Token(token_id))
-            .expect("token not found");
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
 
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(caller == token.owner || caller == admin, "unauthorized");
+        // Holder-only: the caller must be the SBT owner.
+        if token.owner != holder {
+            panic_with_error!(&env, ContractError::UnauthorizedBurn);
+        }
 
         let owner = token.owner.clone();
-        env.storage().persistent().remove(&DataKey::Token(token_id));
-        env.storage().persistent().remove(&DataKey::Owner(token_id));
+        let timestamp = env.ledger().timestamp();
+
+        env.storage().persistent().remove(&DataKey::Token(sbt_id));
+        env.storage().persistent().remove(&DataKey::Owner(sbt_id));
         env.storage()
             .instance()
-            .remove(&DataKey::Delegation(token_id));
-        let mut owner_tokens: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::OwnerTokens(owner.clone()))
-            .unwrap_or(Vec::new(&env));
-        if let Some(pos) = owner_tokens.iter().position(|id| id == token_id) {
-            owner_tokens.remove(pos as u32);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
+            .remove(&DataKey::Delegation(sbt_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             owner.clone(),
             token.credential_id,
         ));
 
+        let mut owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = owner_tokens.iter().position(|id| id == sbt_id) {
+            owner_tokens.remove(pos as u32);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
+
+        // Emit BurnEvent with sbt_id, holder, and timestamp.
+        let burn_event = BurnEvent {
+            sbt_id,
+            holder: owner.clone(),
+            timestamp,
+        };
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
-        topics.push_back(symbol_short!("burn").into_val(&env));
-        topics.push_back(token_id.into_val(&env));
-        env.events().publish(topics, (owner.clone(), token_id));
-        Self::record_notification(&env, owner.clone(), token_id, symbol_short!("burn"));
-        Self::log_sbt_activity(&env, token_id, symbol_short!("burn"), owner.clone());
+        topics.push_back(Symbol::new(&env, "burn_sbt").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, burn_event);
+
+        Self::record_notification(&env, owner.clone(), sbt_id, symbol_short!("burn"));
+        Self::log_sbt_activity(&env, sbt_id, symbol_short!("burn"), owner);
     }
 
     /// Recover an SBT to a new owner during credential recovery.
@@ -1724,14 +1774,17 @@ mod tests {
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
 
-        client.burn_sbt(&owner, &token_id);
+        client.burn_sbt(&owner, &token_id, &proof);
 
         assert!(client.get_tokens_by_owner(&owner).is_empty());
     }
 
+    /// burn_sbt is holder-only; admin calling with a non-owned token must fail.
     #[test]
-    fn test_burn_sbt_by_admin() {
+    #[should_panic(expected = "HostError")]
+    fn test_burn_sbt_by_admin_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
@@ -1742,10 +1795,10 @@ mod tests {
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
 
-        // Admin burns the SBT for a revoked credential
-        qp_client.revoke_credential(&issuer, &cred_id);
-        client.burn_sbt(&admin, &token_id);
+        // Admin is not the holder — UnauthorizedBurn expected.
+        client.burn_sbt(&admin, &token_id, &proof);
 
         assert!(client.get_tokens_by_owner(&owner).is_empty());
     }
@@ -1762,25 +1815,44 @@ mod tests {
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
 
-        client.burn_sbt(&owner, &token_id);
+        // Capture the ledger timestamp right before the burn so we can validate it.
+        let burn_timestamp = env.ledger().timestamp();
+        client.burn_sbt(&owner, &token_id, &proof);
 
-        // Verify token was burned (owner_of should panic or tokens list should be empty)
+        // Verify token was burned.
         assert!(client.get_tokens_by_owner(&owner).is_empty());
-        // Verify a burn event was emitted by checking events list is non-empty
+
+        // Verify a BurnEvent was emitted with the "burn_sbt" topic.
         let events = env.events().all();
-        let burn_event = events.iter().find(|(_, topics, _)| {
+        let burn_event_opt = events.iter().find(|(_, topics, _)| {
             topics
                 .get(0)
                 .and_then(|v| soroban_sdk::Symbol::try_from_val(&env, &v).ok())
-                .map(|s| s == symbol_short!("burn"))
+                .map(|s| s == Symbol::new(&env, "burn_sbt"))
                 .unwrap_or(false)
         });
-        assert!(burn_event.is_some(), "burn event not emitted");
+        assert!(burn_event_opt.is_some(), "BurnEvent not emitted");
+
+        // Verify topics: [burn_sbt, sbt_id]
+        let (_, topics, data) = burn_event_opt.unwrap();
+        let emitted_id = u64::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(emitted_id, token_id, "BurnEvent sbt_id mismatch");
+
+        // Verify data payload: BurnEvent { sbt_id, holder, timestamp }
+        let event_data = BurnEvent::try_from_val(&env, &data)
+            .expect("BurnEvent data must deserialize as BurnEvent");
+        assert_eq!(event_data.sbt_id, token_id, "BurnEvent.sbt_id mismatch");
+        assert_eq!(event_data.holder, owner, "BurnEvent.holder mismatch");
+        assert_eq!(
+            event_data.timestamp, burn_timestamp,
+            "BurnEvent.timestamp mismatch"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized")]
+    #[should_panic(expected = "HostError")]
     fn test_burn_sbt_unauthorized_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1793,8 +1865,10 @@ mod tests {
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
 
-        client.burn_sbt(&stranger, &token_id);
+        // Stranger is not the holder — must panic with UnauthorizedBurn.
+        client.burn_sbt(&stranger, &token_id, &proof);
     }
 
     #[test]
@@ -1809,12 +1883,48 @@ mod tests {
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
 
-        client.burn_sbt(&owner, &token_id);
+        client.burn_sbt(&owner, &token_id, &proof);
 
         // Re-mint must succeed after burn
         let new_id = client.mint(&owner, &cred_id, &uri);
         assert_eq!(client.owner_of(&new_id), owner);
+    }
+
+    /// Empty proof_of_residency must be rejected with InvalidProof.
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_burn_sbt_empty_proof_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        // Empty proof must panic with ContractError::InvalidProof (HostError in test).
+        let empty_proof = Bytes::new(&env);
+        client.burn_sbt(&owner, &token_id, &empty_proof);
+    }
+
+    /// Attempting to burn a non-existent sbt_id must panic with TokenNotFound.
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_burn_sbt_token_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
+
+        // sbt_id 999 was never minted — must panic with ContractError::TokenNotFound.
+        client.burn_sbt(&owner, &999u64, &proof);
     }
 
     #[test]
