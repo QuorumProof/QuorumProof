@@ -4713,6 +4713,13 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Issue #510: Maintain SubjectCredentialIndex for O(1) lookup
+        Self::subject_index_add(env, subject.clone(), id);
+
+        // Issue #520: Maintain CredentialTypeIndex
+        Self::type_index_add(env, credential_type, id);
+
         let event_data = CredentialIssuedEventData {
             id,
             subject: credential.subject.clone(),
@@ -4723,9 +4730,12 @@ impl QuorumProofContract {
         topics.push_back(topic);
         env.events().publish(topics, event_data);
 
+        // Update metrics
+        Self::update_credential_metrics(env, id, "credential");
+
         // Record activity for the holder
         Self::record_holder_activity(
-            &env,
+            env,
             subject.clone(),
             ActivityType::CredentialIssued,
             id,
@@ -4752,6 +4762,133 @@ impl QuorumProofContract {
         }
 
         id
+    }
+
+    /// Issue credentials to multiple subjects with the same type in one call.
+    /// Returns a `Vec` of new credential IDs in the same order as the input subjects.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address issuing all credentials; must authorize this call.
+    /// - `subject_list`: Ordered list of recipient addresses.
+    /// - `credential_type`: Numeric type identifier for all credentials.
+    /// - `metadata_hashes`: Ordered list of metadata hashes, one per subject (as BytesN<32>).
+    /// - `expires_at`: Optional shared expiry timestamp applied to all credentials.
+    /// - `nonce`: Nonce for Proof of Work verification (same for entire batch).
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics if `subject_list` and `metadata_hashes` have different lengths.
+    /// Panics for any individual credential that violates duplicate or empty-hash rules.
+    pub fn batch_issue_credentials(
+        env: Env,
+        issuer: Address,
+        subject_list: Vec<Address>,
+        credential_type: u32,
+        metadata_hashes: Vec<soroban_sdk::BytesN<32>>,
+        expires_at: Option<u64>,
+        nonce: u64,
+    ) -> Vec<u64> {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        // Reject direct issuance if a multisig policy exists for this credential type
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey2::IssuancePolicy(credential_type))
+        {
+            panic_with_error!(&env, ContractError::InvalidApprovalWorkflow);
+        }
+        // Issue #381: Rate limiting
+        Self::require_rate_limit(&env, &issuer);
+        // Issue #597: Quota enforcement (once per batch)
+        Self::enforce_quota(&env, &issuer);
+        // Issue #521: Proof of Work verification (using first subject as representative)
+        let first_subject = subject_list.get(0).unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidInput));
+        Self::verify_pow(&env, &issuer, first_subject, credential_type, nonce);
+        
+        let batch_len = subject_list.len() as u32;
+        Self::validate_array_bounds(batch_len, 1, MAX_BATCH_SIZE, "subject_list");
+        assert!(
+            metadata_hashes.len() as u32 == batch_len,
+            "subject_list and metadata_hashes must have the same length"
+        );
+
+        // Pre-validation phase: check all entries before issuing any credentials
+        for i in 0..batch_len {
+            let subject = subject_list.get(i).unwrap();
+            let metadata_hash_bytes: soroban_sdk::Bytes = metadata_hashes.get(i).unwrap().clone().into();
+            
+            Self::require_valid_address(&env, &subject);
+            assert!(
+                credential_type > 0,
+                "credential_type must be greater than 0"
+            );
+            assert!(!metadata_hash_bytes.is_empty(), "metadata_hash cannot be empty");
+            Self::precondition(&env, metadata_hash_bytes.len() <= 256);
+
+            // Issue #378: Validate transaction size
+            Self::validate_transaction_size(&env, &metadata_hash_bytes);
+
+            // Issue #379: Validate timestamp
+            Self::validate_optional_timestamp(&env, &expires_at);
+
+            // Check for duplicate credential of same type from same issuer to same subject
+            let duplicate_key = DataKey::SubjectIssuerType(
+                subject.clone(),
+                issuer.clone(),
+                credential_type,
+            );
+            if env.storage().instance().has(&duplicate_key) {
+                panic_with_error!(&env, ContractError::DuplicateCredential);
+            }
+
+            // Check if subject is blacklisted by issuer
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey2::BlacklistEntry(issuer.clone(), subject.clone()))
+            {
+                panic_with_error!(&env, ContractError::HolderBlacklisted);
+            }
+
+            // Also check for duplicates within the batch itself
+            for j in 0..i {
+                let other_subject = subject_list.get(j).unwrap();
+                if subject == other_subject {
+                    panic_with_error!(&env, ContractError::DuplicateCredential);
+                }
+            }
+        }
+
+        // Validation complete - issue all credentials
+        let mut ids: Vec<u64> = Vec::new(&env);
+        for i in 0..batch_len {
+            let subject = subject_list.get(i).unwrap();
+            let metadata_hash_bytes: soroban_sdk::Bytes = metadata_hashes.get(i).unwrap().clone().into();
+            
+            let id = Self::issue_inner(
+                &env,
+                issuer.clone(),
+                subject.clone(),
+                credential_type,
+                metadata_hash_bytes,
+                expires_at.clone(),
+            );
+
+            // Store duplicate prevention mapping
+            let duplicate_key = DataKey::SubjectIssuerType(
+                subject.clone(),
+                issuer.clone(),
+                credential_type,
+            );
+            env.storage().instance().set(&duplicate_key, &id);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            ids.push_back(id);
+        }
+        ids
     }
 
     /// Issue multiple credentials atomically with rollback on validation failure.

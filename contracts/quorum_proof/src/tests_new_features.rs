@@ -1823,4 +1823,98 @@ mod tests {
         assert!(result.is_err(), "request_proof should fail when paused");
         drop(cred_id); // suppress unused warning
     }
+
+    #[test]
+    fn test_batch_issue_credentials_1() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let subject_list = soroban_sdk::vec![&env, subject.clone()];
+        let metadata_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[1u8; 32]);
+        let metadata_hashes = soroban_sdk::vec![&env, metadata_hash];
+
+        let ids = client.batch_issue_credentials(&issuer, &subject_list, &1u32, &metadata_hashes, &None, &0u64);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids.get(0).unwrap(), 1);
+
+        // Verify the credential exists
+        let credential = client.get_credential(&1);
+        assert_eq!(credential.subject, subject);
+        assert_eq!(credential.issuer, issuer);
+        assert_eq!(credential.credential_type, 1);
+    }
+
+    #[test]
+    fn test_batch_issue_credentials_10() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let mut subject_list = soroban_sdk::Vec::new(&env);
+        let mut metadata_hashes = soroban_sdk::Vec::new(&env);
+        
+        for i in 0..10 {
+            let subject = Address::generate(&env);
+            let hash = soroban_sdk::BytesN::<32>::from_array(&env, &[(i + 1) as u8; 32]);
+            subject_list.push_back(subject);
+            metadata_hashes.push_back(hash);
+        }
+
+        let ids = client.batch_issue_credentials(&issuer, &subject_list, &1u32, &metadata_hashes, &None, &0u64);
+        assert_eq!(ids.len(), 10);
+
+        for i in 0..10 {
+            let id = ids.get(i).unwrap();
+            assert_eq!(id, (i + 1) as u64);
+            
+            let credential = client.get_credential(&id);
+            assert_eq!(credential.subject, subject_list.get(i).unwrap());
+            assert_eq!(credential.issuer, issuer);
+            assert_eq!(credential.credential_type, 1);
+        }
+    }
+
+    #[test]
+    fn test_batch_issue_credentials_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let mut subject_list = soroban_sdk::Vec::new(&env);
+        let mut metadata_hashes = soroban_sdk::Vec::new(&env);
+        
+        for i in 0..100 {
+            let subject = Address::generate(&env);
+            let hash = soroban_sdk::BytesN::<32>::from_array(&env, &[(i + 1) as u8; 32]);
+            subject_list.push_back(subject);
+            metadata_hashes.push_back(hash);
+        }
+
+        let ids = client.batch_issue_credentials(&issuer, &subject_list, &1u32, &metadata_hashes, &None, &0u64);
+        assert_eq!(ids.len(), 100);
+
+        for i in 0..100 {
+            let id = ids.get(i).unwrap();
+            assert_eq!(id, (i + 1) as u64);
+            
+            let credential = client.get_credential(&id);
+            assert_eq!(credential.subject, subject_list.get(i).unwrap());
+            assert_eq!(credential.issuer, issuer);
+            assert_eq!(credential.credential_type, 1);
+        }
+    }
 }
