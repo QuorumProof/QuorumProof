@@ -695,6 +695,7 @@ pub enum DataKey {
     SliceCount,
     Attestors(u64),
     SubjectCredentials(Address),
+    Delegations(Address),
     AttestorCount(Address),
     CredentialType(u32),
     Admin,
@@ -1405,6 +1406,35 @@ pub struct DelegationAuditEntry {
     /// When the delegation expires.
     pub expiry: u64,
     /// Ledger sequence when the delegation was granted.
+    pub granted_at: u64,
+}
+
+/// Scope granted to a delegated verifier for the subject's credentials.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum VerificationScope {
+    Credential = 0,
+    ProofRequest = 1,
+    Any = 2,
+}
+
+impl VerificationScope {
+    fn allows(self, required: VerificationScope) -> bool {
+        match (self, required) {
+            (VerificationScope::Any, _) => true,
+            (_, VerificationScope::Any) => true,
+            (left, right) => left == right,
+        }
+    }
+}
+
+/// Subject-scoped authorization entry for a delegated verifier.
+#[contracttype]
+#[derive(Clone)]
+pub struct VerificationDelegation {
+    pub delegate: Address,
+    pub scope: VerificationScope,
     pub granted_at: u64,
 }
 
@@ -8928,8 +8958,10 @@ impl QuorumProofContract {
         proof: soroban_sdk::Bytes,
         verifier: Option<Address>,
     ) -> bool {
-        // Check if subject or a delegate is authorized
-        if !Self::is_authorized_verifier(&env, subject.clone(), sbt_registry_id, credential_id) {
+        let _ = verifier;
+        let caller = env.invoker();
+        // Check if the current caller (subject or delegate) is authorized for the requested subject.
+        if !Self::is_authorized_verifier(&env, caller, sbt_registry_id, credential_id, subject.clone()) {
             return false;
         }
         let quorum_proof_id = env.current_contract_address();
@@ -8961,25 +8993,60 @@ impl QuorumProofContract {
         caller: Address,
         sbt_registry_id: Address,
         credential_id: u64,
+        subject: Address,
     ) -> bool {
-        // Check if caller has a valid delegation
+        if let Some(credential) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Credential>(&DataKey::Credential(credential_id))
+        {
+            if credential.subject != subject {
+                return false;
+            }
+
+            if credential.subject == caller {
+                let sbt_client = SbtRegistryContractClient::new(env, &sbt_registry_id);
+                let tokens = sbt_client.get_tokens_by_owner(&caller);
+                if tokens.iter().any(|token_id| {
+                    let token = sbt_client.get_token(&token_id);
+                    token.credential_id == credential_id
+                }) {
+                    return true;
+                }
+            }
+
+            if Self::has_scope_delegation(env, &credential.subject, &caller, VerificationScope::Credential) {
+                return true;
+            }
+        }
+
         if let Some(delegation) = env
             .storage()
             .instance()
             .get::<_, Delegation>(&DataKey2::Delegation(credential_id, caller.clone()))
         {
-            // Check if delegation hasn't expired (current ledger time < expiry)
             if env.ledger().timestamp() < delegation.expiry {
                 return true;
             }
         }
 
-        // Check if caller is the holder with valid SBT
-        let sbt_client = SbtRegistryContractClient::new(env, &sbt_registry_id);
-        let tokens = sbt_client.get_tokens_by_owner(&caller);
-        tokens.iter().any(|token_id| {
-            let token = sbt_client.get_token(&token_id);
-            token.credential_id == credential_id
+        false
+    }
+
+    fn has_scope_delegation(
+        env: &Env,
+        subject: &Address,
+        delegate: &Address,
+        required_scope: VerificationScope,
+    ) -> bool {
+        let delegations: Vec<VerificationDelegation> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Delegations(subject.clone()))
+            .unwrap_or(Vec::new(env));
+
+        delegations.iter().any(|delegation| {
+            delegation.delegate == *delegate && delegation.scope.allows(required_scope)
         })
     }
 
@@ -9427,6 +9494,86 @@ impl QuorumProofContract {
         let mut topics: Vec<String> = Vec::new(&env);
         topics.push_back(topic);
         env.events().publish(topics, audit_entry);
+    }
+
+    /// Delegate subject-scoped verification authority to another address.
+    ///
+    /// The invoker is treated as the credential subject and can grant a delegate
+    /// the ability to verify their credentials with a specific scope.
+    pub fn delegate_verification_authority(
+        env: Env,
+        delegate: Address,
+        scope: VerificationScope,
+    ) {
+        let subject = env.invoker();
+        subject.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(delegate != subject, "cannot delegate to self");
+
+        let mut delegations: Vec<VerificationDelegation> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Delegations(subject.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        let mut updated = false;
+        for i in 0..delegations.len() {
+            let mut existing = delegations.get(i).unwrap();
+            if existing.delegate == delegate {
+                existing.scope = scope;
+                existing.granted_at = env.ledger().timestamp();
+                delegations.set(i, existing);
+                updated = true;
+                break;
+            }
+        }
+
+        if !updated {
+            delegations.push_back(VerificationDelegation {
+                delegate: delegate.clone(),
+                scope,
+                granted_at: env.ledger().timestamp(),
+            });
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Delegations(subject.clone()), &delegations);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Check whether a delegate is authorized to verify a credential on behalf of
+    /// the current subject for the requested scope.
+    pub fn verify_as_delegate(env: Env, credential_id: u64, delegate: Address) -> bool {
+        let subject = env.invoker();
+
+        let credential: Option<Credential> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id));
+        if let Some(credential) = credential {
+            if credential.subject != subject {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        Self::has_scope_delegation(&env, &subject, &delegate, VerificationScope::Credential)
+    }
+
+    /// Retrieve the subject-scoped verification delegations for a subject.
+    pub fn get_verification_delegations(
+        env: Env,
+        subject: Address,
+    ) -> Vec<VerificationDelegation> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Delegations(subject))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Retrieve the delegation record for a specific credential and delegate.
@@ -20031,6 +20178,62 @@ mod doc_tests {
         // Audit log should have 2 entries
         let audit_log = client.get_delegation_audit(&cred_id);
         assert_eq!(audit_log.len(), 2);
+    }
+
+    #[test]
+    fn test_delegate_verification_authority_grants_subject_scoped_access() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+        let cred_id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &metadata,
+            &None,
+        );
+
+        client.delegate_verification_authority(&delegate, &VerificationScope::Credential);
+
+        let delegations = client.get_verification_delegations(&subject);
+        assert_eq!(delegations.len(), 1);
+        let delegation = delegations.get(0).unwrap();
+        assert_eq!(delegation.delegate, delegate);
+        assert_eq!(delegation.scope, VerificationScope::Credential);
+        assert!(client.verify_as_delegate(&cred_id, &delegate));
+    }
+
+    #[test]
+    fn test_delegate_verification_authority_enforces_scope() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &qp_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+        let cred_id = client.issue_credential(
+            &issuer,
+            &subject,
+            &1u32,
+            &metadata,
+            &None,
+        );
+
+        client.delegate_verification_authority(&delegate, &VerificationScope::ProofRequest);
+        assert!(!client.verify_as_delegate(&cred_id, &delegate));
     }
 
     #[test]
