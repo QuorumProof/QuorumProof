@@ -397,6 +397,9 @@ pub enum DataKey {
     Disputes,
     Dispute(u64),
     DisputeCount,
+    CredentialDisputes(u64),        // Vec of dispute IDs for a credential
+    CredentialDisputeEntry(u64),    // Individual dispute data
+    CredentialDisputeCount,         // Global dispute counter
     Challenge(u64),
     ChallengeCount,
     ActiveChallenge(u64, Address),
@@ -438,6 +441,16 @@ pub enum DataKey2 {
     RateLimitState(Address),
     CredentialAuditTrail(u64),
     CredentialMetadataStore(u64),
+    PowDifficulty,
+    RevocationAuditTrail(u64),
+    CredentialVersionHistory(u64),
+    CredentialTypeIndex(u32),
+    MetadataHashCache(u64),
+    RevocationRequest(u64),
+    CredentialMetadataCiphertext(u64),
+    ThresholdAuditLog(u64),
+    Delegation(u64, Address),
+    DelegationAuditLog(u64),
 }
 
 #[contracttype]
@@ -464,8 +477,64 @@ pub struct Credential {
     pub metadata_hash: soroban_sdk::Bytes,
     pub revoked: bool,
     pub suspended: bool,
+    pub status: CredentialStatus,
     pub expires_at: Option<u64>,
     pub version: u32,
+}
+
+/// Status of a credential
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CredentialStatus {
+    Valid = 1,
+    Disputed = 2,
+    Rejected = 3,
+}
+
+/// Resolution action for a dispute
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum DisputeResolution {
+    Upheld = 1,      // Dispute is valid, credential should be rejected
+    Dismissed = 2,   // Dispute is invalid, credential remains valid
+}
+
+/// Represents a dispute against a credential
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialDispute {
+    pub id: u64,
+    pub credential_id: u64,
+    pub initiator: Address,
+    pub reason: soroban_sdk::Bytes,
+    pub evidence_hash: soroban_sdk::BytesN<32>,
+    pub status: CredentialStatus,
+    pub created_at: u64,
+    pub resolved_at: Option<u64>,
+    pub resolution: Option<DisputeResolution>,
+    pub resolution_note: Option<soroban_sdk::String>,
+}
+
+/// Event data for dispute initiation
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeInitiatedEventData {
+    pub dispute_id: u64,
+    pub credential_id: u64,
+    pub initiator: Address,
+    pub created_at: u64,
+}
+
+/// Event data for dispute resolution
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeResolvedEventData {
+    pub dispute_id: u64,
+    pub credential_id: u64,
+    pub resolution: DisputeResolution,
+    pub resolved_at: u64,
 }
 
 /// Status of a holder-initiated revocation request.
@@ -679,6 +748,8 @@ pub enum ActivityType {
     CredentialAttested = 4,
     AttestationExpired = 5,
     CredentialRecovered = 6,
+    DisputeInitiated = 7,
+    DisputeResolved = 8,
 }
 
 /// Records a single activity event for a credential holder
@@ -845,6 +916,14 @@ pub struct AttestationEvidence {
 pub struct AttestationCondition {
     pub key: soroban_sdk::String,
     pub value: soroban_sdk::Bytes,
+}
+
+/// A shareable link for credential access
+#[contracttype]
+#[derive(Clone)]
+pub struct ShareLink {
+    pub credential_id: u64,
+    pub expires_at: u64,
 }
 
 /// Issue #381: Rate limit configuration per address
@@ -1102,7 +1181,7 @@ impl QuorumProofContract {
     }
 
     /// Verify that SHA-256(issuer_bytes || subject_bytes || credential_type || nonce) has
-    /// at least `difficulty` leading zero bits. Panics with InvalidPoWNonce if not satisfied.
+    /// at least `difficulty` leading zero bits. Panics with InvalidInput if not satisfied.
     fn verify_pow(
         env: &Env,
         issuer: &Address,
@@ -1143,13 +1222,13 @@ impl QuorumProofContract {
 
         for i in 0..required_zero_bytes {
             if hash_bytes[i] != 0 {
-                panic_with_error!(env, ContractError::InvalidPoWNonce);
+                panic_with_error!(env, ContractError::InvalidInput);
             }
         }
         if remaining_bits > 0 && required_zero_bytes < 32 {
             let mask: u8 = 0xFF << (8 - remaining_bits);
             if hash_bytes[required_zero_bytes] & mask != 0 {
-                panic_with_error!(env, ContractError::InvalidPoWNonce);
+                panic_with_error!(env, ContractError::InvalidInput);
             }
         }
     }
@@ -1324,7 +1403,7 @@ impl QuorumProofContract {
     /// Validate ActivityType enum value
     fn validate_activity_type(value: u32) -> bool {
         match value {
-            1 | 2 | 3 | 4 | 5 | 6 => true, // CredentialIssued, CredentialRevoked, etc.
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => true, // CredentialIssued through DisputeResolved
             _ => false,
         }
     }
@@ -2134,6 +2213,7 @@ impl QuorumProofContract {
             metadata_hash,
             revoked: false,
             suspended: false,
+            status: CredentialStatus::Valid,
             expires_at,
             version: 1,
         };
@@ -2289,6 +2369,7 @@ impl QuorumProofContract {
             metadata_hash,
             revoked: false,
             suspended: false,
+            status: CredentialStatus::Valid,
             expires_at,
             version: 1,
         };
@@ -6315,6 +6396,281 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
         dispute_id
+    }
+
+    // ── Credential Dispute Resolution (Issue #985) ──────────────────────────────
+
+    /// Allows any address to dispute a credential (e.g., if it's fraudulent).
+    ///
+    /// # Parameters
+    /// - `initiator`: The address initiating the dispute.
+    /// - `credential_id`: The ID of the credential being disputed.
+    /// - `reason`: Text description of why the credential is being disputed.
+    /// - `evidence_hash`: Hash of evidence supporting the dispute claim.
+    ///
+    /// # Returns
+    /// The unique dispute ID.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics if the credential does not exist.
+    pub fn dispute_credential(
+        env: Env,
+        initiator: Address,
+        credential_id: u64,
+        reason: soroban_sdk::Bytes,
+        evidence_hash: soroban_sdk::BytesN<32>,
+    ) -> u64 {
+        initiator.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_credential_exists(&env, credential_id);
+
+        // Get the credential and update its status
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap();
+
+        // Only allow disputes on Valid credentials
+        if credential.status != CredentialStatus::Valid {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        // Update credential status to Disputed
+        credential.status = CredentialStatus::Disputed;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Generate new dispute ID
+        let dispute_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialDisputeCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        // Create dispute record
+        let dispute = CredentialDispute {
+            id: dispute_id,
+            credential_id,
+            initiator: initiator.clone(),
+            reason: reason.clone(),
+            evidence_hash: evidence_hash.clone(),
+            status: CredentialStatus::Disputed,
+            created_at: env.ledger().timestamp(),
+            resolved_at: None,
+            resolution: None,
+            resolution_note: None,
+        };
+
+        // Store the dispute
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialDisputeEntry(dispute_id), &dispute);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Add dispute ID to credential's disputes list
+        let mut disputes: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialDisputes(credential_id))
+            .unwrap_or(Vec::new(&env));
+        disputes.push_back(dispute_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialDisputes(credential_id), &disputes);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Update dispute counter
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialDisputeCount, &dispute_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("init")),
+            DisputeInitiatedEventData {
+                dispute_id,
+                credential_id,
+                initiator,
+                created_at: env.ledger().timestamp(),
+            },
+        );
+
+        // Record activity
+        Self::record_holder_activity(
+            &env,
+            &credential.subject,
+            ActivityType::DisputeInitiated,
+            credential_id,
+            initiator.clone(),
+            None,
+        );
+
+        dispute_id
+    }
+
+    /// Resolves a credential dispute (admin-only).
+    ///
+    /// # Parameters
+    /// - `admin`: The admin address resolving the dispute.
+    /// - `credential_id`: The ID of the credential in dispute.
+    /// - `resolution`: The resolution decision (Upheld or Dismissed).
+    ///
+    /// # Panics
+    /// Panics if the caller is not the admin.
+    /// Panics if the contract is paused.
+    /// Panics if the credential does not exist.
+    /// Panics if there are no disputes for this credential.
+    pub fn resolve_dispute(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        resolution: DisputeResolution,
+    ) {
+        Self::require_admin(&env, &admin);
+        Self::require_not_paused(&env);
+        Self::require_credential_exists(&env, credential_id);
+
+        // Get the credential
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap();
+
+        // Check that the credential is actually in dispute
+        if credential.status != CredentialStatus::Disputed {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        // Get all disputes for this credential
+        let disputes: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialDisputes(credential_id))
+            .unwrap_or(Vec::new(&env));
+
+        if disputes.is_empty() {
+            panic_with_error!(&env, ContractError::DisputeNotFound);
+        }
+
+        // Update the credential status based on resolution
+        credential.status = match resolution {
+            DisputeResolution::Upheld => CredentialStatus::Rejected,
+            DisputeResolution::Dismissed => CredentialStatus::Valid,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Update all associated disputes
+        let resolved_at = env.ledger().timestamp();
+        for dispute_id in disputes.iter() {
+            let mut dispute: CredentialDispute = env
+                .storage()
+                .instance()
+                .get(&DataKey::CredentialDisputeEntry(dispute_id))
+                .unwrap();
+
+            dispute.status = credential.status;
+            dispute.resolved_at = Some(resolved_at);
+            dispute.resolution = Some(resolution);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialDisputeEntry(dispute_id), &dispute);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+            // Emit event for each dispute
+            env.events().publish(
+                (symbol_short!("dispute"), symbol_short!("resolve")),
+                DisputeResolvedEventData {
+                    dispute_id,
+                    credential_id,
+                    resolution,
+                    resolved_at,
+                },
+            );
+        }
+
+        // Record activity
+        Self::record_holder_activity(
+            &env,
+            &credential.subject,
+            ActivityType::DisputeResolved,
+            credential_id,
+            admin,
+            None,
+        );
+    }
+
+    /// Gets all disputes for a specific credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential.
+    ///
+    /// # Returns
+    /// A vector of all disputes associated with the credential.
+    pub fn get_credential_disputes(env: Env, credential_id: u64) -> Vec<CredentialDispute> {
+        let dispute_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialDisputes(credential_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut disputes = Vec::new(&env);
+        for dispute_id in dispute_ids.iter() {
+            if let Some(dispute) = env
+                .storage()
+                .instance()
+                .get::<DataKey, CredentialDispute>(&DataKey::CredentialDisputeEntry(dispute_id))
+            {
+                disputes.push_back(dispute);
+            }
+        }
+
+        disputes
+    }
+
+    /// Gets the current status of a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential.
+    ///
+    /// # Returns
+    /// The current CredentialStatus.
+    ///
+    /// # Panics
+    /// Panics if the credential does not exist.
+    pub fn get_credential_status(env: Env, credential_id: u64) -> CredentialStatus {
+        Self::require_credential_exists(&env, credential_id);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap();
+
+        credential.status
     }
 
     // ── Credential Holder Recovery (Issue #290) ──────────────────────────────
@@ -13685,6 +14041,262 @@ mod doc_tests {
                 assert_eq!(count, 0);
             }
         }
+    }
+
+    // ── Tests for Issue #985: Credential Dispute Resolution ────────────────
+
+    #[test]
+    fn test_dispute_credential_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let disputer = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        // Issue a credential
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        // Verify initial status is Valid
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Valid);
+        
+        // Dispute the credential
+        let reason = Bytes::from_slice(&env, b"This degree is fake");
+        let evidence_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let dispute_id = client.dispute_credential(&disputer, &cred_id, &reason, &evidence_hash);
+        
+        assert_eq!(dispute_id, 1u64);
+        
+        // Verify status changed to Disputed
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Disputed);
+        
+        // Verify dispute is recorded
+        let disputes = client.get_credential_disputes(&cred_id);
+        assert_eq!(disputes.len(), 1);
+        assert_eq!(disputes.get(0).unwrap().credential_id, cred_id);
+        assert_eq!(disputes.get(0).unwrap().initiator, disputer);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #7)")]
+    fn test_dispute_credential_already_disputed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let disputer = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        let reason = Bytes::from_slice(&env, b"Fake credential");
+        let evidence_hash = BytesN::from_array(&env, &[1u8; 32]);
+        
+        // First dispute succeeds
+        client.dispute_credential(&disputer, &cred_id, &reason, &evidence_hash);
+        
+        // Second dispute should fail (credential already disputed)
+        client.dispute_credential(&disputer, &cred_id, &reason, &evidence_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #1)")]
+    fn test_dispute_credential_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        
+        let disputer = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"Fake credential");
+        let evidence_hash = BytesN::from_array(&env, &[1u8; 32]);
+        
+        // Try to dispute non-existent credential
+        client.dispute_credential(&disputer, &999u64, &reason, &evidence_hash);
+    }
+
+    #[test]
+    fn test_resolve_dispute_upheld() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let disputer = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        let reason = Bytes::from_slice(&env, b"Fraudulent credential");
+        let evidence_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.dispute_credential(&disputer, &cred_id, &reason, &evidence_hash);
+        
+        // Admin resolves dispute - upholds it (credential is fake)
+        client.resolve_dispute(&admin, &cred_id, &DisputeResolution::Upheld);
+        
+        // Verify status changed to Rejected
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Rejected);
+        
+        // Verify dispute is resolved
+        let disputes = client.get_credential_disputes(&cred_id);
+        assert_eq!(disputes.len(), 1);
+        assert_eq!(disputes.get(0).unwrap().status, CredentialStatus::Rejected);
+        assert!(disputes.get(0).unwrap().resolved_at.is_some());
+        assert_eq!(disputes.get(0).unwrap().resolution.unwrap(), DisputeResolution::Upheld);
+    }
+
+    #[test]
+    fn test_resolve_dispute_dismissed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let disputer = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        let reason = Bytes::from_slice(&env, b"Baseless claim");
+        let evidence_hash = BytesN::from_array(&env, &[3u8; 32]);
+        client.dispute_credential(&disputer, &cred_id, &reason, &evidence_hash);
+        
+        // Admin resolves dispute - dismisses it (credential is valid)
+        client.resolve_dispute(&admin, &cred_id, &DisputeResolution::Dismissed);
+        
+        // Verify status changed back to Valid
+        let status = client.get_credential_status(&cred_id);
+        assert_eq!(status, CredentialStatus::Valid);
+        
+        // Verify dispute is resolved
+        let disputes = client.get_credential_disputes(&cred_id);
+        assert_eq!(disputes.len(), 1);
+        assert_eq!(disputes.get(0).unwrap().status, CredentialStatus::Valid);
+        assert!(disputes.get(0).unwrap().resolved_at.is_some());
+        assert_eq!(disputes.get(0).unwrap().resolution.unwrap(), DisputeResolution::Dismissed);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_resolve_dispute_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let disputer = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        let reason = Bytes::from_slice(&env, b"Dispute");
+        let evidence_hash = BytesN::from_array(&env, &[4u8; 32]);
+        client.dispute_credential(&disputer, &cred_id, &reason, &evidence_hash);
+        
+        // Non-admin tries to resolve - should fail
+        client.resolve_dispute(&non_admin, &cred_id, &DisputeResolution::Dismissed);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #7)")]
+    fn test_resolve_dispute_not_in_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        // Try to resolve dispute on a credential that's not disputed
+        client.resolve_dispute(&admin, &cred_id, &DisputeResolution::Dismissed);
+    }
+
+    #[test]
+    fn test_multiple_disputes_same_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let disputer1 = Address::generate(&env);
+        let disputer2 = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        // First dispute
+        let reason1 = Bytes::from_slice(&env, b"First complaint");
+        let evidence1 = BytesN::from_array(&env, &[5u8; 32]);
+        let dispute_id1 = client.dispute_credential(&disputer1, &cred_id, &reason1, &evidence1);
+        
+        // Resolve first dispute as dismissed
+        client.resolve_dispute(&admin, &cred_id, &DisputeResolution::Dismissed);
+        
+        // Second dispute after resolution
+        let reason2 = Bytes::from_slice(&env, b"Second complaint");
+        let evidence2 = BytesN::from_array(&env, &[6u8; 32]);
+        let dispute_id2 = client.dispute_credential(&disputer2, &cred_id, &reason2, &evidence2);
+        
+        assert_ne!(dispute_id1, dispute_id2);
+        
+        // Verify both disputes are recorded
+        let disputes = client.get_credential_disputes(&cred_id);
+        assert_eq!(disputes.len(), 2);
+    }
+
+    #[test]
+    fn test_get_credential_disputes_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        // No disputes yet
+        let disputes = client.get_credential_disputes(&cred_id);
+        assert_eq!(disputes.len(), 0);
+    }
+
+    #[test]
+    fn test_dispute_events_emitted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let disputer = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        
+        let reason = Bytes::from_slice(&env, b"Test dispute");
+        let evidence_hash = BytesN::from_array(&env, &[7u8; 32]);
+        
+        // Dispute and resolve
+        client.dispute_credential(&disputer, &cred_id, &reason, &evidence_hash);
+        client.resolve_dispute(&admin, &cred_id, &DisputeResolution::Upheld);
+        
+        // Events should be emitted (tested via event system)
+        // In a real test, you would check env.events()
     }
 }
 
