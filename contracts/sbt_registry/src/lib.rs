@@ -33,6 +33,7 @@ pub enum DataKey {
     OwnerTokens(Address),
     OwnerCredential(Address, u64),
     Delegation(u64),
+    UsageDelegation(u64, Address),
     Admin,
     QuorumProofId,
     RecoveryRequest(u64),
@@ -111,6 +112,22 @@ pub struct Delegation {
     pub token_id: u64,
     pub delegatee: Address,
     pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UsageScope {
+    DeFiCollateral { expires_at: u64 },
+    IdentityVerification { expires_at: u64 },
+    GovernanceVoting { expires_at: u64 },
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ScopedDelegation {
+    pub token_id: u64,
+    pub delegatee: Address,
+    pub scope: UsageScope,
 }
 
 /// Represents a recovery request for an SBT holder's lost/compromised account
@@ -494,6 +511,61 @@ impl SbtRegistryContract {
             .map_or(false, |delegation: Delegation| {
                 delegation.delegatee == delegatee && delegation.expires_at > current_ts
             })
+    }
+
+    /// Delegate token usage with specific scope and time-based expiry.
+    pub fn delegate_sbt_usage(
+        env: Env,
+        sbt_id: u64,
+        delegatee: Address,
+        scope: UsageScope,
+    ) {
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .expect("token not found");
+        token.owner.require_auth();
+
+        assert!(token.owner != delegatee, "cannot delegate to self");
+
+        let expires_at = match &scope {
+            UsageScope::DeFiCollateral { expires_at } => *expires_at,
+            UsageScope::IdentityVerification { expires_at } => *expires_at,
+            UsageScope::GovernanceVoting { expires_at } => *expires_at,
+        };
+        let current_ts = env.ledger().timestamp();
+        assert!(expires_at > current_ts, "expiry must be in the future");
+
+        let delegation = ScopedDelegation {
+            token_id: sbt_id,
+            delegatee: delegatee.clone(),
+            scope,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::UsageDelegation(sbt_id, delegatee), &delegation);
+    }
+
+    /// Verify a delegated SBT specifically for DeFi protocol usages.
+    pub fn verify_delegated_sbt(env: Env, sbt_id: u64, delegatee: Address) -> bool {
+        if !env.storage().persistent().has(&DataKey::Token(sbt_id)) {
+            return false;
+        }
+
+        let key = DataKey::UsageDelegation(sbt_id, delegatee);
+        if let Some(delegation) = env.storage().instance().get::<_, ScopedDelegation>(&key) {
+            let current_ts = env.ledger().timestamp();
+            match delegation.scope {
+                UsageScope::DeFiCollateral { expires_at } => {
+                    expires_at > current_ts
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
     }
 
     /// Returns the total number of SBTs ever minted.
@@ -2930,5 +3002,77 @@ mod tests {
         client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
 
         client.revoke_sbt_delegation(&other, &token_id);
+    }
+
+    #[test]
+    fn test_delegate_sbt_usage_success_and_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let current_ts = env.ledger().timestamp();
+        let expires_at = current_ts + 1_000;
+
+        // Delegate with DeFiCollateral scope
+        let scope = UsageScope::DeFiCollateral { expires_at };
+        client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
+
+        // Verify delegation is active for DeFi
+        assert!(client.verify_delegated_sbt(&token_id, &delegatee));
+
+        // Advance ledger time past expiry
+        env.ledger().set_timestamp(expires_at + 1);
+        assert!(!client.verify_delegated_sbt(&token_id, &delegatee));
+    }
+
+    #[test]
+    fn test_delegate_sbt_usage_non_defi_scope_fails_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+
+        // Delegate with IdentityVerification scope
+        let scope = UsageScope::IdentityVerification { expires_at };
+        client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
+
+        // verify_delegated_sbt should return false because it's only for DeFi protocols (DeFiCollateral scope)
+        assert!(!client.verify_delegated_sbt(&token_id, &delegatee));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot delegate to self")]
+    fn test_delegate_sbt_usage_to_self_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::DeFiCollateral { expires_at };
+        client.delegate_sbt_usage(&owner, &token_id, &owner, &scope);
     }
 }
