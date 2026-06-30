@@ -9,6 +9,7 @@ import consentRouter from './routes/consent.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
+import issuerRouter from './routes/issuer.js';
 import recoveryRouter from './routes/recovery.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
@@ -67,6 +68,7 @@ app.use('/api/credentials', consentRouter); // #881 consent management
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/attestor', attestorRouter);
+app.use('/api/issuer', issuerRouter);
 app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 
