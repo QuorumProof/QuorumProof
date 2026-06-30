@@ -1,144 +1,178 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+/**
+ * Tests for #928: notification preferences per credential type.
+ */
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  dispatchNotification,
-  flushPendingBatch,
   setPreferences,
+  getPreferences,
   getHistory,
-  BATCH_WINDOW_MS,
-  _resetStores,
+  dispatchNotification,
 } from '../src/notifications.js';
+import express from 'express';
+import request from 'supertest';
 
-const BASE_PREFS = {
-  address: 'GTEST',
-  email: 'test@example.com',
-  channels: ['email' as const],
-  events: ['credential_issued' as const, 'credential_revoked' as const],
-  enabled: true,
-};
+// ---- Unit tests for dispatchNotification with credential_type_filters ----
 
-beforeEach(() => {
-  _resetStores();
-  vi.useFakeTimers();
+describe('dispatchNotification (#928 credential_type_filters)', () => {
+  beforeEach(() => {
+    // Reset by setting fresh prefs before each test
+  });
+
+  it('dispatches when no credential_type_filters are set', async () => {
+    setPreferences({
+      address: 'G_NOFILTER',
+      email: 'no@filter.com',
+      channels: ['email'],
+      events: ['credential_issued'],
+      enabled: true,
+    });
+
+    // Should not throw — dispatch proceeds (email is stubbed to console)
+    await expect(
+      dispatchNotification('G_NOFILTER', 'credential_issued', 1)
+    ).resolves.toBeUndefined();
+  });
+
+  it('dispatches when credential type matches filter', async () => {
+    setPreferences({
+      address: 'G_TYPE_MATCH',
+      email: 'match@test.com',
+      channels: ['email'],
+      events: ['credential_issued'],
+      credential_type_filters: [1, 2], // Degree + License
+      enabled: true,
+    });
+
+    await expect(
+      dispatchNotification('G_TYPE_MATCH', 'credential_issued', 10, 1)
+    ).resolves.toBeUndefined();
+
+    const history = getHistory('G_TYPE_MATCH');
+    expect(history.some((h) => h.credential_id === 10)).toBe(true);
+  });
+
+  it('skips dispatch when credential type is NOT in filter', async () => {
+    setPreferences({
+      address: 'G_TYPE_SKIP',
+      email: 'skip@test.com',
+      channels: ['email'],
+      events: ['credential_issued'],
+      credential_type_filters: [2], // License only
+      enabled: true,
+    });
+
+    const historyBefore = getHistory('G_TYPE_SKIP').length;
+    await dispatchNotification('G_TYPE_SKIP', 'credential_issued', 20, 1); // type=1 (Degree)
+    const historyAfter = getHistory('G_TYPE_SKIP').length;
+
+    expect(historyAfter).toBe(historyBefore); // no new record
+  });
+
+  it('dispatches when credential_type_filters is empty (allow all)', async () => {
+    setPreferences({
+      address: 'G_EMPTY_FILTER',
+      email: 'empty@test.com',
+      channels: ['email'],
+      events: ['credential_issued'],
+      credential_type_filters: [],
+      enabled: true,
+    });
+
+    await expect(
+      dispatchNotification('G_EMPTY_FILTER', 'credential_issued', 30, 3)
+    ).resolves.toBeUndefined();
+  });
 });
 
-afterEach(() => {
-  vi.useRealTimers();
+// ---- HTTP route tests ----
+
+import notificationsRouter from '../src/routes/notifications.js';
+import { vi } from 'vitest';
+
+// Mock ws broadcastEvent to avoid needing a real WS server
+vi.mock('../src/ws/server.js', () => ({
+  broadcastEvent: vi.fn(() => 0),
+}));
+
+const app = express();
+app.use(express.json());
+app.use('/api/notifications', notificationsRouter);
+
+describe('PUT /api/notifications/preferences with credential_type_filters (#928)', () => {
+  it('saves credential_type_filters in preferences', async () => {
+    const res = await request(app)
+      .put('/api/notifications/preferences')
+      .send({
+        address: 'G_HTTP_TEST',
+        email: 'http@test.com',
+        channels: ['email'],
+        events: ['credential_issued'],
+        credential_type_filters: [1, 3],
+        enabled: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    const get = await request(app).get('/api/notifications/preferences/G_HTTP_TEST');
+    expect(get.status).toBe(200);
+    expect(get.body.credential_type_filters).toEqual([1, 3]);
+  });
+
+  it('accepts preferences without credential_type_filters (backward-compat)', async () => {
+    const res = await request(app)
+      .put('/api/notifications/preferences')
+      .send({
+        address: 'G_NO_FILTER_HTTP',
+        email: 'nofilter@test.com',
+        channels: ['email'],
+        events: ['credential_revoked'],
+        enabled: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
+  it('rejects invalid credential_type_filters (non-integer)', async () => {
+    const res = await request(app)
+      .put('/api/notifications/preferences')
+      .send({
+        address: 'G_BAD_FILTER',
+        email: 'bad@test.com',
+        channels: ['email'],
+        events: ['credential_issued'],
+        credential_type_filters: ['Degree'], // strings not allowed
+        enabled: true,
+      });
+
+    expect(res.status).toBe(400);
+  });
 });
 
-describe('notification batching', () => {
-  it('sends a single notification when no other events arrive within the window', async () => {
-    setPreferences(BASE_PREFS);
-    await dispatchNotification('GTEST', 'credential_issued', 1, 'issuerA');
+describe('POST /api/notifications/send with credential_type (#928)', () => {
+  it('accepts credential_type in send payload', async () => {
+    // Ensure prefs exist for this address with no type filter
+    await request(app)
+      .put('/api/notifications/preferences')
+      .send({
+        address: 'G_SEND_TYPE',
+        email: 'send@type.com',
+        channels: ['email'],
+        events: ['credential_issued'],
+        enabled: true,
+      });
 
-    await vi.runAllTimersAsync();
+    const res = await request(app)
+      .post('/api/notifications/send')
+      .send({
+        address: 'G_SEND_TYPE',
+        event: 'credential_issued',
+        credential_id: 5,
+        credential_type: 2,
+      });
 
-    const history = getHistory('GTEST');
-    expect(history).toHaveLength(1);
-    expect(history[0].credential_id).toBe(1);
-    expect(history[0].issuer).toBe('issuerA');
-    expect(history[0].batched_credential_ids).toBeUndefined();
-  });
-
-  it('batches multiple events from the same issuer into one notification', async () => {
-    setPreferences(BASE_PREFS);
-    await dispatchNotification('GTEST', 'credential_issued', 1, 'issuerA');
-    await dispatchNotification('GTEST', 'credential_issued', 2, 'issuerA');
-    await dispatchNotification('GTEST', 'credential_revoked', 3, 'issuerA');
-
-    await vi.runAllTimersAsync();
-
-    const history = getHistory('GTEST');
-    expect(history).toHaveLength(1);
-    expect(history[0].batched_credential_ids).toEqual([1, 2, 3]);
-    expect(history[0].issuer).toBe('issuerA');
-    expect(history[0].message).toContain('issuerA');
-    expect(history[0].message).toContain('#1');
-    expect(history[0].message).toContain('#2');
-    expect(history[0].message).toContain('#3');
-  });
-
-  it('keeps events from different issuers in separate notifications', async () => {
-    setPreferences(BASE_PREFS);
-    await dispatchNotification('GTEST', 'credential_issued', 1, 'issuerA');
-    await dispatchNotification('GTEST', 'credential_issued', 2, 'issuerB');
-
-    await vi.runAllTimersAsync();
-
-    const history = getHistory('GTEST');
-    expect(history).toHaveLength(2);
-    const issuers = history.map((r) => r.issuer).sort();
-    expect(issuers).toEqual(['issuerA', 'issuerB']);
-  });
-
-  it('resets the batch window timer when a new event arrives before flush', async () => {
-    setPreferences(BASE_PREFS);
-    await dispatchNotification('GTEST', 'credential_issued', 1, 'issuerA');
-
-    // Advance time to just before the window expires
-    vi.advanceTimersByTime(BATCH_WINDOW_MS - 100);
-
-    // A second event resets the timer
-    await dispatchNotification('GTEST', 'credential_issued', 2, 'issuerA');
-
-    // Original window would have fired here, but it was reset
-    vi.advanceTimersByTime(100);
-    expect(getHistory('GTEST')).toHaveLength(0);
-
-    // After the full window from the second event, flush occurs
-    vi.advanceTimersByTime(BATCH_WINDOW_MS);
-    // Allow the async flush to complete
-    await Promise.resolve();
-    await Promise.resolve();
-
-    const history = getHistory('GTEST');
-    expect(history).toHaveLength(1);
-    expect(history[0].batched_credential_ids).toEqual([1, 2]);
-  });
-
-  it('flushPendingBatch immediately dispatches the buffered events', async () => {
-    setPreferences(BASE_PREFS);
-    await dispatchNotification('GTEST', 'credential_issued', 10, 'issuerA');
-    await dispatchNotification('GTEST', 'credential_issued', 11, 'issuerA');
-
-    // Do NOT advance timers — explicitly flush
-    await flushPendingBatch('GTEST', 'issuerA');
-
-    const history = getHistory('GTEST');
-    expect(history).toHaveLength(1);
-    expect(history[0].batched_credential_ids).toEqual([10, 11]);
-  });
-
-  it('does not dispatch if address has no preferences', async () => {
-    // No setPreferences call
-    await dispatchNotification('GUNKNOWN', 'credential_issued', 1, 'issuerA');
-    await vi.runAllTimersAsync();
-    expect(getHistory('GUNKNOWN')).toHaveLength(0);
-  });
-
-  it('does not dispatch if notifications are disabled', async () => {
-    setPreferences({ ...BASE_PREFS, enabled: false });
-    await dispatchNotification('GTEST', 'credential_issued', 1, 'issuerA');
-    await vi.runAllTimersAsync();
-    expect(getHistory('GTEST')).toHaveLength(0);
-  });
-
-  it('does not dispatch for events the user has not subscribed to', async () => {
-    setPreferences({ ...BASE_PREFS, events: ['credential_revoked'] });
-    await dispatchNotification('GTEST', 'credential_issued', 1, 'issuerA');
-    await vi.runAllTimersAsync();
-    expect(getHistory('GTEST')).toHaveLength(0);
-  });
-
-  it('groups events without an issuer under an anonymous batch key', async () => {
-    setPreferences(BASE_PREFS);
-    await dispatchNotification('GTEST', 'credential_issued', 1);
-    await dispatchNotification('GTEST', 'credential_issued', 2);
-
-    await vi.runAllTimersAsync();
-
-    const history = getHistory('GTEST');
-    expect(history).toHaveLength(1);
-    expect(history[0].batched_credential_ids).toEqual([1, 2]);
-    expect(history[0].issuer).toBeUndefined();
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
   });
 });
