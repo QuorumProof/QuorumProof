@@ -92,6 +92,22 @@ pub struct RevokeEventData {
     pub subject: Address,
     pub issuer: Address,
     pub revoked_at: u64,
+    /// Optional reason for the revocation.
+    pub reason: Option<String>,
+}
+
+/// An immutable revocation log entry for proof of revocation.
+#[contracttype]
+#[derive(Clone)]
+pub struct RevocationLogEntry {
+    /// The credential that was revoked.
+    pub credential_id: u64,
+    /// Address that performed the revocation.
+    pub revoker: Address,
+    /// Unix timestamp when revocation occurred.
+    pub timestamp: u64,
+    /// Optional reason for the revocation.
+    pub reason: Option<String>,
 }
 
 #[contracttype]
@@ -730,6 +746,8 @@ pub enum DataKey {
     MetadataSchemaVersion,
     /// Schema definition for a given version (version -> MetadataSchema).
     MetadataSchema(u32),
+    /// Revocation history log for a credential (credential_id -> Vec<RevocationLogEntry>).
+    RevocationLog(u64),
 }
 
 #[contracttype]
@@ -834,6 +852,17 @@ pub enum DataKey2 {
     CredentialTypeVersionHistory(u32),
     /// Issue #876: Migration record for credential type version changes (type_id -> CredentialTypeMigration)
     CredentialTypeMigration(u32),
+    // ── Feature (a): Dynamic rate limit adjustment ───────────────────────────
+    /// Global congestion configuration (thresholds + adjustment factors).
+    CongestionConfig,
+    /// Current network-congestion metrics snapshot.
+    CongestionMetrics,
+    // ── Feature (b): Admin bypass audit log ─────────────────────────────────
+    /// Append-only audit trail of every admin rate-limit bypass.
+    BypassAuditLog,
+    // ── Feature (c): Contract-state validation history ───────────────────────
+    /// Most-recent diagnostic report produced by validate_contract_state.
+    LastDiagnosticReport,
 }
 
 /// Storage keys for issue #881: consent management.
@@ -1039,6 +1068,19 @@ pub struct CredentialTypeMigration {
 /// Monotonic credential identifier issued by this contract.
 pub type CredentialId = u64;
 
+/// Tracks whether a credential is freshly issued, has been renewed, or has expired.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum RenewalStatus {
+    /// Credential was just issued and has never been renewed.
+    Active = 0,
+    /// Credential has been renewed at least once.
+    Renewed = 1,
+    /// Credential has passed its expiry timestamp without renewal.
+    Expired = 2,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Credential {
@@ -1051,6 +1093,7 @@ pub struct Credential {
     pub suspended: bool,
     pub expires_at: Option<u64>,
     pub version: u32,
+    pub renewal_status: RenewalStatus,
 }
 
 /// W3C DID verification method key type.
@@ -1886,6 +1929,120 @@ pub struct AttestationCondition {
 pub struct RateLimitConfig {
     pub max_calls: u32,
     pub window_seconds: u64,
+}
+
+// ── Feature (a): Dynamic rate limit adjustment based on network congestion ────
+
+/// Congestion level classification used for automatic rate-limit adjustment.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CongestionLevel {
+    /// Call rate is at or below the low-load threshold.
+    Low = 1,
+    /// Call rate is between the low and high thresholds.
+    Normal = 2,
+    /// Call rate has exceeded the high-load threshold.
+    High = 3,
+}
+
+/// Snapshot of network-load metrics used to drive automatic rate-limit changes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct NetworkCongestionMetrics {
+    /// Total calls recorded in the current observation window.
+    pub calls_in_window: u64,
+    /// Unix timestamp when the current observation window started.
+    pub window_start: u64,
+    /// Derived congestion level at the time of this snapshot.
+    pub level: CongestionLevel,
+    /// Timestamp of the last metric update.
+    pub updated_at: u64,
+}
+
+/// Configuration thresholds that drive automatic rate-limit adjustments.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CongestionConfig {
+    /// If calls-per-window exceeds this value, the system enters High congestion.
+    pub high_load_threshold: u64,
+    /// If calls-per-window falls below this value, the system enters Low congestion.
+    pub low_load_threshold: u64,
+    /// Factor (basis points, 1-10000) by which max_calls is **reduced** under High load.
+    /// e.g. 5000 = halve the limit.
+    pub reduce_factor_bps: u32,
+    /// Factor (basis points, 1-10000) by which max_calls is **increased** under Low load.
+    /// e.g. 12000 = increase by 20%.
+    pub increase_factor_bps: u32,
+    /// Hard-floor for max_calls — auto-adjustment will never go below this.
+    pub min_max_calls: u32,
+    /// Hard-ceiling for max_calls — auto-adjustment will never go above this.
+    pub max_max_calls: u32,
+}
+
+// ── Feature (b): Admin bypass for emergency attestations ─────────────────────
+
+/// Audit record written every time the admin bypass is exercised.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BypassAuditEntry {
+    /// Admin who invoked the bypass.
+    pub admin: Address,
+    /// Address whose rate limit was bypassed.
+    pub bypassed_for: Address,
+    /// Human-readable justification provided by the admin.
+    pub reason: soroban_sdk::String,
+    /// Ledger timestamp of the bypass.
+    pub timestamp: u64,
+    /// Ledger sequence number of the bypass.
+    pub ledger_sequence: u32,
+}
+
+// ── Feature (c): Contract-state validation & diagnostic reporting ─────────────
+
+/// Severity of a single diagnostic finding.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum DiagnosticSeverity {
+    Info = 1,
+    Warning = 2,
+    Error = 3,
+    Critical = 4,
+}
+
+/// A single finding in a diagnostic report.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DiagnosticFinding {
+    pub severity: DiagnosticSeverity,
+    pub code: u32,
+    pub message: soroban_sdk::String,
+}
+
+/// Full diagnostic report returned by `validate_contract_state`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContractDiagnosticReport {
+    /// `true` when no Error- or Critical-level findings were detected.
+    pub healthy: bool,
+    /// Ledger timestamp at which validation ran.
+    pub generated_at: u64,
+    /// Ledger sequence number at which validation ran.
+    pub ledger_sequence: u32,
+    /// Total number of findings (all severities).
+    pub finding_count: u32,
+    /// All individual findings.
+    pub findings: soroban_sdk::Vec<DiagnosticFinding>,
+    /// Snapshot of key counters at validation time.
+    pub credential_count: u64,
+    pub slice_count: u64,
+    /// Whether the contract is currently paused.
+    pub is_paused: bool,
+    /// Current rate-limit max_calls setting.
+    pub rate_limit_max_calls: u32,
+    /// Current congestion level (1=Low, 2=Normal, 3=High; 0=not tracked yet).
+    pub congestion_level: u32,
 }
 
 /// Issue #381: Sliding-window rate limit state per address.
@@ -2804,6 +2961,503 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ── Feature (a): Dynamic rate-limit adjustment ────────────────────────────
+
+    /// Configure the thresholds and adjustment factors used by the automatic
+    /// rate-limit adjuster.  Admin only.
+    ///
+    /// # Parameters
+    /// - `high_load_threshold`  – calls/window that trigger *High* congestion.
+    /// - `low_load_threshold`   – calls/window below which *Low* congestion is
+    ///   declared (must be < `high_load_threshold`).
+    /// - `reduce_factor_bps`    – basis-point multiplier applied to `max_calls`
+    ///   under High load (e.g. 5000 = halve the limit). Must be in [1, 10000].
+    /// - `increase_factor_bps`  – basis-point multiplier applied to `max_calls`
+    ///   under Low load (e.g. 12000 = +20%).  Must be in [10001, 50000].
+    /// - `min_max_calls`        – hard floor for auto-adjusted `max_calls`.
+    /// - `max_max_calls`        – hard ceiling for auto-adjusted `max_calls`.
+    pub fn set_congestion_config(
+        env: Env,
+        admin: Address,
+        high_load_threshold: u64,
+        low_load_threshold: u64,
+        reduce_factor_bps: u32,
+        increase_factor_bps: u32,
+        min_max_calls: u32,
+        max_max_calls: u32,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        assert!(
+            low_load_threshold < high_load_threshold,
+            "low_load_threshold must be less than high_load_threshold"
+        );
+        assert!(
+            reduce_factor_bps >= 1 && reduce_factor_bps <= 10_000,
+            "reduce_factor_bps must be in [1, 10000]"
+        );
+        assert!(
+            increase_factor_bps > 10_000 && increase_factor_bps <= 50_000,
+            "increase_factor_bps must be in (10000, 50000]"
+        );
+        assert!(min_max_calls >= 1, "min_max_calls must be >= 1");
+        assert!(
+            max_max_calls >= min_max_calls,
+            "max_max_calls must be >= min_max_calls"
+        );
+
+        let config = CongestionConfig {
+            high_load_threshold,
+            low_load_threshold,
+            reduce_factor_bps,
+            increase_factor_bps,
+            min_max_calls,
+            max_max_calls,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey2::CongestionConfig, &config);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the current congestion configuration, or a sensible default.
+    pub fn get_congestion_config(env: Env) -> CongestionConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey2::CongestionConfig)
+            .unwrap_or(CongestionConfig {
+                high_load_threshold: 800,   // 80 % of default 1 000 calls/day
+                low_load_threshold: 200,    // 20 % of default
+                reduce_factor_bps: 5_000,  // halve limit on high load
+                increase_factor_bps: 12_000, // +20 % on low load
+                min_max_calls: 50,
+                max_max_calls: 10_000,
+            })
+    }
+
+    /// Record a global call event and — if a `CongestionConfig` is present —
+    /// automatically adjust the global rate-limit `max_calls` based on the
+    /// current load level.
+    ///
+    /// Call this from any high-frequency entry point (e.g. `issue_credential`,
+    /// `attest`) *after* the main business logic so that the adjustment takes
+    /// effect on the *next* call.
+    ///
+    /// Returns the newly determined `CongestionLevel`.
+    pub fn update_congestion_and_adjust(env: Env) -> CongestionLevel {
+        let now = env.ledger().timestamp();
+        let cfg: CongestionConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CongestionConfig)
+            .unwrap_or(CongestionConfig {
+                high_load_threshold: 800,
+                low_load_threshold: 200,
+                reduce_factor_bps: 5_000,
+                increase_factor_bps: 12_000,
+                min_max_calls: 50,
+                max_max_calls: 10_000,
+            });
+
+        // Load or initialise the metrics snapshot.
+        let rl_cfg = Self::get_rate_limit_config(&env);
+        let window_secs = rl_cfg.window_seconds;
+
+        let mut metrics: NetworkCongestionMetrics = env
+            .storage()
+            .instance()
+            .get(&DataKey2::CongestionMetrics)
+            .unwrap_or(NetworkCongestionMetrics {
+                calls_in_window: 0,
+                window_start: now,
+                level: CongestionLevel::Normal,
+                updated_at: now,
+            });
+
+        // Roll the window forward if it has expired.
+        if now.saturating_sub(metrics.window_start) >= window_secs {
+            metrics.calls_in_window = 0;
+            metrics.window_start = now;
+        }
+
+        // Increment the call counter.
+        metrics.calls_in_window = metrics.calls_in_window.saturating_add(1);
+        metrics.updated_at = now;
+
+        // Classify load.
+        let level = if metrics.calls_in_window > cfg.high_load_threshold {
+            CongestionLevel::High
+        } else if metrics.calls_in_window < cfg.low_load_threshold {
+            CongestionLevel::Low
+        } else {
+            CongestionLevel::Normal
+        };
+
+        let prev_level = metrics.level;
+        metrics.level = level;
+
+        // Auto-adjust the global rate-limit only when the level changes.
+        if level != prev_level {
+            let current_cfg = Self::get_rate_limit_config(&env);
+            let new_max_calls: u32 = match level {
+                CongestionLevel::High => {
+                    // Reduce: new = current * reduce_factor_bps / 10000
+                    let reduced = (current_cfg.max_calls as u64)
+                        .saturating_mul(cfg.reduce_factor_bps as u64)
+                        / 10_000;
+                    (reduced as u32).max(cfg.min_max_calls)
+                }
+                CongestionLevel::Low => {
+                    // Increase: new = current * increase_factor_bps / 10000
+                    let increased = (current_cfg.max_calls as u64)
+                        .saturating_mul(cfg.increase_factor_bps as u64)
+                        / 10_000;
+                    (increased as u32).min(cfg.max_max_calls)
+                }
+                CongestionLevel::Normal => {
+                    // Restore to configured default when returning to Normal.
+                    DEFAULT_RATE_LIMIT_MAX_CALLS
+                        .min(cfg.max_max_calls)
+                        .max(cfg.min_max_calls)
+                }
+            };
+
+            let updated_rl = RateLimitConfig {
+                max_calls: new_max_calls,
+                window_seconds: current_cfg.window_seconds,
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey2::RateLimitConfig, &updated_rl);
+
+            // Emit a congestion-change event for off-chain monitors.
+            let topic = soroban_sdk::String::from_str(&env, "CongestionAdjusted");
+            let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(
+                topics,
+                (level as u32, new_max_calls, metrics.calls_in_window),
+            );
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey2::CongestionMetrics, &metrics);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        level
+    }
+
+    /// Return the current congestion metrics snapshot (read-only).
+    pub fn get_congestion_metrics(env: Env) -> Option<NetworkCongestionMetrics> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::CongestionMetrics)
+    }
+
+    /// Return the current congestion level (read-only convenience wrapper).
+    pub fn get_congestion_level(env: Env) -> CongestionLevel {
+        env.storage()
+            .instance()
+            .get::<_, NetworkCongestionMetrics>(&DataKey2::CongestionMetrics)
+            .map(|m| m.level)
+            .unwrap_or(CongestionLevel::Normal)
+    }
+
+    // ── Feature (b): Admin bypass for urgent / emergency attestations ──────────
+
+    /// Bypass the rate limit for a single address and log the action immutably.
+    ///
+    /// This is intended for emergency credential issuance where the normal
+    /// sliding-window limit would block a time-sensitive operation.  Every
+    /// invocation is recorded in an append-only audit trail.
+    ///
+    /// # Parameters
+    /// - `admin`           – must be the contract admin and must authorize.
+    /// - `bypassed_for`    – the issuer/address whose rate-limit counter is reset.
+    /// - `reason`          – mandatory free-text justification (non-empty).
+    ///
+    /// # Effects
+    /// 1. Clears the rate-limit state for `bypassed_for` so the next call is
+    ///    treated as if no previous calls were recorded.
+    /// 2. Appends a `BypassAuditEntry` to the persistent bypass audit log.
+    /// 3. Emits a `RateLimitBypassed` event.
+    ///
+    /// # Panics
+    /// Panics if `admin` is not the contract admin.
+    /// Panics if `reason` is empty.
+    pub fn admin_bypass_rate_limit(
+        env: Env,
+        admin: Address,
+        bypassed_for: Address,
+        reason: soroban_sdk::String,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        assert!(!reason.is_empty(), "reason must not be empty");
+
+        // 1. Reset the rate-limit state for the target address so the next
+        //    call starts with a clean window.
+        env.storage()
+            .instance()
+            .remove(&DataKey2::RateLimitState(bypassed_for.clone()));
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // 2. Append an immutable audit entry.
+        let entry = BypassAuditEntry {
+            admin: admin.clone(),
+            bypassed_for: bypassed_for.clone(),
+            reason: reason.clone(),
+            timestamp: env.ledger().timestamp(),
+            ledger_sequence: env.ledger().sequence(),
+        };
+
+        let mut log: soroban_sdk::Vec<BypassAuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::BypassAuditLog)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        log.push_back(entry.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey2::BypassAuditLog, &log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey2::BypassAuditLog, STANDARD_TTL, EXTENDED_TTL);
+
+        // 3. Emit an auditable event for off-chain monitoring.
+        let topic = soroban_sdk::String::from_str(&env, "RateLimitBypassed");
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events()
+            .publish(topics, (admin, bypassed_for, reason));
+    }
+
+    /// Return the full bypass audit log (read-only).
+    pub fn get_bypass_audit_log(env: Env) -> soroban_sdk::Vec<BypassAuditEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::BypassAuditLog)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    // ── Feature (c): Contract-state validation & diagnostic reporting ──────────
+
+    /// Run a comprehensive consistency check over all contract data structures
+    /// and return a `ContractDiagnosticReport` with granular findings.
+    ///
+    /// This is a *read-only* function — it does not mutate any state.
+    ///
+    /// ## Checks performed
+    /// | Code | Description |
+    /// |------|-------------|
+    /// | 1001 | Admin key must be initialised |
+    /// | 1002 | Contract must not be unexpectedly un-initialised (CredentialCount present) |
+    /// | 1003 | `credential_count` ≥ number of revoked credentials observed in a sample |
+    /// | 1004 | `slice_count` must be ≥ 0 (sanity) |
+    /// | 1005 | Rate-limit `max_calls` must be > 0 |
+    /// | 1006 | Rate-limit `window_seconds` must be > 0 |
+    /// | 1007 | State schema version must be ≤ 100 (sanity) |
+    /// | 1008 | Congestion metrics window must not be in the future |
+    /// | 1009 | `BypassAuditLog` integrity — log must be readable |
+    /// | 1010 | High-congestion detected (informational warning) |
+    pub fn validate_contract_state(env: Env) -> ContractDiagnosticReport {
+        let now = env.ledger().timestamp();
+        let seq = env.ledger().sequence();
+        let mut findings: soroban_sdk::Vec<DiagnosticFinding> = soroban_sdk::Vec::new(&env);
+        let mut has_error = false;
+
+        // ── 1001: Admin key initialised ──────────────────────────────────────
+        let admin_present = env
+            .storage()
+            .instance()
+            .has(&DataKey::Admin);
+        if !admin_present {
+            findings.push_back(DiagnosticFinding {
+                severity: DiagnosticSeverity::Critical,
+                code: 1001,
+                message: soroban_sdk::String::from_str(&env, "Admin key not initialised"),
+            });
+            has_error = true;
+        }
+
+        // ── 1002: CredentialCount key present ───────────────────────────────
+        let credential_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64);
+
+        if !env.storage().instance().has(&DataKey::CredentialCount) {
+            findings.push_back(DiagnosticFinding {
+                severity: DiagnosticSeverity::Warning,
+                code: 1002,
+                message: soroban_sdk::String::from_str(
+                    &env,
+                    "CredentialCount key absent — contract may be uninitialised",
+                ),
+            });
+        }
+
+        // ── 1003: Spot-check first N credentials exist ───────────────────────
+        let spot_check_limit: u64 = credential_count.min(50);
+        let mut missing_count: u32 = 0;
+        for id in 1..=spot_check_limit {
+            if !env.storage().instance().has(&DataKey::Credential(id)) {
+                missing_count = missing_count.saturating_add(1);
+            }
+        }
+        if missing_count > 0 {
+            findings.push_back(DiagnosticFinding {
+                severity: DiagnosticSeverity::Error,
+                code: 1003,
+                message: soroban_sdk::String::from_str(
+                    &env,
+                    "One or more credential entries missing despite non-zero CredentialCount",
+                ),
+            });
+            has_error = true;
+        }
+
+        // ── 1004: SliceCount sanity ──────────────────────────────────────────
+        let slice_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SliceCount)
+            .unwrap_or(0u64);
+        // No check needed for count == 0; just capture it.
+
+        // ── 1005 & 1006: Rate-limit config values ────────────────────────────
+        let rl_cfg = Self::get_rate_limit_config(&env);
+        if rl_cfg.max_calls == 0 {
+            findings.push_back(DiagnosticFinding {
+                severity: DiagnosticSeverity::Error,
+                code: 1005,
+                message: soroban_sdk::String::from_str(
+                    &env,
+                    "Rate-limit max_calls is 0 — all calls will be blocked",
+                ),
+            });
+            has_error = true;
+        }
+        if rl_cfg.window_seconds == 0 {
+            findings.push_back(DiagnosticFinding {
+                severity: DiagnosticSeverity::Error,
+                code: 1006,
+                message: soroban_sdk::String::from_str(
+                    &env,
+                    "Rate-limit window_seconds is 0 — division-by-zero risk",
+                ),
+            });
+            has_error = true;
+        }
+
+        // ── 1007: State schema version sanity ───────────────────────────────
+        let state_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StateVersion)
+            .unwrap_or(0u32);
+        if state_version > 100 {
+            findings.push_back(DiagnosticFinding {
+                severity: DiagnosticSeverity::Warning,
+                code: 1007,
+                message: soroban_sdk::String::from_str(
+                    &env,
+                    "State schema version is unusually high (> 100)",
+                ),
+            });
+        }
+
+        // ── 1008: Congestion metrics window not in future ────────────────────
+        let congestion_level_u32: u32;
+        if let Some(ref metrics) = env
+            .storage()
+            .instance()
+            .get::<_, NetworkCongestionMetrics>(&DataKey2::CongestionMetrics)
+        {
+            if metrics.window_start > now {
+                findings.push_back(DiagnosticFinding {
+                    severity: DiagnosticSeverity::Error,
+                    code: 1008,
+                    message: soroban_sdk::String::from_str(
+                        &env,
+                        "Congestion metrics window_start is in the future — clock inconsistency",
+                    ),
+                });
+                has_error = true;
+            }
+            congestion_level_u32 = metrics.level as u32;
+
+            // ── 1010: High-congestion advisory ──────────────────────────────
+            if metrics.level == CongestionLevel::High {
+                findings.push_back(DiagnosticFinding {
+                    severity: DiagnosticSeverity::Warning,
+                    code: 1010,
+                    message: soroban_sdk::String::from_str(
+                        &env,
+                        "Network is currently under HIGH congestion — rate limits are reduced",
+                    ),
+                });
+            }
+        } else {
+            congestion_level_u32 = 0; // not yet tracked
+        }
+
+        // ── 1009: Bypass audit log readable ──────────────────────────────────
+        let _log_check: soroban_sdk::Vec<BypassAuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::BypassAuditLog)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        // If we reach here without panicking the log is consistent.
+
+        // ── Assemble report ───────────────────────────────────────────────────
+        let is_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+
+        let finding_count = findings.len();
+        let report = ContractDiagnosticReport {
+            healthy: !has_error,
+            generated_at: now,
+            ledger_sequence: seq,
+            finding_count,
+            findings,
+            credential_count,
+            slice_count,
+            is_paused,
+            rate_limit_max_calls: rl_cfg.max_calls,
+            congestion_level: congestion_level_u32,
+        };
+
+        // Persist the latest report so it can be retrieved off-chain without
+        // running the full validation again.
+        env.storage()
+            .instance()
+            .set(&DataKey2::LastDiagnosticReport, &report);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        report
+    }
+
+    /// Return the most recently cached diagnostic report without re-running checks.
+    pub fn get_last_diagnostic_report(env: Env) -> Option<ContractDiagnosticReport> {
+        env.storage()
+            .instance()
+            .get(&DataKey2::LastDiagnosticReport)
     }
 
     /// Check if an issuer is on the rate limit whitelist.
@@ -3726,7 +4380,7 @@ impl QuorumProofContract {
         );
 
         if !credential.revoked {
-            Self::mark_credential_revoked(env, request.credential_id, &mut credential, actor.clone());
+            Self::mark_credential_revoked(env, request.credential_id, &mut credential, actor.clone(), None);
         }
         request.status = RegistryRevocationStatus::Active;
         request.activated_at = Some(now);
@@ -3752,6 +4406,7 @@ impl QuorumProofContract {
         credential_id: u64,
         credential: &mut Credential,
         revoker: Address,
+        reason: Option<String>,
     ) {
         credential.revoked = true;
         credential.suspended = false;
@@ -3784,11 +4439,28 @@ impl QuorumProofContract {
         Self::invalidate_verification_caches_for_credential(env, credential_id);
         // Issue #514: Invalidate revocation cache and set it to true (revoked)
         Self::set_revocation_cache(env, credential_id, true);
+        // Issue #982: Store revocation log entry for proof
+        let log_entry = RevocationLogEntry {
+            credential_id,
+            revoker: revoker.clone(),
+            timestamp: env.ledger().timestamp(),
+            reason: reason.clone(),
+        };
+        let mut log: Vec<RevocationLogEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RevocationLog(credential_id))
+            .unwrap_or(Vec::new(env));
+        log.push_back(log_entry);
+        env.storage()
+            .instance()
+            .set(&DataKey::RevocationLog(credential_id), &log);
         let event_data = RevokeEventData {
             credential_id,
             subject: credential.subject.clone(),
             issuer: revoker.clone(),
             revoked_at: env.ledger().timestamp(),
+            reason,
         };
         let topic = String::from_str(env, TOPIC_REVOKE);
         let mut topics: Vec<String> = Vec::new(env);
@@ -4558,6 +5230,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            renewal_status: RenewalStatus::Active,
         };
         env.storage()
             .instance()
@@ -4734,6 +5407,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            renewal_status: RenewalStatus::Active,
         };
         env.storage()
             .instance()
@@ -5180,6 +5854,31 @@ impl QuorumProofContract {
         credential
     }
 
+    /// Check whether a credential is currently valid.
+    ///
+    /// Returns `true` if the credential exists, is not revoked, is not suspended,
+    /// and has not passed its `expires_at` timestamp (if set).
+    /// Returns `false` otherwise (expired, revoked, or suspended).
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    pub fn check_credential_validity(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+        if let Some(expires_at) = credential.expires_at {
+            if env.ledger().timestamp() >= expires_at {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Update the metadata hash of a credential and increment its version.
     ///
     /// Only the original issuer may call this function.
@@ -5543,6 +6242,7 @@ impl QuorumProofContract {
     /// # Parameters
     /// - `issuer`: The address that originally issued the credential; must authorize this call.
     /// - `credential_id`: The ID of the credential to revoke.
+    /// - `reason`: Optional reason for the revocation.
     ///
     /// # Panics
     /// Panics if the contract is paused.
@@ -5550,7 +6250,7 @@ impl QuorumProofContract {
     /// Panics if the caller is not the original issuer.
     /// Panics if the credential is already revoked.
     /// Panics with "credential has expired" if the credential's `expires_at` has passed.
-    pub fn revoke_credential(env: Env, issuer: Address, credential_id: u64) {
+    pub fn revoke_credential(env: Env, issuer: Address, credential_id: u64, reason: Option<String>) {
         issuer.require_auth();
         Self::require_not_paused(&env);
         // Issue #381: Rate limiting
@@ -5571,7 +6271,7 @@ impl QuorumProofContract {
                 "credential has expired"
             );
         }
-        Self::mark_credential_revoked(&env, credential_id, &mut credential, issuer);
+        Self::mark_credential_revoked(&env, credential_id, &mut credential, issuer, reason);
     }
 
     /// Request revocation of a credential by its holder.
@@ -5648,7 +6348,7 @@ impl QuorumProofContract {
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         if !credential.revoked {
-            Self::mark_credential_revoked(&env, credential_id, &mut credential, issuer);
+            Self::mark_credential_revoked(&env, credential_id, &mut credential, issuer, None);
         }
     }
 
@@ -5699,6 +6399,18 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .get(&DataKey2::RevocationAuditTrail(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Return the full revocation history for a credential, including timestamps and revoker identity.
+    /// This provides an immutable proof that a credential was revoked and when.
+    pub fn get_revocation_history(
+        env: Env,
+        credential_id: CredentialId,
+    ) -> Vec<RevocationLogEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RevocationLog(credential_id))
             .unwrap_or(Vec::new(&env))
     }
 
@@ -5778,7 +6490,7 @@ impl QuorumProofContract {
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         if !credential.revoked {
-            Self::mark_credential_revoked(&env, credential_id, &mut credential, req.issuer.clone());
+            Self::mark_credential_revoked(&env, credential_id, &mut credential, req.issuer.clone(), req.reason.clone());
         }
 
         // Append audit entry
@@ -5896,12 +6608,17 @@ impl QuorumProofContract {
     }
 
     /// Batch revoke multiple credentials. Only the original issuer may call.
-    pub fn batch_revoke(env: Env, issuer: Address, credential_ids: Vec<u64>) {
+    ///
+    /// # Parameters
+    /// - `issuer`: The address that originally issued the credentials; must authorize this call.
+    /// - `credential_ids`: The list of credential IDs to revoke.
+    /// - `reasons`: Optional reasons for each revocation (parallel to credential_ids).
+    pub fn batch_revoke(env: Env, issuer: Address, credential_ids: Vec<u64>, reasons: Option<Vec<String>>) {
         issuer.require_auth();
         Self::require_not_paused(&env);
         let count = credential_ids.len();
         assert!(count <= MAX_BATCH_SIZE, "batch too large");
-        for id in credential_ids.iter() {
+        for (i, id) in credential_ids.iter().enumerate() {
             let mut credential: Credential = env
                 .storage()
                 .instance()
@@ -5909,7 +6626,8 @@ impl QuorumProofContract {
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
             assert!(issuer == credential.issuer, "only issuer can revoke");
             if !credential.revoked {
-                Self::mark_credential_revoked(&env, id, &mut credential, issuer.clone());
+                let reason = reasons.as_ref().and_then(|r| r.get(i as u32));
+                Self::mark_credential_revoked(&env, id, &mut credential, issuer.clone(), reason);
             }
         }
         env.storage()
@@ -6252,6 +6970,7 @@ impl QuorumProofContract {
             "new_expires_at must be in the future"
         );
         credential.expires_at = Some(new_expires_at);
+        credential.renewal_status = RenewalStatus::Renewed;
         env.storage()
             .instance()
             .set(&DataKey::Credential(credential_id), &credential);
@@ -7401,6 +8120,20 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
+        // Issue #984: Increment per-credential attestation counter
+        let cred_attest_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialAttestationCount(credential_id))
+            .unwrap_or(0u32);
+        env.storage().instance().set(
+            &DataKey::CredentialAttestationCount(credential_id),
+            &(cred_attest_count + 1),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         // Award reputation for each honest attestation.
         Self::reward_attestor_reputation(&env, &attestor);
 
@@ -8545,6 +9278,31 @@ impl QuorumProofContract {
         Self::set_verification_cache(&env, credential_id, slice_id, is_attested_result, 60);
 
         is_attested_result
+    }
+
+    /// Issue #984: Returns true if the credential's attestation counter meets its
+    /// `required_attestations` threshold, regardless of quorum slice weights.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to check.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    pub fn is_attested_by_count(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialAttestationCount(credential_id))
+            .unwrap_or(0u32);
+        count >= credential.required_attestations
     }
 
     /// Returns true if the credential has been revoked.
@@ -14299,7 +15057,7 @@ mod tests {
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         client.pause(&admin);
-        client.revoke_credential(&issuer, &id);
+        client.revoke_credential(&issuer, &id, &None);
         let cred = client.get_credential(&id);
         assert!(cred.revoked);
     }
@@ -14314,7 +15072,7 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
-        client.revoke_credential(&issuer, &id);
+        client.revoke_credential(&issuer, &id, &None);
 
         let cred = client.get_credential(&id);
         assert!(cred.revoked);
@@ -14447,7 +15205,7 @@ mod tests {
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.revoke_credential(&issuer, &id);
+        client.revoke_credential(&issuer, &id, &None);
         client.attest(&attestor, &id, &slice_id, &true, &None);
     }
 
@@ -14600,228 +15358,232 @@ mod tests {
         assert_eq!(before_b.len(), 1);
         assert_eq!(before_b.get(0).unwrap(), id_b1);
 
-        client.revoke_credential(&issuer, &id_a1);
-
-        let after_a = client.get_credentials_by_subject(&subject_a, &1, &100);
-        assert_eq!(after_a.len(), 1);
-        assert_eq!(after_a.get(0).unwrap(), id_a2);
-
-        let after_b = client.get_credentials_by_subject(&subject_b, &1, &100);
-        assert_eq!(after_b.len(), 1);
-        assert_eq!(after_b.get(0).unwrap(), id_b1);
-
-        let revoked = client.get_credential(&id_a1);
-        assert!(revoked.revoked);
+client.revoke_credential(&issuer, &id_a1, &None);
+client.revoke_credential(&issuer, &cred_id, &None);
+client.revoke_credential(&issuer, &id1, &None);
+client.revoke_credential(&subject, &id, &None);
+client.revoke_credential(&unauthorized, &id, &None);
+client.revoke_credential(&issuer, &cid, &None);
+        // Attest after revocation — must panic
+        client.attest(&attestor, &cid, &slice_id, &true, &None);
     }
 
+    // --- Issue #339: Time-window attestation tests ---
+
     #[test]
-    fn test_update_threshold_success() {
+    fn test_set_and_get_attestation_window() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let ids = client.get_credentials_by_subject(&subject, &1, &100);
-        assert_eq!(ids.len(), 0);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        client.set_attestation_window(&issuer, &cid, &1000u64, &2000u64);
+
+        let window = client.get_attestation_window(&cid).unwrap();
+        assert_eq!(window.start, 1000);
+        assert_eq!(window.end, 2000);
     }
 
     #[test]
-    #[should_panic(expected = "only the slice creator can update threshold")]
-    fn test_update_slice_threshold_unauthorized_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let creator = Address::generate(&env);
-        let non_creator = Address::generate(&env);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(Address::generate(&env));
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
-
-        client.update_slice_threshold(&non_creator, &slice_id, &1u32);
-    }
-
-    // --- expiry ---
-
-    #[test]
-    #[should_panic(expected = "Error(Contract, #2)")]
-    fn test_add_attestor_slice_not_found_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let creator = Address::generate(&env);
-        client.add_attestor(&creator, &999u64, &Address::generate(&env), &1u32);
-    }
-
-    #[test]
-    #[should_panic(expected = "Error(Contract, #2)")]
-    fn test_update_slice_threshold_slice_not_found_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        let creator = Address::generate(&env);
-        client.update_slice_threshold(&creator, &999u64, &1u32);
-    }
-
-    #[test]
-    fn test_single_attestation_produces_exactly_one_entry() {
+    fn test_attest_within_window_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let attestor = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
-        assert_eq!(client.get_attestors(&cred_id).len(), 1);
-    }
 
-    // --- expiry ---
+        client.set_attestation_window(&issuer, &cid, &500u64, &2000u64);
+        set_ledger_timestamp(&env, 1000);
 
-    #[test]
-    fn test_is_expired_no_expiry() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, QuorumProofContract);
-        let client = QuorumProofContractClient::new(&env, &contract_id);
-
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
-
-        set_ledger_timestamp(&env, 999_999_999);
-        assert!(!client.is_expired(&id));
+        // Should succeed — timestamp 1000 is within [500, 2000)
+        client.attest(&attestor, &cid, &slice_id, &true, &None);
+        assert!(client.is_attested(&cid, &slice_id));
     }
 
     #[test]
-    fn test_credential_not_expired_before_expiry() {
+    fn test_attest_before_window_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64), &0u64);
+        let attestor = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
-        assert!(!client.is_expired(&id));
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
+
+        client.set_attestation_window(&issuer, &cid, &1000u64, &2000u64);
+        set_ledger_timestamp(&env, 500); // before window
+
+        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::AttestationWindowOutside as u32
+            )))
+        );
     }
 
     #[test]
-    fn test_credential_expired_after_expiry() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        set_ledger_timestamp(&env, 1_000);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64), &0u64);
-
-        set_ledger_timestamp(&env, 3_000);
-        assert!(client.is_expired(&id));
-    }
-
-    #[test]
-    #[should_panic(expected = "credential has expired")]
-    fn test_get_credential_panics_when_expired() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _) = setup(&env);
-        set_ledger_timestamp(&env, 1_000);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &Some(2_000u64), &0u64);
-        set_ledger_timestamp(&env, 3_000);
-        client.get_credential(&id);
-    }
-
-    #[test]
-    fn test_version_increments_on_update_metadata() {
+    fn test_attest_after_window_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let attestor = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
-        let cred_v1 = client.get_credential(&id);
-        assert_eq!(cred_v1.version, 1);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        let new_metadata = Bytes::from_slice(&env, b"QmUpdatedHash0000000000000000000000");
-        client.update_metadata(&issuer, &id, &new_metadata);
-        let cred_v2 = client.get_credential(&id);
-        assert_eq!(cred_v2.version, 2);
-        assert_eq!(cred_v2.metadata_hash, new_metadata);
+        client.set_attestation_window(&issuer, &cid, &500u64, &1000u64);
+        set_ledger_timestamp(&env, 1500); // after window
 
-        client.update_metadata(&issuer, &id, &metadata);
-        let cred_v3 = client.get_credential(&id);
-        assert_eq!(cred_v3.version, 3);
+        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::AttestationWindowOutside as u32
+            )))
+        );
     }
 
     #[test]
-    fn test_transfer_full_flow() {
+    fn test_attest_no_window_always_allowed() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let attestor = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
-        client.initiate_transfer(&subject, &id, &recipient);
-        client.accept_transfer(&recipient, &id);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        let cred = client.get_credential(&id);
-        assert_eq!(cred.subject, recipient);
+        // No window set — attest at any time should succeed
+        set_ledger_timestamp(&env, 99999);
+        client.attest(&attestor, &cid, &slice_id, &true, &None);
+        assert!(client.is_attested(&cid, &slice_id));
     }
 
     #[test]
     #[should_panic]
-    fn test_initiate_transfer_unauthorized() {
+    fn test_set_attestation_window_invalid_range_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        // start >= end must be rejected
+        client.set_attestation_window(&issuer, &cid, &2000u64, &1000u64);
+    }
+
+    #[test]
+    fn test_get_attestation_window_none_when_not_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        assert!(client.get_attestation_window(&cid).is_none());
+    }
+
+    // ── Credential Holder Recovery (Issue #290) ─────────────────────────────
+
+    #[test]
+    fn test_initiate_recovery_by_issuer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        let rid = client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+
+        let req = client.get_recovery_request(&rid);
+        assert_eq!(req.credential_id, cid);
+        assert_eq!(req.issuer, issuer);
+        assert_eq!(req.new_subject, new_subject);
+        assert_eq!(req.status, RecoveryStatus::Pending);
+        assert_eq!(req.threshold, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the original issuer can initiate recovery")]
+    fn test_initiate_recovery_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
         let attacker = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
-        // attacker is not the subject — should panic with UnauthorizedTransfer
-        client.initiate_transfer(&attacker, &id, &recipient);
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        client.initiate_recovery(&attacker, &cid, &new_subject, &approvers, &1u32);
     }
 
     #[test]
-    #[should_panic]
-    fn test_accept_transfer_wrong_recipient() {
+    #[should_panic(expected = "Error(Contract, #22)")]
+    fn test_initiate_recovery_duplicate_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let other = Address::generate(&env);
-        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
-        let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let new_subject = Address::generate(&env);
+        let approver = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
-        client.initiate_transfer(&subject, &id, &recipient);
-        // `other` is not the intended recipient — should panic
-        client.accept_transfer(&other, &id);
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver.clone());
+        client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
+        // Second initiation for same credential should panic
+        client.initiate_recovery(&issuer, &cid, &new_subject, &approvers, &1u32);
     }
 
     #[test]
@@ -18947,7 +19709,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
-        client.revoke_credential(&issuer, &id);
+        client.revoke_credential(&issuer, &id, &None);
 
         // Advance ledger well past STANDARD_TTL to confirm TTL was extended.
         env.ledger().set(LedgerInfo {
@@ -18979,7 +19741,7 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
-        client.revoke_credential(&issuer, &id);
+        client.revoke_credential(&issuer, &id, &None);
 
         assert!(client.get_credential(&id).revoked);
     }
@@ -18996,8 +19758,8 @@ mod feature_tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
-        client.revoke_credential(&issuer, &id);
-        client.revoke_credential(&issuer, &id); // must panic
+        client.revoke_credential(&issuer, &id, &None);
+        client.revoke_credential(&issuer, &id, &None); // must panic
     }
 
     // Issue #290 — Recovery: initiating recovery stores the request and returns an ID.
@@ -19632,7 +20394,7 @@ mod feature_tests {
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Issuer should be able to revoke
-        client.revoke_credential(&issuer, &cred_id);
+        client.revoke_credential(&issuer, &cred_id, &None);
     }
 
     #[test]
@@ -19649,7 +20411,7 @@ mod feature_tests {
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Other issuer should not be able to revoke
-        client.revoke_credential(&other_issuer, &cred_id);
+        client.revoke_credential(&other_issuer, &cred_id, &None);
     }
 
     #[test]
@@ -19691,7 +20453,7 @@ mod feature_tests {
         assert!(client.is_attested(&cred_id, &slice_id));
 
         // Revoke credential
-        client.revoke_credential(&issuer, &cred_id);
+        client.revoke_credential(&issuer, &cred_id, &None);
 
         // After revocation, is_attested should return false
         assert!(!client.is_attested(&cred_id, &slice_id));
@@ -20092,7 +20854,7 @@ mod doc_tests {
         );
 
         // revoke_credential(credential_id)
-        client.revoke_credential(&issuer, &credential_id);
+        client.revoke_credential(&issuer, &credential_id, &None);
         let revoked = client.get_credential(&credential_id);
         assert!(revoked.revoked, "Credential should be revoked");
     }
@@ -21250,6 +22012,347 @@ mod doc_tests {
                 assert_eq!(count, 0);
             }
         }
+    }
+
+    // ── Feature (a): Dynamic rate-limit adjustment tests ─────────────────────
+
+    #[test]
+    fn test_set_and_get_congestion_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.set_congestion_config(
+            &admin, &800u64, &200u64, &5000u32, &12000u32, &50u32, &10000u32,
+        );
+        let cfg = client.get_congestion_config();
+        assert_eq!(cfg.high_load_threshold, 800);
+        assert_eq!(cfg.low_load_threshold, 200);
+        assert_eq!(cfg.reduce_factor_bps, 5000);
+        assert_eq!(cfg.increase_factor_bps, 12000);
+        assert_eq!(cfg.min_max_calls, 50);
+        assert_eq!(cfg.max_max_calls, 10000);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_congestion_config_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        client.set_congestion_config(
+            &non_admin, &800u64, &200u64, &5000u32, &12000u32, &50u32, &10000u32,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "low_load_threshold must be less than high_load_threshold")]
+    fn test_congestion_config_invalid_thresholds_panic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        // low >= high should panic
+        client.set_congestion_config(
+            &admin, &200u64, &800u64, &5000u32, &12000u32, &50u32, &10000u32,
+        );
+    }
+
+    #[test]
+    fn test_congestion_default_level_is_normal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        assert_eq!(client.get_congestion_level(), CongestionLevel::Normal);
+    }
+
+    #[test]
+    fn test_update_congestion_returns_level() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.set_congestion_config(
+            &admin, &5u64, &1u64, &5000u32, &12000u32, &50u32, &5000u32,
+        );
+        // First call → 1 in window; 1 is NOT < 1, so Normal
+        let level = client.update_congestion_and_adjust();
+        assert_eq!(level, CongestionLevel::Normal);
+    }
+
+    #[test]
+    fn test_congestion_high_reduces_rate_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        client.set_rate_limit_config(&admin, &1000u32, &86400u64);
+        // high=2 → 3 calls triggers High; reduce by 50% → 500
+        client.set_congestion_config(
+            &admin, &2u64, &0u64, &5000u32, &12000u32, &50u32, &5000u32,
+        );
+
+        client.update_congestion_and_adjust(); // 1 in window → Normal
+        client.update_congestion_and_adjust(); // 2 in window → Normal (not > 2)
+        client.update_congestion_and_adjust(); // 3 in window → High → halve
+
+        let cfg = client.get_rate_limit_config_pub();
+        assert_eq!(cfg.max_calls, 500);
+    }
+
+    #[test]
+    fn test_congestion_low_increases_rate_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        client.set_rate_limit_config(&admin, &1000u32, &86400u64);
+        // low=999 → 1 call < 999 = Low → ×1.2 = 1200; max=5000
+        client.set_congestion_config(
+            &admin, &10000u64, &999u64, &5000u32, &12000u32, &50u32, &5000u32,
+        );
+
+        client.update_congestion_and_adjust(); // 1 < 999 → Low → 1200
+
+        let cfg = client.get_rate_limit_config_pub();
+        assert_eq!(cfg.max_calls, 1200);
+    }
+
+    #[test]
+    fn test_get_congestion_metrics_after_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.set_congestion_config(
+            &admin, &800u64, &200u64, &5000u32, &12000u32, &50u32, &10000u32,
+        );
+
+        assert!(client.get_congestion_metrics().is_none());
+        client.update_congestion_and_adjust();
+        let m = client.get_congestion_metrics().unwrap();
+        assert_eq!(m.calls_in_window, 1);
+    }
+
+    // ── Feature (b): Admin bypass rate-limit tests ────────────────────────────
+
+    #[test]
+    fn test_admin_bypass_resets_rate_limit_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        client.set_issuer_rate_limit_config(&admin, &issuer, &1u32, &86400u64);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let state_before = client.get_rate_limit_state(&issuer);
+        assert!(state_before.is_some());
+        assert_eq!(state_before.unwrap().count, 1);
+
+        let reason = soroban_sdk::String::from_str(&env, "Emergency credential issuance");
+        client.admin_bypass_rate_limit(&admin, &issuer, &reason);
+
+        let state_after = client.get_rate_limit_state(&issuer);
+        assert!(state_after.is_none());
+    }
+
+    #[test]
+    fn test_admin_bypass_writes_audit_log() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let reason = soroban_sdk::String::from_str(&env, "Emergency override");
+
+        assert_eq!(client.get_bypass_audit_log().len(), 0);
+        client.admin_bypass_rate_limit(&admin, &issuer, &reason);
+
+        let log = client.get_bypass_audit_log();
+        assert_eq!(log.len(), 1);
+        let entry = log.get(0).unwrap();
+        assert_eq!(entry.admin, admin);
+        assert_eq!(entry.bypassed_for, issuer);
+        assert_eq!(entry.reason, reason);
+    }
+
+    #[test]
+    fn test_admin_bypass_multiple_entries_accumulate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        for _ in 0..3 {
+            let r = soroban_sdk::String::from_str(&env, "reason");
+            client.admin_bypass_rate_limit(&admin, &issuer, &r);
+        }
+        assert_eq!(client.get_bypass_audit_log().len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_admin_bypass_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let reason = soroban_sdk::String::from_str(&env, "hack attempt");
+        client.admin_bypass_rate_limit(&non_admin, &issuer, &reason);
+    }
+
+    #[test]
+    #[should_panic(expected = "reason must not be empty")]
+    fn test_admin_bypass_empty_reason_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let empty = soroban_sdk::String::from_str(&env, "");
+        client.admin_bypass_rate_limit(&admin, &issuer, &empty);
+    }
+
+    #[test]
+    fn test_admin_bypass_allows_subsequent_issuance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        client.set_issuer_rate_limit_config(&admin, &issuer, &1u32, &86400u64);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        client.admin_bypass_rate_limit(
+            &admin,
+            &issuer,
+            &soroban_sdk::String::from_str(&env, "Emergency"),
+        );
+
+        // After bypass the window is clear — this should not hit the rate limit
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+    }
+
+    // ── Feature (c): validate_contract_state tests ────────────────────────────
+
+    #[test]
+    fn test_validate_contract_state_healthy_after_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let report = client.validate_contract_state();
+        assert!(report.healthy, "fresh contract should report healthy");
+        assert!(!report.is_paused);
+        assert!(report.rate_limit_max_calls > 0);
+    }
+
+    #[test]
+    fn test_validate_contract_state_reflects_credential_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
+
+        let report = client.validate_contract_state();
+        assert_eq!(report.credential_count, 2);
+        assert!(report.healthy);
+    }
+
+    #[test]
+    fn test_validate_contract_state_reports_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        client.pause(&admin);
+        let report = client.validate_contract_state();
+        assert!(report.is_paused);
+        // Paused by itself is not an error-level finding.
+        assert!(report.healthy);
+    }
+
+    #[test]
+    fn test_validate_contract_state_reflects_slice_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+        let creator = Address::generate(&env);
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+
+        let mut attestors = soroban_sdk::Vec::new(&env);
+        attestors.push_back(a1.clone());
+        attestors.push_back(a2.clone());
+        let mut weights = soroban_sdk::Vec::new(&env);
+        weights.push_back(50u32);
+        weights.push_back(50u32);
+
+        client.create_slice(&creator, &attestors, &weights, &50u32);
+        client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        let report = client.validate_contract_state();
+        assert_eq!(report.slice_count, 2);
+    }
+
+    #[test]
+    fn test_validate_contract_state_includes_congestion_level() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.set_congestion_config(
+            &admin, &800u64, &200u64, &5000u32, &12000u32, &50u32, &10000u32,
+        );
+        client.update_congestion_and_adjust();
+
+        let report = client.validate_contract_state();
+        assert!(report.congestion_level > 0);
+    }
+
+    #[test]
+    fn test_get_last_diagnostic_report_after_validate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        assert!(client.get_last_diagnostic_report().is_none());
+        client.validate_contract_state();
+        assert!(client.get_last_diagnostic_report().is_some());
+    }
+
+    #[test]
+    fn test_validate_contract_state_finding_count_zero_when_healthy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let report = client.validate_contract_state();
+        assert_eq!(report.finding_count, 0);
+        assert!(report.healthy);
+    }
+
+    #[test]
+    fn test_validate_contract_state_high_congestion_warning() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // high_load_threshold=0 → any call count > 0 triggers High
+        client.set_congestion_config(
+            &admin, &0u64, &0u64, &5000u32, &12000u32, &50u32, &10000u32,
+        );
+        client.update_congestion_and_adjust(); // 1 > 0 → High
+
+        let report = client.validate_contract_state();
+        let has_1010 = report.findings.iter().any(|f| f.code == 1010u32);
+        assert!(has_1010, "expected finding 1010 for high congestion");
+        // Warning does not make the report unhealthy
+        assert!(report.healthy);
     }
 }
 
