@@ -51,16 +51,17 @@ describe('GET /api/slices/:id', () => {
 describe('GET /api/slices', () => {
   beforeEach(() => mockSimulateCall.mockReset());
 
-  it('returns paginated slices', async () => {
+  it('returns paginated slices with cursor', async () => {
     mockSimulateCall
       .mockResolvedValueOnce(2n) // get_slice_count
       .mockResolvedValueOnce({ ...mockSlice, id: 1n })
       .mockResolvedValueOnce({ ...mockSlice, id: 2n });
 
-    const res = await request(app).get('/api/slices?page=1&page_size=20');
+    const res = await request(app).get('/api/slices?limit=20');
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(2);
     expect(res.body.pagination.total).toBe(2);
+    expect(res.body.pagination.has_more).toBe(false);
   });
 
   it('returns empty list when no slices exist', async () => {
@@ -70,15 +71,15 @@ describe('GET /api/slices', () => {
     expect(res.body.data).toHaveLength(0);
   });
 
-  it('respects page_size limit', async () => {
+  it('respects limit parameter', async () => {
     mockSimulateCall
       .mockResolvedValueOnce(5n)
       .mockResolvedValueOnce({ ...mockSlice, id: 1n })
       .mockResolvedValueOnce({ ...mockSlice, id: 2n });
 
-    const res = await request(app).get('/api/slices?page=1&page_size=2');
+    const res = await request(app).get('/api/slices?limit=2');
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(2);
-    expect(res.body.pagination.page_size).toBe(2);
+    expect(res.body.pagination.limit).toBe(2);
   });
 });

@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
+import { SearchIndex, type SearchOptions, type CredentialRecord as SearchCredentialRecord } from '../searchIndex.js';
+import { MetadataHashCache } from '../services/metadataHashCache.js';
+import { ShardedCredentialStore } from '../services/shardedStorage.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -20,91 +23,165 @@ function serializeBigInt(value: unknown): unknown {
   return value;
 }
 
-type CredentialRecord = {
-  id: string;
-  subject: string;
-  issuer: string;
-  credential_type: number;
-  metadata_hash: string;
-  revoked: boolean;
-  suspended: boolean;
-  expires_at: string | null;
-  version: number;
-};
+type CredentialRecord = SearchCredentialRecord;
 
 export function createCredentialsRouter(soroban: SorobanClient) {
   const router = Router();
+  const searchIndex = new SearchIndex();
+  const metadataHashCache = new MetadataHashCache();
+  const shardedStore = new ShardedCredentialStore();
+  let indexedCredentials: Set<string> = new Set();
 
   /**
-   * GET /api/credentials/search
-   * Query params: type, issuer, subject, status (active|revoked|suspended),
-   *               page, page_size, sort_by (id|type), sort_order (asc|desc)
+   * Helper function to populate the search index from Soroban
    */
-  router.get('/search', async (req: Request, res: Response) => {
-    const {
-      type,
-      issuer,
-      subject,
-      status,
-      page: pageQ = '1',
-      page_size: pageSizeQ = '20',
-      sort_by: sortBy = 'id',
-      sort_order: sortOrder = 'asc',
-    } = req.query as Record<string, string>;
-
-    const page = Math.max(1, parseInt(pageQ, 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(pageSizeQ, 10) || 20));
-
-    if (sortBy && !['id', 'type'].includes(sortBy)) {
-      res.status(400).json({ error: 'sort_by must be "id" or "type"' });
-      return;
-    }
-    if (sortOrder && !['asc', 'desc'].includes(sortOrder)) {
-      res.status(400).json({ error: 'sort_order must be "asc" or "desc"' });
-      return;
-    }
-
+  async function populateIndex(): Promise<void> {
     try {
       const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
       const total = Number(credCount);
 
-      // Fetch all credentials and filter in-memory
-      // (On-chain filtering is not supported; this is a read-only query layer)
-      const all: CredentialRecord[] = [];
+      const allCredentials: CredentialRecord[] = [];
       for (let i = 1; i <= total; i++) {
         try {
           const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
-          all.push(serializeBigInt(cred) as CredentialRecord);
+          const credRecord = serializeBigInt(cred) as CredentialRecord;
+          // Ensure id is a string
+          credRecord.id = String(credRecord.id || i);
+          allCredentials.push(credRecord);
+          indexedCredentials.add(credRecord.id);
+          metadataHashCache.set(credRecord.id, credRecord.metadata_hash, cred as Record<string, unknown>);
+          shardedStore.set(credRecord);
         } catch {
           // skip missing/expired credentials
         }
       }
 
-      // Filter
-      let filtered = all.filter((c) => {
-        if (type !== undefined && c.credential_type !== parseInt(type, 10)) return false;
-        if (issuer !== undefined && c.issuer !== issuer) return false;
-        if (subject !== undefined && c.subject !== subject) return false;
-        if (status === 'revoked' && !c.revoked) return false;
-        if (status === 'suspended' && !c.suspended) return false;
-        if (status === 'active' && (c.revoked || c.suspended)) return false;
-        return true;
-      });
+      searchIndex.indexCredentials(allCredentials);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Failed to populate search index:', msg);
+    }
+  }
 
-      // Sort
-      filtered.sort((a, b) => {
-        const aVal = sortBy === 'type' ? a.credential_type : parseInt(a.id, 10);
-        const bVal = sortBy === 'type' ? b.credential_type : parseInt(b.id, 10);
-        return sortOrder === 'desc' ? bVal - aVal : aVal - bVal;
-      });
+  /**
+   * GET /api/credentials/search
+   * Advanced search with filters, full-text search, and cursor-based pagination
+   * Query params:
+   *   - q: full-text search query
+   *   - type: credential type (supports multiple: type=1&type=2)
+   *   - issuer: issuer address (supports multiple)
+   *   - issuer_type: issuer type (supports multiple)
+   *   - subject: subject address
+   *   - status: active|revoked|suspended
+   *   - attestation_count_min, attestation_count_max: attestation count range
+   *   - created_after, created_before: creation date range (ISO 8601)
+   *   - expires_after, expires_before: expiration date range (ISO 8601)
+   *   - cursor: base64-encoded cursor for pagination (from previous response)
+   *   - limit: results per page (default: 20, max: 100)
+   *   - sort_by: id|type|relevance|created_at|updated_at (default: id)
+   *   - sort_order: asc|desc (default: asc)
+   *   - facets: comma-separated facet names (default: issuer,credential_type,status,issuer_type)
+   */
+  router.get('/search', async (req: Request, res: Response) => {
+    try {
+      // Populate index on first search or if empty
+      if (searchIndex.getIndexSize() === 0) {
+        await populateIndex();
+      }
 
-      const totalFiltered = filtered.length;
-      const start = (page - 1) * pageSize;
-      const data = filtered.slice(start, start + pageSize);
+      const {
+        q,
+        type,
+        issuer,
+        issuer_type,
+        subject,
+        status,
+        attestation_count_min,
+        attestation_count_max,
+        created_after,
+        created_before,
+        expires_after,
+        expires_before,
+        cursor: cursorQ,
+        limit: limitQ = '20',
+        sort_by: sortBy = 'id',
+        sort_order: sortOrder = 'asc',
+        facets: facetsQ,
+      } = req.query as Record<string, string>;
+
+      // Validate limit
+      const limitNum = parseInt(limitQ, 10);
+      if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+        res.status(400).json({ error: 'limit must be between 1 and 100' });
+        return;
+      }
+
+      // Validate sort parameters
+      const validSortBy = ['id', 'type', 'relevance', 'created_at', 'updated_at'];
+      if (!validSortBy.includes(sortBy)) {
+        res.status(400).json({ error: `sort_by must be one of: ${validSortBy.join(', ')}` });
+        return;
+      }
+      if (!['asc', 'desc'].includes(sortOrder)) {
+        res.status(400).json({ error: 'sort_order must be "asc" or "desc"' });
+        return;
+      }
+
+      // Parse facets
+      const facets = (facetsQ || 'issuer,credential_type,status,issuer_type').split(',').map(f => f.trim());
+
+      // Build search options
+      const options: SearchOptions = {
+        query: q,
+        cursor: cursorQ,
+        limit: limitNum,
+        sort_by: (sortBy as any) || 'id',
+        sort_order: (sortOrder as any) || 'asc',
+        facets,
+      };
+
+      // Parse type filter (can be multiple)
+      if (type) {
+        const types = Array.isArray(type) ? type : [type];
+        options.type = types.map(t => parseInt(t, 10)).filter(t => !isNaN(t));
+        if (options.type.length === 1) {
+          options.type = options.type[0];
+        }
+      }
+
+      // Parse issuer filter (can be multiple)
+      if (issuer) {
+        options.issuer = Array.isArray(issuer) ? issuer : [issuer];
+        if ((options.issuer as string[]).length === 1) {
+          options.issuer = (options.issuer as string[])[0];
+        }
+      }
+
+      // Parse issuer_type filter (can be multiple)
+      if (issuer_type) {
+        options.issuer_type = Array.isArray(issuer_type) ? issuer_type : [issuer_type];
+        if ((options.issuer_type as string[]).length === 1) {
+          options.issuer_type = (options.issuer_type as string[])[0];
+        }
+      }
+
+      if (subject) options.subject = subject;
+      if (status) options.status = status as 'active' | 'revoked' | 'suspended';
+      if (attestation_count_min) options.attestation_count_min = parseInt(attestation_count_min, 10);
+      if (attestation_count_max) options.attestation_count_max = parseInt(attestation_count_max, 10);
+      if (created_after) options.created_after = created_after;
+      if (created_before) options.created_before = created_before;
+      if (expires_after) options.expires_after = expires_after;
+      if (expires_before) options.expires_before = expires_before;
+
+      // Execute search
+      const result = searchIndex.search(options);
 
       res.json({
-        data,
-        pagination: { page, page_size: pageSize, total: totalFiltered },
+        data: result.data,
+        facets: result.facets,
+        pagination: result.pagination,
+        query_info: result.query_info,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -158,6 +235,176 @@ export function createCredentialsRouter(soroban: SorobanClient) {
     );
 
     res.json({ results: serializeBigInt(results) });
+  });
+
+  /**
+   * POST /api/credentials/search/refresh-index
+   * Force refresh of the search index from blockchain
+   */
+  router.post('/search/refresh-index', async (req: Request, res: Response) => {
+    try {
+      metadataHashCache.invalidateAll();
+      shardedStore.clear();
+      await populateIndex();
+      res.json({
+        success: true,
+        index_size: searchIndex.getIndexSize(),
+        cache_size: metadataHashCache.size,
+        last_indexed: searchIndex.getLastIndexed(),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  /**
+   * GET /api/credentials/search/index-stats
+   * Get search index and metadata hash cache statistics
+   */
+  router.get('/search/index-stats', (_req: Request, res: Response) => {
+    res.json({
+      index_size: searchIndex.getIndexSize(),
+      vocabulary_size: searchIndex.getVocabularySize(),
+      cache_size: metadataHashCache.size,
+      last_indexed: searchIndex.getLastIndexed(),
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  /**
+   * GET /api/credentials/crl
+   * #866 — Export revoked credentials as a CRL in X.509-compatible JSON structure.
+   * Query params:
+   *   - issuer: CRL issuer identifier (default: "QuorumProof")
+   *   - format: "json" (default) | "pem" (base64-encoded JSON in PEM envelope)
+   */
+  router.get('/crl', async (req: Request, res: Response) => {
+    const issuerName = typeof req.query.issuer === 'string' ? req.query.issuer : 'QuorumProof';
+    const format = typeof req.query.format === 'string' ? req.query.format : 'json';
+
+    if (!['json', 'pem'].includes(format)) {
+      res.status(400).json({ error: 'format must be "json" or "pem"' });
+      return;
+    }
+
+    try {
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+
+      const revokedCertificates: Array<{
+        serialNumber: string;
+        revocationDate: string;
+        reason: string;
+      }> = [];
+
+      for (let i = 1; i <= total; i++) {
+        try {
+          const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          const record = serializeBigInt(cred) as CredentialRecord;
+          if (record.revoked) {
+            revokedCertificates.push({
+              serialNumber: String(record.id || i),
+              revocationDate: record.updated_at ?? new Date().toISOString(),
+              reason: 'unspecified',
+            });
+          }
+        } catch {
+          // skip inaccessible credentials
+        }
+      }
+
+      const thisUpdate = new Date().toISOString();
+      const nextUpdateDate = new Date();
+      nextUpdateDate.setUTCDate(nextUpdateDate.getUTCDate() + 7);
+
+      const crl = {
+        version: 2,
+        issuer: issuerName,
+        thisUpdate,
+        nextUpdate: nextUpdateDate.toISOString(),
+        revokedCertificates,
+        totalRevoked: revokedCertificates.length,
+      };
+
+      if (format === 'pem') {
+        const b64 = Buffer.from(JSON.stringify(crl)).toString('base64');
+        const lines = b64.match(/.{1,64}/g) ?? [];
+        const pem = ['-----BEGIN X509 CRL-----', ...lines, '-----END X509 CRL-----'].join('\n');
+        res.type('text/plain').send(pem);
+        return;
+      }
+
+      res.json(crl);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  /**
+   * GET /api/credentials/shards/stats
+   * #867 — Return sharded storage distribution statistics.
+   */
+  router.get('/shards/stats', (_req: Request, res: Response) => {
+    res.json({
+      shard_count: shardedStore.shardCount,
+      total_credentials: shardedStore.totalSize,
+      shards: shardedStore.getShardStats(),
+    });
+  });
+
+  /**
+   * GET /api/credentials/shards/by-subject
+   * #867 — Fetch credentials for a subject address directly from its shard.
+   * Query params:
+   *   - subject: subject Stellar address (required)
+   */
+  router.get('/shards/by-subject', (_req: Request, res: Response) => {
+    const { subject } = _req.query;
+    if (!subject || typeof subject !== 'string') {
+      res.status(400).json({ error: 'subject query parameter required' });
+      return;
+    }
+    const credentials = shardedStore.getBySubject(subject);
+    res.json({
+      subject,
+      shard_index: shardedStore.getShardIndex(subject),
+      count: credentials.length,
+      credentials,
+    });
+  });
+
+  /**
+   * GET /api/credentials/:id/metadata-hash
+   * Returns the cached metadata hash for a credential, fetching from chain if needed.
+   */
+  router.get('/:id/metadata-hash', async (req: Request, res: Response) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: 'Invalid credential ID' });
+      return;
+    }
+
+    const cached = metadataHashCache.get(String(id));
+    if (cached) {
+      res.json({ credential_id: id, metadata_hash: cached.metadata_hash, cached: true });
+      return;
+    }
+
+    try {
+      const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(id)]);
+      const record = serializeBigInt(cred) as CredentialRecord;
+      metadataHashCache.set(String(id), record.metadata_hash, cred as Record<string, unknown>);
+      res.json({ credential_id: id, metadata_hash: record.metadata_hash, cached: false });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('CredentialNotFound') || msg.includes('not found')) {
+        res.status(404).json({ error: 'Credential not found' });
+      } else {
+        res.status(500).json({ error: msg });
+      }
+    }
   });
 
   return router;

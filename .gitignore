@@ -1,18 +1,27 @@
 # Build artifacts
 target/
 *.wasm
+*.d
 
 # Node
 node_modules/
 frontend/node_modules/
 dashboard/node_modules/
+api-server/node_modules/
+
+# Lock files (generated)
+frontend/package-lock.json
+frontend/pnpm-lock.yaml
+api-server/package-lock.json
 
 # Coverage
 coverage/
 frontend/coverage/
 dashboard/coverage/
+api-server/coverage/
 *.lcov
 .nyc_output/
+lcov.info
 
 # Test snapshots
 **/test_snapshots/
@@ -21,20 +30,28 @@ dashboard/coverage/
 # Backup files
 *.bak
 *.bak.*
-lib.rs.bak
-
-# Build artifacts
-*.wasm
-*.d
 
 # IDE / OS
 .DS_Store
 *.swp
 *.swo
 .vscode/settings.json
+.idea/
 
 # Misc
 .env
 dist/
 dashboard/dist/
 frontend/dist/
+
+# Rust / Cargo
+Cargo.lock.bak
+**/*.rs.bak
+
+# Fuzz artifacts
+fuzz/corpus/
+fuzz/artifacts/
+
+# Mutation testing
+mutants.out/
+mutants.out.old/
