@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { getUsageReport } from '../analytics.js';
+import { buildExpiryForecast, getExpiringWithin } from '../services/expiryAnalytics.js';
+import { dispatchNotification } from '../notifications.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -145,6 +147,63 @@ export function createReportsRouter(soroban: SorobanClient) {
   });
 
   /**
+   * GET /api/reports/distribution
+   * #923 — Credential type distribution: count of Degree/License/Employment
+   * credentials broken down by issuer and optional time period.
+   * Query params:
+   *   - issuer: optional filter by issuer address
+   *   - since: optional ISO date string (lower bound on credential id scan is not available, so
+   *            this is applied client-side when expires_at / metadata is available — currently
+   *            returns all credentials and notes the filter)
+   */
+  router.get('/distribution', async (req: Request, res: Response) => {
+    const issuerFilter = typeof req.query.issuer === 'string' ? req.query.issuer : null;
+
+    const CREDENTIAL_TYPE_LABELS: Record<number, string> = {
+      1: 'Degree',
+      2: 'License',
+      3: 'Employment',
+    };
+
+    try {
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+
+      const credentials: Credential[] = [];
+      for (let i = 1; i <= total; i++) {
+        try {
+          const c = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          credentials.push(serializeBigInt(c) as Credential);
+        } catch {
+          // skip
+        }
+      }
+
+      const filtered = issuerFilter
+        ? credentials.filter((c) => c.issuer === issuerFilter)
+        : credentials;
+
+      // Aggregate by type
+      const byType: Record<string, { count: number; issuers: Record<string, number> }> = {};
+      for (const c of filtered) {
+        const label = CREDENTIAL_TYPE_LABELS[c.credential_type] ?? `Type_${c.credential_type}`;
+        if (!byType[label]) byType[label] = { count: 0, issuers: {} };
+        byType[label].count++;
+        byType[label].issuers[c.issuer] = (byType[label].issuers[c.issuer] ?? 0) + 1;
+      }
+
+      res.json({
+        generatedAt: new Date().toISOString(),
+        total: filtered.length,
+        issuerFilter: issuerFilter ?? null,
+        distribution: byType,
+      });
+    } catch (err: unknown) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
    * GET /api/reports/usage
    * #585 — Contract usage analytics: function call frequency and error rates.
    */
@@ -218,6 +277,81 @@ export function createReportsRouter(soroban: SorobanClient) {
         },
         byCategory,
       });
+    } catch (err: unknown) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * GET /api/reports/expiry-forecast
+   * #924 — Predictive analytics: forecast upcoming credential expiry waves.
+   * Query params:
+   *   - horizon: forecast horizon in days (default 90, max 365)
+   */
+  router.get('/expiry-forecast', async (req: Request, res: Response) => {
+    const horizon = Math.min(
+      365,
+      Math.max(1, parseInt(String(req.query.horizon ?? '90'), 10) || 90)
+    );
+
+    try {
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+
+      const credentials: Credential[] = [];
+      for (let i = 1; i <= total; i++) {
+        try {
+          const c = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          credentials.push(serializeBigInt(c) as Credential);
+        } catch { /* skip */ }
+      }
+
+      const forecast = buildExpiryForecast(credentials, Date.now(), horizon);
+      res.json(forecast);
+    } catch (err: unknown) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * POST /api/reports/expiry-advance-notify
+   * #924 — Dispatch advance expiry notifications for credentials expiring within
+   *        `threshold_days` (default 30). Calls dispatchNotification with
+   *        `credential_expiring` for each matching subject address.
+   * Body: { threshold_days?: number }
+   */
+  router.post('/expiry-advance-notify', async (req: Request, res: Response) => {
+    const threshold = Math.min(
+      365,
+      Math.max(1, parseInt(String(req.body?.threshold_days ?? '30'), 10) || 30)
+    );
+
+    try {
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+
+      const credentials: Credential[] = [];
+      for (let i = 1; i <= total; i++) {
+        try {
+          const c = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          credentials.push(serializeBigInt(c) as Credential);
+        } catch { /* skip */ }
+      }
+
+      const expiring = getExpiringWithin(credentials, threshold);
+
+      const dispatched: { credential_id: string; subject: string; days_until_expiry: number }[] = [];
+      for (const c of expiring) {
+        await dispatchNotification(
+          c.subject,
+          'credential_expiring',
+          parseInt(c.id, 10),
+          c.credential_type
+        );
+        dispatched.push({ credential_id: c.id, subject: c.subject, days_until_expiry: c.days_until_expiry });
+      }
+
+      res.json({ notified: dispatched.length, threshold_days: threshold, dispatched });
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
