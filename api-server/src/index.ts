@@ -4,6 +4,7 @@ import compression from 'compression';
 import zlib from 'zlib';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
+import verifyRouter from './routes/verify.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
@@ -55,6 +56,7 @@ app.use((req, _res, next) => {
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
+app.use('/api/verify', verifyRouter);
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
 app.use('/api/notifications', notificationsRouter);

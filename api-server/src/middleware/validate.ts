@@ -65,6 +65,30 @@ export const schemas = {
     },
   },
 
+  verifyBatchClaims: {
+    body: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: 'object',
+            properties: {
+              credential_id: { type: 'integer', minimum: 1 },
+              claim_type: { type: 'string', minLength: 1, maxLength: 64 },
+            },
+            required: ['credential_id', 'claim_type'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['items'],
+      additionalProperties: false,
+    },
+  },
+
   notificationPreferences: {
     body: {
       type: 'object',
