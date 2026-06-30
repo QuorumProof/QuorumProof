@@ -63,6 +63,7 @@ app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/attestor', attestorRouter);
 app.use('/api/recovery', recoveryRouter);
+app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -84,4 +85,25 @@ createWsServer(httpServer, '/ws');
 httpServer.listen(PORT, () => console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`));
 
 export { broadcastEvent };
+
+// #926: fire webhooks for credential events alongside WS broadcast
+const _origBroadcast = broadcastEvent;
+function broadcastEventWithWebhooks(...args: Parameters<typeof _origBroadcast>) {
+  const result = _origBroadcast(...args);
+  const [event] = args;
+  const webhookEvents = ['credential_issued', 'credential_attested', 'credential_revoked'] as const;
+  if (webhookEvents.includes(event.type as typeof webhookEvents[number])) {
+    dispatchWebhookEvent({
+      event: event.type,
+      credential_id: event.credential_id,
+      issuer: event.issuer,
+      holder: event.holder,
+      attestor: event.attestor,
+      timestamp: event.timestamp ?? new Date().toISOString(),
+    });
+  }
+  return result;
+}
+
+export { broadcastEventWithWebhooks as broadcastEventAndWebhooks };
 export default app;
