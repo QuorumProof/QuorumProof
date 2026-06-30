@@ -1041,6 +1041,19 @@ pub struct CredentialTypeDef {
 /// Monotonic credential identifier issued by this contract.
 pub type CredentialId = u64;
 
+/// Tracks whether a credential is freshly issued, has been renewed, or has expired.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum RenewalStatus {
+    /// Credential was just issued and has never been renewed.
+    Active = 0,
+    /// Credential has been renewed at least once.
+    Renewed = 1,
+    /// Credential has passed its expiry timestamp without renewal.
+    Expired = 2,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Credential {
@@ -1053,6 +1066,7 @@ pub struct Credential {
     pub suspended: bool,
     pub expires_at: Option<u64>,
     pub version: u32,
+    pub renewal_status: RenewalStatus,
 }
 
 /// W3C DID verification method key type.
@@ -5189,6 +5203,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            renewal_status: RenewalStatus::Active,
         };
         env.storage()
             .instance()
@@ -5347,6 +5362,7 @@ impl QuorumProofContract {
             suspended: false,
             expires_at,
             version: 1,
+            renewal_status: RenewalStatus::Active,
         };
         env.storage()
             .instance()
@@ -5773,6 +5789,31 @@ impl QuorumProofContract {
             );
         }
         credential
+    }
+
+    /// Check whether a credential is currently valid.
+    ///
+    /// Returns `true` if the credential exists, is not revoked, is not suspended,
+    /// and has not passed its `expires_at` timestamp (if set).
+    /// Returns `false` otherwise (expired, revoked, or suspended).
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    pub fn check_credential_validity(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if credential.revoked || credential.suspended {
+            return false;
+        }
+        if let Some(expires_at) = credential.expires_at {
+            if env.ledger().timestamp() >= expires_at {
+                return false;
+            }
+        }
+        true
     }
 
     /// Update the metadata hash of a credential and increment its version.
@@ -6866,6 +6907,7 @@ impl QuorumProofContract {
             "new_expires_at must be in the future"
         );
         credential.expires_at = Some(new_expires_at);
+        credential.renewal_status = RenewalStatus::Renewed;
         env.storage()
             .instance()
             .set(&DataKey::Credential(credential_id), &credential);
