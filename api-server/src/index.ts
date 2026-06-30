@@ -8,8 +8,7 @@ import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
 import recoveryRouter from './routes/recovery.js';
-import webhooksRouter from './routes/webhooks.js';
-import { dispatchWebhookEvent } from './services/webhooks.js';
+import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
@@ -43,6 +42,7 @@ const apiRateLimiter = createRateLimiter({
 });
 
 app.use('/api', apiRateLimiter);
+app.use(cacheControl);
 
 app.use((req, _res, next) => {
   console.log(JSON.stringify({

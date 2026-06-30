@@ -13,6 +13,7 @@ import {
   consensusSummary,
 } from '../lib/sliceBuilderUtils';
 import type { AttestorEntry } from '../lib/sliceBuilderUtils';
+import { SliceSimulator } from './SliceSimulator';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -209,6 +210,7 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
   const [submitError, setSubmitError] = useState('');
   const [success, setSuccess] = useState<{ sliceId: bigint } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showSim, setShowSim] = useState(false);
 
   // ── Auto-save draft ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -514,6 +516,32 @@ export function QuorumSliceBuilder({ creatorAddress, initialAttestors, initialTh
       </section>
 
       <div className="divider" />
+
+      {/* ── Simulate / Preview ── */}
+      {attestors.length > 0 && (
+        <section className="qsb__section" aria-label="Simulate attestation scenarios">
+          <div className="qsb__section-header">
+            <span className="detail-card__title">Simulate / Preview</span>
+            <Tooltip text="Preview which signing scenarios would reach consensus, and how resilient the slice is, before you create it." />
+          </div>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            style={{ width: '100%' }}
+            aria-expanded={showSim}
+            onClick={() => setShowSim((s) => !s)}
+          >
+            {showSim ? 'Hide simulator' : '🧪 Preview attestation outcomes'}
+          </button>
+          {showSim && (
+            <div style={{ marginTop: 16 }}>
+              <SliceSimulator attestors={attestors} threshold={threshold} />
+            </div>
+          )}
+        </section>
+      )}
+
+      {attestors.length > 0 && <div className="divider" />}
 
       {/* ── Share ── */}
       {attestors.length > 0 && (
