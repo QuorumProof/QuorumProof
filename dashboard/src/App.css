@@ -31,6 +31,176 @@
   padding: 3rem 2rem;
 }
 
+/* Live Dashboard */
+.live-dashboard-section {
+  margin-bottom: 2.5rem;
+}
+
+:root {
+  --ld-accent: #818cf8;
+  --ld-success: #34d399;
+  --ld-warn: #fbbf24;
+  --ld-error: #f87171;
+  --ld-muted: #9ca3af;
+  --ld-bg: rgba(255, 255, 255, 0.08);
+  --ld-border: rgba(255, 255, 255, 0.15);
+  --ld-text: #f3f4f6;
+  --ld-sub: rgba(243, 244, 246, 0.6);
+}
+
+.live-dashboard {
+  background: var(--ld-bg);
+  border: 1px solid var(--ld-border);
+  border-radius: 1rem;
+  padding: 1.5rem;
+  color: var(--ld-text);
+  backdrop-filter: blur(8px);
+}
+
+.live-dashboard__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.live-dashboard__title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ld-text);
+}
+
+.live-dashboard__status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+}
+
+.live-dashboard__dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.live-dashboard__dot--connected {
+  background: var(--ld-success);
+  box-shadow: 0 0 6px var(--ld-success);
+  animation: ld-pulse 2s ease-in-out infinite;
+}
+
+.live-dashboard__dot--connecting {
+  background: var(--ld-warn);
+}
+
+.live-dashboard__dot--disconnected {
+  background: var(--ld-error);
+}
+
+@keyframes ld-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.live-dashboard__status-text {
+  color: var(--ld-sub);
+  text-transform: capitalize;
+}
+
+.live-dashboard__updated {
+  color: var(--ld-sub);
+  font-size: 0.75rem;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--ld-border);
+}
+
+.live-dashboard__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.live-dashboard__card {
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--ld-border);
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.25rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.live-dashboard__card-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ld-sub);
+  margin: 0;
+}
+
+.live-dashboard__card-value {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  margin: 0.25rem 0 0.5rem;
+  color: var(--ld-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.live-dashboard__card-sub {
+  font-size: 0.75rem;
+  color: var(--ld-sub);
+  margin: 0.25rem 0 0;
+}
+
+.live-dashboard__sparkline {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.live-dashboard__rate-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin: 0.25rem 0;
+}
+
+.live-dashboard__rate-bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.live-dashboard__rate-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.4s ease;
+}
+
+.live-dashboard__rate-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 3rem;
+  text-align: right;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ld-bg: rgba(15, 23, 42, 0.6);
+    --ld-border: rgba(255, 255, 255, 0.1);
+  }
+}
+
 .credentials-section {
   margin-bottom: 3rem;
 }

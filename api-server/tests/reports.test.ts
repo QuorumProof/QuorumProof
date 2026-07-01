@@ -145,3 +145,62 @@ describe('GET /api/reports/audit', () => {
     expect(res.status).toBe(500);
   });
 });
+
+// #923: credential type distribution tests
+describe('GET /api/reports/distribution', () => {
+  beforeEach(() => mockSimulateCall.mockReset());
+
+  it('returns distribution of credential types', async () => {
+    mockSimulateCall
+      .mockResolvedValueOnce(BigInt(3))
+      .mockResolvedValueOnce(mockCredential(1, { credential_type: 1 })) // Degree
+      .mockResolvedValueOnce(mockCredential(2, { credential_type: 2 })) // License
+      .mockResolvedValueOnce(mockCredential(3, { credential_type: 1 })); // Degree
+
+    const res = await request(app).get('/api/reports/distribution');
+    expect(res.status).toBe(200);
+    expect(res.body.distribution.Degree.count).toBe(2);
+    expect(res.body.distribution.License.count).toBe(1);
+    expect(res.body.total).toBe(3);
+  });
+
+  it('filters distribution by issuer', async () => {
+    mockSimulateCall
+      .mockResolvedValueOnce(BigInt(2))
+      .mockResolvedValueOnce(mockCredential(1, { credential_type: 1, issuer: 'issuerA' }))
+      .mockResolvedValueOnce(mockCredential(2, { credential_type: 2, issuer: 'issuerB' }));
+
+    const res = await request(app).get('/api/reports/distribution?issuer=issuerA');
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.distribution.Degree).toBeDefined();
+    expect(res.body.distribution.License).toBeUndefined();
+    expect(res.body.issuerFilter).toBe('issuerA');
+  });
+
+  it('tracks per-issuer counts inside each type', async () => {
+    mockSimulateCall
+      .mockResolvedValueOnce(BigInt(2))
+      .mockResolvedValueOnce(mockCredential(1, { credential_type: 1, issuer: 'issuerA' }))
+      .mockResolvedValueOnce(mockCredential(2, { credential_type: 1, issuer: 'issuerB' }));
+
+    const res = await request(app).get('/api/reports/distribution');
+    expect(res.status).toBe(200);
+    expect(res.body.distribution.Degree.issuers.issuerA).toBe(1);
+    expect(res.body.distribution.Degree.issuers.issuerB).toBe(1);
+  });
+
+  it('returns empty distribution when no credentials exist', async () => {
+    mockSimulateCall.mockResolvedValueOnce(BigInt(0));
+    const res = await request(app).get('/api/reports/distribution');
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(0);
+    expect(res.body.distribution).toEqual({});
+  });
+
+  it('returns 500 when soroban call fails', async () => {
+    mockSimulateCall.mockRejectedValueOnce(new Error('contract error'));
+    const res = await request(app).get('/api/reports/distribution');
+    expect(res.status).toBe(500);
+  });
+});

@@ -30,6 +30,7 @@ router.put('/preferences', validate(schemas.notificationPreferences), (req: Requ
     phone: body.phone,
     channels: body.channels,
     events: body.events,
+    credential_type_filters: body.credential_type_filters,
     enabled: body.enabled !== false,
   });
 
@@ -51,10 +52,11 @@ router.get('/history', (req: Request, res: Response) => {
 });
 
 router.post('/send', validate(schemas.notificationSend), async (req: Request, res: Response) => {
-  const { address, event, credential_id, issuer, holder } = req.body as {
+  const { address, event, credential_id, credential_type, issuer, holder } = req.body as {
     address: string;
     event: NotificationEvent;
     credential_id: number;
+    credential_type?: number;
     issuer?: string;
     holder?: string;
   };
@@ -67,7 +69,7 @@ router.post('/send', validate(schemas.notificationSend), async (req: Request, re
     timestamp: new Date().toISOString(),
   });
 
-  await dispatchNotification(address, event, credential_id);
+  await dispatchNotification(address, event, credential_id, credential_type);
   res.json({ success: true, ws_recipients: wsRecipients });
 });
 
