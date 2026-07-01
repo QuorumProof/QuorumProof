@@ -3,7 +3,7 @@ import type { simulateCall as SimulateCallType } from '../soroban.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
-  u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
+  u64Val: (n: number | bigint) => any;
 };
 
 type ServiceRecord = {

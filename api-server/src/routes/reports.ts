@@ -6,7 +6,7 @@ import { dispatchNotification } from '../notifications.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
-  u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
+  u64Val: (n: number | bigint) => any;
 };
 
 function serializeBigInt(value: unknown): unknown {
@@ -346,6 +346,7 @@ export function createReportsRouter(soroban: SorobanClient) {
           c.subject,
           'credential_expiring',
           parseInt(c.id, 10),
+          undefined,
           c.credential_type
         );
         dispatched.push({ credential_id: c.id, subject: c.subject, days_until_expiry: c.days_until_expiry });

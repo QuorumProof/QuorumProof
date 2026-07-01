@@ -8,7 +8,7 @@ import {
   Clock,
   AlertCircle,
   Users,
-  Signature,
+  PenTool,
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import clsx from 'clsx'
@@ -306,7 +306,7 @@ export const AttestationPanel: React.FC<AttestationPanelProps> = ({
               </>
             ) : (
               <>
-                <Signature width={18} height={18} aria-hidden="true" />
+                <PenTool width={18} height={18} aria-hidden="true" />
                 <span>Submit Attestation</span>
               </>
             )}

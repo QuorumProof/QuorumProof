@@ -10,6 +10,9 @@ import analyticsRouter from './routes/analytics.js';
 import attestorRouter from './routes/attestor.js';
 import issuerRouter from './routes/issuer.js';
 import recoveryRouter from './routes/recovery.js';
+import shareLinksRouter from './routes/shareLinks.js';
+import consentRouter from './routes/consent.js';
+import webhooksRouter from './routes/webhooks.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
@@ -17,9 +20,9 @@ import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { createWsServer } from './ws/server.js';
-import { getConnectionCount, getSubscriberCount } from './ws/subscriptions.js';
+import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics } from './ws/metrics.js';
-import { broadcastEvent } from './ws/server.js';
+import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
 
@@ -94,6 +97,8 @@ httpServer.listen(PORT, () => console.log(`QuorumProof API server listening on p
 export { broadcastEvent };
 
 // #926: fire webhooks for credential events alongside WS broadcast
+// TODO: Implement webhook dispatch when dispatchWebhookEvent is available
+/*
 const _origBroadcast = broadcastEvent;
 function broadcastEventWithWebhooks(...args: Parameters<typeof _origBroadcast>) {
   const result = _origBroadcast(...args);
@@ -111,6 +116,7 @@ function broadcastEventWithWebhooks(...args: Parameters<typeof _origBroadcast>) 
   }
   return result;
 }
+*/
 
 export { broadcastEventWithWebhooks as broadcastEventAndWebhooks };
 export default app;

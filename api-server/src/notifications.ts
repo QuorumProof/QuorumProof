@@ -102,23 +102,25 @@ async function sendSms(phone: string, message: string): Promise<void> {
 }
 
 /**
- * Dispatch notifications for a credential event to all subscribers whose
- * preferences include the given address and event type.
- * @param credentialType optional credential type number; used to filter against
+ * Dispatch a notification for a credential event.  Events from the same issuer
+ * arriving within BATCH_WINDOW_MS are grouped into a single notification.
+ *
+ * @param address      Stellar address of the credential holder.
+ * @param event        The credential lifecycle event.
+ * @param credentialId The credential being affected.
+ * @param issuer       Optional issuer identity used as the batch grouping key.
+ * @param credentialType Optional credential type number; used to filter against
  *   per-preference `credential_type_filters` (issue #928).
  */
 export async function dispatchNotification(
   address: string,
   event: NotificationEvent,
   credentialId: number,
+  issuer?: string,
   credentialType?: number
 ): Promise<void> {
   const prefs = preferencesStore.get(address);
-  if (!prefs || !prefs.enabled) return;
-
-  // Only include events the user cares about
-  const relevant = entry.events.filter((e) => prefs.events.includes(e.event));
-  if (relevant.length === 0) return;
+  if (!prefs || !prefs.enabled || !prefs.events.includes(event)) return;
 
   // #928: skip if user has type filters and this credential type isn't in them
   if (
@@ -127,56 +129,6 @@ export async function dispatchNotification(
     prefs.credential_type_filters.length > 0 &&
     !prefs.credential_type_filters.includes(credentialType)
   ) return;
-
-  const message = buildMessage(event, credentialId);
-
-  for (const channel of prefs.channels) {
-    const record: NotificationRecord = {
-      id: String(++notificationCounter),
-      address,
-      event: relevant[0].event,
-      channel,
-      credential_id: relevant[0].credentialId,
-      batched_credential_ids: relevant.length > 1 ? relevant.map((e) => e.credentialId) : undefined,
-      issuer,
-      message,
-      sent_at: new Date().toISOString(),
-      success: false,
-    };
-
-    try {
-      if (channel === 'email' && prefs.email) {
-        await sendEmail(prefs.email, message);
-        record.success = true;
-      } else if (channel === 'sms' && prefs.phone) {
-        await sendSms(prefs.phone, message);
-        record.success = true;
-      }
-    } catch (err) {
-      record.error = err instanceof Error ? err.message : String(err);
-    }
-
-    historyStore.push(record);
-  }
-}
-
-/**
- * Dispatch a notification for a credential event.  Events from the same issuer
- * arriving within BATCH_WINDOW_MS are grouped into a single notification.
- *
- * @param address      Stellar address of the credential holder.
- * @param event        The credential lifecycle event.
- * @param credentialId The credential being affected.
- * @param issuer       Optional issuer identity used as the batch grouping key.
- */
-export async function dispatchNotification(
-  address: string,
-  event: NotificationEvent,
-  credentialId: number,
-  issuer?: string
-): Promise<void> {
-  const prefs = preferencesStore.get(address);
-  if (!prefs || !prefs.enabled || !prefs.events.includes(event)) return;
 
   const batchKey = `${address}:${issuer ?? ''}`;
   const existing = batchStore.get(batchKey);
@@ -200,6 +152,53 @@ export async function dispatchNotification(
 export async function flushPendingBatch(address: string, issuer?: string): Promise<void> {
   const batchKey = `${address}:${issuer ?? ''}`;
   await flushBatch(address, issuer, batchKey);
+}
+
+/**
+ * Internal function to flush a batch and send the notification.
+ */
+async function flushBatch(address: string, issuer: string | undefined, batchKey: string): Promise<void> {
+  const entry = batchStore.get(batchKey);
+  if (!entry || entry.events.length === 0) return;
+
+  const prefs = preferencesStore.get(address);
+  if (!prefs || !prefs.enabled) {
+    batchStore.delete(batchKey);
+    return;
+  }
+
+  const message = buildBatchMessage(entry.events, issuer);
+
+  for (const channel of prefs.channels) {
+    const record: NotificationRecord = {
+      id: String(++notificationCounter),
+      address,
+      event: entry.events[0].event,
+      channel,
+      credential_id: entry.events[0].credentialId,
+      batched_credential_ids: entry.events.length > 1 ? entry.events.map((e) => e.credentialId) : undefined,
+      issuer,
+      message,
+      sent_at: new Date().toISOString(),
+      success: false,
+    };
+
+    try {
+      if (channel === 'email' && prefs.email) {
+        await sendEmail(prefs.email, message);
+        record.success = true;
+      } else if (channel === 'sms' && prefs.phone) {
+        await sendSms(prefs.phone, message);
+        record.success = true;
+      }
+    } catch (err) {
+      record.error = err instanceof Error ? err.message : String(err);
+    }
+
+    historyStore.push(record);
+  }
+
+  batchStore.delete(batchKey);
 }
 
 /** Upsert notification preferences for an address. */

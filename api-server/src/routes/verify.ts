@@ -235,9 +235,9 @@ export function createVerifyRouter(soroban: SorobanClient) {
             return {
               credential_id: pair.credential_id,
               claim_type: pair.claim_type,
-              status: credential.reason === 'not_found' ? 'not_found' : 'error',
+              status: (credential as any).reason === 'not_found' ? 'not_found' : 'error',
               proof: null,
-              error: credential.reason === 'error' ? credential.error ?? 'lookup failed' : null,
+              error: (credential as any).reason === 'error' ? (credential as any).error ?? 'lookup failed' : null,
             };
           }
 

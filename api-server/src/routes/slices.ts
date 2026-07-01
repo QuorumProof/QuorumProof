@@ -3,7 +3,7 @@ import type { simulateCall as SimulateCallType } from '../soroban.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
-  u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
+  u64Val: (n: number | bigint) => any;
 };
 
 /** Recursively convert BigInt values to strings for JSON serialization. */
@@ -26,7 +26,7 @@ export function createSlicesRouter(soroban: SorobanClient) {
    * Returns a single quorum slice by ID.
    */
   router.get('/:id', async (req: Request, res: Response) => {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(req.params.id as string, 10);
     if (!Number.isInteger(id) || id <= 0) {
       res.status(400).json({ error: 'Invalid slice ID' });
       return;
