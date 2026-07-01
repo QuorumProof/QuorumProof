@@ -22,6 +22,10 @@ pub enum ContractError {
     InvalidGuardian = 7,
     NotWhitelisted = 8,
     HolderBlacklisted = 9,
+    EscrowAlreadyActive = 10,
+    EscrowNotFound = 11,
+    AlreadyApproved = 12,
+    InvalidApprovalCount = 13,
 }
 
 #[contracttype]
@@ -54,6 +58,8 @@ pub enum DataKey {
     CredentialCache(u64),
     /// Compressed metadata storage
     CompressedMetadata(u64),
+    /// Escrow record for pending SBT transfers, keyed by sbt_id
+    SBTEscrow(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -194,6 +200,27 @@ pub struct SbtActivityEntry {
     pub actor: Address,
     /// Ledger timestamp when the action occurred.
     pub timestamp: u64,
+}
+
+/// Escrow record for a pending SBT transfer.
+/// SBTs are non-transferable by default; this escrow mechanism allows
+/// safe transfers in account recovery and inheritance scenarios only,
+/// requiring multi-approver consensus before the transfer executes.
+#[contracttype]
+#[derive(Clone)]
+pub struct SBTEscrow {
+    /// The SBT being held in escrow for transfer.
+    pub sbt_id: u64,
+    /// The current holder initiating the transfer.
+    pub current_holder: Address,
+    /// The intended recipient of the SBT.
+    pub new_holder: Address,
+    /// Number of approvals received so far.
+    pub approval_count: u32,
+    /// Number of approvals required to complete the transfer.
+    pub required_approvals: u32,
+    /// Set of addresses that have already approved (to prevent double-approvals).
+    pub approvers: Vec<Address>,
 }
 
 #[contract]
@@ -1455,6 +1482,204 @@ impl SbtRegistryContract {
             .persistent()
             .get(&DataKey::SbtActivityLog(sbt_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Initiates an escrow transfer for an SBT.
+    /// Only the current SBT holder can initiate. SBT must not already be in escrow.
+    ///
+    /// # Arguments
+    /// * `sbt_id` - The SBT to transfer
+    /// * `new_holder` - The intended recipient
+    /// * `required_approvals` - Number of admin/approver signatures needed (minimum 1)
+    ///
+    /// # Errors
+    /// * `SBTNotFound` if sbt_id does not exist
+    /// * `Unauthorized` if caller is not the current holder
+    /// * `EscrowAlreadyActive` if this SBT is already in escrow
+    /// * `InvalidApprovalCount` if required_approvals == 0
+    pub fn initiate_sbt_escrow_transfer(
+        env: Env,
+        sbt_id: u64,
+        new_holder: Address,
+        required_approvals: u32,
+    ) -> SBTEscrow {
+        // Load SBT — error if not found
+        let sbt: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        // require_auth on current holder — BEFORE any state mutations
+        sbt.owner.require_auth();
+
+        // Validate
+        if required_approvals == 0 {
+            panic_with_error!(&env, ContractError::InvalidApprovalCount);
+        }
+
+        // Reject if escrow already active for this SBT
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::SBTEscrow(sbt_id))
+        {
+            panic_with_error!(&env, ContractError::EscrowAlreadyActive);
+        }
+
+        // Create and store escrow
+        let escrow = SBTEscrow {
+            sbt_id,
+            current_holder: sbt.owner.clone(),
+            new_holder: new_holder.clone(),
+            approval_count: 0,
+            required_approvals,
+            approvers: Vec::new(&env),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::SBTEscrow(sbt_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::SBTEscrow(sbt_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+
+        // Emit event
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("escr_in").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events()
+            .publish(topics, (sbt.owner.clone(), new_holder.clone(), required_approvals));
+
+        escrow
+    }
+
+    /// Approves a pending SBT escrow transfer.
+    /// Each admin/approver can only approve once. When approval_count reaches
+    /// required_approvals, the transfer executes automatically.
+    ///
+    /// # Arguments
+    /// * `sbt_id` - The SBT escrow to approve
+    ///
+    /// # Errors
+    /// * `EscrowNotFound` if no escrow is active for this sbt_id
+    /// * `Unauthorized` if caller is not an admin or approver
+    /// * `AlreadyApproved` if caller has already approved this escrow
+    pub fn approve_sbt_transfer(env: Env, sbt_id: u64, approver: Address) {
+        approver.require_auth();
+
+        // Load escrow — error if not found
+        let mut escrow: SBTEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SBTEscrow(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EscrowNotFound));
+
+        // Verify approver is admin
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+
+        assert!(approver == admin, "unauthorized");
+
+        // Reject duplicate approval
+        if escrow.approvers.iter().any(|a| a == &approver) {
+            panic_with_error!(&env, ContractError::AlreadyApproved);
+        }
+
+        // Record approval
+        escrow.approvers.push_back(approver.clone());
+        escrow.approval_count += 1;
+
+        // Check if threshold reached
+        if escrow.approval_count >= escrow.required_approvals {
+            // Execute transfer
+            let mut sbt: SoulboundToken = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Token(sbt_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+            let old_holder = sbt.owner.clone();
+
+            // Remove from old holder's list
+            let mut old_tokens: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerTokens(old_holder.clone()))
+                .unwrap_or(Vec::new(&env));
+            if let Some(pos) = old_tokens.iter().position(|id| id == sbt_id) {
+                old_tokens.remove(pos as u32);
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerTokens(old_holder.clone()), &old_tokens);
+            env.storage()
+                .instance()
+                .remove(&DataKey::Delegation(sbt_id));
+            env.storage().instance().remove(&DataKey::OwnerCredential(
+                old_holder.clone(),
+                sbt.credential_id,
+            ));
+
+            // Update owner and add to new holder's list
+            sbt.owner = escrow.new_holder.clone();
+            env.storage()
+                .persistent()
+                .set(&DataKey::Token(sbt_id), &sbt);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Owner(sbt_id), &escrow.new_holder.clone());
+
+            let mut new_tokens: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerTokens(escrow.new_holder.clone()))
+                .unwrap_or(Vec::new(&env));
+            new_tokens.push_back(sbt_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerTokens(escrow.new_holder.clone()), &new_tokens);
+            env.storage().instance().set(
+                &DataKey::OwnerCredential(escrow.new_holder.clone(), sbt.credential_id),
+                &sbt_id,
+            );
+
+            // Remove escrow record
+            env.storage()
+                .persistent()
+                .remove(&DataKey::SBTEscrow(sbt_id));
+
+            // Emit transfer completed event
+            let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+            topics.push_back(symbol_short!("escr_done").into_val(&env));
+            topics.push_back(sbt_id.into_val(&env));
+            env.events()
+                .publish(topics, (old_holder.clone(), escrow.new_holder.clone()));
+
+            Self::record_notification(&env, escrow.new_holder.clone(), sbt_id, symbol_short!("transfer"));
+            Self::log_sbt_activity(&env, sbt_id, symbol_short!("transfer"), approver.clone());
+        } else {
+            // Save updated escrow with new approval
+            env.storage()
+                .persistent()
+                .set(&DataKey::SBTEscrow(sbt_id), &escrow);
+            env.storage().persistent().extend_ttl(
+                &DataKey::SBTEscrow(sbt_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+
+            // Emit approval recorded event
+            let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+            topics.push_back(symbol_short!("escr_approv").into_val(&env));
+            topics.push_back(sbt_id.into_val(&env));
+            env.events()
+                .publish(topics, (approver.clone(), escrow.approval_count));
+        }
     }
 }
 
