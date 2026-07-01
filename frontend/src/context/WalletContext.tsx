@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { STELLAR_NETWORK } from '../config/env';
 import type { WalletType, WalletState as WalletStateType } from '../wallets/types';
 import { getWalletAdapter, detectAvailableWallets } from '../wallets/registry';
+import { isConnected, isAllowed, setAllowed, getAddress } from '@stellar/freighter-api';
 
 interface WalletState {
   address: string | null;
@@ -13,6 +14,7 @@ interface WalletState {
   isInitializing: boolean;
   network: string;
   error: string | null;
+  availableWallets: WalletType[];
   connect: (type?: WalletType) => Promise<void>;
   disconnect: () => void;
   switchWallet: (index: number) => void;
@@ -83,6 +85,10 @@ export function WalletProvider({ children }: WalletProviderProps) {
     const init = async () => {
       try {
         setError(null);
+        // Detect available wallets
+        const detected = await detectAvailableWallets();
+        setAvailableWallets(detected);
+        
         const connResult = await isConnected();
         const freighterConnected = connResult.isConnected;
         setHasFreighter(freighterConnected);
@@ -143,7 +149,6 @@ export function WalletProvider({ children }: WalletProviderProps) {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect wallet';
       setError(errorMsg);
-      setWalletType(null);
       console.error('Wallet connection error:', err);
     }
   }, [availableWallets]);
@@ -178,6 +183,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     isInitializing,
     network: STELLAR_NETWORK,
     error,
+    availableWallets,
     connect,
     disconnect,
     switchWallet,

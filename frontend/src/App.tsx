@@ -39,17 +39,17 @@ const NotFound = () => (
 
 function AppContent() {
   const location = useLocation();
-  const { address, connect, network } = useWallet();
+  const { address, connect, network, wallets, activeIndex, switchWallet } = useWallet();
   const { isOnline } = useServiceWorker();
 
   return (
     <AppLayout
       currentPath={location.pathname}
       walletAddress={address ?? undefined}
-      wallets={wallets}
-      activeIndex={activeIndex}
+      wallets={wallets || []}
+      activeIndex={activeIndex ?? 0}
       onConnectWallet={connect}
-      onSwitchWallet={switchWallet}
+      onSwitchWallet={switchWallet || (() => {})}
     >
       <Suspense fallback={<LoadingFallback />}>
         <Routes>

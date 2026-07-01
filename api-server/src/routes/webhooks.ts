@@ -46,7 +46,7 @@ router.get('/deliveries/log', (_req: Request, res: Response) => {
 
 // GET /api/webhooks/:id — get a single webhook
 router.get('/:id', (req: Request, res: Response) => {
-  const reg = getWebhook(req.params.id);
+  const reg = getWebhook(req.params.id as string);
   if (!reg) {
     res.status(404).json({ error: 'Webhook not found' });
     return;
@@ -56,7 +56,7 @@ router.get('/:id', (req: Request, res: Response) => {
 
 // DELETE /api/webhooks/:id — remove a webhook
 router.delete('/:id', (req: Request, res: Response) => {
-  if (!deleteWebhook(req.params.id)) {
+  if (!deleteWebhook(req.params.id as string)) {
     res.status(404).json({ error: 'Webhook not found' });
     return;
   }
