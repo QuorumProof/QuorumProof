@@ -83,6 +83,7 @@ export function removeSubscriber(ws: WebSocket, filters?: SubscriptionFilter[]):
 
 export function removeConnection(ws: WebSocket): void {
   subscriptions.delete(ws);
+  dashboardSubscribers.delete(ws);
 }
 
 export function getSubscriberCount(): number {
@@ -107,4 +108,28 @@ export function getMatchingSubscribers(event: WsBroadcastEvent): WebSocket[] {
 
 export function getSubscriptions(): Map<WebSocket, ClientSubscription> {
   return new Map(subscriptions);
+}
+
+// --- Dashboard subscribers ---
+
+const dashboardSubscribers = new Set<WebSocket>();
+
+export function addDashboardSubscriber(ws: WebSocket): void {
+  dashboardSubscribers.add(ws);
+}
+
+export function removeDashboardSubscriber(ws: WebSocket): void {
+  dashboardSubscribers.delete(ws);
+}
+
+export function getDashboardSubscribers(): WebSocket[] {
+  const open: WebSocket[] = [];
+  for (const ws of dashboardSubscribers) {
+    if (ws.readyState === WebSocket.OPEN) {
+      open.push(ws);
+    } else {
+      dashboardSubscribers.delete(ws);
+    }
+  }
+  return open;
 }
