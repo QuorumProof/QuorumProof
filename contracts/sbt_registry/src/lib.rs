@@ -59,6 +59,8 @@ pub enum DataKey {
     CredentialCache(u64),
     /// Compressed metadata storage
     CompressedMetadata(u64),
+    /// Escrow record for pending SBT transfers, keyed by sbt_id
+    SBTEscrow(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
