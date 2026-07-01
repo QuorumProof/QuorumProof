@@ -733,6 +733,9 @@ pub enum DataKey {
     Disputes,
     Dispute(u64),
     DisputeCount,
+    CredentialDisputes(u64),        // Vec of dispute IDs for a credential
+    CredentialDisputeEntry(u64),    // Individual dispute data
+    CredentialDisputeCount,         // Global dispute counter
     Challenge(u64),
     ChallengeCount,
     ActiveChallenge(u64, Address),
@@ -1092,6 +1095,7 @@ pub struct Credential {
     pub metadata_hash: soroban_sdk::Bytes,
     pub revoked: bool,
     pub suspended: bool,
+    pub status: CredentialStatus,
     pub expires_at: Option<u64>,
     pub version: u32,
     pub renewal_status: RenewalStatus,
@@ -1689,6 +1693,8 @@ pub enum ActivityType {
     CredentialAttested = 4,
     AttestationExpired = 5,
     CredentialRecovered = 6,
+    DisputeInitiated = 7,
+    DisputeResolved = 8,
 }
 
 /// Records a single activity event for a credential holder
@@ -1971,6 +1977,14 @@ pub struct AttestationEvidence {
 pub struct AttestationCondition {
     pub key: soroban_sdk::String,
     pub value: soroban_sdk::Bytes,
+}
+
+/// A shareable link for credential access
+#[contracttype]
+#[derive(Clone)]
+pub struct ShareLink {
+    pub credential_id: u64,
+    pub expires_at: u64,
 }
 
 /// Issue #381: Rate limit configuration per address
