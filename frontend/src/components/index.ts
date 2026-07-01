@@ -25,3 +25,5 @@ export { ClaimProofGenerator } from './ClaimProofGenerator';
 export { CLAIM_TYPE_OPTIONS, findClaimTypeOption, encodeProofRequest, buildProofShareUrl } from '../lib/claimDisclosure';
 export type { ClaimTypeOption } from '../lib/claimDisclosure';
 export { CredentialVerificationDashboard } from './CredentialVerificationDashboard';
+export { SliceTemplateLibrary } from './SliceTemplateLibrary';
+export type { SliceTemplateLibraryProps } from './SliceTemplateLibrary';

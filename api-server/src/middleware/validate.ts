@@ -112,6 +112,11 @@ export const schemas = {
           },
           minItems: 1,
         },
+        /** #928: optional per-type filter; 1=Degree, 2=License, 3=Employment */
+        credential_type_filters: {
+          type: 'array',
+          items: { type: 'integer', minimum: 1 },
+        },
         enabled: { type: 'boolean' },
       },
       required: ['address', 'channels', 'events'],
@@ -132,6 +137,8 @@ export const schemas = {
           ],
         },
         credential_id: { type: 'integer', minimum: 1 },
+        /** #928: optional credential type for per-type preference filtering */
+        credential_type: { type: 'integer', minimum: 1 },
         issuer: { type: 'string' },
         holder: { type: 'string' },
       },
