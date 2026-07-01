@@ -7,6 +7,7 @@ import {
   buildAnomalyQuery,
   type AnomalyDetectionResult,
   type DailyMetrics,
+  type IssuerMetrics,
 } from '../services/metrics.js';
 import { validate, schemas } from '../middleware/validate.js';
 
@@ -104,6 +105,27 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
       const message = err instanceof Error ? err.message : 'Invalid query parameters';
       res.status(400).json({ error: message });
     }
+  });
+
+  // GET /api/analytics/issuer/:address
+  // Query params: period_days (default 30)
+  router.get('/issuer/:address', (req: Request, res: Response) => {
+    const { address } = req.params;
+    const periodDays = req.query.period_days
+      ? parseInt(req.query.period_days as string, 10)
+      : 30;
+
+    if (!address) {
+      res.status(400).json({ error: 'address parameter required' });
+      return;
+    }
+    if (isNaN(periodDays) || periodDays < 1 || periodDays > 365) {
+      res.status(400).json({ error: 'period_days must be between 1 and 365' });
+      return;
+    }
+
+    const metrics = metricsStore.getIssuerMetrics(address, periodDays);
+    res.json(metrics);
   });
 
   router.get('/summary', (req: Request, res: Response) => {
