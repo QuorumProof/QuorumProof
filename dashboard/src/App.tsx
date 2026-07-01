@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { CredentialCard } from './components/CredentialCard'
 import { AttestationPanel } from './components/AttestationPanel'
+import { LiveDashboard } from './components/LiveDashboard'
 import { Credential } from './types/credential'
 import { Attestor } from './types/attestor'
 import './App.css'
@@ -108,6 +109,10 @@ function App() {
       </header>
 
       <main className="app-main">
+        <section className="live-dashboard-section">
+          <LiveDashboard />
+        </section>
+
         <section className="credentials-section">
           <h2>Your Credentials</h2>
           {selectedId && (

@@ -185,6 +185,52 @@ describe('GET /api/audit/export', () => {
     expect(res.status).toBe(200);
     expect(mockSimulateCall).toHaveBeenCalledWith('get_entries_by_action', expect.anything());
   });
+
+  // #925: date range filtering tests
+  it('filters export by start_date and excludes earlier entries', async () => {
+    const earlyEntry = { ...mockEntry, id: 1n, timestamp: 1000000000n }; // year ~2001
+    const laterEntry = { ...mockEntry, id: 2n, timestamp: 1700000000n }; // year ~2023
+    mockSimulateCall.mockResolvedValueOnce([earlyEntry, laterEntry]);
+
+    const res = await request(app).get('/api/audit/export?start_date=2023-01-01T00:00:00Z');
+    expect(res.status).toBe(200);
+    const lines = res.text.trim().split('\n').filter(Boolean);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]).entry_id).toBe('2');
+  });
+
+  it('filters export by end_date and excludes later entries', async () => {
+    const earlyEntry = { ...mockEntry, id: 1n, timestamp: 1000000000n };
+    const laterEntry = { ...mockEntry, id: 2n, timestamp: 1700000000n };
+    mockSimulateCall.mockResolvedValueOnce([earlyEntry, laterEntry]);
+
+    const res = await request(app).get('/api/audit/export?end_date=2010-01-01T00:00:00Z');
+    expect(res.status).toBe(200);
+    const lines = res.text.trim().split('\n').filter(Boolean);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]).entry_id).toBe('1');
+  });
+
+  it('returns 400 when start_date is after end_date', async () => {
+    const res = await request(app).get('/api/audit/export?start_date=2024-01-01&end_date=2023-01-01');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('start_date must be before end_date');
+  });
+
+  it('returns 400 for invalid start_date', async () => {
+    const res = await request(app).get('/api/audit/export?start_date=not-a-date');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Invalid start_date');
+  });
+
+  it('exports in CSV format', async () => {
+    mockSimulateCall.mockResolvedValueOnce([mockEntry]);
+    const res = await request(app).get('/api/audit/export?format=csv');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/csv/);
+    expect(res.text).toContain('entry_id');
+    expect(res.text).toContain('CredentialIssued');
+  });
 });
 
 describe('POST /api/audit/verify', () => {
