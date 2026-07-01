@@ -193,14 +193,36 @@ export function createAuditRouter(soroban: SorobanClient) {
    * GET /api/audit/export
    * Export audit logs in JSON Lines or JSON format for compliance audits.
    * Query params:
-   *   - format: 'jsonl' (default) or 'json'
+   *   - format: 'jsonl' (default) or 'json' or 'csv'
    *   - credential_id: optional filter by credential
    *   - action: optional filter by action type
+   *   - start_date: optional ISO date string (inclusive lower bound on timestamp)  #925
+   *   - end_date: optional ISO date string (inclusive upper bound on timestamp)    #925
    */
   router.get('/export', async (req: Request, res: Response) => {
-    const format = (req.query.format as string) === 'json' ? 'json' : 'jsonl';
+    const format = (req.query.format as string) === 'json' ? 'json'
+      : (req.query.format as string) === 'csv' ? 'csv'
+      : 'jsonl';
     const credentialId = req.query.credential_id ? parseInt(String(req.query.credential_id), 10) : null;
     const action = req.query.action ? String(req.query.action) : null;
+
+    // #925: date range filtering
+    let startSecs: bigint | null = null;
+    let endSecs: bigint | null = null;
+    if (req.query.start_date) {
+      const d = Date.parse(String(req.query.start_date));
+      if (isNaN(d)) { res.status(400).json({ error: 'Invalid start_date' }); return; }
+      startSecs = BigInt(Math.floor(d / 1000));
+    }
+    if (req.query.end_date) {
+      const d = Date.parse(String(req.query.end_date));
+      if (isNaN(d)) { res.status(400).json({ error: 'Invalid end_date' }); return; }
+      endSecs = BigInt(Math.floor(d / 1000));
+    }
+    if (startSecs !== null && endSecs !== null && startSecs > endSecs) {
+      res.status(400).json({ error: 'start_date must be before end_date' });
+      return;
+    }
 
     try {
       let entries;
@@ -226,7 +248,38 @@ export function createAuditRouter(soroban: SorobanClient) {
         ]);
       }
 
-      const exported = exportAuditLogs(entries as never[], format);
+      // #925: apply date range filter
+      let entriesArr = entries as { timestamp?: bigint | string }[];
+      if (startSecs !== null || endSecs !== null) {
+        entriesArr = entriesArr.filter((e) => {
+          const ts = BigInt(String(e.timestamp ?? 0));
+          if (startSecs !== null && ts < startSecs) return false;
+          if (endSecs !== null && ts > endSecs) return false;
+          return true;
+        });
+      }
+
+      if (format === 'csv') {
+        const exported = exportAuditLogs(entriesArr as never[], 'jsonl');
+        // Convert JSONL → CSV
+        const rows = exported.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        if (rows.length === 0) {
+          res.setHeader('Content-Type', 'text/csv');
+          res.setHeader('Content-Disposition', `attachment; filename="audit-export-${Date.now()}.csv"`);
+          res.send('');
+          return;
+        }
+        const headers = Object.keys(rows[0]).join(',');
+        const body = rows.map((r: Record<string, unknown>) =>
+          Object.values(r).map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')
+        ).join('\n');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="audit-export-${Date.now()}.csv"`);
+        res.send(`${headers}\n${body}`);
+        return;
+      }
+
+      const exported = exportAuditLogs(entriesArr as never[], format);
       res.setHeader('Content-Type', format === 'json' ? 'application/json' : 'text/plain');
       res.setHeader(
         'Content-Disposition',
