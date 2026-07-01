@@ -2,7 +2,8 @@
  * Credential Notification System (#550)
  *
  * Provides email/SMS notification dispatch, configurable preferences per address,
- * and an in-memory notification history store.
+ * an in-memory notification history store, and batching of events from the same
+ * issuer within a configurable time window.
  */
 
 export type NotificationChannel = 'email' | 'sms';
@@ -20,6 +21,10 @@ export interface NotificationPreferences {
   phone?: string;
   channels: NotificationChannel[];
   events: NotificationEvent[];
+  /** Optional allowlist of credential types (e.g. 1=Degree, 2=License, 3=Employment).
+   *  When set, notifications are only dispatched for credentials whose type is in this list.
+   *  When absent or empty, all credential types are notified. */
+  credential_type_filters?: number[];
   enabled: boolean;
 }
 
@@ -29,10 +34,18 @@ export interface NotificationRecord {
   event: NotificationEvent;
   channel: NotificationChannel;
   credential_id: number;
+  /** When batched, contains all credential IDs in the batch (undefined for single notifications). */
+  batched_credential_ids?: number[];
+  issuer?: string;
   message: string;
   sent_at: string;
   success: boolean;
   error?: string;
+}
+
+interface BatchEntry {
+  events: Array<{ event: NotificationEvent; credentialId: number }>;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 // In-memory stores (replace with a DB in production)
@@ -40,7 +53,13 @@ const preferencesStore = new Map<string, NotificationPreferences>();
 const historyStore: NotificationRecord[] = [];
 let notificationCounter = 0;
 
-/** Build a human-readable message for a credential event. */
+/** Batch key: "<address>:<issuer>" */
+const batchStore = new Map<string, BatchEntry>();
+
+/** Time window (ms) during which events from the same issuer are grouped. */
+export const BATCH_WINDOW_MS = 5_000;
+
+/** Build a human-readable message for a single credential event. */
 function buildMessage(event: NotificationEvent, credentialId: number): string {
   switch (event) {
     case 'credential_issued':
@@ -56,12 +75,21 @@ function buildMessage(event: NotificationEvent, credentialId: number): string {
   }
 }
 
+/** Build a human-readable message summarising a batch of credential events. */
+function buildBatchMessage(
+  events: Array<{ event: NotificationEvent; credentialId: number }>,
+  issuer?: string
+): string {
+  const ids = events.map((e) => `#${e.credentialId}`).join(', ');
+  const prefix = issuer ? `From ${issuer}: ` : '';
+  return `${prefix}${events.length} credential updates for credentials ${ids}.`;
+}
+
 /**
  * Simulate sending an email notification.
  * Replace with a real provider (e.g. SendGrid, SES) in production.
  */
 async function sendEmail(to: string, message: string): Promise<void> {
-  // Stub: log to console; wire up a real email provider here.
   console.log(`[EMAIL] To: ${to} | ${message}`);
 }
 
@@ -70,21 +98,35 @@ async function sendEmail(to: string, message: string): Promise<void> {
  * Replace with a real provider (e.g. Twilio) in production.
  */
 async function sendSms(phone: string, message: string): Promise<void> {
-  // Stub: log to console; wire up a real SMS provider here.
   console.log(`[SMS] To: ${phone} | ${message}`);
 }
 
 /**
  * Dispatch notifications for a credential event to all subscribers whose
  * preferences include the given address and event type.
+ * @param credentialType optional credential type number; used to filter against
+ *   per-preference `credential_type_filters` (issue #928).
  */
 export async function dispatchNotification(
   address: string,
   event: NotificationEvent,
-  credentialId: number
+  credentialId: number,
+  credentialType?: number
 ): Promise<void> {
   const prefs = preferencesStore.get(address);
-  if (!prefs || !prefs.enabled || !prefs.events.includes(event)) return;
+  if (!prefs || !prefs.enabled) return;
+
+  // Only include events the user cares about
+  const relevant = entry.events.filter((e) => prefs.events.includes(e.event));
+  if (relevant.length === 0) return;
+
+  // #928: skip if user has type filters and this credential type isn't in them
+  if (
+    credentialType !== undefined &&
+    prefs.credential_type_filters &&
+    prefs.credential_type_filters.length > 0 &&
+    !prefs.credential_type_filters.includes(credentialType)
+  ) return;
 
   const message = buildMessage(event, credentialId);
 
@@ -92,9 +134,11 @@ export async function dispatchNotification(
     const record: NotificationRecord = {
       id: String(++notificationCounter),
       address,
-      event,
+      event: relevant[0].event,
       channel,
-      credential_id: credentialId,
+      credential_id: relevant[0].credentialId,
+      batched_credential_ids: relevant.length > 1 ? relevant.map((e) => e.credentialId) : undefined,
+      issuer,
       message,
       sent_at: new Date().toISOString(),
       success: false,
@@ -116,9 +160,54 @@ export async function dispatchNotification(
   }
 }
 
+/**
+ * Dispatch a notification for a credential event.  Events from the same issuer
+ * arriving within BATCH_WINDOW_MS are grouped into a single notification.
+ *
+ * @param address      Stellar address of the credential holder.
+ * @param event        The credential lifecycle event.
+ * @param credentialId The credential being affected.
+ * @param issuer       Optional issuer identity used as the batch grouping key.
+ */
+export async function dispatchNotification(
+  address: string,
+  event: NotificationEvent,
+  credentialId: number,
+  issuer?: string
+): Promise<void> {
+  const prefs = preferencesStore.get(address);
+  if (!prefs || !prefs.enabled || !prefs.events.includes(event)) return;
+
+  const batchKey = `${address}:${issuer ?? ''}`;
+  const existing = batchStore.get(batchKey);
+
+  if (existing) {
+    // Extend the batch with the new event and reset the window timer
+    existing.events.push({ event, credentialId });
+    clearTimeout(existing.timer);
+    existing.timer = setTimeout(() => flushBatch(address, issuer, batchKey), BATCH_WINDOW_MS);
+  } else {
+    // Start a new batch window
+    const timer = setTimeout(() => flushBatch(address, issuer, batchKey), BATCH_WINDOW_MS);
+    batchStore.set(batchKey, { events: [{ event, credentialId }], timer });
+  }
+}
+
+/**
+ * Immediately flush any pending batch for the given address/issuer pair.
+ * Useful in tests or when an explicit "send now" is needed.
+ */
+export async function flushPendingBatch(address: string, issuer?: string): Promise<void> {
+  const batchKey = `${address}:${issuer ?? ''}`;
+  await flushBatch(address, issuer, batchKey);
+}
+
 /** Upsert notification preferences for an address. */
 export function setPreferences(prefs: NotificationPreferences): void {
-  preferencesStore.set(prefs.address, prefs);
+  preferencesStore.set(prefs.address, {
+    ...prefs,
+    credential_type_filters: prefs.credential_type_filters ?? [],
+  });
 }
 
 /** Retrieve notification preferences for an address. */
@@ -130,4 +219,13 @@ export function getPreferences(address: string): NotificationPreferences | undef
 export function getHistory(address?: string): NotificationRecord[] {
   if (address) return historyStore.filter((r) => r.address === address);
   return [...historyStore];
+}
+
+/** Clear all in-memory state (useful for test isolation). */
+export function _resetStores(): void {
+  preferencesStore.clear();
+  historyStore.length = 0;
+  notificationCounter = 0;
+  for (const entry of batchStore.values()) clearTimeout(entry.timer);
+  batchStore.clear();
 }
