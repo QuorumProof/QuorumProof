@@ -1,6 +1,6 @@
-import { useState, useRef } from 'react';
+import { useMemo, useState, useRef } from 'react';
 import { Navbar } from '../components/Navbar';
-import { useWallet } from '../hooks';
+import { useWallet, useFormAutosave } from '../hooks';
 import { formatAddress } from '../lib/credentialUtils';
 
 interface StudentRow {
@@ -56,6 +56,29 @@ export default function UniversityRegistration() {
 
   const [activeTab, setActiveTab] = useState<'register' | 'import'>('register');
 
+  // Periodically persist the registration form so a crash/reload doesn't lose
+  // typed details. Pauses once the registration is submitted.
+  const registrationDraft = useMemo(
+    () => ({ universityName, country, accreditationBody, contactEmail }),
+    [universityName, country, accreditationBody, contactEmail],
+  );
+  const {
+    draft: savedDraft,
+    savedAt,
+    clear: clearDraft,
+  } = useFormAutosave('university-registration', registrationDraft, {
+    enabled: !registrationSubmitted,
+  });
+
+  const restoreDraft = () => {
+    if (!savedDraft) return;
+    setUniversityName(savedDraft.universityName ?? '');
+    setCountry(savedDraft.country ?? '');
+    setAccreditationBody(savedDraft.accreditationBody ?? '');
+    setContactEmail(savedDraft.contactEmail ?? '');
+    clearDraft();
+  };
+
   const handleRegister = () => {
     if (!universityName.trim()) {
       setRegistrationMsg('University name is required.');
@@ -75,6 +98,7 @@ export default function UniversityRegistration() {
     }
     setRegistrationSubmitted(true);
     setRegistrationMsg(null);
+    clearDraft();
   };
 
   const handleCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -230,6 +254,36 @@ export default function UniversityRegistration() {
                 </div>
               ) : (
                 <div style={{ display: 'grid', gap: 16 }}>
+                  {savedDraft && (
+                    <div
+                      role="alert"
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                        padding: '12px 16px',
+                        borderRadius: 6,
+                        border: '1px solid var(--color-warning, #f59e0b)',
+                        background: 'rgba(245, 158, 11, 0.08)',
+                        fontSize: 13,
+                      }}
+                    >
+                      <span>
+                        📝 We recovered unsaved registration details
+                        {savedAt ? ` from ${new Date(savedAt).toLocaleString()}` : ''}.
+                      </span>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn--primary btn--sm" onClick={restoreDraft}>
+                          Restore
+                        </button>
+                        <button className="btn btn--ghost btn--sm" onClick={clearDraft}>
+                          Discard
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
                     University / Institution Name *
                     <input

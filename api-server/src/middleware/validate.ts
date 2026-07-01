@@ -65,6 +65,30 @@ export const schemas = {
     },
   },
 
+  verifyBatchClaims: {
+    body: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: 'object',
+            properties: {
+              credential_id: { type: 'integer', minimum: 1 },
+              claim_type: { type: 'string', minLength: 1, maxLength: 64 },
+            },
+            required: ['credential_id', 'claim_type'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['items'],
+      additionalProperties: false,
+    },
+  },
+
   notificationPreferences: {
     body: {
       type: 'object',
@@ -88,6 +112,11 @@ export const schemas = {
           },
           minItems: 1,
         },
+        /** #928: optional per-type filter; 1=Degree, 2=License, 3=Employment */
+        credential_type_filters: {
+          type: 'array',
+          items: { type: 'integer', minimum: 1 },
+        },
         enabled: { type: 'boolean' },
       },
       required: ['address', 'channels', 'events'],
@@ -108,6 +137,8 @@ export const schemas = {
           ],
         },
         credential_id: { type: 'integer', minimum: 1 },
+        /** #928: optional credential type for per-type preference filtering */
+        credential_type: { type: 'integer', minimum: 1 },
         issuer: { type: 'string' },
         holder: { type: 'string' },
       },

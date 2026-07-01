@@ -121,3 +121,41 @@ export function decodeSliceFromSearch(search: string): SliceDraft | null {
     return JSON.parse(atob(raw)) as SliceDraft;
   } catch { return null; }
 }
+
+// ── JSON Import / Export ──────────────────────────────────────────────────────
+
+export interface SliceExport {
+  version: 1;
+  exportedAt: string;
+  attestors: AttestorEntry[];
+  threshold: number;
+}
+
+/** Serialise the current draft to a JSON string and trigger a file download. */
+export function exportSliceAsJson(draft: SliceDraft, filename = 'quorum-slice.json'): void {
+  const payload: SliceExport = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    ...draft,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/** Parse a JSON string exported by `exportSliceAsJson`. Throws on invalid data. */
+export function importSliceFromJson(raw: string): SliceDraft {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('Invalid JSON file.'); }
+  const data = parsed as SliceExport;
+  if (data.version !== 1 || !Array.isArray(data.attestors) || typeof data.threshold !== 'number') {
+    throw new Error('Unrecognised slice export format.');
+  }
+  return { attestors: data.attestors, threshold: data.threshold };
+}

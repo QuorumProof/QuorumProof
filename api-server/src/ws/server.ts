@@ -34,9 +34,13 @@ import {
   removeConnection,
   getMatchingSubscribers,
   getSubscriberCount,
+  addDashboardSubscriber,
+  removeDashboardSubscriber,
+  getDashboardSubscribers,
   type SubscriptionFilter,
   type WsBroadcastEvent,
 } from './subscriptions.js';
+import { liveDashboard } from '../services/liveDashboard.js';
 import {
   incrementConnections,
   decrementConnections,
@@ -49,11 +53,12 @@ import {
 } from './metrics.js';
 
 interface WsClientMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ping';
+  type: 'subscribe' | 'unsubscribe' | 'ping' | 'subscribe_dashboard' | 'unsubscribe_dashboard';
   filters?: SubscriptionFilter[];
 }
 
 const PING_INTERVAL_MS = 30_000;
+const DASHBOARD_BROADCAST_INTERVAL_MS = 5_000;
 
 function createMessage(type: string, data: Record<string, unknown>) {
   return JSON.stringify({ type, data });
@@ -61,6 +66,7 @@ function createMessage(type: string, data: Record<string, unknown>) {
 
 let wss: WebSocketServer | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
+let dashboardTimer: ReturnType<typeof setInterval> | null = null;
 
 export function createWsServer(server: HttpServer, path = '/ws'): WebSocketServer {
   wss = new WebSocketServer({ server, path });
@@ -111,6 +117,22 @@ export function createWsServer(server: HttpServer, path = '/ws'): WebSocketServe
             break;
           }
 
+          case 'subscribe_dashboard': {
+            addDashboardSubscriber(ws);
+            const initialStats = liveDashboard.getStats() as unknown as Record<string, unknown>;
+            ws.send(createMessage('dashboard_subscribed', { ts: new Date().toISOString() }));
+            ws.send(createMessage('dashboard_stats', initialStats));
+            recordMessageSent(Buffer.byteLength('dashboard_subscribed') + Buffer.byteLength('dashboard_stats'));
+            break;
+          }
+
+          case 'unsubscribe_dashboard': {
+            removeDashboardSubscriber(ws);
+            ws.send(createMessage('dashboard_unsubscribed', {}));
+            recordMessageSent(Buffer.byteLength('dashboard_unsubscribed'));
+            break;
+          }
+
           default:
             ws.send(createMessage('error', {
               message: `Unknown message type: ${(msg as any).type ?? 'undefined'}`,
@@ -156,10 +178,26 @@ export function createWsServer(server: HttpServer, path = '/ws'): WebSocketServe
     });
   }, PING_INTERVAL_MS);
 
+  dashboardTimer = setInterval(() => {
+    const subscribers = getDashboardSubscribers();
+    if (subscribers.length === 0) return;
+    const stats = liveDashboard.getStats() as unknown as Record<string, unknown>;
+    const message = createMessage('dashboard_stats', stats);
+    const bytes = Buffer.byteLength(message);
+    for (const client of subscribers) {
+      client.send(message);
+      recordMessageSent(bytes);
+    }
+  }, DASHBOARD_BROADCAST_INTERVAL_MS);
+
   wss.on('close', () => {
     if (pingTimer) {
       clearInterval(pingTimer);
       pingTimer = null;
+    }
+    if (dashboardTimer) {
+      clearInterval(dashboardTimer);
+      dashboardTimer = null;
     }
   });
 
@@ -227,6 +265,10 @@ export function closeWsServer(): void {
   if (pingTimer) {
     clearInterval(pingTimer);
     pingTimer = null;
+  }
+  if (dashboardTimer) {
+    clearInterval(dashboardTimer);
+    dashboardTimer = null;
   }
   wss?.close();
   wss = null;
