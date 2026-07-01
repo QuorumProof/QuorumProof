@@ -1,9 +1,8 @@
-// Issue #555: Security audit trail verification
-// Verifies that every state-changing operation emits the correct on-chain event,
-// detects missing events, and ensures unauthorized operations are rejected.
+// Issue #982: Credential Revocation with Proof
+// Tests for revocation event emission with reason and revocation history retrieval.
 
 use quorum_proof::{
-    AttestationEventData, CredentialIssuedEventData, RevokeEventData,
+    AttestationEventData, CredentialIssuedEventData, RevokeEventData, RevocationLogEntry,
     QuorumProofContract, QuorumProofContractClient,
 };
 use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
@@ -111,7 +110,7 @@ fn audit_revoke_credential_emits_event() {
 
     let cred_id =
         c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
-    c.qp.revoke_credential(&issuer, &cred_id);
+    c.qp.revoke_credential(&issuer, &cred_id, &None);
 
     assert!(
         has_string_topic_event(&env, "RevokeCredential"),
@@ -131,6 +130,93 @@ fn audit_revoke_credential_emits_event() {
         payload.credential_id, cred_id,
         "audit: revocation event credential_id must match"
     );
+}
+
+// Issue #982: revoke_credential must emit event with reason when provided.
+#[test]
+fn revoke_credential_emits_event_with_reason() {
+    let env = Env::default();
+    let c = setup(&env);
+    let issuer = soroban_sdk::Address::generate(&env);
+    let holder = soroban_sdk::Address::generate(&env);
+    let reason = String::from_str(&env, "security violation");
+
+    let cred_id =
+        c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+    c.qp.revoke_credential(&issuer, &cred_id, &Some(reason.clone()));
+
+    let event = env.events().all().iter().find(|(_, topics, _)| {
+        topics
+            .get(0)
+            .and_then(|v| String::try_from_val(&env, &v).ok())
+            .map(|s| s == String::from_str(&env, "RevokeCredential"))
+            .unwrap_or(false)
+    });
+    let (_, _, data) = event.unwrap();
+    let payload: RevokeEventData = soroban_sdk::Val::into_val(&data, &env);
+    assert_eq!(
+        payload.credential_id, cred_id,
+        "revocation event credential_id must match"
+    );
+    assert_eq!(
+        payload.reason, Some(reason),
+        "revocation event reason must be included in event payload"
+    );
+}
+
+// Issue #982: get_revocation_history returns stored revocation log entries.
+#[test]
+fn get_revocation_history_returns_entries() {
+    let env = Env::default();
+    let c = setup(&env);
+    let issuer = soroban_sdk::Address::generate(&env);
+    let holder = soroban_sdk::Address::generate(&env);
+    let reason = String::from_str(&env, "policy violation");
+
+    let cred_id =
+        c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+    c.qp.revoke_credential(&issuer, &cred_id, &Some(reason.clone()));
+
+    let history = c.qp.get_revocation_history(&cred_id);
+    assert_eq!(
+        history.len(), 1,
+        "revocation history should contain exactly one entry after revocation"
+    );
+    let entry = history.get(0).unwrap();
+    assert_eq!(entry.credential_id, cred_id);
+    assert_eq!(entry.revoker, issuer);
+    assert_eq!(entry.reason, Some(reason));
+}
+
+// Issue #982: Revocation history provides proof - multiple revocations logged.
+#[test]
+fn revocation_history_proof_multiple_revocations() {
+    let env = Env::default();
+    let c = setup(&env);
+    let issuer = soroban_sdk::Address::generate(&env);
+    let holder = soroban_sdk::Address::generate(&env);
+
+    // Issue a fresh credential (not previously revoked)
+    let cred_id1 =
+        c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+    let cred_id2 =
+        c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+
+    let reason1 = String::from_str(&env, "first reason");
+    let reason2 = String::from_str(&env, "second reason");
+
+    c.qp.revoke_credential(&issuer, &cred_id1, &Some(reason1.clone()));
+    c.qp.revoke_credential(&issuer, &cred_id2, &Some(reason2.clone()));
+
+    // Verify history for first credential
+    let history1 = c.qp.get_revocation_history(&cred_id1);
+    assert_eq!(history1.len(), 1);
+    assert_eq!(history1.get(0).unwrap().reason, Some(reason1.clone()));
+
+    // Verify history for second credential
+    let history2 = c.qp.get_revocation_history(&cred_id2);
+    assert_eq!(history2.len(), 1);
+    assert_eq!(history2.get(0).unwrap().reason, Some(reason2.clone()));
 }
 
 // Audit: attest must emit an attestation event with the correct attestor and credential.
@@ -333,7 +419,7 @@ fn audit_full_lifecycle_all_events_present() {
         "audit: missing SBT burn event"
     );
 
-    c.qp.revoke_credential(&issuer, &cred_id);
+    c.qp.revoke_credential(&issuer, &cred_id, &None);
     assert!(
         has_string_topic_event(&env, "RevokeCredential"),
         "audit: missing RevokeCredential event"

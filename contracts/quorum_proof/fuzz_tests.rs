@@ -72,7 +72,10 @@ mod contract {
                 credential_type,
                 metadata_hash,
                 revoked: false,
+                suspended: false,
+                status: CredentialStatus::Valid,
                 expires_at,
+                version: 1,
             };
 
             // Store credential
