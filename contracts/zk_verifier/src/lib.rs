@@ -1388,6 +1388,99 @@ impl ZkVerifierContract {
 
         binding.to_array()[0] != 0xFF
     }
+
+    // ===== Issue #994: Proof Expiry / TTL =====
+
+    /// Set the protocol-level configuration.
+    ///
+    /// Only the admin may call this function.  The primary field is
+    /// `proof_ttl_seconds` — after this many seconds a stored proof is
+    /// considered expired.  Pass `0` to use the built-in default of 30 days.
+    pub fn set_protocol_config(env: Env, admin: Address, config: ProtocolConfig) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::ProtocolConfig, &config);
+    }
+
+    /// Return the current protocol configuration.
+    ///
+    /// If `set_protocol_config` has never been called the default config
+    /// (30-day TTL) is returned without mutating storage.
+    pub fn get_protocol_config(env: Env) -> ProtocolConfig {
+        env.storage().instance()
+            .get(&DataKey::ProtocolConfig)
+            .unwrap_or(ProtocolConfig { proof_ttl_seconds: 2_592_000 })
+    }
+
+    /// Record the Unix-epoch timestamp at which a proof was first submitted
+    /// for a given `(credential_id, claim_type)` pair.
+    ///
+    /// Calling this more than once for the same pair is a no-op — the original
+    /// submission timestamp is preserved so that TTL is measured from first
+    /// submission, not from the most-recent call.
+    pub fn store_proof_timestamp(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+        submitted_at: u64,
+    ) {
+        let key = DataKey::ProofTimestamp(credential_id, claim_type);
+        // Preserve the original submission time; ignore if already set.
+        if !env.storage().instance().has(&key) {
+            env.storage().instance().set(&key, &submitted_at);
+        }
+    }
+
+    /// Return the age (in seconds) of the stored proof for
+    /// `(credential_id, claim_type)` relative to `now_seconds`.
+    ///
+    /// Returns `None` when no timestamp has been stored for the pair.
+    /// Returns `0` when `now_seconds` is older than or equal to the stored
+    /// timestamp (i.e. the proof was submitted in the future or at exactly
+    /// `now_seconds`).
+    pub fn get_proof_age(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+        now_seconds: u64,
+    ) -> Option<u64> {
+        let key = DataKey::ProofTimestamp(credential_id, claim_type);
+        env.storage().instance()
+            .get::<_, u64>(&key)
+            .map(|submitted_at| now_seconds.saturating_sub(submitted_at))
+    }
+
+    /// Check whether the proof for `(credential_id, claim_type)` has expired.
+    ///
+    /// A proof is expired when its age exceeds `proof_ttl_seconds` from
+    /// `ProtocolConfig`.  Returns `false` (not expired) when no timestamp has
+    /// been stored yet so that callers that haven't started using TTL are not
+    /// broken.
+    pub fn is_proof_expired(
+        env: Env,
+        credential_id: u64,
+        claim_type: ClaimType,
+        now_seconds: u64,
+    ) -> bool {
+        let config: ProtocolConfig = env.storage().instance()
+            .get(&DataKey::ProtocolConfig)
+            .unwrap_or(ProtocolConfig { proof_ttl_seconds: 2_592_000 });
+
+        let ttl = if config.proof_ttl_seconds == 0 {
+            2_592_000u64
+        } else {
+            config.proof_ttl_seconds
+        };
+
+        let key = DataKey::ProofTimestamp(credential_id, claim_type);
+        match env.storage().instance().get::<_, u64>(&key) {
+            Some(submitted_at) => now_seconds.saturating_sub(submitted_at) > ttl,
+            None => false,
+        }
+    }
 }
 
 #[contracttype]
@@ -1407,6 +1500,27 @@ pub enum DataKey {
     RangeProofParams(RangeProofType),
     /// Cache TTL settings per claim type
     CacheTTL(ClaimType),
+    // ===== Issue #994: Proof Expiry / TTL =====
+    /// Protocol-level configuration (includes proof_ttl_seconds)
+    ProtocolConfig,
+    /// Timestamp (Unix seconds) when a proof was first submitted/verified
+    /// Keyed by (credential_id, claim_type)
+    ProofTimestamp(u64, ClaimType),
+}
+
+// ===== Issue #994: ProtocolConfig =====
+
+/// Protocol-level configuration governing proof lifecycle.
+///
+/// `proof_ttl_seconds` — the number of seconds after which a submitted proof
+/// is considered expired and must be re-submitted.  Defaults to 30 days
+/// (2_592_000 seconds) when not explicitly configured.
+#[contracttype]
+#[derive(Clone)]
+pub struct ProtocolConfig {
+    /// Seconds a proof remains valid after it was first stored.
+    /// Default: 2_592_000 (30 days).
+    pub proof_ttl_seconds: u64,
 }
 
 #[cfg(test)]
@@ -2574,5 +2688,175 @@ mod tests {
         let proof2 = Bytes::from_slice(&env, &buf);
         // Will verify based on new key binding — depends on whether 0xFF collision occurs
         let _ = client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof2);
+    }
+
+    // ===== Issue #994: Proof Expiry / TTL Tests =====
+
+    #[test]
+    fn test_get_protocol_config_default() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let config = client.get_protocol_config();
+        // Default TTL is 30 days = 2_592_000 seconds
+        assert_eq!(config.proof_ttl_seconds, 2_592_000);
+    }
+
+    #[test]
+    fn test_set_and_get_protocol_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let config = ProtocolConfig { proof_ttl_seconds: 86_400 }; // 1 day
+        client.set_protocol_config(&admin, &config);
+
+        let retrieved = client.get_protocol_config();
+        assert_eq!(retrieved.proof_ttl_seconds, 86_400);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_protocol_config_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, _admin) = setup(&env);
+        let non_admin = Address::generate(&env);
+
+        let config = ProtocolConfig { proof_ttl_seconds: 100 };
+        client.set_protocol_config(&non_admin, &config);
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_and_get_age() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let credential_id = 1u64;
+        let claim_type = ClaimType::HasDegree;
+        let submitted_at = 1_000_000u64;
+
+        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+
+        // Age at submitted_at + 3600 should be 3600 seconds
+        let age = client.get_proof_age(&credential_id, &claim_type, &(submitted_at + 3600));
+        assert_eq!(age, Some(3600u64));
+    }
+
+    #[test]
+    fn test_get_proof_age_no_timestamp_returns_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let age = client.get_proof_age(&99u64, &ClaimType::HasLicense, &2_000_000u64);
+        assert_eq!(age, None);
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_is_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let credential_id = 2u64;
+        let claim_type = ClaimType::HasCertification;
+        let first_ts = 1_000_000u64;
+        let second_ts = 1_100_000u64; // later timestamp should be ignored
+
+        client.store_proof_timestamp(&credential_id, &claim_type, &first_ts);
+        client.store_proof_timestamp(&credential_id, &claim_type, &second_ts);
+
+        // Age must still be based on first_ts
+        let age = client.get_proof_age(&credential_id, &claim_type, &(first_ts + 500));
+        assert_eq!(age, Some(500u64));
+    }
+
+    #[test]
+    fn test_proof_not_expired_within_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 10u64;
+        let claim_type = ClaimType::HasLicense;
+        let submitted_at = 0u64;
+
+        // TTL = 1 day
+        client.set_protocol_config(&admin, &ProtocolConfig { proof_ttl_seconds: 86_400 });
+        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+
+        // Check at 1 hour — well within TTL
+        let expired = client.is_proof_expired(&credential_id, &claim_type, &3_600u64);
+        assert!(!expired);
+    }
+
+    #[test]
+    fn test_proof_expired_after_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 11u64;
+        let claim_type = ClaimType::HasDegree;
+        let submitted_at = 0u64;
+
+        // TTL = 1 day
+        client.set_protocol_config(&admin, &ProtocolConfig { proof_ttl_seconds: 86_400 });
+        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+
+        // Check at 2 days — past TTL
+        let expired = client.is_proof_expired(&credential_id, &claim_type, &172_801u64);
+        assert!(expired);
+    }
+
+    #[test]
+    fn test_proof_expired_default_ttl_30_days() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let credential_id = 12u64;
+        let claim_type = ClaimType::HasEmploymentHistory;
+        let submitted_at = 0u64;
+
+        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+
+        // 31 days in seconds > 30-day default TTL
+        let expired = client.is_proof_expired(&credential_id, &claim_type, &2_678_401u64);
+        assert!(expired);
+
+        // 29 days in seconds < 30-day default TTL
+        let not_expired = client.is_proof_expired(&credential_id, &claim_type, &2_505_600u64);
+        assert!(!not_expired);
+    }
+
+    #[test]
+    fn test_is_proof_expired_no_timestamp_returns_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        // No timestamp stored — should default to not-expired (non-breaking)
+        let expired = client.is_proof_expired(&999u64, &ClaimType::HasResearchPublication, &999_999_999u64);
+        assert!(!expired);
+    }
+
+    #[test]
+    fn test_proof_age_saturates_at_zero_for_future_timestamp() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let credential_id = 20u64;
+        let claim_type = ClaimType::HasDegree;
+        // stored timestamp is in the future relative to now_seconds
+        client.store_proof_timestamp(&credential_id, &claim_type, &5_000_000u64);
+
+        let age = client.get_proof_age(&credential_id, &claim_type, &1_000_000u64);
+        // saturating_sub should give 0
+        assert_eq!(age, Some(0u64));
     }
 }
