@@ -26,6 +26,9 @@ pub enum ContractError {
     UnauthorizedBurn = 10,
     /// The supplied proof_of_residency is empty or structurally invalid.
     InvalidProof = 11,
+    /// The supplied metadata URI is empty, too long (>256 bytes), or
+    /// does not start with `https://` or `ipfs://`.
+    InvalidMetadataUri = 12,
 }
 
 #[contracttype]
@@ -123,9 +126,9 @@ pub struct Delegation {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageScope {
-    DeFiCollateral { expires_at: u64 },
-    IdentityVerification { expires_at: u64 },
-    GovernanceVoting { expires_at: u64 },
+    DeFiCollateral(u64),
+    IdentityVerification(u64),
+    GovernanceVoting(u64),
 }
 
 #[contracttype]
@@ -219,6 +222,27 @@ pub struct SbtActivityEntry {
     pub timestamp: u64,
 }
 
+/// Issue #987: A record of a verifier (e.g. an employer or university) accessing a
+/// credential for a hiring/enrollment decision. One entry is appended to the
+/// credential's access log each time `track_credential_access` is called.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialAccessEntry {
+    /// The verifier address that accessed the credential.
+    pub accessor: Address,
+    /// Ledger timestamp when the access occurred.
+    pub timestamp: u64,
+    /// Micropayment (in stroops) accrued to the credential holder for this access.
+    /// Stubbed at `CREDENTIAL_ACCESS_MICROPAYMENT` until a payment rail is wired up.
+    pub payment: i128,
+}
+
+/// Issue #987: Flat micropayment (in stroops) accrued to a credential holder each
+/// time a verifier accesses their credential. Stubbed at 0 until a real payment
+/// rail (e.g. a token-contract transfer) is connected; see
+/// `settle_access_micropayment`.
+const CREDENTIAL_ACCESS_MICROPAYMENT: i128 = 0;
+
 /// Event emitted when an SBT is burned by its holder via `burn_sbt`.
 ///
 /// Published as the event data with topic `["burn_sbt", sbt_id]`.
@@ -259,6 +283,9 @@ impl SbtRegistryContract {
     /// Panics if the credential does not exist or is revoked in `quorum_proof`.
     pub fn mint(env: Env, owner: Address, credential_id: u64, metadata_uri: Bytes) -> u64 {
         owner.require_auth();
+
+        // Issue #989: Validate the metadata URI format before any state changes.
+        Self::validate_metadata_uri(&env, &metadata_uri);
 
         if env.storage().instance().has(&DataKey::Blacklist(owner.clone())) {
             panic_with_error!(&env, ContractError::HolderBlacklisted);
@@ -550,9 +577,9 @@ impl SbtRegistryContract {
         assert!(token.owner != delegatee, "cannot delegate to self");
 
         let expires_at = match &scope {
-            UsageScope::DeFiCollateral { expires_at } => *expires_at,
-            UsageScope::IdentityVerification { expires_at } => *expires_at,
-            UsageScope::GovernanceVoting { expires_at } => *expires_at,
+            UsageScope::DeFiCollateral(expires_at) => *expires_at,
+            UsageScope::IdentityVerification(expires_at) => *expires_at,
+            UsageScope::GovernanceVoting(expires_at) => *expires_at,
         };
         let current_ts = env.ledger().timestamp();
         assert!(expires_at > current_ts, "expiry must be in the future");
@@ -578,7 +605,7 @@ impl SbtRegistryContract {
         if let Some(delegation) = env.storage().instance().get::<_, ScopedDelegation>(&key) {
             let current_ts = env.ledger().timestamp();
             match delegation.scope {
-                UsageScope::DeFiCollateral { expires_at } => {
+                UsageScope::DeFiCollateral(expires_at) => {
                     expires_at > current_ts
                 }
                 _ => false,
@@ -1527,6 +1554,9 @@ impl SbtRegistryContract {
     /// Increments the token version on each update.
     fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
         owner.require_auth();
+
+        // Issue #989: Validate the metadata URI format before any state changes.
+        Self::validate_metadata_uri(&env, &new_metadata_uri);
         let mut token: SoulboundToken = env
             .storage()
             .persistent()
@@ -1552,6 +1582,77 @@ impl SbtRegistryContract {
             EXTENDED_TTL,
         );
         Self::log_sbt_activity(&env, token_id, symbol_short!("upd_meta"), owner);
+    }
+
+    // ── Issue #989: SBT Metadata URI ─────────────────────────────────────────
+
+    /// Validate that `uri` is a well-formed metadata URI.
+    /// Must be non-empty, ≤ 256 bytes, and start with `https://` or `ipfs://`.
+    fn validate_metadata_uri(env: &Env, uri: &Bytes) {
+        if uri.is_empty() || uri.len() > 256 {
+            panic_with_error!(env, ContractError::InvalidMetadataUri);
+        }
+        let https_prefix = Bytes::from_slice(env, b"https://");
+        let ipfs_prefix = Bytes::from_slice(env, b"ipfs://");
+        let is_https = uri.len() >= https_prefix.len()
+            && uri.slice(0..https_prefix.len()) == https_prefix;
+        let is_ipfs = uri.len() >= ipfs_prefix.len()
+            && uri.slice(0..ipfs_prefix.len()) == ipfs_prefix;
+        if !is_https && !is_ipfs {
+            panic_with_error!(env, ContractError::InvalidMetadataUri);
+        }
+    }
+
+    /// Issue #989: Set the metadata URI for an SBT. Admin/issuer-only.
+    ///
+    /// Validates that the URI is non-empty, ≤ 256 bytes, and starts with
+    /// `https://` or `ipfs://`. Increments the token version.
+    ///
+    /// # Parameters
+    /// - `admin`: The contract admin; must authorize this call.
+    /// - `sbt_id`: The SBT token ID to update.
+    /// - `uri`: The new metadata URI (HTTPS or IPFS).
+    ///
+    /// # Panics
+    /// - `ContractError::InvalidMetadataUri` if the URI fails validation.
+    /// - `ContractError::TokenNotFound` if the SBT does not exist.
+    /// - Panics with "unauthorized" if caller is not the admin.
+    pub fn set_sbt_metadata_uri(env: Env, admin: Address, sbt_id: u64, uri: Bytes) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+
+        Self::validate_metadata_uri(&env, &uri);
+
+        let mut token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        // Store metadata separately per Issue #512
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompressedMetadata(sbt_id), &uri);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CompressedMetadata(sbt_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+        token.version += 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(sbt_id), &token);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Token(sbt_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+        Self::log_sbt_activity(&env, sbt_id, symbol_short!("set_uri"), admin);
     }
 
     /// Append an activity entry to the SBT's activity log.
@@ -3290,7 +3391,7 @@ mod tests {
         let expires_at = current_ts + 1_000;
 
         // Delegate with DeFiCollateral scope
-        let scope = UsageScope::DeFiCollateral { expires_at };
+        let scope = UsageScope::DeFiCollateral(expires_at);
         client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
 
         // Verify delegation is active for DeFi
@@ -3318,7 +3419,7 @@ mod tests {
         let expires_at = env.ledger().timestamp() + 1_000;
 
         // Delegate with IdentityVerification scope
-        let scope = UsageScope::IdentityVerification { expires_at };
+        let scope = UsageScope::IdentityVerification(expires_at);
         client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
 
         // verify_delegated_sbt should return false because it's only for DeFi protocols (DeFiCollateral scope)
@@ -3340,7 +3441,172 @@ mod tests {
         let token_id = client.mint(&owner, &cred_id, &uri);
 
         let expires_at = env.ledger().timestamp() + 1_000;
-        let scope = UsageScope::DeFiCollateral { expires_at };
+        let scope = UsageScope::DeFiCollateral(expires_at);
         client.delegate_sbt_usage(&owner, &token_id, &owner, &scope);
+    }
+
+    // ── Issue #989: SBT Metadata URI Tests ────────────────────────────────────────
+
+    #[test]
+    fn test_set_sbt_metadata_uri_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let new_uri = Bytes::from_slice(&env, b"https://new-metadata-uri.com/sbt.json");
+        client.set_sbt_metadata_uri(&admin, &token_id, &new_uri);
+
+        let updated_token = client.get_token(&token_id);
+        assert_eq!(updated_token.metadata_uri, new_uri);
+        assert_eq!(updated_token.version, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_sbt_metadata_uri_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let new_uri = Bytes::from_slice(&env, b"https://new-metadata-uri.com/sbt.json");
+        let non_admin = Address::generate(&env);
+        client.set_sbt_metadata_uri(&non_admin, &token_id, &new_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_set_sbt_metadata_uri_token_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let new_uri = Bytes::from_slice(&env, b"https://new-metadata-uri.com/sbt.json");
+        client.set_sbt_metadata_uri(&admin, &999u64, &new_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_set_sbt_metadata_uri_empty_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let empty_uri = Bytes::new(&env);
+        client.set_sbt_metadata_uri(&admin, &token_id, &empty_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_set_sbt_metadata_uri_too_long_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        // Generate a 257-byte valid-prefix URI: "https://" + 249 'a's
+        let mut long_bytes = [0u8; 257];
+        long_bytes[0..8].copy_from_slice(b"https://");
+        for i in 8..257 {
+            long_bytes[i] = b'a';
+        }
+        let too_long_uri = Bytes::from_slice(&env, &long_bytes);
+        client.set_sbt_metadata_uri(&admin, &token_id, &too_long_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_set_sbt_metadata_uri_http_not_https_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let http_uri = Bytes::from_slice(&env, b"http://unsecure-metadata.com/sbt.json");
+        client.set_sbt_metadata_uri(&admin, &token_id, &http_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_set_sbt_metadata_uri_invalid_scheme_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let invalid_uri = Bytes::from_slice(&env, b"ftp://metadata.com/sbt.json");
+        client.set_sbt_metadata_uri(&admin, &token_id, &invalid_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_mint_validates_metadata_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+
+        let invalid_uri = Bytes::from_slice(&env, b"invalid_uri_scheme");
+        client.mint(&owner, &cred_id, &invalid_uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_update_metadata_validates_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"https://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let invalid_uri = Bytes::from_slice(&env, b"http://unsecure.com");
+        client.update_metadata(&owner, &token_id, &invalid_uri);
     }
 }
