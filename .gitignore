@@ -44,6 +44,10 @@ dist/
 dashboard/dist/
 frontend/dist/
 
+# Durable runtime state (GDPR request store, crypto-shredding vault)
+.data/
+api-server/.data/
+
 # Rust / Cargo
 Cargo.lock.bak
 **/*.rs.bak
