@@ -28,6 +28,16 @@ This document outlines QuorumProof's approach to GDPR compliance, including data
 
 ## Right to Be Forgotten (Data Deletion)
 
+> **Implementation note:** because credential data is anchored to an
+> immutable ledger (see [ADR-002](adr/adr-002-sbt-non-transferability.md)),
+> "deletion" for credential personal data is implemented as crypto-shredding
+> — off-chain encrypted storage with per-credential key destruction — rather
+> than literal byte deletion. See
+> [docs/crypto-shredding-architecture.md](crypto-shredding-architecture.md)
+> for the precise mechanism and what remains verifiable vs. inaccessible
+> after erasure. The pseudocode below describes the conceptual flow; the
+> real implementation is `api-server/src/routes/gdpr.ts`.
+
 ### Scope
 
 Users can request deletion of their personal data, subject to legal and contractual obligations.
