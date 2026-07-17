@@ -103,3 +103,32 @@ contract_invocation_duration_seconds = Histogram(
     buckets=(0.1, 0.5, 1, 2, 5),
     registry=registry
 )
+
+# #846 — Performance regression detection
+query_sla_threshold_seconds = Gauge(
+    'quorumproof_query_sla_threshold_seconds',
+    'Configured SLA latency ceiling per operation (seconds)',
+    ['operation'],
+    registry=registry
+)
+
+query_sla_violations_total = Counter(
+    'quorumproof_query_sla_violations_total',
+    'Number of queries that exceeded the SLA threshold',
+    ['operation'],
+    registry=registry
+)
+
+performance_regression_detected = Gauge(
+    'quorumproof_performance_regression_detected',
+    '1 if a performance regression vs baseline is active, 0 otherwise',
+    ['operation'],
+    registry=registry
+)
+
+query_baseline_p95_seconds = Gauge(
+    'quorumproof_query_baseline_p95_seconds',
+    'Recorded baseline p95 latency per operation (seconds)',
+    ['operation'],
+    registry=registry
+)

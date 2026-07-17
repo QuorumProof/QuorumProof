@@ -1,4 +1,5 @@
 import React from 'react';
+import { captureError } from '../lib/sentry';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -16,7 +17,7 @@ export class ErrorBoundary extends React.Component<React.PropsWithChildren<{}>, 
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error('Uncaught error in ErrorBoundary:', error, info);
+    captureError(error, 'ui', { componentStack: info.componentStack });
   }
 
   handleReload = () => {

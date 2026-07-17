@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react';
 
 export type CredentialEventType = 'issued' | 'revoked' | 'verified' | 'disputed';
 
@@ -11,6 +11,9 @@ export interface Notification {
   read: boolean;
   credentialId?: string;
   eventType?: CredentialEventType;
+  /** When multiple events were batched, all credential IDs are listed here. */
+  batchedCredentialIds?: string[];
+  issuer?: string;
 }
 
 export type NotificationPreferences = Record<CredentialEventType, boolean>;
@@ -22,14 +25,22 @@ const DEFAULT_PREFERENCES: NotificationPreferences = {
   disputed: true,
 };
 
+/** Duration (ms) to wait before flushing batched notifications from the same issuer. */
+export const BATCH_WINDOW_MS = 3_000;
+
+interface PendingBatch {
+  events: Array<{ credentialId: string; eventType: CredentialEventType; title: string; type: Notification['type'] }>;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface NotificationContextValue {
   notifications: Notification[];
   preferences: NotificationPreferences;
   addNotification: (notification: Omit<Notification, 'id' | 'timestamp' | 'read'>) => string;
-  notifyCredentialIssued: (credentialId: string, credentialType?: string) => void;
-  notifyCredentialRevoked: (credentialId: string) => void;
-  notifyCredentialVerified: (credentialId: string) => void;
-  notifyCredentialDisputed: (credentialId: string) => void;
+  notifyCredentialIssued: (credentialId: string, credentialType?: string, issuer?: string) => void;
+  notifyCredentialRevoked: (credentialId: string, issuer?: string) => void;
+  notifyCredentialVerified: (credentialId: string, issuer?: string) => void;
+  notifyCredentialDisputed: (credentialId: string, issuer?: string) => void;
   markAsRead: (id: string) => void;
   markAllAsRead: () => void;
   removeNotification: (id: string) => void;
@@ -43,69 +54,150 @@ const NotificationContext = createContext<NotificationContextValue | undefined>(
 export function NotificationProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [preferences, setPreferences] = useState<NotificationPreferences>(DEFAULT_PREFERENCES);
+  const batchRef = useRef<Map<string, PendingBatch>>(new Map());
 
   const addNotification = useCallback((notification: Omit<Notification, 'id' | 'timestamp' | 'read'>): string => {
     const id = crypto.randomUUID();
-    const newNotification: Notification = {
-      ...notification,
-      id,
-      timestamp: new Date(),
-      read: false,
-    };
-    setNotifications((prev) => [newNotification, ...prev]);
+    setNotifications((prev) => [{ ...notification, id, timestamp: new Date(), read: false }, ...prev]);
     return id;
   }, []);
 
-  const notifyCredentialIssued = useCallback((credentialId: string, credentialType?: string) => {
+  /** Queue an event for the given issuer. Flushes after BATCH_WINDOW_MS with no new events. */
+  const queueBatchedNotification = useCallback((
+    issuer: string,
+    credentialId: string,
+    eventType: CredentialEventType,
+    title: string,
+    type: Notification['type'],
+  ) => {
+    const batches = batchRef.current;
+    const existing = batches.get(issuer);
+
+    if (existing) {
+      existing.events.push({ credentialId, eventType, title, type });
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => {
+        const batch = batches.get(issuer);
+        if (!batch) return;
+        batches.delete(issuer);
+
+        if (batch.events.length === 1) {
+          const ev = batch.events[0];
+          setNotifications((prev) => [{
+            id: crypto.randomUUID(),
+            title: ev.title,
+            message: `Credential #${ev.credentialId} update from ${issuer}.`,
+            type: ev.type,
+            timestamp: new Date(),
+            read: false,
+            credentialId: ev.credentialId,
+            eventType: ev.eventType,
+            issuer,
+          }, ...prev]);
+        } else {
+          const ids = batch.events.map((e) => e.credentialId);
+          setNotifications((prev) => [{
+            id: crypto.randomUUID(),
+            title: `${batch.events.length} updates from ${issuer}`,
+            message: `Credentials ${ids.map((id) => `#${id}`).join(', ')} were updated by ${issuer}.`,
+            type: batch.events.some((e) => e.type === 'error') ? 'error'
+              : batch.events.some((e) => e.type === 'warning') ? 'warning' : 'info',
+            timestamp: new Date(),
+            read: false,
+            credentialId: ids[0],
+            batchedCredentialIds: ids,
+            issuer,
+          }, ...prev]);
+        }
+      }, BATCH_WINDOW_MS);
+    } else {
+      const timer = setTimeout(() => {
+        const batch = batches.get(issuer);
+        if (!batch) return;
+        batches.delete(issuer);
+
+        if (batch.events.length === 1) {
+          const ev = batch.events[0];
+          setNotifications((prev) => [{
+            id: crypto.randomUUID(),
+            title: ev.title,
+            message: `Credential #${ev.credentialId} update from ${issuer}.`,
+            type: ev.type,
+            timestamp: new Date(),
+            read: false,
+            credentialId: ev.credentialId,
+            eventType: ev.eventType,
+            issuer,
+          }, ...prev]);
+        } else {
+          const ids = batch.events.map((e) => e.credentialId);
+          setNotifications((prev) => [{
+            id: crypto.randomUUID(),
+            title: `${batch.events.length} updates from ${issuer}`,
+            message: `Credentials ${ids.map((id) => `#${id}`).join(', ')} were updated by ${issuer}.`,
+            type: batch.events.some((e) => e.type === 'error') ? 'error'
+              : batch.events.some((e) => e.type === 'warning') ? 'warning' : 'info',
+            timestamp: new Date(),
+            read: false,
+            credentialId: ids[0],
+            batchedCredentialIds: ids,
+            issuer,
+          }, ...prev]);
+        }
+      }, BATCH_WINDOW_MS);
+      batches.set(issuer, { events: [{ credentialId, eventType, title, type }], timer });
+    }
+  }, []);
+
+  const notifyCredentialIssued = useCallback((credentialId: string, credentialType?: string, issuer?: string) => {
     if (!preferences.issued) return;
-    addNotification({
-      title: 'Credential Issued',
-      message: credentialType
-        ? `Your ${credentialType} credential has been issued.`
-        : `Credential #${credentialId} has been issued.`,
-      type: 'success',
-      credentialId,
-      eventType: 'issued',
-    });
-  }, [preferences.issued, addNotification]);
+    const title = 'Credential Issued';
+    const message = credentialType
+      ? `Your ${credentialType} credential has been issued.`
+      : `Credential #${credentialId} has been issued.`;
 
-  const notifyCredentialRevoked = useCallback((credentialId: string) => {
+    if (issuer) {
+      queueBatchedNotification(issuer, credentialId, 'issued', title, 'success');
+    } else {
+      addNotification({ title, message, type: 'success', credentialId, eventType: 'issued' });
+    }
+  }, [preferences.issued, addNotification, queueBatchedNotification]);
+
+  const notifyCredentialRevoked = useCallback((credentialId: string, issuer?: string) => {
     if (!preferences.revoked) return;
-    addNotification({
-      title: 'Credential Revoked',
-      message: `Credential #${credentialId} has been revoked.`,
-      type: 'error',
-      credentialId,
-      eventType: 'revoked',
-    });
-  }, [preferences.revoked, addNotification]);
+    const title = 'Credential Revoked';
 
-  const notifyCredentialVerified = useCallback((credentialId: string) => {
+    if (issuer) {
+      queueBatchedNotification(issuer, credentialId, 'revoked', title, 'error');
+    } else {
+      addNotification({ title, message: `Credential #${credentialId} has been revoked.`, type: 'error', credentialId, eventType: 'revoked' });
+    }
+  }, [preferences.revoked, addNotification, queueBatchedNotification]);
+
+  const notifyCredentialVerified = useCallback((credentialId: string, issuer?: string) => {
     if (!preferences.verified) return;
-    addNotification({
-      title: 'Credential Verified',
-      message: `Credential #${credentialId} has been successfully verified.`,
-      type: 'success',
-      credentialId,
-      eventType: 'verified',
-    });
-  }, [preferences.verified, addNotification]);
+    const title = 'Credential Verified';
 
-  const notifyCredentialDisputed = useCallback((credentialId: string) => {
+    if (issuer) {
+      queueBatchedNotification(issuer, credentialId, 'verified', title, 'success');
+    } else {
+      addNotification({ title, message: `Credential #${credentialId} has been successfully verified.`, type: 'success', credentialId, eventType: 'verified' });
+    }
+  }, [preferences.verified, addNotification, queueBatchedNotification]);
+
+  const notifyCredentialDisputed = useCallback((credentialId: string, issuer?: string) => {
     if (!preferences.disputed) return;
-    addNotification({
-      title: 'Credential Disputed',
-      message: `Credential #${credentialId} has been disputed and is under review.`,
-      type: 'warning',
-      credentialId,
-      eventType: 'disputed',
-    });
-  }, [preferences.disputed, addNotification]);
+    const title = 'Credential Disputed';
+
+    if (issuer) {
+      queueBatchedNotification(issuer, credentialId, 'disputed', title, 'warning');
+    } else {
+      addNotification({ title, message: `Credential #${credentialId} has been disputed and is under review.`, type: 'warning', credentialId, eventType: 'disputed' });
+    }
+  }, [preferences.disputed, addNotification, queueBatchedNotification]);
 
   const markAsRead = useCallback((id: string) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-    );
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
   }, []);
 
   const markAllAsRead = useCallback(() => {

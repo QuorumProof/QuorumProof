@@ -7,6 +7,19 @@ import {
   getSlice as _getSlice,
 } from '../../stellar';
 
+// ── Issue #798: Per-Issuer Quota types ───────────────────────────────────────
+
+export interface IssuerQuota {
+  max_credentials: number;
+  window_seconds: bigint;
+  alert_threshold_pct: number;
+}
+
+export interface IssuerQuotaUsage {
+  issued_count: number;
+  window_start: bigint;
+}
+
 // ── Core types ────────────────────────────────────────────────────────────────
 
 export interface Credential {
@@ -220,5 +233,27 @@ export async function countCredentials(
     )
   );
   
+  return scValToNative(result.result?.retval);
+}
+
+// ── Issue #798: Per-Issuer Credential Issuance Quota ─────────────────────────
+
+/** Fetch quota configuration for an issuer. Returns null if not set. */
+export async function getIssuerQuota(issuer: string): Promise<IssuerQuota | null> {
+  const client = getRpcClient();
+  const contract = new Contract(CONTRACT_ID);
+  const result = await client.simulateTransaction(
+    contract.call('get_issuer_quota', nativeToScVal(issuer, { type: 'address' }))
+  );
+  return scValToNative(result.result?.retval) ?? null;
+}
+
+/** Fetch current quota usage for an issuer. */
+export async function getIssuerQuotaUsage(issuer: string): Promise<IssuerQuotaUsage> {
+  const client = getRpcClient();
+  const contract = new Contract(CONTRACT_ID);
+  const result = await client.simulateTransaction(
+    contract.call('get_issuer_quota_usage', nativeToScVal(issuer, { type: 'address' }))
+  );
   return scValToNative(result.result?.retval);
 }

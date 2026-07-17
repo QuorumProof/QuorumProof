@@ -1,45 +1,51 @@
-import React from "react";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
+import React, { useState, useRef, useEffect } from "react";
+import { NetworkSwitcher } from "./NetworkSwitcher";
 
 interface AppLayoutProps {
-  /** Current pathname, e.g. "/dashboard" */
   currentPath: string;
-  /** Connected Stellar wallet address (full G… address) */
   walletAddress?: string;
-  /** Function to connect wallet */
+  wallets?: string[];
+  activeIndex?: number;
   onConnectWallet?: () => void;
-  /** Current network */
-  network?: string;
+  onSwitchWallet?: (index: number) => void;
   children: React.ReactNode;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Truncate a Stellar address: GABC...XYZ */
 function truncateAddress(addr: string): string {
   if (addr.length <= 10) return addr;
   return `${addr.slice(0, 4)}...${addr.slice(-4)}`;
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
-/**
- * AppLayout — shared layout with top nav bar.
- */
-export function AppLayout({ currentPath, walletAddress, onConnectWallet, network = "Testnet", children }: AppLayoutProps) {
+export function AppLayout({
+  currentPath,
+  walletAddress,
+  wallets = [],
+  activeIndex = 0,
+  onConnectWallet,
+  onSwitchWallet,
+  children
+}: AppLayoutProps) {
   const isActive = (href: string) => currentPath === href;
+  const [showWalletMenu, setShowWalletMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowWalletMenu(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   return (
     <div className="flex flex-col h-screen bg-slate-900 text-slate-100">
-      {/* Top Nav Bar */}
       <header className="flex items-center justify-between h-14 px-4 border-b border-slate-700 bg-slate-800">
-        {/* Logo */}
         <div className="text-base font-bold tracking-tight text-white">
           ⬡ QuorumProof
         </div>
 
-        {/* Nav Links - hidden on mobile, show on md+ */}
         <nav className="hidden md:flex space-x-4">
           <a href="/dashboard" className={`px-3 py-2 rounded ${isActive('/dashboard') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
             Dashboard
@@ -68,13 +74,63 @@ export function AppLayout({ currentPath, walletAddress, onConnectWallet, network
           <a href="/compare" className={`px-3 py-2 rounded ${isActive('/compare') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
             Compare
           </a>
+          <a href="/share" className={`px-3 py-2 rounded ${isActive('/share') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+            Share
+          </a>
         </nav>
 
-        {/* Wallet and Network */}
         <div className="flex items-center space-x-4">
-          <span className="text-sm text-slate-400">{network}</span>
+          <NetworkSwitcher />
           {walletAddress ? (
-            <span className="text-sm font-mono text-slate-300">{truncateAddress(walletAddress)}</span>
+            <div style={{ position: 'relative' }} ref={menuRef}>
+              <button
+                onClick={() => setShowWalletMenu(prev => !prev)}
+                className="text-sm font-mono text-slate-300 hover:text-white flex items-center gap-1"
+              >
+                {truncateAddress(walletAddress)}
+                {wallets.length > 1 && <span style={{ fontSize: 10 }}>▼</span>}
+              </button>
+              {showWalletMenu && wallets.length > 0 && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '100%',
+                    right: 0,
+                    marginTop: 4,
+                    background: '#1e293b',
+                    border: '1px solid #334155',
+                    borderRadius: 8,
+                    padding: '4px 0',
+                    minWidth: 200,
+                    zIndex: 50,
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                  }}
+                >
+                  {wallets.map((w, i) => (
+                    <button
+                      key={w}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        padding: '8px 12px',
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                        textAlign: 'left',
+                        background: i === activeIndex ? '#334155' : 'transparent',
+                        color: '#e2e8f0',
+                        border: 'none',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => { onSwitchWallet?.(i); setShowWalletMenu(false); }}
+                      onMouseEnter={(e) => { if (i !== activeIndex) e.currentTarget.style.background = '#2d3748'; }}
+                      onMouseLeave={(e) => { if (i !== activeIndex) e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      {truncateAddress(w)} {i === activeIndex ? ' ✓' : ''}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           ) : (
             <button
               onClick={onConnectWallet}
@@ -86,7 +142,6 @@ export function AppLayout({ currentPath, walletAddress, onConnectWallet, network
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="flex-1 overflow-y-auto p-4">
         {children}
       </main>

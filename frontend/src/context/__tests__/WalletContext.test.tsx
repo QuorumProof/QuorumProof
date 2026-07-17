@@ -1,9 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { WalletProvider, useWallet } from '../WalletContext';
-import * as FreighterApi from '@stellar/freighter-api';
 
-jest.mock('@stellar/freighter-api');
+jest.mock('@stellar/freighter-api', () => ({
+  isConnected: jest.fn().mockResolvedValue({ isConnected: true }),
+  isAllowed: jest.fn().mockResolvedValue({ isAllowed: true }),
+  getAddress: jest.fn().mockResolvedValue({ address: 'GTEST123' }),
+  setAllowed: jest.fn().mockResolvedValue(undefined),
+}));
 
 const TestComponent = () => {
   const { address, isConnected, error, disconnect } = useWallet();
@@ -23,11 +27,19 @@ describe('WalletContext', () => {
     localStorage.clear();
   });
 
-  it('should disconnect and clear error state', async () => {
-    (FreighterApi.isConnected as jest.Mock).mockResolvedValue(true);
-    (FreighterApi.isAllowed as jest.Mock).mockResolvedValue(true);
-    (FreighterApi.getPublicKey as jest.Mock).mockResolvedValue('GTEST123');
+  it('should detect wallet and show address', async () => {
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>
+    );
 
+    await waitFor(() => {
+      expect(screen.getByTestId('address')).toHaveTextContent('GTEST123');
+    });
+  });
+
+  it('should disconnect and clear error state', async () => {
     render(
       <WalletProvider>
         <TestComponent />
@@ -48,7 +60,11 @@ describe('WalletContext', () => {
   });
 
   it('should surface connection errors', async () => {
-    (FreighterApi.isConnected as jest.Mock).mockRejectedValue(new Error('Connection failed'));
+    jest.isolateModules(() => {
+      jest.mock('@stellar/freighter-api', () => ({
+        isConnected: jest.fn().mockRejectedValue(new Error('Connection failed')),
+      }));
+    });
 
     render(
       <WalletProvider>
