@@ -1,11 +1,24 @@
+import { liveDashboard } from './liveDashboard.js';
+
 export interface CredentialEvent {
-  type: 'issued' | 'attested' | 'revoked' | 'suspended' | 'verified';
+  type: 'issued' | 'attested' | 'revoked' | 'suspended' | 'verified' | 'disputed';
   credential_id: string;
   timestamp: string;
   issuer?: string;
   subject?: string;
   attestor?: string;
+  /** For 'attested' events paired with a prior 'issued': ms elapsed since issuance */
+  attestation_duration_ms?: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface IssuerMetrics {
+  issuer: string;
+  period_days: number;
+  credentials_issued: number;
+  avg_attestation_time_ms: number | null;
+  dispute_rate: number;
+  reputation_trend: { date: string; issued: number; disputed: number }[];
 }
 
 export interface HourlyMetrics {
@@ -49,6 +62,101 @@ const RETENTION_DAYS = 730; // 2 years
 const DAILY_AGGREGATION_INTERVAL = 24 * 60 * 60 * 1000;
 const DATA_RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
+export interface MetricsQuery {
+  startDate: string;
+  endDate: string;
+}
+
+export interface EventLogQuery {
+  startDate: string;
+  endDate: string;
+  type?: CredentialEvent['type'];
+}
+
+export interface MetricsResult {
+  metrics: DailyMetrics[];
+  summary: {
+    total_issued: number;
+    total_attested: number;
+    total_revoked: number;
+  };
+}
+
+export interface AnomalyQuery {
+  startDate: string;
+  endDate: string;
+  threshold?: number;
+}
+
+export function parseDateParam(value: string | undefined, defaultDaysAgo: number): string {
+  if (!value) {
+    return getDateDaysAgo(defaultDaysAgo);
+  }
+  const parsed = normalizeDateInput(value);
+  if (!parsed) {
+    throw new Error(`Invalid date: ${value}`);
+  }
+  return parsed;
+}
+
+export function buildMetricsQuery(startDate?: string, endDate?: string): MetricsQuery {
+  const s = parseDateParam(startDate, 90);
+  const e = parseDateParam(endDate, 0);
+  if (s > e) {
+    throw new Error('startDate must be before or equal to endDate');
+  }
+  return { startDate: s, endDate: e };
+}
+
+export function buildEventLogQuery(startDate?: string, endDate?: string, type?: string): EventLogQuery {
+  const s = parseDateParam(startDate, 7);
+  const e = parseDateParam(endDate, 0);
+  if (s > e) {
+    throw new Error('startDate must be before or equal to endDate');
+  }
+  const q: EventLogQuery = { startDate: s, endDate: e };
+  if (type && isValidEventType(type)) {
+    q.type = type as CredentialEvent['type'];
+  }
+  return q;
+}
+
+export function buildAnomalyQuery(startDate?: string, endDate?: string, threshold?: number): AnomalyQuery {
+  const s = parseDateParam(startDate, 30);
+  const e = parseDateParam(endDate, 0);
+  if (s > e) {
+    throw new Error('startDate must be before or equal to endDate');
+  }
+  return { startDate: s, endDate: e, threshold };
+}
+
+function getDateDaysAgo(days: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().split('T')[0];
+}
+
+function normalizeDateInput(input: string): string | null {
+  if (input.includes('T')) {
+    const date = new Date(input);
+    if (!isNaN(date.getTime())) {
+      return date.toISOString().split('T')[0];
+    }
+  }
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (dateRegex.test(input)) {
+    const date = new Date(input);
+    if (!isNaN(date.getTime())) {
+      return input;
+    }
+  }
+  return null;
+}
+
+function isValidEventType(type: string): boolean {
+  return ['issued', 'attested', 'revoked', 'suspended', 'verified', 'disputed'].includes(type);
+}
+
 class MetricsStore {
   private hourlyMetrics: Map<string, HourlyMetrics> = new Map();
   private dailyMetrics: Map<string, DailyMetrics> = new Map();
@@ -57,6 +165,8 @@ class MetricsStore {
   recordEvent(event: CredentialEvent): void {
     this.eventLog.push(event);
     this.aggregateToHourly(event);
+    if (event.type === 'issued') liveDashboard.recordIssuance();
+    else if (event.type === 'attested') liveDashboard.recordAttestation(true);
   }
 
   private aggregateToHourly(event: CredentialEvent): void {
@@ -169,9 +279,9 @@ class MetricsStore {
     return Math.min(zscore, 5);
   }
 
-  getMetrics(startDate: string, endDate: string): DailyMetrics[] {
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+  getMetrics(query: MetricsQuery): DailyMetrics[] {
+    const start = new Date(query.startDate);
+    const end = new Date(query.endDate);
     const result: DailyMetrics[] = [];
 
     for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
@@ -183,7 +293,8 @@ class MetricsStore {
     return result;
   }
 
-  detectAnomalies(metrics: DailyMetrics[]): AnomalyDetectionResult[] {
+  detectAnomalies(metrics: DailyMetrics[], threshold?: number): AnomalyDetectionResult[] {
+    const anomalyThreshold = threshold ?? 2.5;
     return metrics.map((m) => {
       const historical = Array.from(this.dailyMetrics.values()).filter((h) => h.date < m.date);
       if (historical.length === 0) {
@@ -197,7 +308,7 @@ class MetricsStore {
       );
 
       const zscore = stdDev > 0 ? Math.abs((m.issued_count - avgIssued) / stdDev) : 0;
-      const is_anomalous = zscore > 2.5;
+      const is_anomalous = zscore > anomalyThreshold;
 
       return {
         is_anomalous,
@@ -233,13 +344,17 @@ class MetricsStore {
     );
   }
 
-  getEventLog(startDate: string, endDate: string): CredentialEvent[] {
-    const start = new Date(startDate).getTime();
-    const end = new Date(endDate).getTime();
-    return this.eventLog.filter((e) => {
+  getEventLog(query: EventLogQuery): CredentialEvent[] {
+    const start = new Date(query.startDate).getTime();
+    const end = new Date(query.endDate).getTime();
+    let events = this.eventLog.filter((e) => {
       const ts = new Date(e.timestamp).getTime();
       return ts >= start && ts <= end;
     });
+    if (query.type) {
+      events = events.filter((e) => e.type === query.type);
+    }
+    return events;
   }
 
   getSummary(): {
@@ -251,6 +366,47 @@ class MetricsStore {
       total_events: this.eventLog.length,
       total_days: this.dailyMetrics.size,
       retention_days: RETENTION_DAYS,
+    };
+  }
+
+  getIssuerMetrics(issuer: string, periodDays = 30): IssuerMetrics {
+    const now = Date.now();
+    const windowStart = now - periodDays * 24 * 60 * 60 * 1000;
+
+    const issuerEvents = this.eventLog.filter(
+      (e) => new Date(e.timestamp).getTime() >= windowStart && e.issuer === issuer
+    );
+
+    const credentials_issued = issuerEvents.filter((e) => e.type === 'issued').length;
+    const disputes = issuerEvents.filter((e) => e.type === 'disputed').length;
+    const dispute_rate = credentials_issued > 0 ? disputes / credentials_issued : 0;
+
+    // Compute avg attestation time from events that carry attestation_duration_ms
+    const durations = issuerEvents
+      .filter((e) => e.type === 'attested' && e.attestation_duration_ms != null)
+      .map((e) => e.attestation_duration_ms as number);
+    const avg_attestation_time_ms =
+      durations.length > 0 ? durations.reduce((s, d) => s + d, 0) / durations.length : null;
+
+    // Daily reputation trend: group issued/disputed by date
+    const byDate: Record<string, { issued: number; disputed: number }> = {};
+    for (const e of issuerEvents) {
+      const date = e.timestamp.slice(0, 10);
+      if (!byDate[date]) byDate[date] = { issued: 0, disputed: 0 };
+      if (e.type === 'issued') byDate[date].issued++;
+      if (e.type === 'disputed') byDate[date].disputed++;
+    }
+    const reputation_trend = Object.entries(byDate)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, counts]) => ({ date, ...counts }));
+
+    return {
+      issuer,
+      period_days: periodDays,
+      credentials_issued,
+      avg_attestation_time_ms,
+      dispute_rate,
+      reputation_trend,
     };
   }
 

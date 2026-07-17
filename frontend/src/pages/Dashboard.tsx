@@ -5,6 +5,10 @@ import { CredentialCardSkeleton } from '../components/CredentialCardSkeleton';
 import { EmptyState } from '../components/EmptyState';
 import { ExportCredentialsDialog } from '../components/ExportCredentialsDialog';
 import { ImportCredentialsDialog } from '../components/ImportCredentialsDialog';
+import { CredentialSearchFilter, type SearchFilters } from '../components/CredentialSearchFilter';
+import { BulkActionsBar } from '../components/BulkActionsBar';
+import { BulkRevokeDialog } from '../components/BulkRevokeDialog';
+import { BulkShareDialog } from '../components/BulkShareDialog';
 import { useWallet, useRealtimeUpdates } from '../hooks';
 import {
   getCredentialsBySubject,
@@ -33,7 +37,66 @@ export default function Dashboard() {
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [filters, setFilters] = useState<SearchFilters>(DEFAULT_FILTERS);
 
+  // Bulk selection state
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBulkExport, setShowBulkExport] = useState(false);
+  const [showBulkShare, setShowBulkShare] = useState(false);
+  const [showBulkRevoke, setShowBulkRevoke] = useState(false);
+
   const visibleCards = useMemo(() => filterAndSortCards(cards, filters), [cards, filters]);
+
+  const selectedCards = useMemo(
+    () => visibleCards.filter((c) => selectedIds.has(c.credential.id.toString())),
+    [visibleCards, selectedIds],
+  );
+
+  const canRevoke = useMemo(
+    () => selectedCards.some((c) => !c.credential.revoked),
+    [selectedCards],
+  );
+
+  function toggleSelectMode() {
+    setSelectMode((v) => !v);
+    setSelectedIds(new Set());
+  }
+
+  function handleToggleCard(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function handleSelectAll() {
+    setSelectedIds(new Set(visibleCards.map((c) => c.credential.id.toString())));
+  }
+
+  function handleDeselectAll() {
+    setSelectedIds(new Set());
+  }
+
+  function handleExitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }
+
+  function handleBulkRevokeConfirm(ids: bigint[]) {
+    setCards((prev) =>
+      prev.map((card) =>
+        ids.some((id) => id === card.credential.id)
+          ? { ...card, credential: { ...card.credential, revoked: true } }
+          : card,
+      ),
+    );
+    setSelectedIds(new Set());
+    setShowBulkRevoke(false);
+  }
 
   const fetchCredentials = useCallback(async (walletAddress: string) => {
     setLoading(true);
@@ -81,7 +144,6 @@ export default function Dashboard() {
 
             return { credential, attested, slice, expired, sliceError, credError: null };
           } catch (err) {
-            // Per-card error — return a placeholder so the grid still renders
             const msg = err instanceof Error ? err.message : 'Failed to load credential';
             return {
               credential: {
@@ -139,19 +201,28 @@ export default function Dashboard() {
           </div>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
             <span
-              className={`badge badge--${realtimeStatus === 'connected' ? 'green' : realtimeStatus === 'polling' ? 'gray' : 'gray'}`}
+              className={`badge badge--${realtimeStatus === 'connected' ? 'green' : 'gray'}`}
               title={`Real-time status: ${realtimeStatus}`}
               style={{ alignSelf: 'center' }}
             >
               {realtimeStatus === 'connected' ? '🟢 Live' : realtimeStatus === 'polling' ? '🔄 Polling' : '⚪ Offline'}
             </span>
-            {cards.length > 0 && (
-              <button
-                className="btn btn--primary btn--sm"
-                onClick={() => setShowExportDialog(true)}
-              >
-                📥 Export
-              </button>
+            {!selectMode && cards.length > 0 && (
+              <>
+                <button
+                  className="btn btn--ghost btn--sm"
+                  onClick={toggleSelectMode}
+                  title="Enter selection mode to perform bulk actions"
+                >
+                  ☑ Select
+                </button>
+                <button
+                  className="btn btn--primary btn--sm"
+                  onClick={() => setShowExportDialog(true)}
+                >
+                  📥 Export
+                </button>
+              </>
             )}
             <button
               className="btn btn--ghost btn--sm"
@@ -231,6 +302,9 @@ export default function Dashboard() {
                   key={card.credential.id.toString()}
                   data={card}
                   sliceId={sliceId}
+                  selectable={selectMode}
+                  selected={selectedIds.has(card.credential.id.toString())}
+                  onToggle={handleToggleCard}
                 />
               ))}
             </div>
@@ -255,10 +329,51 @@ export default function Dashboard() {
         </div>
       </footer>
 
+      {/* Bulk actions bar — visible in select mode */}
+      {selectMode && (
+        <BulkActionsBar
+          selectedCount={selectedIds.size}
+          totalCount={visibleCards.length}
+          canRevoke={canRevoke}
+          onSelectAll={handleSelectAll}
+          onDeselectAll={handleDeselectAll}
+          onExport={() => setShowBulkExport(true)}
+          onShare={() => setShowBulkShare(true)}
+          onRevoke={() => setShowBulkRevoke(true)}
+          onExit={handleExitSelectMode}
+        />
+      )}
+
+      {/* All-credentials export dialog */}
       {showExportDialog && (
         <ExportCredentialsDialog
           credentials={cards.map(c => c.credential)}
           onClose={() => setShowExportDialog(false)}
+        />
+      )}
+
+      {/* Bulk export — only selected credentials */}
+      {showBulkExport && (
+        <ExportCredentialsDialog
+          credentials={selectedCards.map(c => c.credential)}
+          onClose={() => setShowBulkExport(false)}
+        />
+      )}
+
+      {/* Bulk share */}
+      {showBulkShare && (
+        <BulkShareDialog
+          credentials={selectedCards.map(c => c.credential)}
+          onClose={() => setShowBulkShare(false)}
+        />
+      )}
+
+      {/* Bulk revoke */}
+      {showBulkRevoke && (
+        <BulkRevokeDialog
+          credentials={selectedCards.map(c => c.credential)}
+          onConfirm={handleBulkRevokeConfirm}
+          onClose={() => setShowBulkRevoke(false)}
         />
       )}
 

@@ -5,6 +5,7 @@ import {
   verifyMerkleRoot,
   validateLogIntegrity,
 } from '../services/audit.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -40,18 +41,30 @@ export function createAuditRouter(soroban: SorobanClient) {
 
   /**
    * GET /api/audit/entries
-   * Paginated audit log entries with optional filtering.
+   * Cursor-paginated audit log entries with optional filtering.
    * Query params:
-   *   - from_id: starting entry id (default: 1)
+   *   - cursor: base64-encoded entry id cursor (from previous response)
    *   - limit: max entries to return (default: 20, max: 100)
    *   - credential_id: filter by credential id
    *   - action: filter by action name (e.g. CredentialIssued)
    */
   router.get('/entries', async (req: Request, res: Response) => {
-    const fromId = Math.max(1, parseInt(String(req.query.from_id ?? '1'), 10) || 1);
+    const cursorQ = req.query.cursor ? String(req.query.cursor) : undefined;
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
     const credentialId = req.query.credential_id ? parseInt(String(req.query.credential_id), 10) : null;
     const action = req.query.action ? String(req.query.action) : null;
+
+    let fromId = 1;
+    if (cursorQ) {
+      try {
+        const decoded = Buffer.from(cursorQ, 'base64').toString('utf-8');
+        fromId = parseInt(decoded, 10) + 1;
+        if (isNaN(fromId) || fromId < 1) fromId = 1;
+      } catch {
+        res.status(400).json({ error: 'Invalid cursor' });
+        return;
+      }
+    }
 
     try {
       if (credentialId !== null && Number.isInteger(credentialId) && credentialId > 0) {
@@ -79,15 +92,30 @@ export function createAuditRouter(soroban: SorobanClient) {
         return;
       }
 
-      // Paginated fetch.
+      // Cursor-paginated fetch.
       const entries = await soroban.simulateCall('get_entries', [
         soroban.u64Val(fromId),
         soroban.u32Val(limit),
       ]);
       const total = await soroban.simulateCall('get_entry_count', []);
+      const entriesArr = entries as unknown[];
+      const hasMore = entriesArr.length >= limit;
+      const lastEntry = entriesArr.length > 0
+        ? (entriesArr[entriesArr.length - 1] as Record<string, unknown>)
+        : null;
+      const nextCursor = hasMore && lastEntry
+        ? Buffer.from(String(lastEntry.id ?? fromId + limit - 1)).toString('base64')
+        : null;
+
       res.json({
         data: serializeBigInt(entries),
-        pagination: { from_id: fromId, limit, total: serializeBigInt(total) },
+        pagination: {
+          cursor: cursorQ ?? null,
+          next_cursor: nextCursor,
+          limit,
+          total: serializeBigInt(total),
+          has_more: hasMore,
+        },
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -165,14 +193,36 @@ export function createAuditRouter(soroban: SorobanClient) {
    * GET /api/audit/export
    * Export audit logs in JSON Lines or JSON format for compliance audits.
    * Query params:
-   *   - format: 'jsonl' (default) or 'json'
+   *   - format: 'jsonl' (default) or 'json' or 'csv'
    *   - credential_id: optional filter by credential
    *   - action: optional filter by action type
+   *   - start_date: optional ISO date string (inclusive lower bound on timestamp)  #925
+   *   - end_date: optional ISO date string (inclusive upper bound on timestamp)    #925
    */
   router.get('/export', async (req: Request, res: Response) => {
-    const format = (req.query.format as string) === 'json' ? 'json' : 'jsonl';
+    const format = (req.query.format as string) === 'json' ? 'json'
+      : (req.query.format as string) === 'csv' ? 'csv'
+      : 'jsonl';
     const credentialId = req.query.credential_id ? parseInt(String(req.query.credential_id), 10) : null;
     const action = req.query.action ? String(req.query.action) : null;
+
+    // #925: date range filtering
+    let startSecs: bigint | null = null;
+    let endSecs: bigint | null = null;
+    if (req.query.start_date) {
+      const d = Date.parse(String(req.query.start_date));
+      if (isNaN(d)) { res.status(400).json({ error: 'Invalid start_date' }); return; }
+      startSecs = BigInt(Math.floor(d / 1000));
+    }
+    if (req.query.end_date) {
+      const d = Date.parse(String(req.query.end_date));
+      if (isNaN(d)) { res.status(400).json({ error: 'Invalid end_date' }); return; }
+      endSecs = BigInt(Math.floor(d / 1000));
+    }
+    if (startSecs !== null && endSecs !== null && startSecs > endSecs) {
+      res.status(400).json({ error: 'start_date must be before end_date' });
+      return;
+    }
 
     try {
       let entries;
@@ -198,7 +248,38 @@ export function createAuditRouter(soroban: SorobanClient) {
         ]);
       }
 
-      const exported = exportAuditLogs(entries as never[], format);
+      // #925: apply date range filter
+      let entriesArr = entries as { timestamp?: bigint | string }[];
+      if (startSecs !== null || endSecs !== null) {
+        entriesArr = entriesArr.filter((e) => {
+          const ts = BigInt(String(e.timestamp ?? 0));
+          if (startSecs !== null && ts < startSecs) return false;
+          if (endSecs !== null && ts > endSecs) return false;
+          return true;
+        });
+      }
+
+      if (format === 'csv') {
+        const exported = exportAuditLogs(entriesArr as never[], 'jsonl');
+        // Convert JSONL → CSV
+        const rows = exported.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        if (rows.length === 0) {
+          res.setHeader('Content-Type', 'text/csv');
+          res.setHeader('Content-Disposition', `attachment; filename="audit-export-${Date.now()}.csv"`);
+          res.send('');
+          return;
+        }
+        const headers = Object.keys(rows[0]).join(',');
+        const body = rows.map((r: Record<string, unknown>) =>
+          Object.values(r).map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')
+        ).join('\n');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="audit-export-${Date.now()}.csv"`);
+        res.send(`${headers}\n${body}`);
+        return;
+      }
+
+      const exported = exportAuditLogs(entriesArr as never[], format);
       res.setHeader('Content-Type', format === 'json' ? 'application/json' : 'text/plain');
       res.setHeader(
         'Content-Disposition',
@@ -216,12 +297,8 @@ export function createAuditRouter(soroban: SorobanClient) {
    * Verify Merkle root integrity for a batch of entries.
    * Body: { batch_id: number }
    */
-  router.post('/verify', async (req: Request, res: Response) => {
-    const batchId = parseInt(req.body.batch_id, 10);
-    if (!Number.isInteger(batchId) || batchId <= 0) {
-      res.status(400).json({ error: 'Invalid batch ID' });
-      return;
-    }
+  router.post('/verify', validate(schemas.auditVerify), async (req: Request, res: Response) => {
+    const batchId = req.body.batch_id as number;
 
     try {
       const notarization = await soroban.simulateCall('get_notarization', [soroban.u64Val(batchId)]);

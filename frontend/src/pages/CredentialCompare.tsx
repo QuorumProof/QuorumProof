@@ -3,6 +3,7 @@ import { Navbar } from '../components/Navbar';
 import { getCredential, getAttestors, isExpired } from '../lib/contracts/quorumProof';
 import type { Credential } from '../lib/contracts/quorumProof';
 import { credTypeLabel, formatAddress, formatTimestamp } from '../lib/credentialUtils';
+import { captureError } from '../lib/sentry';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,7 @@ export default function CredentialCompare() {
       setInfoA(a);
       setInfoB(b);
     } catch (err) {
+      captureError(err, 'credential', { credentialIdA: trimA, credentialIdB: trimB });
       setError(err instanceof Error ? err.message : 'Failed to load credentials.');
     } finally {
       setLoading(false);
@@ -80,6 +82,10 @@ export default function CredentialCompare() {
 
   const hasDiff = (field: Field) =>
     infoA && infoB && field.value(infoA) !== field.value(infoB);
+
+  const diffCount = infoA && infoB
+    ? FIELDS.filter((f) => hasDiff(f)).length
+    : 0;
 
   return (
     <>
@@ -131,6 +137,16 @@ export default function CredentialCompare() {
 
         {/* Comparison table */}
         {infoA && infoB && (
+          <>
+            <p
+              className="compare-subtitle"
+              role="status"
+              style={{ marginBottom: '12px' }}
+            >
+              {diffCount === 0
+                ? 'Credentials are identical across all fields.'
+                : `${diffCount} field${diffCount > 1 ? 's' : ''} differ${diffCount === 1 ? 's' : ''}.`}
+            </p>
           <div className="compare-table" role="table" aria-label="Credential comparison">
             {/* Header */}
             <div className="compare-row compare-row--header" role="row">
@@ -166,6 +182,7 @@ export default function CredentialCompare() {
               );
             })}
           </div>
+          </>
         )}
       </main>
 

@@ -50,6 +50,22 @@ interface CheckResult {
 export function createRateLimiter(config: RateLimitConfig, keyFn: KeyFn = combinedKey) {
   const store = new Map<string, RateLimitEntry>();
 
+  const trustedIps = new Set<string>(
+    (process.env.TRUSTED_IPS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  );
+  const trustedHeaderName = process.env.TRUSTED_HEADER_NAME ?? 'x-internal-request';
+  const trustedHeaderValue = process.env.TRUSTED_HEADER_VALUE ?? '';
+
+  function isTrusted(req: Request): boolean {
+    const ip = clientIp(req);
+    if (trustedIps.has(ip)) return true;
+    if (trustedHeaderValue) {
+      const header = req.headers[trustedHeaderName.toLowerCase()];
+      if (header === trustedHeaderValue) return true;
+    }
+    return false;
+  }
+
   function check(key: string): CheckResult {
     const now = Date.now();
     let entry = store.get(key);
@@ -104,6 +120,11 @@ export function createRateLimiter(config: RateLimitConfig, keyFn: KeyFn = combin
   }
 
   const middleware = (req: Request, res: Response, next: NextFunction): void => {
+    if (isTrusted(req)) {
+      next();
+      return;
+    }
+
     const key = keyFn(req);
     const result = check(key);
 

@@ -74,3 +74,35 @@ groups:
         annotations:
           summary: "Backup integrity verification failed"
           description: "The most recent backup failed integrity checks. Restore may not be possible."
+
+      # #846 — Automated performance regression detection
+      - alert: QuerySLABreach
+        expr: >
+          rate(quorumproof_query_sla_violations_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Query latency exceeded SLA on {{ $labels.operation }}"
+          description: "Operation {{ $labels.operation }} is producing SLA violations at {{ $value | humanize }} violations/s."
+
+      - alert: PerformanceRegressionDetected
+        expr: quorumproof_performance_regression_detected == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Performance regression on {{ $labels.operation }}"
+          description: "p95 latency for {{ $labels.operation }} is ≥20% above recorded baseline. Investigate recent deployments."
+
+      - alert: HighP95Latency
+        expr: >
+          histogram_quantile(0.95,
+            rate(quorumproof_contract_invocation_duration_seconds_bucket[10m])
+          ) > on(operation) quorumproof_query_sla_threshold_seconds
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "p95 latency for {{ $labels.operation }} exceeds SLA"
+          description: "p95={{ $value | humanizeDuration }} exceeds the configured SLA ceiling for {{ $labels.operation }}."
