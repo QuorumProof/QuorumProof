@@ -8,6 +8,7 @@ import { isConnected, isAllowed, setAllowed, getAddress } from '@stellar/freight
 interface WalletState {
   address: string | null;
   wallets: string[];
+  walletType: WalletType | null;
   activeIndex: number;
   isConnected: boolean;
   hasFreighter: boolean;
@@ -26,6 +27,7 @@ const STORAGE_KEY = 'quorum-proof-wallets';
 
 interface PersistedWalletState {
   wallets: string[];
+  walletTypes: WalletType[];
   activeIndex: number;
 }
 
@@ -35,7 +37,10 @@ function loadPersistedState(): PersistedWalletState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PersistedWalletState;
     if (Array.isArray(parsed.wallets) && parsed.wallets.length > 0) {
-      return parsed;
+      return {
+        ...parsed,
+        walletTypes: Array.isArray(parsed.walletTypes) ? parsed.walletTypes : [],
+      };
     }
     return null;
   } catch {
@@ -43,9 +48,9 @@ function loadPersistedState(): PersistedWalletState | null {
   }
 }
 
-function savePersistedState(wallets: string[], activeIndex: number): void {
+function savePersistedState(wallets: string[], walletTypes: WalletType[], activeIndex: number): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ wallets, activeIndex }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ wallets, walletTypes, activeIndex }));
   } catch (err) {
     console.error('Failed to persist wallet state:', err);
   }
@@ -66,6 +71,10 @@ export function WalletProvider({ children }: WalletProviderProps) {
     const persisted = loadPersistedState();
     return persisted ? persisted.wallets : [];
   });
+  const [walletTypes, setWalletTypes] = useState<WalletType[]>(() => {
+    const persisted = loadPersistedState();
+    return persisted ? persisted.walletTypes : [];
+  });
   const [activeIndex, setActiveIndex] = useState<number>(() => {
     const persisted = loadPersistedState();
     return persisted ? persisted.activeIndex : 0;
@@ -76,10 +85,11 @@ export function WalletProvider({ children }: WalletProviderProps) {
   const [availableWallets, setAvailableWallets] = useState<WalletType[]>([]);
 
   const address = wallets.length > 0 ? wallets[activeIndex] ?? wallets[0] : null;
+  const walletType = walletTypes.length > 0 ? walletTypes[activeIndex] ?? walletTypes[0] ?? null : null;
 
   useEffect(() => {
-    savePersistedState(wallets, activeIndex);
-  }, [wallets, activeIndex]);
+    savePersistedState(wallets, walletTypes, activeIndex);
+  }, [wallets, walletTypes, activeIndex]);
 
   useEffect(() => {
     const init = async () => {
@@ -100,11 +110,16 @@ export function WalletProvider({ children }: WalletProviderProps) {
               const persisted = loadPersistedState();
               if (persisted && persisted.wallets.includes(result.address)) {
                 setWallets(persisted.wallets);
+                setWalletTypes(persisted.wallets.map((_, i) => persisted.walletTypes[i] ?? 'freighter'));
                 setActiveIndex(persisted.activeIndex);
               } else {
                 setWallets(prev => {
                   if (prev.includes(result.address)) return prev;
                   return [result.address, ...prev];
+                });
+                setWalletTypes(prev => {
+                  if (wallets.includes(result.address)) return prev;
+                  return ['freighter', ...prev];
                 });
                 setActiveIndex(0);
               }
@@ -139,10 +154,12 @@ export function WalletProvider({ children }: WalletProviderProps) {
           const existing = prev.findIndex(w => w === result.address);
           if (existing >= 0) {
             setActiveIndex(existing);
+            setWalletTypes(types => types.map((t, i) => (i === existing ? walletToUse : t)));
             return prev;
           }
           const newWallets = [...prev, result.address];
           setActiveIndex(newWallets.length - 1);
+          setWalletTypes(types => [...types, walletToUse]);
           return newWallets;
         });
       }
@@ -159,6 +176,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
       if (next.length === 0) clearPersistedState();
       return next;
     });
+    setWalletTypes(prev => prev.filter((_, i) => i !== activeIndex));
     setActiveIndex(() => {
       const newLength = wallets.length - 1;
       if (newLength <= 0) return 0;
@@ -177,6 +195,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
   const value: WalletState = {
     address,
     wallets,
+    walletType,
     activeIndex,
     isConnected: wallets.length > 0,
     hasFreighter,
