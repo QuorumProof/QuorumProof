@@ -3,6 +3,9 @@ import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { SearchIndex, type SearchOptions, type CredentialRecord as SearchCredentialRecord } from '../searchIndex.js';
 import { MetadataHashCache } from '../services/metadataHashCache.js';
 import { ShardedCredentialStore } from '../services/shardedStorage.js';
+import { SearchIndexStore } from '../services/searchIndexStore.js';
+import { SearchRebuildManager } from '../services/searchRebuildManager.js';
+import { parseFilterTree } from '../services/searchFilterParser.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -25,38 +28,74 @@ function serializeBigInt(value: unknown): unknown {
 
 type CredentialRecord = SearchCredentialRecord;
 
+const VALID_SORT_KEYS = ['id', 'type', 'relevance', 'created_at', 'updated_at', 'recency', 'reputation'];
+
 export function createCredentialsRouter(soroban: SorobanClient) {
   const router = Router();
-  const searchIndex = new SearchIndex();
+  const store = new SearchIndexStore();
   const metadataHashCache = new MetadataHashCache();
   const shardedStore = new ShardedCredentialStore();
+  const rebuildManager = new SearchRebuildManager();
   let indexedCredentials: Set<string> = new Set();
+  let indexVersion = 0;
+
+  // The live, queryable index. Rebuilds build a fresh instance off to the
+  // side and only swap this reference in once fully built, so `/search`
+  // always sees either the old index or the new one, never a partial one.
+  let currentIndex = new SearchIndex();
+
+  // Hydrate from local disk (no chain RPC) so a process restart doesn't
+  // require re-scanning the chain before search works again.
+  {
+    const persisted = store.all();
+    if (persisted.length > 0) {
+      currentIndex.indexCredentials(persisted);
+      for (const cred of persisted) indexedCredentials.add(cred.id);
+      indexVersion++;
+    }
+  }
 
   /**
-   * Helper function to populate the search index from Soroban
+   * Fetches every credential from the chain (1x get_credential_count + Nx
+   * get_credential). Only credentials that are new or changed since the last
+   * time they were persisted get written to `store` and re-indexed — repeat
+   * polls patch the index incrementally instead of rebuilding it from
+   * scratch, and diffing happens against the on-disk store so it's true
+   * across process restarts too.
    */
   async function populateIndex(): Promise<void> {
     try {
       const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
       const total = Number(credCount);
 
-      const allCredentials: CredentialRecord[] = [];
       for (let i = 1; i <= total; i++) {
         try {
           const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
           const credRecord = serializeBigInt(cred) as CredentialRecord;
           // Ensure id is a string
           credRecord.id = String(credRecord.id || i);
-          allCredentials.push(credRecord);
+
+          const existing = store.get(credRecord.id);
+          const changed =
+            !existing ||
+            existing.version !== credRecord.version ||
+            existing.metadata_hash !== credRecord.metadata_hash ||
+            existing.revoked !== credRecord.revoked ||
+            existing.suspended !== credRecord.suspended;
+
           indexedCredentials.add(credRecord.id);
           metadataHashCache.set(credRecord.id, credRecord.metadata_hash, cred as Record<string, unknown>);
           shardedStore.set(credRecord);
+
+          if (changed) {
+            store.set(credRecord);
+            currentIndex.indexCredential(credRecord);
+          }
         } catch {
           // skip missing/expired credentials
         }
       }
-
-      searchIndex.indexCredentials(allCredentials);
+      indexVersion++;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Failed to populate search index:', msg);
@@ -65,7 +104,8 @@ export function createCredentialsRouter(soroban: SorobanClient) {
 
   /**
    * GET /api/credentials/search
-   * Advanced search with filters, full-text search, and cursor-based pagination
+   * Advanced search with filters, full-text search, ranking, deduplication,
+   * and cursor-based pagination.
    * Query params:
    *   - q: full-text search query
    *   - type: credential type (supports multiple: type=1&type=2)
@@ -76,16 +116,27 @@ export function createCredentialsRouter(soroban: SorobanClient) {
    *   - attestation_count_min, attestation_count_max: attestation count range
    *   - created_after, created_before: creation date range (ISO 8601)
    *   - expires_after, expires_before: expiration date range (ISO 8601)
+   *   - <field>[gte]/[lte]/[gt]/[lt]/[regex]: advanced per-field operators
+   *     (e.g. attestation_count[gte]=2, issuer[regex]=BANK.*, supports
+   *     dotted metadata paths like metadata[name][regex]=...)
+   *   - filter[and]/[or]/[not]: nested boolean combinations of the above
+   *   - deduplicate: when true, collapses same subject+issuer credentials to
+   *     the highest version (ties broken by latest updated_at)
+   *   - include_versions: when true, includes a `versions` map of every
+   *     subject+issuer group in the response
+   *   - include_score: when true, attaches a `reputation_score` to each result
    *   - cursor: base64-encoded cursor for pagination (from previous response)
    *   - limit: results per page (default: 20, max: 100)
-   *   - sort_by: id|type|relevance|created_at|updated_at (default: id)
-   *   - sort_order: asc|desc (default: asc)
+   *   - sort_by: comma-separated list of id|type|relevance|created_at|
+   *     updated_at|recency|reputation (default: relevance if `q` is set,
+   *     otherwise id)
+   *   - sort_order: asc|desc (default: desc for recency/reputation, else asc)
    *   - facets: comma-separated facet names (default: issuer,credential_type,status,issuer_type)
    */
   router.get('/search', async (req: Request, res: Response) => {
     try {
       // Populate index on first search or if empty
-      if (searchIndex.getIndexSize() === 0) {
+      if (currentIndex.getIndexSize() === 0) {
         await populateIndex();
       }
 
@@ -104,9 +155,11 @@ export function createCredentialsRouter(soroban: SorobanClient) {
         expires_before,
         cursor: cursorQ,
         limit: limitQ = '20',
-        sort_by: sortBy = 'id',
-        sort_order: sortOrder = 'asc',
         facets: facetsQ,
+        deduplicate: deduplicateQ,
+        show_all: showAllQ,
+        include_versions: includeVersionsQ,
+        include_score: includeScoreQ,
       } = req.query as Record<string, string>;
 
       // Validate limit
@@ -116,12 +169,28 @@ export function createCredentialsRouter(soroban: SorobanClient) {
         return;
       }
 
-      // Validate sort parameters
-      const validSortBy = ['id', 'type', 'relevance', 'created_at', 'updated_at'];
-      if (!validSortBy.includes(sortBy)) {
-        res.status(400).json({ error: `sort_by must be one of: ${validSortBy.join(', ')}` });
+      // sort_by defaults to 'relevance' when a text query is present (so
+      // matches rank by relevance instead of arbitrary id order), else 'id'.
+      const sortByRaw =
+        typeof req.query.sort_by === 'string' && req.query.sort_by.length > 0
+          ? req.query.sort_by
+          : q
+            ? 'relevance'
+            : 'id';
+      const sortByParts = sortByRaw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (sortByParts.length === 0 || !sortByParts.every(p => VALID_SORT_KEYS.includes(p))) {
+        res.status(400).json({ error: `sort_by must be one of: ${VALID_SORT_KEYS.join(', ')}` });
         return;
       }
+
+      // recency/reputation naturally mean "best/most-recent first"; default
+      // to desc for those unless the caller explicitly asked for asc.
+      const sortOrderRaw = typeof req.query.sort_order === 'string' ? req.query.sort_order : undefined;
+      const sortOrder =
+        sortOrderRaw ?? (sortByParts[0] === 'recency' || sortByParts[0] === 'reputation' ? 'desc' : 'asc');
       if (!['asc', 'desc'].includes(sortOrder)) {
         res.status(400).json({ error: 'sort_order must be "asc" or "desc"' });
         return;
@@ -135,9 +204,13 @@ export function createCredentialsRouter(soroban: SorobanClient) {
         query: q,
         cursor: cursorQ,
         limit: limitNum,
-        sort_by: (sortBy as any) || 'id',
-        sort_order: (sortOrder as any) || 'asc',
+        sort_by: sortByRaw,
+        sort_order: sortOrder as 'asc' | 'desc',
         facets,
+        filterTree: parseFilterTree(req.query as Record<string, unknown>),
+        deduplicate: deduplicateQ === 'true' && showAllQ !== 'true',
+        include_versions: includeVersionsQ === 'true',
+        include_score: includeScoreQ === 'true',
       };
 
       // Parse type filter (can be multiple)
@@ -175,18 +248,87 @@ export function createCredentialsRouter(soroban: SorobanClient) {
       if (expires_before) options.expires_before = expires_before;
 
       // Execute search
-      const result = searchIndex.search(options);
+      const result = currentIndex.search(options);
 
       res.json({
         data: result.data,
         facets: result.facets,
         pagination: result.pagination,
         query_info: result.query_info,
+        index_version: indexVersion,
+        ...(result.deduplication_stats && { deduplication_stats: result.deduplication_stats }),
+        ...(result.versions && { versions: result.versions }),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
     }
+  });
+
+  /**
+   * POST /api/credentials/search/rebuild-index-async
+   * Kicks off a background full re-scan of the chain into a fresh index,
+   * then atomically swaps it in — the current index stays live and
+   * queryable for the whole rebuild. Returns immediately with a rebuild ID.
+   */
+  router.post('/search/rebuild-index-async', (_req: Request, res: Response) => {
+    const estimatedDurationMs = Math.max(50, currentIndex.getIndexSize() * 5);
+
+    const job = rebuildManager.start(estimatedDurationMs, async onProgress => {
+      const newIndex = new SearchIndex();
+      const credCount: bigint = await soroban.simulateCall('get_credential_count', []);
+      const total = Number(credCount);
+      const totalForProgress = isNaN(total) ? 0 : total;
+      let processed = 0;
+
+      for (let i = 1; i <= total; i++) {
+        try {
+          const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(i)]);
+          const credRecord = serializeBigInt(cred) as CredentialRecord;
+          credRecord.id = String(credRecord.id || i);
+          store.set(credRecord);
+          newIndex.indexCredential(credRecord);
+        } catch {
+          // skip missing/expired credentials
+        }
+        processed++;
+        onProgress(processed, totalForProgress);
+      }
+
+      currentIndex = newIndex;
+      indexVersion++;
+      return newIndex.getIndexSize();
+    });
+
+    if (!job) {
+      res.status(409).json({ error: 'A rebuild is already in progress' });
+      return;
+    }
+
+    res.status(202).json({
+      rebuild_id: job.rebuild_id,
+      status: job.status,
+      estimated_duration_ms: job.estimated_duration_ms,
+    });
+  });
+
+  /**
+   * GET /api/credentials/search/rebuild-status/:id
+   */
+  router.get('/search/rebuild-status/:id', (req: Request, res: Response) => {
+    const job = rebuildManager.getStatus(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: 'Rebuild not found' });
+      return;
+    }
+    res.json(job);
+  });
+
+  /**
+   * GET /api/credentials/search/rebuild-history
+   */
+  router.get('/search/rebuild-history', (_req: Request, res: Response) => {
+    res.json({ rebuilds: rebuildManager.getHistory() });
   });
 
   /**
@@ -248,9 +390,9 @@ export function createCredentialsRouter(soroban: SorobanClient) {
       await populateIndex();
       res.json({
         success: true,
-        index_size: searchIndex.getIndexSize(),
+        index_size: currentIndex.getIndexSize(),
         cache_size: metadataHashCache.size,
-        last_indexed: searchIndex.getLastIndexed(),
+        last_indexed: currentIndex.getLastIndexed(),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -264,10 +406,11 @@ export function createCredentialsRouter(soroban: SorobanClient) {
    */
   router.get('/search/index-stats', (_req: Request, res: Response) => {
     res.json({
-      index_size: searchIndex.getIndexSize(),
-      vocabulary_size: searchIndex.getVocabularySize(),
+      index_size: currentIndex.getIndexSize(),
+      vocabulary_size: currentIndex.getVocabularySize(),
       cache_size: metadataHashCache.size,
-      last_indexed: searchIndex.getLastIndexed(),
+      last_indexed: currentIndex.getLastIndexed(),
+      index_version: indexVersion,
       timestamp: new Date().toISOString(),
     });
   });
