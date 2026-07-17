@@ -2,7 +2,7 @@
  * Advanced Search Index Service
  *
  * Provides full-text search via an **inverted index**, faceted filtering,
- * and aggregation for credentials.
+ * ranking, deduplication, and aggregation for credentials.
  *
  * ## Inverted Index
  * Each time credentials are indexed (`indexCredentials` / `indexCredential`)
@@ -19,9 +19,14 @@
  *
  * At query time the query string is tokenised and the posting lists for each
  * token are intersected/unioned to produce a candidate set, then each
- * candidate is scored for relevance.  This replaces the previous O(n × q)
- * linear scan with an O(|postings| × q) lookup that is typically much
- * smaller for large corpora.
+ * candidate is scored for relevance.
+ *
+ * ## Field indexes
+ * `issuer`, `issuer_type`, `credential_type`, and `status` are additionally
+ * indexed as value → Set<credentialId> maps so that structural filters (and
+ * a text query) narrow the candidate set via index lookups *before* any
+ * per-record scan — the per-record filter pass below only runs over that
+ * narrowed candidate set, not the full corpus.
  */
 
 export type CredentialRecord = {
@@ -64,7 +69,15 @@ export type SearchResult = {
     full_text_query?: string;
     active_filters: Record<string, unknown>;
     execution_time_ms: number;
+    sort_by?: string;
+    sort_order?: string;
   };
+  deduplication_stats?: {
+    total_before: number;
+    total_after: number;
+    duplicates_removed: number;
+  };
+  versions?: Record<string, CredentialRecord[]>;
 };
 
 export type SearchFilters = {
@@ -81,14 +94,31 @@ export type SearchFilters = {
   expires_before?: string;
 };
 
+// ---------------------------------------------------------------------------
+// Advanced filter tree (bracket operators / and-or-not trees from the route)
+// ---------------------------------------------------------------------------
+
+export type FilterOp = 'eq' | 'gte' | 'lte' | 'gt' | 'lt' | 'regex';
+
+export type FilterNode =
+  | { and: FilterNode[] }
+  | { or: FilterNode[] }
+  | { not: FilterNode }
+  | { field: string; op: FilterOp; value: unknown };
+
 export type SearchOptions = SearchFilters & {
   query?: string;
   cursor?: string;
   limit?: number;
-  sort_by?: 'id' | 'type' | 'relevance' | 'created_at' | 'updated_at';
+  /** Comma-separated list of: id|type|relevance|created_at|updated_at|recency|reputation */
+  sort_by?: string;
   sort_order?: 'asc' | 'desc';
   facets?: string[];
   owner?: string;
+  filterTree?: FilterNode[];
+  deduplicate?: boolean;
+  include_versions?: boolean;
+  include_score?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +132,19 @@ const FIELD_WEIGHTS: Record<string, number> = {
   credential_type: 1,
   metadata: 0.5,
 };
+
+const ISSUER_TYPE_REPUTATION_WEIGHT: Record<string, number> = {
+  government: 3,
+  bank: 2,
+  private: 1,
+};
+
+/** Higher-is-better score combining attestor count with issuer-type trust weight. */
+function reputationScore(cred: CredentialRecord): number {
+  const attestation = cred.attestation_count ?? 0;
+  const issuerWeight = ISSUER_TYPE_REPUTATION_WEIGHT[(cred.issuer_type || '').toLowerCase()] ?? 0;
+  return attestation * 10 + issuerWeight;
+}
 
 // ---------------------------------------------------------------------------
 // Tokenisation helpers
@@ -205,6 +248,154 @@ function parseDate(dateStr: string | undefined): Date | null {
 }
 
 // ---------------------------------------------------------------------------
+// Advanced filter tree evaluation
+// ---------------------------------------------------------------------------
+
+function getFieldValue(record: CredentialRecord, path: string): unknown {
+  const parts = path.split('.');
+  let cur: unknown = record;
+  for (const part of parts) {
+    if (cur == null || typeof cur !== 'object') return undefined;
+    cur = (cur as Record<string, unknown>)[part];
+  }
+  return cur;
+}
+
+function toComparable(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return value;
+  const n = Number(value);
+  if (!isNaN(n)) return n;
+  const d = new Date(String(value));
+  const t = d.getTime();
+  return isNaN(t) ? null : t;
+}
+
+function evalFilterNode(node: FilterNode, record: CredentialRecord): boolean {
+  if ('and' in node) return node.and.every(n => evalFilterNode(n, record));
+  if ('or' in node) return node.or.some(n => evalFilterNode(n, record));
+  if ('not' in node) return !evalFilterNode(node.not, record);
+
+  const actual = getFieldValue(record, node.field);
+  switch (node.op) {
+    case 'eq':
+      return String(actual) === String(node.value);
+    case 'gte':
+    case 'lte':
+    case 'gt':
+    case 'lt': {
+      const a = toComparable(actual);
+      const b = toComparable(node.value);
+      if (a === null || b === null) return false;
+      if (node.op === 'gte') return a >= b;
+      if (node.op === 'lte') return a <= b;
+      if (node.op === 'gt') return a > b;
+      return a < b;
+    }
+    case 'regex': {
+      try {
+        let pattern = String(node.value);
+        let flags = '';
+        const caseInsensitive = pattern.match(/^\(\?i\)(.*)$/);
+        if (caseInsensitive) {
+          pattern = caseInsensitive[1];
+          flags = 'i';
+        }
+        const re = new RegExp(pattern, flags);
+        return re.test(String(actual ?? ''));
+      } catch {
+        return false;
+      }
+    }
+    default:
+      return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sorting helpers
+// ---------------------------------------------------------------------------
+
+function sortKeyValue(cred: CredentialRecord, key: string): number | string {
+  switch (key) {
+    case 'type':
+      return cred.credential_type;
+    case 'created_at':
+      return cred.created_at || '';
+    case 'updated_at':
+      return cred.updated_at || '';
+    case 'recency':
+      return Date.parse(cred.created_at || cred.updated_at || '') || 0;
+    case 'reputation':
+      return reputationScore(cred);
+    case 'relevance':
+      return 0;
+    case 'id':
+    default:
+      return parseInt(cred.id, 10);
+  }
+}
+
+function compareByKeys(a: CredentialRecord, b: CredentialRecord, keys: string[], order: 'asc' | 'desc'): number {
+  for (const key of keys) {
+    const av = sortKeyValue(a, key);
+    const bv = sortKeyValue(b, key);
+    const cmp = typeof av === 'string' && typeof bv === 'string' ? av.localeCompare(bv) : (av as number) - (bv as number);
+    if (cmp !== 0) return order === 'desc' ? -cmp : cmp;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Deduplication
+// ---------------------------------------------------------------------------
+
+function dedupeKey(cred: CredentialRecord): string {
+  return `${cred.subject ?? ''}::${cred.issuer ?? ''}`;
+}
+
+function deduplicateRecords(records: CredentialRecord[]): {
+  deduped: CredentialRecord[];
+  stats: { total_before: number; total_after: number; duplicates_removed: number };
+  groups: Map<string, CredentialRecord[]>;
+} {
+  const groups = new Map<string, CredentialRecord[]>();
+  for (const record of records) {
+    const key = dedupeKey(record);
+    const group = groups.get(key);
+    if (group) group.push(record);
+    else groups.set(key, [record]);
+  }
+
+  const deduped: CredentialRecord[] = [];
+  for (const group of groups.values()) {
+    let best = group[0];
+    for (const candidate of group.slice(1)) {
+      const bestVersion = best.version ?? 0;
+      const candidateVersion = candidate.version ?? 0;
+      if (candidateVersion > bestVersion) {
+        best = candidate;
+      } else if (candidateVersion === bestVersion) {
+        const bestTime = Date.parse(best.updated_at || '') || 0;
+        const candidateTime = Date.parse(candidate.updated_at || '') || 0;
+        if (candidateTime >= bestTime) best = candidate;
+      }
+    }
+    deduped.push(best);
+  }
+
+  return {
+    deduped,
+    stats: {
+      total_before: records.length,
+      total_after: deduped.length,
+      duplicates_removed: records.length - deduped.length,
+    },
+    groups,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Inverted index data structures
 // ---------------------------------------------------------------------------
 
@@ -220,6 +411,44 @@ type Posting = { credId: string; field: string };
  */
 type InvertedIndex = Map<string, Posting[]>;
 
+type IndexedFieldName = 'issuer' | 'issuer_type' | 'credential_type' | 'status';
+const INDEXED_FIELDS: IndexedFieldName[] = ['issuer', 'issuer_type', 'credential_type', 'status'];
+
+function statusOf(cred: CredentialRecord): string {
+  return cred.revoked ? 'revoked' : cred.suspended ? 'suspended' : 'active';
+}
+
+function fieldIndexValue(cred: CredentialRecord, field: IndexedFieldName): string {
+  switch (field) {
+    case 'issuer':
+      return cred.issuer ?? '';
+    case 'issuer_type':
+      return cred.issuer_type || 'unknown';
+    case 'credential_type':
+      return String(cred.credential_type);
+    case 'status':
+      return statusOf(cred);
+  }
+}
+
+function intersectSets(a: Set<string>, b: Set<string>): Set<string> {
+  const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+  const result = new Set<string>();
+  for (const id of small) {
+    if (big.has(id)) result.add(id);
+  }
+  return result;
+}
+
+function unionFieldIndex(map: Map<string, Set<string>>, values: string[]): Set<string> {
+  const result = new Set<string>();
+  for (const value of values) {
+    const set = map.get(value);
+    if (set) for (const id of set) result.add(id);
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // SearchIndex class
 // ---------------------------------------------------------------------------
@@ -227,6 +456,12 @@ type InvertedIndex = Map<string, Posting[]>;
 export class SearchIndex {
   private credentials: Map<string, CredentialRecord> = new Map();
   private invertedIndex: InvertedIndex = new Map();
+  private fieldIndex: Record<IndexedFieldName, Map<string, Set<string>>> = {
+    issuer: new Map(),
+    issuer_type: new Map(),
+    credential_type: new Map(),
+    status: new Map(),
+  };
   private lastIndexed: Date | null = null;
 
   // ── Index management ──────────────────────────────────────────────────────
@@ -237,10 +472,12 @@ export class SearchIndex {
   indexCredentials(creds: CredentialRecord[]): void {
     this.credentials.clear();
     this.invertedIndex.clear();
+    for (const field of INDEXED_FIELDS) this.fieldIndex[field].clear();
 
     for (const cred of creds) {
       this.credentials.set(cred.id, cred);
       this._addToInvertedIndex(cred);
+      this._addToFieldIndex(cred);
     }
     this.lastIndexed = new Date();
   }
@@ -254,9 +491,11 @@ export class SearchIndex {
     const existing = this.credentials.get(cred.id);
     if (existing) {
       this._removeFromInvertedIndex(existing);
+      this._removeFromFieldIndex(existing);
     }
     this.credentials.set(cred.id, cred);
     this._addToInvertedIndex(cred);
+    this._addToFieldIndex(cred);
     if (!this.lastIndexed) this.lastIndexed = new Date();
   }
 
@@ -267,6 +506,7 @@ export class SearchIndex {
     const existing = this.credentials.get(credentialId);
     if (existing) {
       this._removeFromInvertedIndex(existing);
+      this._removeFromFieldIndex(existing);
       this.credentials.delete(credentialId);
     }
   }
@@ -277,6 +517,7 @@ export class SearchIndex {
   clear(): void {
     this.credentials.clear();
     this.invertedIndex.clear();
+    for (const field of INDEXED_FIELDS) this.fieldIndex[field].clear();
     this.lastIndexed = null;
   }
 
@@ -323,6 +564,32 @@ export class SearchIndex {
           this.invertedIndex.set(token, filtered);
         }
       }
+    }
+  }
+
+  // ── Field (structural filter) index maintenance ───────────────────────────
+
+  private _addToFieldIndex(cred: CredentialRecord): void {
+    for (const field of INDEXED_FIELDS) {
+      const value = fieldIndexValue(cred, field);
+      const map = this.fieldIndex[field];
+      let set = map.get(value);
+      if (!set) {
+        set = new Set();
+        map.set(value, set);
+      }
+      set.add(cred.id);
+    }
+  }
+
+  private _removeFromFieldIndex(cred: CredentialRecord): void {
+    for (const field of INDEXED_FIELDS) {
+      const value = fieldIndexValue(cred, field);
+      const map = this.fieldIndex[field];
+      const set = map.get(value);
+      if (!set) continue;
+      set.delete(cred.id);
+      if (set.size === 0) map.delete(value);
     }
   }
 
@@ -390,13 +657,21 @@ export class SearchIndex {
   }
 
   private getSortValue(cred: CredentialRecord, sort_by: string): string {
-    switch (sort_by) {
+    const key = sort_by.split(',')[0]?.trim() || 'id';
+    switch (key) {
       case 'type':
         return String(cred.credential_type).padStart(20, '0');
       case 'created_at':
         return cred.created_at || '';
       case 'updated_at':
         return cred.updated_at || '';
+      case 'recency':
+        return String(Math.max(0, Math.floor(Date.parse(cred.created_at || cred.updated_at || '') || 0))).padStart(
+          20,
+          '0',
+        );
+      case 'reputation':
+        return String(Math.max(0, Math.floor(reputationScore(cred)))).padStart(20, '0');
       case 'relevance':
         return String(0).padStart(20, '0');
       case 'id':
@@ -409,12 +684,13 @@ export class SearchIndex {
 
   /**
    * Search credentials with optional full-text query, structural filters,
-   * facets, sorting and cursor-based pagination.
+   * an advanced filter tree, deduplication, ranking, facets and cursor-based
+   * pagination.
    *
-   * When a `query` string is provided the inverted index is used to retrieve
-   * candidates in O(|matches|) time instead of scanning the entire corpus.
-   * Results are then scored by relevance and the rest of the pipeline
-   * (filters, sort, facets, pagination) runs on the candidate subset.
+   * When a `query` string or a structural filter (type/issuer/issuer_type/
+   * status) is provided, the inverted index / field indexes are used to
+   * narrow the candidate set *before* the per-record filter pass runs, so
+   * the pass below scans the narrowed set rather than the full corpus.
    */
   search(options: SearchOptions): SearchResult {
     const startTime = Date.now();
@@ -431,25 +707,48 @@ export class SearchIndex {
     const pageSize = Math.min(100, Math.max(1, limit));
     const queryTokens = query ? tokenize(query) : [];
 
-    // ── Step 1: Candidate selection ──────────────────────────────────────────
-    // Use the inverted index for full-text queries; otherwise start with the
-    // full corpus and let the filter pass narrow it down.
+    // ── Step 1: Candidate selection via inverted index + field indexes ───────
     let candidateIds: Set<string> | null = null;
     if (queryTokens.length > 0) {
       candidateIds = this._lookup(queryTokens, false /* OR */);
     }
 
-    const allCredentials = Array.from(this.credentials.values());
+    const narrowByField = (map: Map<string, Set<string>>, values: string[]): void => {
+      const idx = unionFieldIndex(map, values);
+      candidateIds = candidateIds !== null ? intersectSets(candidateIds, idx) : idx;
+    };
 
-    // ── Step 2: Filter pass ───────────────────────────────────────────────────
-    let filtered = allCredentials.filter(cred => {
-      // Restrict to inverted-index candidates when a query is present
-      if (candidateIds !== null && !candidateIds.has(cred.id)) return false;
+    if (options.type !== undefined) {
+      const types = (Array.isArray(options.type) ? options.type : [options.type]).map(String);
+      narrowByField(this.fieldIndex.credential_type, types);
+    }
+    if (options.issuer !== undefined) {
+      const issuers = Array.isArray(options.issuer) ? options.issuer : [options.issuer];
+      narrowByField(this.fieldIndex.issuer, issuers);
+    }
+    if (options.issuer_type !== undefined) {
+      const issuerTypes = Array.isArray(options.issuer_type) ? options.issuer_type : [options.issuer_type];
+      narrowByField(this.fieldIndex.issuer_type, issuerTypes);
+    }
+    if (options.status !== undefined) {
+      narrowByField(this.fieldIndex.status, [options.status]);
+    }
 
+    const baseRecords: CredentialRecord[] =
+      candidateIds !== null
+        ? Array.from(candidateIds)
+            .map(id => this.credentials.get(id))
+            .filter((c): c is CredentialRecord => !!c)
+        : Array.from(this.credentials.values());
+
+    // ── Step 2: Filter pass (over the narrowed candidate set) ────────────────
+    let filtered = baseRecords.filter(cred => {
       // Permission-based filtering
       if (owner && cred.owner && cred.owner !== owner) return false;
 
-      // Structural filters
+      // Structural filters (re-checked here as a correctness safety net —
+      // the field-index narrowing above is an optimization, not the only
+      // source of truth).
       if (options.type !== undefined) {
         const types = Array.isArray(options.type) ? options.type : [options.type];
         if (!types.includes(cred.credential_type)) return false;
@@ -500,10 +799,15 @@ export class SearchIndex {
         if (!ed || !before || ed > before) return false;
       }
 
+      // Advanced filter tree (bracket operators / and-or-not, from the route)
+      if (options.filterTree && options.filterTree.length > 0) {
+        if (!options.filterTree.every(node => evalFilterNode(node, cred))) return false;
+      }
+
       return true;
     });
 
-    // ── Step 3: Relevance scoring & sort ─────────────────────────────────────
+    // ── Step 3: Relevance scoring & zero-score drop ───────────────────────────
     if (queryTokens.length > 0) {
       // Score each candidate and drop zero-scorers (no real match).
       const scored = filtered
@@ -519,43 +823,28 @@ export class SearchIndex {
       }
     }
 
-    // Deterministic secondary sort (or primary when not sorting by relevance)
-    if (sort_by !== 'relevance' || queryTokens.length === 0) {
-      filtered.sort((a, b) => {
-        let aVal: number | string;
-        let bVal: number | string;
-
-        switch (sort_by) {
-          case 'type':
-            aVal = a.credential_type;
-            bVal = b.credential_type;
-            break;
-          case 'created_at':
-            aVal = a.created_at || '';
-            bVal = b.created_at || '';
-            break;
-          case 'updated_at':
-            aVal = a.updated_at || '';
-            bVal = b.updated_at || '';
-            break;
-          case 'id':
-          default:
-            aVal = parseInt(a.id, 10);
-            bVal = parseInt(b.id, 10);
-        }
-
-        if (typeof aVal === 'string' && typeof bVal === 'string') {
-          return sort_order === 'desc'
-            ? bVal.localeCompare(aVal)
-            : aVal.localeCompare(bVal);
-        }
-        return sort_order === 'desc'
-          ? (bVal as number) - (aVal as number)
-          : (aVal as number) - (bVal as number);
-      });
+    // ── Step 4: Deduplication (before sort/facets/pagination) ────────────────
+    let deduplicationStats: SearchResult['deduplication_stats'];
+    let versionGroups: Map<string, CredentialRecord[]> | undefined;
+    if (options.include_versions) {
+      versionGroups = deduplicateRecords(filtered).groups;
+    }
+    if (options.deduplicate) {
+      const { deduped, stats } = deduplicateRecords(filtered);
+      filtered = deduped;
+      deduplicationStats = stats;
     }
 
-    // ── Step 4: Facet calculation (pre-pagination) ────────────────────────────
+    // ── Step 5: Sort ───────────────────────────────────────────────────────
+    const sortKeys = sort_by
+      .split(',')
+      .map(k => k.trim())
+      .filter(Boolean);
+    if (sort_by !== 'relevance' || queryTokens.length === 0) {
+      filtered.sort((a, b) => compareByKeys(a, b, sortKeys.length ? sortKeys : ['id'], sort_order));
+    }
+
+    // ── Step 6: Facet calculation (pre-pagination) ────────────────────────────
     const facetData: Record<string, Map<string, number>> = {};
     for (const facetName of facets) {
       facetData[facetName] = new Map<string, number>();
@@ -579,7 +868,7 @@ export class SearchIndex {
       }
     }
 
-    // ── Step 5: Cursor pagination (binary search) ─────────────────────────────
+    // ── Step 7: Cursor pagination (binary search) ─────────────────────────────
     const total = filtered.length;
     const cursorVal = this.decodeCursor(cursor);
     let startIndex = 0;
@@ -602,9 +891,12 @@ export class SearchIndex {
       if (startIndex === 0) startIndex = low;
     }
 
-    const data = filtered.slice(startIndex, startIndex + pageSize);
+    let data = filtered.slice(startIndex, startIndex + pageSize);
+    if (options.include_score) {
+      data = data.map(cred => ({ ...cred, reputation_score: reputationScore(cred) }) as CredentialRecord);
+    }
 
-    // ── Step 6: Build facet response ──────────────────────────────────────────
+    // ── Step 8: Build facet response ──────────────────────────────────────────
     const facetsResponse: SearchFacet[] = [];
     for (const facetName of facets) {
       const facetValues = facetData[facetName];
@@ -625,7 +917,7 @@ export class SearchIndex {
         ? this.encodeCursor(this.getSortValue(data[data.length - 1], sort_by))
         : null;
 
-    return {
+    const result: SearchResult = {
       data,
       facets: facetsResponse,
       pagination: {
@@ -649,10 +941,20 @@ export class SearchIndex {
           created_before: options.created_before,
           expires_after: options.expires_after,
           expires_before: options.expires_before,
+          filter: options.filterTree && options.filterTree.length > 0 ? options.filterTree : undefined,
         },
         execution_time_ms: Date.now() - startTime,
+        sort_by,
+        sort_order,
       },
     };
+
+    if (deduplicationStats) result.deduplication_stats = deduplicationStats;
+    if (versionGroups) {
+      result.versions = Object.fromEntries(versionGroups);
+    }
+
+    return result;
   }
 
   // ── Accessors ─────────────────────────────────────────────────────────────
