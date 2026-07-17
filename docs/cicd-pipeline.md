@@ -22,11 +22,11 @@ Runs on every push and pull request to `main` or `develop`.
 
 **Jobs:**
 
-- **contracts** — Builds all Soroban WASM contracts and runs the full test suite.
+- **contracts** — Builds all Soroban WASM contracts and runs the full test suite. Includes the **migration verification gate** which runs snapshot-diff invariant checks (see `docs/migration-invariants.md`).
 - **frontend** — Installs dependencies, lints, tests, and builds the frontend.
 - **security** — Runs `cargo audit` to check for known vulnerabilities in Rust dependencies, and TruffleHog to detect any hardcoded secrets in the diff.
 
-All three jobs must pass before a PR can be merged.
+All three jobs must pass before a PR can be merged. The migration verification gate (`cargo test -p integration_tests -- migration_verification`) runs as part of the contracts job and must pass before any migration PR can be merged.
 
 ### 2. Testnet Deploy on PR — `deploy-pr.yml`
 
