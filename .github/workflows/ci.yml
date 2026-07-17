@@ -31,7 +31,10 @@ jobs:
           key: wasm-${{ hashFiles('contracts/**/Cargo.toml', 'contracts/**/src/**/*.rs') }}
 
       - name: Build all contracts
-        run: cargo build --release --target wasm32-unknown-unknown --workspace
+        run: |
+          cargo build --release --target wasm32-unknown-unknown -p quorum_proof
+          cargo build --release --target wasm32-unknown-unknown -p sbt_registry
+          cargo build --release --target wasm32-unknown-unknown -p zk_verifier
 
       - name: Run unit tests
         run: cargo test --lib --workspace
