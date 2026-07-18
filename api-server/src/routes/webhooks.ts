@@ -5,6 +5,8 @@ import {
   getWebhook,
   deleteWebhook,
   getDeliveryLog,
+  listDeadLetters,
+  replayDeadLetter,
   type WebhookEvent,
 } from '../services/webhooks.js';
 
@@ -42,6 +44,21 @@ router.get('/', (_req: Request, res: Response) => {
 // GET /api/webhooks/deliveries/log — delivery log (must be before /:id)
 router.get('/deliveries/log', (_req: Request, res: Response) => {
   res.json({ data: getDeliveryLog() });
+});
+
+// GET /api/webhooks/dead-letters — list deliveries that exhausted retries (must be before /:id)
+router.get('/dead-letters', (_req: Request, res: Response) => {
+  res.json({ data: listDeadLetters() });
+});
+
+// POST /api/webhooks/dead-letters/:id/replay — re-queue a dead-lettered delivery
+router.post('/dead-letters/:id/replay', (req: Request, res: Response) => {
+  const record = replayDeadLetter(req.params.id as string);
+  if (!record) {
+    res.status(404).json({ error: 'Dead-lettered delivery not found' });
+    return;
+  }
+  res.status(202).json(record);
 });
 
 // GET /api/webhooks/:id — get a single webhook
