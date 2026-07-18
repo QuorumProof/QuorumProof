@@ -317,6 +317,16 @@ soroban contract invoke --id <CONTRACT_ID> --network testnet \
   -- get_credential --credential-id 1
 ```
 
+### Migration Invariant Regression
+
+Run the formal invariant checker after every upgrade:
+
+```bash
+cargo test -p integration_tests -- migration_verification
+```
+
+This runs the snapshot-diff harness against all invariants defined in `docs/migration-invariants.md`.
+
 ### Regression Testing
 
 After upgrade, verify:
@@ -327,6 +337,7 @@ After upgrade, verify:
 - ✅ Admin functions still work
 - ✅ New features function correctly
 - ✅ No data corruption
+- ✅ Migration invariant set passes (I1–I8)
 
 ## Version Management
 
@@ -349,12 +360,49 @@ Follow semantic versioning for releases:
 - **MINOR**: New features (backward compatible)
 - **PATCH**: Bug fixes (backward compatible)
 
+## Migration Invariant Verification
+
+Every upgrade that performs a state migration **must** pass the formal invariant verification gate before merging. See:
+
+- **[Migration Invariants](./migration-invariants.md)** — The complete formal invariant set (I1–I8) that every migration must preserve.
+- **`contracts/integration_tests/src/migration_verification.rs`** — The snapshot-diff harness that captures contract state before/after a candidate migration and asserts all invariants hold.
+
+### Invariant Gate in CI
+
+The CI workflow (`.github/workflows/ci.yml`) runs `cargo test -p integration_tests -- migration_verification` as a mandatory check. Positive tests validate real migrations; negative tests ensure the checker catches deliberately broken transitions.
+
+### Adding a New Migration
+
+When writing a new `migrate_state` branch:
+
+1. **Review the invariant set** in `docs/migration-invariants.md`. If your migration changes storage in a way not covered, add a new invariant.
+2. **Add a positive test** to `migration_verification.rs` that populates state, runs your migration, and asserts zero violations.
+3. **Run the gate locally** before pushing:
+   ```bash
+   cargo test -p integration_tests -- migration_verification
+   ```
+4. Ensure CI passes with the migration-verification gate green before requesting review.
+
+### What the Harness Checks
+
+| ID | Invariant | Scope |
+|---|---|---|
+| I1 | No orphaned SBT-to-credential references | Cross-contract |
+| I2 | Slice weight caches match live attestor-weight sums | quorum_proof |
+| I3 | No ID collisions (credential/slice/SBT) post-migration | quorum_proof + sbt_registry |
+| I4 | Revocation/expiry state fully preserved | quorum_proof |
+| I5 | Cross-contract credential cache consistent | quorum_proof ↔ sbt_registry |
+| I6 | Admin identity preserved | quorum_proof |
+| I7 | Paused state preserved | quorum_proof |
+| I8 | StateVersion monotonically non-decreasing | quorum_proof |
+
 ## Mainnet Upgrade Checklist
 
 Before upgrading on mainnet:
 
 - [ ] Code reviewed by 2+ team members
 - [ ] All tests pass on testnet
+- [ ] Migration invariant verification passes (`cargo test -p integration_tests -- migration_verification`)
 - [ ] Upgrade tested on testnet with real data
 - [ ] Rollback plan documented and tested
 - [ ] All stakeholders notified
@@ -386,3 +434,6 @@ Before upgrading on mainnet:
 - [Stellar Deployer Interface](https://developers.stellar.org/docs/learn/storing-data#deployer)
 - [QuorumProof Architecture](./architecture.md)
 - [Error Codes Reference](./error-codes.md)
+- [Migration Invariants](./migration-invariants.md) — Formal invariant set (I1–I8)
+- [Migration Verification Harness](../contracts/integration_tests/src/migration_verification.rs) — Snapshot-diff test harness
+- [CI Workflow](../.github/workflows/ci.yml) — CI gate with migration verification
