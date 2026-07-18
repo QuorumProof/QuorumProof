@@ -18,10 +18,24 @@
 //   batch_verify (5) : ~3_000_000 CPU / ~3_000_000 MEM
 //
 // Run with: `cargo test -p quorum-proof-benches -- --nocapture`
+//
+// ── Scaling / complexity-class gate (additive, does not replace the above) ──
+// `bench_*_scaling` tests below run select operations across a range of `n`
+// (capped at the contract's own MAX_BATCH_SIZE/MAX_ATTESTORS_PER_SLICE — no
+// real call can exceed those) and record each (n, cpu, mem) point via
+// `quorum_proof_benches::scaling::record_point`. They assert nothing
+// themselves beyond what they already asserted (e.g. bench_attest_scaling's
+// existing flat-threshold check); the actual complexity-class fit, cross-run
+// history, and pass/fail gate live in `src/bin/scaling_report.rs` — run it
+// after this test binary to fit curves and get a report:
+//   cargo test --manifest-path benches/Cargo.toml --test benchmarks -- --nocapture
+//   cargo run  --manifest-path benches/Cargo.toml --bin scaling_report
+// or just `scripts/scaling_benchmark_report.sh` to do both.
 use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, Vec};
 use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
 use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
 use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+use quorum_proof_benches::scaling;
 
 // ── Regression thresholds (CPU instructions) ─────────────────────────────────
 // Each value = measured_baseline × 1.10 (10% regression gate).
@@ -263,9 +277,15 @@ fn bench_verify_claim() {
 
 /// Measures how attest cost scales with attestor count in a slice.
 /// Detects O(n²) regressions in attestation logic.
+///
+/// n is capped at `MAX_ATTESTORS_PER_SLICE` (20, contracts/quorum_proof/src/lib.rs:37) —
+/// no real slice can ever have more attestors than that, so this is the full
+/// range reachable through the public contract API. Points are recorded via
+/// `scaling::record_point` for `bin/scaling_report.rs` to fit a complexity
+/// curve against, on top of the fixed per-attest threshold assert below.
 #[test]
 fn bench_attest_scaling() {
-    for n in [1u32, 5, 10] {
+    for n in [1u32, 5, 10, 15, 20] {
         let env = Env::default();
         let (client, _) = setup_qp(&env);
         let issuer = Address::generate(&env);
@@ -287,6 +307,7 @@ fn bench_attest_scaling() {
         });
 
         println!("[bench_attest_scaling n={}] cpu={} mem={}", n, m.cpu, m.mem);
+        scaling::record_point("attest", n, m.cpu, m.mem);
         // Each attest must stay within the single-attest threshold regardless of slice size
         assert!(m.cpu <= THRESHOLD_ATTEST_CPU,
             "attest scaling CPU regression at n={}: {} > {}", n, m.cpu, THRESHOLD_ATTEST_CPU);
@@ -383,6 +404,40 @@ fn bench_batch_issue_credentials_5() {
         "batch_issue_credentials(5) MEM regression: {} > {}", m.mem, THRESHOLD_BATCH_ISSUE_5_MEM);
 }
 
+/// Measures how batch_issue_credentials cost scales with batch size.
+///
+/// n is capped at `MAX_BATCH_SIZE` (50, contracts/quorum_proof/src/lib.rs:38) —
+/// no real batch call can ever exceed that, so this is the full range
+/// reachable through the public contract API. Data-collection only: points
+/// are recorded via `scaling::record_point` for `bin/scaling_report.rs` to
+/// fit a complexity curve against; the fixed n=5 threshold gate above is
+/// unaffected.
+#[test]
+fn bench_batch_issue_credentials_scaling() {
+    for n in [1u32, 5, 10, 25, 50] {
+        let env = Env::default();
+        let (client, _) = setup_qp(&env);
+        let issuer = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmBenchHash000000000000000000000000");
+
+        let mut subjects = Vec::new(&env);
+        let mut cred_types = Vec::new(&env);
+        let mut metas = Vec::new(&env);
+        for i in 1u32..=n {
+            subjects.push_back(Address::generate(&env));
+            cred_types.push_back(i);
+            metas.push_back(meta.clone());
+        }
+
+        let m = measure(&env, || {
+            client.batch_issue_credentials(&issuer, &subjects, &cred_types, &metas, &None);
+        });
+
+        println!("[bench_batch_issue_credentials_scaling n={}] cpu={} mem={}", n, m.cpu, m.mem);
+        scaling::record_point("batch_issue_credentials", n, m.cpu, m.mem);
+    }
+}
+
 /// Benchmarks verify_attestations_batch with 5 credential/slice pairs.
 /// Detects regressions in the batch verification loop.
 #[test]
@@ -418,4 +473,47 @@ fn bench_verify_attestations_batch_5() {
         "verify_attestations_batch(5) CPU regression: {} > {}", m.cpu, THRESHOLD_BATCH_VERIFY_5_CPU);
     assert!(m.mem <= THRESHOLD_BATCH_VERIFY_5_MEM,
         "verify_attestations_batch(5) MEM regression: {} > {}", m.mem, THRESHOLD_BATCH_VERIFY_5_MEM);
+}
+
+/// Measures how verify_attestations_batch cost scales with batch size.
+///
+/// n is capped at `MAX_BATCH_SIZE` (50, contracts/quorum_proof/src/lib.rs:38).
+/// This is the operation most likely to show superlinear growth: its
+/// implementation does a nested scan (per credential, per attestation
+/// record, linear scan over slice.attestors) rather than a map lookup —
+/// see contracts/quorum_proof/src/lib.rs:9894-9911. Data-collection only:
+/// points are recorded via `scaling::record_point`; the fixed n=5 threshold
+/// gate above is unaffected.
+#[test]
+fn bench_verify_attestations_batch_scaling() {
+    for n in [1u32, 5, 10, 25, 50] {
+        let env = Env::default();
+        let (client, _) = setup_qp(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attestor = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmBenchHash000000000000000000000000");
+
+        let mut att_list = Vec::new(&env);
+        att_list.push_back(attestor.clone());
+        let mut wts = Vec::new(&env);
+        wts.push_back(1u32);
+
+        let mut cred_ids = Vec::new(&env);
+        let mut slice_ids = Vec::new(&env);
+        for i in 1u32..=n {
+            let cid = client.issue_credential(&issuer, &subject, &i, &meta, &None, &0u64);
+            let sid = client.create_slice(&issuer, &att_list, &wts, &1u32);
+            client.attest(&attestor, &cid, &sid, &true, &None);
+            cred_ids.push_back(cid);
+            slice_ids.push_back(sid);
+        }
+
+        let m = measure(&env, || {
+            client.verify_attestations_batch(&cred_ids, &slice_ids);
+        });
+
+        println!("[bench_verify_attestations_batch_scaling n={}] cpu={} mem={}", n, m.cpu, m.mem);
+        scaling::record_point("verify_attestations_batch", n, m.cpu, m.mem);
+    }
 }
