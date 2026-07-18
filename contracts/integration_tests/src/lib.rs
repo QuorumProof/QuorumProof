@@ -26,6 +26,14 @@ mod incident_response;
 #[cfg(test)]
 mod contract_analytics;
 
+// Issue #1009: Migration verification harness — snapshot-diff invariant checker
+// for cross-contract migration safety. Defines formal invariants (see
+// docs/migration-invariants.md) and runs them before/after every candidate
+// migration. Positive tests validate real migrations; negative tests verify
+// the harness catches broken state transitions.
+#[cfg(test)]
+mod migration_verification;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 

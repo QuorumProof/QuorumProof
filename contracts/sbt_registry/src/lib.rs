@@ -123,9 +123,24 @@ pub struct Delegation {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageScope {
-    DeFiCollateral { expires_at: u64 },
-    IdentityVerification { expires_at: u64 },
-    GovernanceVoting { expires_at: u64 },
+    DeFiCollateral(u64),
+    IdentityVerification(u64),
+    GovernanceVoting(u64),
+}
+
+/// Constant micropayment amount per credential access (stub).
+const CREDENTIAL_ACCESS_MICROPAYMENT: i128 = 100;
+
+/// A single entry in the credential access audit log.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialAccessEntry {
+    /// Address of the verifier who accessed the credential.
+    pub accessor: Address,
+    /// Ledger timestamp of the access event.
+    pub timestamp: u64,
+    /// Micropayment credited (or to be transferred) to the holder.
+    pub payment: i128,
 }
 
 #[contracttype]
@@ -550,9 +565,9 @@ impl SbtRegistryContract {
         assert!(token.owner != delegatee, "cannot delegate to self");
 
         let expires_at = match &scope {
-            UsageScope::DeFiCollateral { expires_at } => *expires_at,
-            UsageScope::IdentityVerification { expires_at } => *expires_at,
-            UsageScope::GovernanceVoting { expires_at } => *expires_at,
+            UsageScope::DeFiCollateral(expires_at) => *expires_at,
+            UsageScope::IdentityVerification(expires_at) => *expires_at,
+            UsageScope::GovernanceVoting(expires_at) => *expires_at,
         };
         let current_ts = env.ledger().timestamp();
         assert!(expires_at > current_ts, "expiry must be in the future");
@@ -578,7 +593,7 @@ impl SbtRegistryContract {
         if let Some(delegation) = env.storage().instance().get::<_, ScopedDelegation>(&key) {
             let current_ts = env.ledger().timestamp();
             match delegation.scope {
-                UsageScope::DeFiCollateral { expires_at } => {
+                UsageScope::DeFiCollateral(expires_at) => {
                     expires_at > current_ts
                 }
                 _ => false,
@@ -3290,7 +3305,7 @@ mod tests {
         let expires_at = current_ts + 1_000;
 
         // Delegate with DeFiCollateral scope
-        let scope = UsageScope::DeFiCollateral { expires_at };
+        let scope = UsageScope::DeFiCollateral(expires_at);
         client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
 
         // Verify delegation is active for DeFi
@@ -3318,7 +3333,7 @@ mod tests {
         let expires_at = env.ledger().timestamp() + 1_000;
 
         // Delegate with IdentityVerification scope
-        let scope = UsageScope::IdentityVerification { expires_at };
+        let scope = UsageScope::IdentityVerification(expires_at);
         client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
 
         // verify_delegated_sbt should return false because it's only for DeFi protocols (DeFiCollateral scope)
@@ -3340,7 +3355,7 @@ mod tests {
         let token_id = client.mint(&owner, &cred_id, &uri);
 
         let expires_at = env.ledger().timestamp() + 1_000;
-        let scope = UsageScope::DeFiCollateral { expires_at };
+        let scope = UsageScope::DeFiCollateral(expires_at);
         client.delegate_sbt_usage(&owner, &token_id, &owner, &scope);
     }
 }
