@@ -42,7 +42,21 @@ CONTRACT_ZK_VERIFIER=<new-id>
 - Mainnet fallback: `https://horizon.stellar.org`
 - No contract redeployment is needed; only the client configuration changes.
 
-### 1.4 Frontend / Dashboard Outage
+### 1.4 Migration Interrupted Mid-Run
+
+A chunked contract migration (see [Paginated / Chunked Migration Protocol](./contract-upgrade-strategy.md#paginated--chunked-migration-protocol))
+that stops partway through — orchestrator crash, host reboot, RPC outage — is
+**not a data-loss event**. Progress lives on-chain in the job's `MigrationJob`
+cursor, not in the orchestrator process.
+
+1. Confirm the job's on-chain state: `soroban contract invoke -- get_migration_job --migration-id <id>`.
+2. If `status` is `InProgress`, just restart `scripts/migration_orchestrator.py` —
+   it re-reads the cursor on startup and resumes from there. No flags, no manual
+   range bookkeeping, and no risk of re-processing already-migrated items.
+3. If `status` is `Completed`, no action is needed; re-running the orchestrator
+   against a completed job is a safe no-op.
+
+### 1.5 Frontend / Dashboard Outage
 
 1. Redeploy from the latest tagged release on the `main` branch via the CI/CD pipeline (`workflow_dispatch` on `deploy.yml`).
 2. If the hosting provider is unavailable, deploy to an alternate static host using `npm run build` output from `frontend/` or `dashboard/`.

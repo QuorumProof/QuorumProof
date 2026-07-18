@@ -28,6 +28,13 @@ from metrics import (
     contract_invocation_duration_seconds,
     backup_last_success_timestamp,
     backup_verification_status,
+    migration_status,
+    migration_progress_ratio,
+    migration_cursor,
+    migration_total_items,
+    migration_migrated_total,
+    migration_skipped_total,
+    migration_last_progress_timestamp,
 )
 from performance_regression import PerformanceRegressionDetector
 
@@ -54,6 +61,16 @@ class QuorumProofExporter:
         self.event_cache: Dict[str, Any] = {}
         baseline_path = os.getenv("PERF_BASELINE_PATH", "performance_baseline.json")
         self.perf_detector = PerformanceRegressionDetector(baseline_path=baseline_path)
+
+        # Migration ids to poll via get_migration_job — job ids are, by
+        # convention, the migration's target schema version (see
+        # docs/contract-upgrade-strategy.md). There's no on-chain index of
+        # "all migration ids ever created", so the exporter is told which ones
+        # are currently relevant via env var; the orchestrator/operator adds
+        # the new id here when starting a migration.
+        self.migration_job_ids = [
+            int(v) for v in os.getenv("MIGRATION_JOB_IDS", "").split(",") if v.strip()
+        ]
 
     def start(self):
         """Start the Prometheus HTTP server and begin scraping."""
@@ -91,6 +108,74 @@ class QuorumProofExporter:
         except requests.RequestException as e:
             logger.error(f"RPC request failed: {e}")
             api_errors_total.labels(error_code="rpc_error").inc()
+
+        self._scrape_migration_jobs()
+
+    def _scrape_migration_jobs(self):
+        """Poll get_migration_job for every configured migration id.
+
+        This is a plain read — always available regardless of whether a
+        migration is running or the contract is paused — so a poll failure
+        here is a monitoring-stack problem, not a signal about migration
+        health, and is logged rather than treated like a contract error.
+        """
+        for migration_id in self.migration_job_ids:
+            try:
+                job = self._fetch_migration_job(migration_id)
+            except Exception as e:
+                logger.error(f"Failed to fetch migration job {migration_id}: {e}")
+                continue
+            if job is None:
+                continue
+
+            labels = {"migration_id": str(migration_id)}
+            migration_status.labels(**labels).set(0 if job["status"] == "InProgress" else 1)
+            migration_cursor.labels(**labels).set(job["cursor"])
+            migration_total_items.labels(**labels).set(job["total_items"])
+            migration_migrated_total.labels(**labels).set(job["migrated_count"])
+            migration_skipped_total.labels(**labels).set(job["skipped_count"])
+            migration_last_progress_timestamp.labels(**labels).set(job["updated_at"])
+            total = job["total_items"]
+            examined = min(max(job["cursor"] - 1, 0), total) if total else total
+            ratio = 1.0 if total == 0 else examined / total
+            migration_progress_ratio.labels(**labels).set(ratio)
+
+    def _fetch_migration_job(self, migration_id: int) -> Optional[Dict[str, Any]]:
+        """Simulate get_migration_job(migration_id) and return a plain dict,
+        following the same simulate-and-decode pattern as
+        scripts/export_state.py's fetch_credential.
+        """
+        from stellar_sdk import Keypair, Network, TransactionBuilder, Account
+        import stellar_sdk.scval as scval
+
+        source = Keypair.random()
+        account = Account(source.public_key, 0)
+        tx = (
+            TransactionBuilder(account, Network.TESTNET_NETWORK_PASSPHRASE, base_fee=100)
+            .append_invoke_contract_function_op(
+                contract_id=self.contract_id,
+                function_name="get_migration_job",
+                parameters=[scval.to_uint32(migration_id)],
+            )
+            .build()
+        )
+        resp = self.server.simulate_transaction(tx) if hasattr(self.server, "simulate_transaction") else None
+        if not resp or getattr(resp, "error", None):
+            return None
+        result_xdr = resp.results[0].xdr if getattr(resp, "results", None) else None
+        if not result_xdr:
+            return None
+        native = scval.to_native(result_xdr)
+        if native is None:
+            return None
+        return {
+            "cursor": int(native["cursor"]),
+            "total_items": int(native["total_items"]),
+            "migrated_count": int(native["migrated_count"]),
+            "skipped_count": int(native["skipped_count"]),
+            "status": "Completed" if native["status"] == 1 else "InProgress",
+            "updated_at": int(native["updated_at"]),
+        }
 
     def _fetch_events(self) -> list:
         """Fetch contract events from Stellar RPC."""
@@ -136,6 +221,19 @@ class QuorumProofExporter:
 
         elif event_type == "ProofRequested":
             proof_requests_total.inc()
+
+        elif event_type == "MigrationProgress":
+            # Emitted by migrate_next_chunk on every chunk — a near-real-time
+            # complement to the periodic get_migration_job poll in
+            # _scrape_migration_jobs, which remains the source of truth for
+            # staleness detection (MigrationStalled) since it doesn't depend
+            # on this event pipeline having kept up.
+            migration_id = data.get("migration_id")
+            if migration_id is not None:
+                labels = {"migration_id": str(migration_id)}
+                migration_cursor.labels(**labels).set(data.get("cursor", 0))
+                migration_total_items.labels(**labels).set(data.get("total_items", 0))
+                migration_status.labels(**labels).set(data.get("status", 0))
 
         elif event_type == "RateLimitExceeded":
             address = data.get("address", "unknown")
