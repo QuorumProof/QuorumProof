@@ -22,7 +22,7 @@ import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
-import { getWsMetrics } from './ws/metrics.js';
+import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
@@ -88,6 +88,14 @@ app.get('/health', (_req, res) => {
 
 app.get('/ws/metrics', (_req, res) => {
   res.json(getWsMetrics());
+});
+
+// Prometheus exposition, tagged with this instance's id — scrape every
+// replica and aggregate (e.g. sum(quorumproof_ws_connections)) to get
+// cluster-wide totals. See docs/websocket-scaling.md.
+app.get('/metrics/ws', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(getWsMetricsPrometheus());
 });
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
