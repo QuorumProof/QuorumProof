@@ -132,3 +132,53 @@ query_baseline_p95_seconds = Gauge(
     ['operation'],
     registry=registry
 )
+
+# ── Chunked migration protocol (docs/contract-upgrade-strategy.md) ──────────
+migration_status = Gauge(
+    'quorumproof_migration_status',
+    '0 = InProgress, 1 = Completed, for a given migration job',
+    ['migration_id'],
+    registry=registry
+)
+
+migration_progress_ratio = Gauge(
+    'quorumproof_migration_progress_ratio',
+    'cursor / total_items for a given migration job (0-1)',
+    ['migration_id'],
+    registry=registry
+)
+
+migration_cursor = Gauge(
+    'quorumproof_migration_cursor',
+    'Current on-chain cursor position for a given migration job',
+    ['migration_id'],
+    registry=registry
+)
+
+migration_total_items = Gauge(
+    'quorumproof_migration_total_items',
+    'total_items snapshot for a given migration job',
+    ['migration_id'],
+    registry=registry
+)
+
+migration_migrated_total = Gauge(
+    'quorumproof_migration_migrated_total',
+    'Items actually transformed so far for a given migration job',
+    ['migration_id'],
+    registry=registry
+)
+
+migration_skipped_total = Gauge(
+    'quorumproof_migration_skipped_total',
+    'Items examined but skipped (already at target, or missing) for a given migration job',
+    ['migration_id'],
+    registry=registry
+)
+
+migration_last_progress_timestamp = Gauge(
+    'quorumproof_migration_last_progress_timestamp',
+    'Unix timestamp this migration job last advanced its cursor (job updated_at)',
+    ['migration_id'],
+    registry=registry
+)

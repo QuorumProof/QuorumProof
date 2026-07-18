@@ -268,6 +268,184 @@ pub fn migrate_credentials(env: Env, admin: Address) {
 }
 ```
 
+#### Pattern 3: Paginated / Chunked Migration (large deployments)
+
+Pattern 2 (batch migration) walks every id in a caller-supplied `[start_id, end_id]`
+range inside a single transaction. That's fine for a few dozen test records, but a
+live deployment with many thousands of Credential/Slice/SBT records cannot be
+migrated that way: Soroban enforces a hard per-invocation CPU instruction and
+memory ceiling (mirrored in tests by `Env::default()`'s budget, ~100M CPU
+instructions per invocation), and one transaction walking thousands of storage
+entries will exceed it and abort with no state change. See
+[Paginated / Chunked Migration Protocol](#paginated--chunked-migration-protocol)
+below for the full design: an on-chain cursor (`migration.rs`), the
+`start_metadata_migration` / `migrate_next_chunk` / `get_migration_job`
+entrypoints, and the crash-safe off-chain orchestrator that drives them.
+
+## Paginated / Chunked Migration Protocol
+
+### Why batch migration doesn't scale
+
+`migrate_metadata_schema(admin, to_version, start_id, end_id)` (Pattern 2 above) is a
+single-transaction batch migration. It works for test fixtures and small deployments,
+but it fundamentally cannot migrate a deployment with real history: Soroban gives
+every invocation a fixed CPU/memory budget, and there is no way to split a single
+transaction across two ledger closes. Once `end_id - start_id` is large enough that
+walking every id's storage entry exceeds that budget, the call reverts outright —
+with no partial progress, because Soroban transactions are all-or-nothing. A test in
+`migration_tests.rs` (`test_single_shot_batch_migration_exceeds_a_single_invocation_budget`)
+demonstrates exactly this failure mode against a 200-credential synthetic dataset,
+using the same budget model Soroban enforces on mainnet.
+
+### On-chain progress cursor
+
+`contracts/quorum_proof/src/migration.rs` implements a small, reusable state machine
+that any chunked migration can drive:
+
+```rust
+pub struct MigrationJob {
+    pub id: u32,            // caller-chosen id (by convention: target schema version)
+    pub kind: u32,           // which concrete migration this job runs
+    pub cursor: u64,         // next item id to examine — the authoritative progress marker
+    pub total_items: u64,    // snapshot of the item count taken when the job was created
+    pub migrated_count: u64,
+    pub skipped_count: u64,
+    pub status: MigrationStatus,  // InProgress | Completed
+    pub started_at: u64,
+    pub updated_at: u64,
+    pub completed_at: Option<u64>,
+}
+```
+
+Three contract entrypoints (in `contracts/quorum_proof/src/lib.rs`) drive a job
+forward one bounded chunk at a time:
+
+| Function | Purpose |
+|---|---|
+| `start_metadata_migration(admin, to_version) -> MigrationJob` | Creates a job (snapshotting `CredentialCount` as `total_items`) or returns the existing one. Admin-only. |
+| `migrate_next_chunk(admin, migration_id, chunk_size) -> MigrationJob` | Processes up to `chunk_size` items (server-clamped to `migration::MAX_CHUNK_SIZE = 200`) starting at the **stored** cursor, then advances it. Admin-only. |
+| `get_migration_job(migration_id) -> Option<MigrationJob>` | Read-only status lookup. Unauthenticated, always available. |
+
+`chunk_size` is clamped **inside the contract**, not just recommended to callers —
+no orchestrator misconfiguration can push a single invocation past
+`migration::MAX_CHUNK_SIZE = 200`.
+
+**`MAX_CHUNK_SIZE` is a hard ceiling / circuit-breaker, not a claim that 200 is a
+safe chunk size.** The real per-item cost depends on how much storage work each
+migration transform does, and empirically (see
+`test_single_shot_batch_migration_exceeds_a_single_invocation_budget` in
+`migration_tests.rs`) even a few dozen credentials migrated in a single invocation
+can exceed a realistic per-invocation budget — nowhere close to 200. Before running
+a migration against a live deployment:
+
+1. Deploy to testnet with production-representative data volume.
+2. Call `migrate_next_chunk` with a candidate `chunk_size` and confirm it succeeds
+   (doesn't hit `Error(Budget, ExceededLimit)`).
+3. Pick the orchestrator's `--chunk-size` based on that measurement, with margin —
+   real mainnet WASM execution costs are typically **higher**, not lower, than what
+   a native test run shows.
+
+This mirrors the existing "test on testnet before mainnet" guidance elsewhere in
+this document — `chunk_size` is an operational tuning parameter, not a constant to
+trust blindly.
+
+### Idempotency guarantees
+
+Idempotency holds at three levels, and each is covered by a dedicated test in
+`contracts/quorum_proof/src/migration_tests.rs`:
+
+1. **Cursor position is derived from storage, never from the caller.**
+   `migrate_next_chunk` reads `job.cursor` from contract storage to decide where to
+   start — it ignores any notion of "where the caller thinks the job is." A replayed,
+   duplicated, or concurrently-submitted call for the same `migration_id` can only
+   ever continue from wherever the ledger currently says the job is; it cannot
+   rewind or reprocess a range that already advanced past it.
+   (`test_replayed_chunk_call_after_crash_never_reprocesses_items`)
+2. **Per-item transforms check the item's own state before touching it.** Each
+   credential's `CredentialMetadataSchema` marker is checked before transforming its
+   metadata; if it's already `>= to_version`, the item is skipped, not re-migrated.
+   This holds even when the *old* single-shot `migrate_metadata_schema` and the *new*
+   chunked engine are mixed on the same range — whichever entrypoint touched an item
+   first, the other treats it as already done.
+   (`test_old_batch_entrypoint_and_new_cursor_entrypoint_are_mutually_idempotent`)
+3. **A completed job is a permanent no-op.** Once `cursor > total_items`, `status`
+   flips to `Completed` and every subsequent `migrate_next_chunk` call against that
+   `migration_id` returns the identical job untouched — same counts, same
+   timestamps — without scanning storage again.
+   (`test_completed_job_is_permanent_noop`)
+
+`start_metadata_migration` is likewise idempotent: calling it again against an
+already-running or already-completed job returns the existing job rather than
+resetting `cursor`/`migrated_count` to zero.
+(`test_starting_an_existing_job_again_does_not_reset_progress`)
+
+### What's available during an in-progress migration
+
+| Operation | Availability mid-migration | Why |
+|---|---|---|
+| Reads (`get_credential`, `get_credential_metadata`, counts, etc.) | **Always available**, for both migrated and not-yet-migrated ids | Reads never check migration/job state; `resolve_credential_metadata` already has a lazy-transform fallback for anything not yet at the active schema version. |
+| Writes to not-yet-migrated records (e.g. `set_credential_metadata`) | **Available** | Writes are gated only by the contract's own `paused` flag, which a running migration does not set. |
+| New writes (`issue_credential`) | **Available**, and land pre-migrated | New credentials are written directly at the currently-active schema version, so they need no migration and are excluded from the job's `total_items` snapshot correctly (anything created after the snapshot is already current). |
+| `migrate_next_chunk` from a second admin session, or two orchestrator instances at once | **Safe**, but not more parallel | Both calls execute against the same on-chain cursor; whichever lands first advances it, and the second simply continues from there (see idempotency above). There's no data hazard, but throughput doesn't increase — the cursor is a single serial resource. |
+| Global contract pause (`pause()`) | Still blocks admin-gated writes, `migrate_next_chunk` included | A migration is not itself a reason to pause the contract, and does not pause it. If an operator pauses the contract for an unrelated incident, migration steps pause along with everything else admin-gated, and resume automatically once unpaused. |
+
+This is verified end-to-end by
+`test_reads_and_writes_available_mid_migration`, which issues new credentials,
+updates not-yet-migrated metadata, and reads both migrated and unmigrated ranges
+while a job sits partway through.
+
+### Crash-safe off-chain orchestrator
+
+`scripts/migration_orchestrator.py` drives a job to completion by calling
+`migrate_next_chunk` in a loop. Its crash-safety rests on one rule: **it never
+trusts its own memory of progress** — every iteration starts by calling
+`get_migration_job` and treats whatever comes back as ground truth. Concretely:
+
+- On startup (including after a crash), it calls `start_metadata_migration`
+  unconditionally — a no-op if the job already exists — and then immediately reads
+  `get_migration_job` for the real cursor.
+- It never keeps a local "last processed id" file, database, or in-memory
+  checkpoint that could drift from on-chain state. If the process is killed at any
+  point — before submitting a chunk, after submitting but before seeing the
+  result, or anywhere in between — the very next thing it does on restart is ask
+  the chain where the job actually is.
+- Each `migrate_next_chunk` submission is wrapped in retry-with-backoff for
+  transient RPC failures. A submission that the RPC reports as failed but that
+  actually landed (an ambiguous network timeout) is harmless to retry: the retry
+  reads the fresh cursor before building its next call, per the point above.
+- The loop exits once `get_migration_job(...).status == Completed`.
+
+`scripts/tests/test_migration_orchestrator.py` proves this with a fake in-memory
+"chain" client: it runs the orchestrator, kills it (raises mid-loop) after a few
+chunks, constructs a **fresh** orchestrator instance against the same fake chain
+state, and asserts the second run completes the job with the exact expected total
+migrated count and no id processed twice — i.e. the kill/restart is invisible to
+the outcome.
+
+### Monitoring
+
+`get_migration_job` is polled by `monitoring/exporter/exporter.py` the same way
+whether or not a migration is running. It exposes:
+
+- `quorumproof_migration_status{migration_id}` — 0 (in progress) / 1 (completed)
+- `quorumproof_migration_progress_ratio{migration_id}` — cursor / total_items
+- `quorumproof_migration_cursor{migration_id}` / `..._total_items{migration_id}`
+- `quorumproof_migration_migrated_total{migration_id}` / `..._skipped_total{migration_id}`
+- `quorumproof_migration_last_progress_timestamp{migration_id}` — for a stalled-migration alert
+
+The Grafana `Contract Health` dashboard has a "Migration Progress" panel, and
+`prometheus/alerts.yml` has a `MigrationStalled` rule that fires if a job's cursor
+stops advancing for longer than a configurable window while still `InProgress`.
+
+### Testing
+
+See `contracts/quorum_proof/src/migration_tests.rs` for the full suite:
+multi-step completion over a 500-credential synthetic dataset (10+ chunked
+invocations), the single-shot-exceeds-budget proof above, all three idempotency
+guarantees, and the read/write availability test. See
+`scripts/tests/test_migration_orchestrator.py` for the off-chain kill/restart
+proof.
+
 ## Testing Procedures
 
 ### Unit Tests

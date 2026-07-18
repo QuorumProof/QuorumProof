@@ -106,3 +106,15 @@ groups:
         annotations:
           summary: "p95 latency for {{ $labels.operation }} exceeds SLA"
           description: "p95={{ $value | humanizeDuration }} exceeds the configured SLA ceiling for {{ $labels.operation }}."
+
+      # Paginated/chunked migration protocol (docs/contract-upgrade-strategy.md)
+      - alert: MigrationStalled
+        expr: >
+          quorumproof_migration_status == 0
+          and time() - quorumproof_migration_last_progress_timestamp > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Migration job {{ $labels.migration_id }} has not advanced in 30+ minutes"
+          description: "Job {{ $labels.migration_id }} is still InProgress but its cursor hasn't moved since {{ $value | humanizeTimestamp }}. Check whether scripts/migration_orchestrator.py is still running."

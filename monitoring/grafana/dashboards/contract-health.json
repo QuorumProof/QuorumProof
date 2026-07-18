@@ -17,11 +17,28 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "OK", "color": "green" }, "1": { "text": "PAUSED", "color": "red" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OK",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "PAUSED",
+                  "color": "red"
+                }
+              }
+            }
           ]
         }
       },
-      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 }
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      }
     },
     {
       "id": 2,
@@ -36,11 +53,28 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
           ]
         }
       },
-      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 }
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      }
     },
     {
       "id": 3,
@@ -57,14 +91,28 @@
           "unit": "reqps",
           "thresholds": {
             "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "yellow", "value": 0.05 },
-              { "color": "red", "value": 0.1 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
             ]
           }
         }
       },
-      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 }
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      }
     },
     {
       "id": 4,
@@ -76,7 +124,12 @@
           "legendFormat": "slices"
         }
       ],
-      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 }
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      }
     },
     {
       "id": 5,
@@ -89,7 +142,12 @@
           "instant": true
         }
       ],
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 }
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      }
     },
     {
       "id": 6,
@@ -101,20 +159,135 @@
           "legendFormat": "errors/s"
         }
       ],
-      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 }
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      }
     },
     {
       "id": 7,
       "title": "Contract Logs",
       "type": "logs",
-      "datasource": { "type": "loki", "uid": "loki" },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
       "targets": [
         {
           "expr": "{job=\"quorumproof-api\"}",
           "legendFormat": ""
         }
       ],
-      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 }
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 10
+      }
+    },
+    {
+      "id": 8,
+      "title": "Migration Progress",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "quorumproof_migration_progress_ratio",
+          "legendFormat": "job {{migration_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 8,
+        "h": 6
+      }
+    },
+    {
+      "id": 9,
+      "title": "Migration Jobs",
+      "type": "table",
+      "description": "One row per configured migration_id (MIGRATION_JOB_IDS). status: 0=InProgress, 1=Completed.",
+      "targets": [
+        {
+          "expr": "quorumproof_migration_status",
+          "legendFormat": "status",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "quorumproof_migration_cursor",
+          "legendFormat": "cursor",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "quorumproof_migration_total_items",
+          "legendFormat": "total_items",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "quorumproof_migration_migrated_total",
+          "legendFormat": "migrated",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "quorumproof_migration_skipped_total",
+          "legendFormat": "skipped",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "gridPos": {
+        "x": 8,
+        "y": 22,
+        "w": 16,
+        "h": 6
+      }
+    },
+    {
+      "id": 10,
+      "title": "Migration Cursor Over Time",
+      "type": "timeseries",
+      "description": "Cursor should advance monotonically while a job is InProgress; a flat line for an extended period indicates a stalled orchestrator (see MigrationStalled alert).",
+      "targets": [
+        {
+          "expr": "quorumproof_migration_cursor",
+          "legendFormat": "job {{migration_id}} cursor"
+        },
+        {
+          "expr": "quorumproof_migration_total_items",
+          "legendFormat": "job {{migration_id}} total_items"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 8
+      }
     }
   ]
 }
