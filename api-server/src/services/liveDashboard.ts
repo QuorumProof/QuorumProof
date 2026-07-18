@@ -1,6 +1,24 @@
-/** Sliding-window per-minute metrics for the real-time credential issuance dashboard. */
+/**
+ * Sliding-window per-minute metrics for the real-time credential issuance dashboard.
+ *
+ * Each instance's buckets are local. To keep the dashboard consistent across
+ * replicas, record*() calls notify an optional delta publisher (wired by
+ * ws/dashboardSync.ts to the pub/sub backbone in api-server/src/ws/pubsub.ts);
+ * other instances receive the delta and apply it via applyRemoteDelta(),
+ * which does NOT re-publish, so deltas don't loop.
+ */
 
 const WINDOW_MINUTES = 60;
+
+export type DashboardDeltaKind = 'issuance' | 'attestation' | 'api_error';
+
+export interface DashboardDelta {
+  kind: DashboardDeltaKind;
+  /** Only meaningful for kind 'attestation'. */
+  success?: boolean;
+}
+
+type DeltaPublisher = (delta: DashboardDelta) => void;
 
 interface MinuteBucket {
   minute: number;
@@ -22,6 +40,12 @@ export interface LiveDashboardStats {
 
 class LiveDashboardStore {
   private readonly buckets = new Map<number, MinuteBucket>();
+  private deltaPublisher: DeltaPublisher | null = null;
+
+  /** Wired once at startup by ws/dashboardSync.ts; a no-op in single-instance mode. */
+  setDeltaPublisher(fn: DeltaPublisher | null): void {
+    this.deltaPublisher = fn;
+  }
 
   private nowMinute(): number {
     return Math.floor(Date.now() / 60_000);
@@ -44,16 +68,36 @@ class LiveDashboardStore {
 
   recordIssuance(): void {
     this.getBucket(this.nowMinute()).issued++;
+    this.deltaPublisher?.({ kind: 'issuance' });
   }
 
   recordAttestation(success: boolean): void {
     const b = this.getBucket(this.nowMinute());
     if (success) b.attested++;
     else b.attestation_errors++;
+    this.deltaPublisher?.({ kind: 'attestation', success });
   }
 
   recordApiError(): void {
     this.getBucket(this.nowMinute()).api_errors++;
+    this.deltaPublisher?.({ kind: 'api_error' });
+  }
+
+  /** Applies a delta received from another instance. Never re-publishes. */
+  applyRemoteDelta(delta: DashboardDelta): void {
+    const b = this.getBucket(this.nowMinute());
+    switch (delta.kind) {
+      case 'issuance':
+        b.issued++;
+        break;
+      case 'attestation':
+        if (delta.success) b.attested++;
+        else b.attestation_errors++;
+        break;
+      case 'api_error':
+        b.api_errors++;
+        break;
+    }
   }
 
   getStats(): LiveDashboardStats {
