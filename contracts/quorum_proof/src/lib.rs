@@ -32,6 +32,9 @@ const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
 const TOPIC_HOLDER_NOTIFIED: &str = "HolderNotified";
 const TOPIC_DELEGATION: &str = "DelegationGranted";
 const TOPIC_THRESHOLD_CHANGE: &str = "ThresholdChanged";
+const TOPIC_MIGRATION_PROGRESS: &str = "MigrationProgress";
+/// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
+const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -706,6 +709,8 @@ pub enum ContractError {
     CredentialTypeVersionMismatch = 77,
     /// Issue #876: Credential type version not found in history
     CredentialTypeVersionNotFound = 78,
+    /// Chunked migration job id has no corresponding job (never started, or wrong id).
+    MigrationJobNotFound = 79,
 }
 
 #[contracttype]
@@ -2743,6 +2748,161 @@ impl QuorumProofContract {
         env.events().publish(topics, (admin, to_version, migrated));
 
         migrated
+    }
+
+    // ── Paginated / Chunked Migration Protocol ──────────────────────────
+    //
+    // `migrate_metadata_schema` above is a single-transaction batch migration:
+    // fine for a handful of test credentials, but it walks every id in
+    // [start_id, end_id] in one invocation and so cannot scale past Soroban's
+    // per-invocation CPU/memory ceiling once a deployment has accumulated a
+    // real amount of history. The functions below drive the same underlying
+    // per-credential transform (`apply_metadata_migration`) through the
+    // generic cursor-based engine in `migration.rs`, so an off-chain
+    // orchestrator can complete an arbitrarily large migration by calling
+    // `migrate_next_chunk` repeatedly, resuming safely after a crash by simply
+    // re-reading `get_migration_job` — see docs/contract-upgrade-strategy.md
+    // for the full protocol writeup.
+
+    /// Begin (or, if already started, return the existing) chunked migration of
+    /// credential metadata to `to_version`. Admin-only. Idempotent: safe to call
+    /// unconditionally on orchestrator startup/restart — it never resets progress
+    /// on an already-running or completed job.
+    pub fn start_metadata_migration(
+        env: Env,
+        admin: Address,
+        to_version: u32,
+    ) -> migration::MigrationJob {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        assert!(to_version > 0, "target version must be >= 1");
+        assert!(
+            env.storage().instance().has(&DataKey::MetadataSchema(to_version)),
+            "target schema version not registered"
+        );
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::MetadataSchemaVersion)
+            .unwrap_or(0u32);
+        assert!(to_version <= active, "cannot migrate to a version beyond active");
+
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64);
+        let job = migration::start_job(&env, to_version, MIGRATION_KIND_METADATA_SCHEMA, total);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        job
+    }
+
+    /// Process the next bounded chunk of a running `migration_id` job (job ids are,
+    /// by convention, the migration's target schema version) and advance its
+    /// on-chain cursor. Admin-only.
+    ///
+    /// Safe to call repeatedly, redundantly, or from more than one orchestrator
+    /// instance at once: a completed job is a permanent no-op, and the range
+    /// processed is always derived from whatever the on-chain cursor currently is
+    /// — never from a caller-supplied position — so a duplicated or replayed call
+    /// can only ever continue the job, never rewind or double-process it.
+    /// `chunk_size` is clamped server-side to `migration::MAX_CHUNK_SIZE` so no
+    /// caller configuration can push a single invocation past the CPU ceiling.
+    pub fn migrate_next_chunk(
+        env: Env,
+        admin: Address,
+        migration_id: u32,
+        chunk_size: u32,
+    ) -> migration::MigrationJob {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        let job = migration::get_job(&env, migration_id)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::MigrationJobNotFound));
+
+        if job.is_completed() {
+            // Idempotent no-op: nothing left for this job, whether this call is a
+            // legitimate re-check or a replay/duplicate from a restarted orchestrator.
+            return job;
+        }
+
+        // Job ids are, by convention, the migration's target schema version
+        // (see start_metadata_migration) — `job.kind` only tags the job
+        // *type* (metadata-schema vs. a future migration kind), so it must
+        // not be used here.
+        let to_version = migration_id;
+        let size = migration::clamp_chunk_size(chunk_size) as u64;
+        let start_id = job.cursor;
+        let end_id = core::cmp::min(start_id + size - 1, job.total_items);
+
+        let mut migrated: u64 = 0;
+        let mut skipped: u64 = 0;
+        let examined: u64 = if end_id >= start_id { end_id - start_id + 1 } else { 0 };
+
+        if end_id >= start_id {
+            for id in start_id..=end_id {
+                if !env.storage().instance().has(&DataKey::Credential(id)) {
+                    skipped += 1;
+                    continue;
+                }
+                let current_schema: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey2::CredentialMetadataSchema(id))
+                    .unwrap_or(0u32);
+                if current_schema >= to_version {
+                    // Already at or past target — including credentials issued after
+                    // the job's total_items snapshot was taken, or ones a previous
+                    // (possibly replayed) chunk already migrated. Idempotency guard:
+                    // never re-transform an item that's already at the target version.
+                    skipped += 1;
+                    continue;
+                }
+                let stored: Option<CredentialMetadata> =
+                    env.storage().instance().get(&DataKey2::CredentialMetadataStore(id));
+                if let Some(meta) = stored {
+                    let transformed =
+                        Self::apply_metadata_migration(&env, current_schema, to_version, &meta.data);
+                    let new_meta = CredentialMetadata {
+                        data: transformed,
+                        compression: meta.compression,
+                    };
+                    env.storage()
+                        .instance()
+                        .set(&DataKey2::CredentialMetadataStore(id), &new_meta);
+                    Self::set_credential_metadata_schema(&env, id, to_version);
+                    migrated += 1;
+                } else {
+                    // No metadata ever stored for this credential — nothing to
+                    // transform, but still bump the marker so it's not re-examined.
+                    Self::set_credential_metadata_schema(&env, id, to_version);
+                    skipped += 1;
+                }
+            }
+        }
+
+        let updated = migration::advance(&env, job, examined, migrated, skipped);
+
+        let topic = String::from_str(&env, TOPIC_MIGRATION_PROGRESS);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(
+            topics,
+            (migration_id, updated.cursor, updated.total_items, updated.status as u32),
+        );
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        updated
+    }
+
+    /// Read-only migration status lookup. Unauthenticated and always available —
+    /// monitoring and the off-chain orchestrator poll this the same way whether or
+    /// not a migration is currently running, and it never blocks on the contract's
+    /// paused state.
+    pub fn get_migration_job(env: Env, migration_id: u32) -> Option<migration::MigrationJob> {
+        migration::get_job(&env, migration_id)
     }
 
     /// Return the schema version distribution across all credentials.
@@ -22781,4 +22941,9 @@ mod proptest_state_transitions;
 #[path = "weighted_voting_tests.rs"]
 mod weighted_voting_tests;
 
+#[cfg(test)]
+#[path = "migration_tests.rs"]
+mod migration_tests;
+
 mod circuit_breaker;
+mod migration;
