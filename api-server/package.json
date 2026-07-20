@@ -12,9 +12,15 @@
     "loadtest:ws": "tsx loadtest/wsLoadTest.ts"
   },
   "dependencies": {
+    "@ethereumjs/block": "^10.1.2",
+    "@ethereumjs/common": "^10.1.2",
+    "@ethereumjs/mpt": "^10.1.2",
+    "@ethereumjs/rlp": "^10.1.2",
+    "@ethereumjs/util": "^10.1.2",
     "@stellar/stellar-sdk": "^14.6.1",
     "ajv": "^8.20.0",
     "compression": "^1.8.1",
+    "ethers": "^6.17.0",
     "express": "^4.21.2",
     "ioredis": "^5.11.1",
     "ws": "^8.21.0"
@@ -25,6 +31,8 @@
     "@types/node": "^24.12.0",
     "@types/supertest": "^7.2.0",
     "@types/ws": "^8.18.1",
+    "hardhat": "^3.10.0",
+    "solc": "^0.8.36",
     "supertest": "^7.2.2",
     "tsx": "^4.19.4",
     "typescript": "~5.9.3",
