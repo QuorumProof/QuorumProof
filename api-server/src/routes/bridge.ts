@@ -3,28 +3,41 @@
  *
  * Routes:
  *   GET  /api/bridge/chains                  — list supported chains
- *   POST /api/bridge/anchors                 — submit a foreign-chain event to anchor
+ *   POST /api/bridge/headers                 — checkpoint a finalized foreign-chain block header
+ *   POST /api/bridge/anchors                 — submit a foreign-chain event reference to anchor
  *   GET  /api/bridge/anchors                 — list all confirmed anchors
  *   GET  /api/bridge/anchors/pending         — list pending (not yet on-chain) anchors
  *   GET  /api/bridge/anchors/:id             — get anchor by on-chain ID
  *   GET  /api/bridge/credentials/:id/anchors — get all anchors for a credential
- *   POST /api/bridge/anchors/:id/verify      — mark anchor as proof-verified
+ *   POST /api/bridge/anchors/:id/verify      — verify anchor via Merkle-Patricia receipt proof
+ *
+ * The Soroban `register_chain_anchor` / `verify_chain_anchor` contract call
+ * shapes are unchanged from before this hardening pass — only what backs
+ * the `proof_hash` bytes and what gates calling `verify_chain_anchor` at all
+ * has changed. See crossChainBridge.ts for the trust-model rationale.
  */
 import { Router, Request, Response } from 'express';
 import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { rbac } from '../middleware/rbac.js';
 import {
   SUPPORTED_CHAINS,
   ProofType,
   prepareAnchor,
   confirmAnchor,
-  markVerified,
   getPendingAnchors,
   getAnchorByTxHash,
   getAnchorById,
   getAllAnchors,
   getSupportedChains,
   computeProofHash,
+  checkpointHeader,
+  verifyAnchorReceiptProof,
+  HeaderVerificationError,
+  ReceiptProofError,
+  UnrecognizedLogError,
+  AnchorVerificationError,
   type ForeignChainEvent,
+  type ReceiptProof,
 } from '../services/crossChainBridge.js';
 
 const router = Router();
@@ -48,19 +61,90 @@ router.get('/chains', (_req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/bridge/headers
+//
+// Checkpoint a finalized foreign-chain block header — relay/admin only.
+// This is the trust-critical entry point: only headers checkpointed here
+// can back a subsequent anchor verification. See blockHeaderStore.ts for
+// exactly what is (and isn't) verified.
+//
+// Body:
+//   chain_id  number  required – EIP-155 chain ID
+//   header    object  required – raw `eth_getBlockByNumber`/`eth_getBlockByHash` result (full: false)
+//   finality  object  required – { mode: 'tag', tag: 'finalized' | 'safe' }
+//                              | { mode: 'confirmations', head_block_number: number }
+// ---------------------------------------------------------------------------
+router.post('/headers', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
+  const { chain_id, header, finality } = req.body as Record<string, unknown>;
+
+  if (typeof chain_id !== 'number') {
+    res.status(400).json({ error: 'chain_id is required' });
+    return;
+  }
+  if (!SUPPORTED_CHAINS[chain_id]) {
+    res.status(400).json({ error: `Unsupported chain_id ${chain_id}` });
+    return;
+  }
+  if (!header || typeof header !== 'object') {
+    res.status(400).json({ error: 'header (raw JSON-RPC block object) is required' });
+    return;
+  }
+  const finalityObj = finality as Record<string, unknown> | undefined;
+  if (!finalityObj || typeof finalityObj.mode !== 'string') {
+    res.status(400).json({ error: "finality is required: {mode:'tag',tag} or {mode:'confirmations',head_block_number}" });
+    return;
+  }
+
+  let finalityInput: Parameters<typeof checkpointHeader>[0]['finality'];
+  if (finalityObj.mode === 'tag') {
+    if (finalityObj.tag !== 'finalized' && finalityObj.tag !== 'safe') {
+      res.status(400).json({ error: "finality.tag must be 'finalized' or 'safe'" });
+      return;
+    }
+    finalityInput = { mode: 'tag', tag: finalityObj.tag };
+  } else if (finalityObj.mode === 'confirmations') {
+    if (typeof finalityObj.head_block_number !== 'number') {
+      res.status(400).json({ error: 'finality.head_block_number is required for confirmations mode' });
+      return;
+    }
+    finalityInput = { mode: 'confirmations', headBlockNumber: finalityObj.head_block_number };
+  } else {
+    res.status(400).json({ error: "finality.mode must be 'tag' or 'confirmations'" });
+    return;
+  }
+
+  try {
+    const checkpointed = checkpointHeader({
+      chainId: chain_id,
+      rpcHeader: header as never,
+      finality: finalityInput,
+    });
+    res.status(201).json(checkpointed);
+  } catch (err: unknown) {
+    if (err instanceof HeaderVerificationError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/bridge/anchors
 //
 // Body:
-//   credential_id   number   required – local QuorumProof credential ID
-//   chain_id        number   required – EIP-155 chain ID
-//   tx_hash         string   required – 0x-prefixed 32-byte tx hash
-//   block_number    number   required
-//   block_timestamp number   required – Unix seconds
-//   contract_address string  required – emitting contract on foreign chain
-//   event_data      string   required – ABI-encoded log data (hex)
-//   zk_proof        string?  optional – raw Groth16/PLONK proof bytes (hex)
-//   proof_type      number?  optional – 1=Groth16, 2=PLONK, 3=HashOnly
-//   admin           string   required – Stellar admin address
+//   credential_id    number   required – local QuorumProof credential ID
+//   chain_id         number   required – EIP-155 chain ID
+//   tx_hash          string   required – 0x-prefixed 32-byte tx hash
+//   block_number     number   required
+//   block_hash       string   required – 0x-prefixed 32-byte block hash (must later be checkpointed)
+//   block_timestamp  number   required – Unix seconds
+//   contract_address string   required – emitting contract on foreign chain
+//   proof_type       number?  optional – 1=Groth16, 2=PLONK, 3=HashOnly (default)
+//   admin            string   required – Stellar admin address
+//
+// This only records an unauthenticated claim from the relay — it does NOT
+// establish that the event happened. See POST /anchors/:id/verify.
 // ---------------------------------------------------------------------------
 router.post('/anchors', async (req: Request, res: Response) => {
   const {
@@ -68,23 +152,21 @@ router.post('/anchors', async (req: Request, res: Response) => {
     chain_id,
     tx_hash,
     block_number,
+    block_hash,
     block_timestamp,
     contract_address,
-    event_data,
-    zk_proof,
     proof_type,
     admin,
   } = req.body as Record<string, unknown>;
 
-  // Validate required fields
   const missingFields: string[] = [];
   if (typeof credential_id !== 'number') missingFields.push('credential_id');
   if (typeof chain_id !== 'number') missingFields.push('chain_id');
   if (typeof tx_hash !== 'string') missingFields.push('tx_hash');
   if (typeof block_number !== 'number') missingFields.push('block_number');
+  if (typeof block_hash !== 'string') missingFields.push('block_hash');
   if (typeof block_timestamp !== 'number') missingFields.push('block_timestamp');
   if (typeof contract_address !== 'string') missingFields.push('contract_address');
-  if (typeof event_data !== 'string') missingFields.push('event_data');
   if (typeof admin !== 'string') missingFields.push('admin (Stellar admin address)');
 
   if (missingFields.length > 0) {
@@ -113,24 +195,28 @@ router.post('/anchors', async (req: Request, res: Response) => {
     chainId: chain_id as number,
     txHash: txHashStr,
     blockNumber: block_number as number,
+    blockHash: (block_hash as string).toLowerCase(),
     contractAddress: (contract_address as string).toLowerCase(),
-    eventData: (event_data as string),
     blockTimestamp: block_timestamp as number,
   };
 
-  const ptCode = typeof proof_type === 'number' ? proof_type : (zk_proof ? ProofType.Groth16 : ProofType.HashOnly);
+  const ptCode = typeof proof_type === 'number' ? proof_type : ProofType.HashOnly;
 
-  const pending = prepareAnchor({
-    credentialId: credential_id as number,
-    foreignEvent,
-    zkProof: typeof zk_proof === 'string' ? zk_proof : undefined,
-    proofType: ptCode as ProofType,
-  });
+  let pending;
+  try {
+    pending = prepareAnchor({
+      credentialId: credential_id as number,
+      foreignEvent,
+      proofType: ptCode as ProofType,
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
 
-  // Build Soroban args
   const { nativeToScVal } = await import('@stellar/stellar-sdk');
   const txHashBuf = Buffer.from(txHashStr.replace(/^0x/, ''), 'hex');
-  const proofHashBuf = computeProofHash(foreignEvent, typeof zk_proof === 'string' ? zk_proof : undefined);
+  const proofHashBuf = computeProofHash(foreignEvent);
 
   // foreign_tx must be ≤ 64 bytes
   const foreignTxBytes = txHashBuf.length <= 64 ? txHashBuf : txHashBuf.slice(0, 64);
@@ -147,7 +233,6 @@ router.post('/anchors', async (req: Request, res: Response) => {
 
     const anchorId = Number(anchorIdRaw);
     confirmAnchor(txHashStr, anchorId);
-    pending.anchorId = anchorId;
 
     res.status(201).json({
       anchor_id: anchorId,
@@ -181,7 +266,7 @@ router.post('/anchors', async (req: Request, res: Response) => {
 // GET /api/bridge/anchors
 // ---------------------------------------------------------------------------
 router.get('/anchors', async (_req: Request, res: Response) => {
-  // Try to get count from chain, fall back to in-memory store
+  // Try to get count from chain, fall back to durable store
   try {
     const count = await simulateCall('get_chain_anchor_count', []);
     const total = Number(count);
@@ -196,7 +281,7 @@ router.get('/anchors', async (_req: Request, res: Response) => {
     }
     res.json({ total, anchors });
   } catch {
-    // Fallback to in-memory
+    // Fallback to durable store
     const anchors = getAllAnchors();
     res.json({ total: anchors.length, anchors });
   }
@@ -228,7 +313,7 @@ router.get('/anchors/:id', async (req: Request, res: Response) => {
     }
     res.json(serializeBigInt(anchor));
   } catch {
-    // Fallback to in-memory
+    // Fallback to durable store
     const anchor = getAnchorById(id);
     if (!anchor) {
       res.status(404).json({ error: 'Anchor not found' });
@@ -261,7 +346,7 @@ router.get('/credentials/:id/anchors', async (req: Request, res: Response) => {
     );
     res.json({ credential_id: credId, anchors: anchors.filter(Boolean) });
   } catch {
-    // Fallback to in-memory
+    // Fallback to durable store
     const anchors = getAllAnchors().filter((a) => a.credentialId === credId);
     res.json({ credential_id: credId, anchors });
   }
@@ -270,7 +355,17 @@ router.get('/credentials/:id/anchors', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // POST /api/bridge/anchors/:id/verify
 //
-// Body: { admin: string }
+// Body:
+//   admin          string  required – Stellar address
+//   log_index      number  required – index of the credential log within the receipt
+//   receipt_proof  object  required – {
+//     claim: { txIndex, txType, status, cumulativeGasUsed, logsBloom, logs },
+//     proofNodes: string[],   // 0x-prefixed trie nodes, root to leaf
+//   }
+//
+// The anchor's registered (chainId, blockHash) must already have a header
+// checkpointed via POST /headers. The receipt proof is verified against
+// that header's receiptsRoot before verify_chain_anchor is ever called.
 // ---------------------------------------------------------------------------
 router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
   const id = parseInt(String(req.params.id), 10);
@@ -279,16 +374,52 @@ router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
     return;
   }
 
-  const { admin } = req.body as { admin?: unknown };
+  const { admin, log_index, receipt_proof } = req.body as {
+    admin?: unknown;
+    log_index?: unknown;
+    receipt_proof?: unknown;
+  };
   if (typeof admin !== 'string' || admin.length === 0) {
     res.status(400).json({ error: 'admin (Stellar address) is required' });
+    return;
+  }
+  if (typeof log_index !== 'number') {
+    res.status(400).json({ error: 'log_index is required' });
+    return;
+  }
+  if (!receipt_proof || typeof receipt_proof !== 'object') {
+    res.status(400).json({ error: 'receipt_proof is required' });
+    return;
+  }
+
+  let verification;
+  try {
+    verification = await verifyAnchorReceiptProof({
+      anchorId: id,
+      logIndexInReceipt: log_index,
+      receiptProof: receipt_proof as ReceiptProof,
+    });
+  } catch (err: unknown) {
+    if (err instanceof AnchorVerificationError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof ReceiptProofError || err instanceof UnrecognizedLogError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     return;
   }
 
   try {
     await simulateCall('verify_chain_anchor', [addressVal(admin), u64Val(id)]);
-    markVerified(id);
-    res.json({ success: true, anchor_id: id, verified: true });
+    res.json({
+      success: true,
+      anchor_id: id,
+      verified: true,
+      decoded_event: verification.decoded,
+    });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('InvalidInput')) {
@@ -296,11 +427,13 @@ router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
     } else if (msg.includes('UnauthorizedAction')) {
       res.status(403).json({ error: 'Only the contract admin may verify anchors' });
     } else {
-      // Mark in-memory even if contract call is simulated
-      markVerified(id);
+      // Off-chain proof verification already succeeded and is durably
+      // recorded; only the on-chain confirmation is pending.
       res.status(202).json({
-        message: 'Verified in bridge memory (on-chain update pending)',
+        message: 'Proof verified and recorded (on-chain update pending — contract may not be deployed)',
         anchor_id: id,
+        verified: true,
+        decoded_event: verification.decoded,
         simulation_error: msg,
       });
     }

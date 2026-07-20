@@ -48,6 +48,10 @@ frontend/dist/
 .data/
 api-server/.data/
 
+# Hardhat build/fork cache (bridge integration test fixture)
+api-server/cache/
+api-server/artifacts/
+
 # Rust / Cargo
 Cargo.lock.bak
 **/*.rs.bak
