@@ -732,6 +732,10 @@ pub enum ContractError {
     CredentialTypeVersionNotFound = 78,
     /// Chunked migration job id has no corresponding job (never started, or wrong id).
     MigrationJobNotFound = 79,
+    /// RBAC role does not exist for the given address.
+    RoleNotFound = 80,
+    /// RBAC role delegation does not exist for the given address.
+    RoleDelegationNotFound = 81,
 }
 
 #[contracttype]
@@ -2901,7 +2905,7 @@ impl QuorumProofContract {
                 let current_schema: u32 = env
                     .storage()
                     .instance()
-                    .get(&DataKey2::CredentialMetadataSchema(id))
+                    .get(&DataKey10::CredentialMetadataSchema(id))
                     .unwrap_or(0u32);
                 if current_schema >= to_version {
                     // Already at or past target — including credentials issued after
