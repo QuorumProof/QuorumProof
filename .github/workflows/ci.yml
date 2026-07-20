@@ -37,10 +37,10 @@ jobs:
           cargo build --release --target wasm32-unknown-unknown -p zk_verifier
 
       - name: Run unit tests
-        run: cargo test --lib --workspace
+        run: cargo test --target x86_64-unknown-linux-gnu --lib --workspace
 
       - name: Run integration tests
-        run: cargo test -p integration_tests
+        run: cargo test --target x86_64-unknown-linux-gnu -p integration_tests
 
       # ── Migration verification gate ──────────────────────────────────────
       # The migration_verification module runs the snapshot-diff invariant
@@ -53,10 +53,10 @@ jobs:
       #
       # This gate MUST pass before any migration PR can merge.
       - name: Run migration verification tests
-        run: cargo test -p integration_tests -- migration_verification 2>&1
+        run: cargo test --target x86_64-unknown-linux-gnu -p integration_tests -- migration_verification 2>&1
 
       - name: Run upgrade safety tests
-        run: cargo test -p integration_tests -- upgrade_safety 2>&1
+        run: cargo test --target x86_64-unknown-linux-gnu -p integration_tests -- upgrade_safety 2>&1
 
   frontend:
     runs-on: ubuntu-latest
