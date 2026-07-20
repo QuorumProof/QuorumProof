@@ -13,6 +13,8 @@ An ADR is a short document that captures *why* a decision was made, not just *wh
 | [001](./adr-001-fba-trust-model.md) | Federated Byzantine Agreement (FBA) Trust Model | Accepted | 2024-01-15 |
 | [002](./adr-002-sbt-non-transferability.md) | Soulbound Token (SBT) Non-Transferability | Accepted | 2024-01-20 |
 | [003](./adr-003-zk-verification.md) | Zero-Knowledge Verification Approach | Accepted | 2024-02-01 |
+| [004](./adr-004-soroban-platform.md) | Soroban Platform Choice | Accepted | 2026-06-26 |
+| [005](./adr-005-registry-attestation-proof.md) | Registry Attestation Proof for Licensing Body Integrations | Accepted | 2026-07-20 |
 
 ## How to Add a New ADR
 
