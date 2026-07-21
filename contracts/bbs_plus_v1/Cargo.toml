@@ -1,0 +1,48 @@
+[package]
+name = "bbs_plus_v1"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Curve arithmetic (same as zk_verifier uses for PLONK)
+bls12_381 = { version = "0.8", default-features = false, features = ["groups", "pairings"] }
+ff = { version = "0.13", default-features = false }
+
+# Hashing (SHA-256 for Fiat-Shamir)
+sha2 = { version = "0.10", default-features = false }
+
+# Secure key handling
+zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
+
+# Serialization (optional, for off-chain components)
+serde = { version = "1.0", optional = true, default-features = false, features = ["alloc"] }
+serde_bytes = { version = "0.11", optional = true, default-features = false, features = ["alloc"] }
+
+# For canonical byte encoding
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+# Soroban SDK (optional, for contract types)
+soroban-sdk = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Property-based testing for unlinkability & correctness
+proptest = { version = "1.0", default-features = false, features = ["alloc", "std"] }
+
+# Benchmarking support
+criterion = { version = "0.5", default-features = false, features = ["std"] }
+
+# Random number generation (for testing only)
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+[features]
+default = ["std"]
+std = ["zeroize/std", "sha2/std", "ff/std", "bls12_381/std"]
+soroban = ["soroban-sdk"]
+serde_support = ["serde", "serde_bytes"]
+
+[[bench]]
+name = "bbs_plus_benchmarks"
+harness = false
