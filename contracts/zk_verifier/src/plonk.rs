@@ -291,7 +291,7 @@ pub fn verify(
     let mut omega_pow = Scalar::one();
     for i in 0..(l as usize) {
         let pi_i = match scalar_from(&public_inputs[i * SCALAR_LEN..(i + 1) * SCALAR_LEN]) {
-            Some(s) => s,
+            Some(s) => -s,
             None => return false,
         };
         let denom = n_scalar * (zeta - omega_pow);
