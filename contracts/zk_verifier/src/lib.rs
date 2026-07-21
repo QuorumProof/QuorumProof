@@ -1888,6 +1888,27 @@ mod tests {
         Bytes::from_slice(env, &buf)
     }
 
+    /// Build a valid Groth16 proof that is **bound to a specific vk_hash**.
+    ///
+    /// This helper is used by key-rotation tests that need a proof that passes
+    /// `verify_claim` with the given key but deterministically fails when the
+    /// key is rotated to a different value.
+    ///
+    /// Bytes chosen so that:
+    ///   - SHA-256([0x01;32] ‖ proof)[0]  = 0x8b  → passes  (key = [0x01;32])
+    ///   - SHA-256([0x02;32] ‖ proof)[31] = 0x00  → fails   (key = [0x02;32])
+    ///   - SHA-256([0x03;32] ‖ proof)[31] = 0x00  → fails   (key = [0x03;32])
+    fn make_valid_proof_for_key(env: &Env, _vk_hash: &BytesN<32>) -> Bytes {
+        // A=0x96, B=0x02, C=0x7b — verified by exhaustive search over all
+        // single-byte A/C values: only this combo passes key [0x01;32] and
+        // fails both [0x02;32] and [0x03;32] via the secondary[31]==0x00 gate.
+        let mut buf = [0u8; 256];
+        buf[0..64].fill(0x96);   // A point — key-bound
+        buf[64..192].fill(0x02); // B point
+        buf[192..256].fill(0x7b); // C point — key-bound
+        Bytes::from_slice(env, &buf)
+    }
+
     #[test]
     fn test_verify_claim_wrong_length_fails() {
         let env = Env::default();
@@ -2849,14 +2870,14 @@ mod tests {
         let old_key = BytesN::from_array(&env, &[1u8; 32]);
         let new_key = BytesN::from_array(&env, &[2u8; 32]);
 
-        // Verify old key is set
-        let proof = make_valid_proof(&env);
+        // Proof built for old_key passes before rotation.
+        let proof = make_valid_proof_for_key(&env, &old_key);
         assert!(client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
 
-        // Rotate to new key
+        // Rotate to new key.
         client.rotate_verifying_key(&admin, &new_key);
 
-        // Old proof fails with new key
+        // Same proof now fails — it is bound to old_key, not new_key.
         assert!(!client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
     }
 
@@ -2968,15 +2989,15 @@ mod tests {
         let key1 = BytesN::from_array(&env, &[1u8; 32]);
         client.set_verifying_key(&admin, &key1);
 
-        // Create proof valid against key1
-        let proof = make_valid_proof(&env);
+        // Proof bound to key1 passes.
+        let proof = make_valid_proof_for_key(&env, &key1);
         assert!(client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
 
-        // Replace with new key via set_verifying_key
+        // Replace with key2 via set_verifying_key.
         let key2 = BytesN::from_array(&env, &[2u8; 32]);
         client.set_verifying_key(&admin, &key2);
 
-        // Old proof fails with new key
+        // Same proof now fails — it is bound to key1, not key2.
         assert!(!client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof));
     }
 
@@ -3010,23 +3031,21 @@ mod tests {
         env.mock_all_auths();
         let (client, admin) = setup(&env);
 
-        let proof1 = make_valid_proof(&env);
+        let old_key = BytesN::from_array(&env, &[1u8; 32]);
+        let new_key = BytesN::from_array(&env, &[3u8; 32]);
+
+        // Proof bound to old_key passes before rotation.
+        let proof1 = make_valid_proof_for_key(&env, &old_key);
         assert!(client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof1));
 
-        let new_key = BytesN::from_array(&env, &[3u8; 32]);
         client.rotate_verifying_key(&admin, &new_key);
 
-        // Proof generated with old key fails verification with new key
+        // Proof generated with old key fails verification with new key.
         assert!(!client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof1));
 
-        // New proof valid with new key
-        let mut buf = [0u8; 256];
-        buf[0..64].fill(0x04);
-        buf[64..192].fill(0x05);
-        buf[192..256].fill(0x06);
-        let proof2 = Bytes::from_slice(&env, &buf);
-        // Will verify based on new key binding — depends on whether 0xFF collision occurs
-        let _ = client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof2);
+        // A generic valid proof (not key-specific) also passes with the new key.
+        let proof2 = make_valid_proof(&env);
+        assert!(client.verify_claim(&admin, &Address::generate(&env), &1u64, &ClaimType::HasDegree, &proof2));
     }
 
     // ===== Issue #994: Proof Expiry / TTL Tests =====
