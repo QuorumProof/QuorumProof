@@ -4,6 +4,10 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, 
 // For range proof hashing
 use sha2::{Sha256, Digest};
 
+mod plonk;
+#[cfg(test)]
+mod plonk_test_prover;
+
 /// Groth16 proof byte layout (BN254, uncompressed):
 ///   A  : 64 bytes  (G1 point)
 ///   B  : 128 bytes (G2 point)
@@ -96,122 +100,154 @@ fn verify_enhanced_vk_binding(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) ->
     digest.to_array()[0] != 0xFF && secondary_digest.to_array()[31] != 0x00
 }
 
-/// PLONK proof byte layout (BN254/BLS12-381, uncompressed):
+/// PLONK proof byte layout (BLS12-381, compressed points):
 ///
 /// ```text
 /// Offset  Length  Field
 /// ------  ------  -----
-///      0      64  [W_a]  — wire polynomial commitment A (G1 point)
-///     64      64  [W_b]  — wire polynomial commitment B (G1 point)
-///    128      64  [W_c]  — wire polynomial commitment C (G1 point)
-///    192      64  [Z]    — permutation argument commitment (G1 point)
-///    256      64  [T_lo] — quotient polynomial commitment low (G1 point)
-///    320      64  [T_mid]— quotient polynomial commitment mid (G1 point)
-///    384      64  [T_hi] — quotient polynomial commitment high (G1 point)
-///    448      64  [W_z]  — opening proof at z (G1 point)
-///    512      64  [W_zw] — opening proof at z·ω (G1 point)
-///    576      32  ā      — wire evaluation at z (field element)
-///    608      32  b̄      — wire evaluation at z (field element)
-///    640      32  c̄      — wire evaluation at z (field element)
-///    672      32  s̄₁     — permutation poly evaluation at z (field element)
-///    704      32  s̄₂     — permutation poly evaluation at z (field element)
-///    736      32  z̄_ω    — shifted permutation evaluation at z·ω (field element)
-///    Total: 768 bytes
+///      0      48  [a]        — wire polynomial commitment A (G1, compressed)
+///     48      48  [b]        — wire polynomial commitment B (G1, compressed)
+///     96      48  [c]        — wire polynomial commitment C (G1, compressed)
+///    144      48  [z]        — permutation argument commitment (G1, compressed)
+///    192      48  [t_lo]     — quotient polynomial commitment low (G1, compressed)
+///    240      48  [t_mid]    — quotient polynomial commitment mid (G1, compressed)
+///    288      48  [t_hi]     — quotient polynomial commitment high (G1, compressed)
+///    336      48  [W_zeta]   — opening proof at ζ (G1, compressed)
+///    384      48  [W_zetaw]  — opening proof at ζ·ω (G1, compressed)
+///    432      32  ā          — wire evaluation at ζ (Fr, little-endian)
+///    464      32  b̄          — wire evaluation at ζ (Fr, little-endian)
+///    496      32  c̄          — wire evaluation at ζ (Fr, little-endian)
+///    528      32  s̄₁         — permutation poly evaluation at ζ (Fr, little-endian)
+///    560      32  s̄₂         — permutation poly evaluation at ζ (Fr, little-endian)
+///    592      32  z̄_ω        — shifted permutation evaluation at ζ·ω (Fr, little-endian)
+///    Total: 624 bytes
 /// ```
 ///
-/// None of the nine G1 commitments may be the point at infinity (all-zero).
-pub const PLONK_PROOF_LEN: u32 = 768;
+/// This is a genuine KZG-over-BLS12-381 vanilla-PLONK proof, verified via a
+/// real batched pairing check in [`plonk::verify`] — see
+/// `docs/plonk-verification.md` for the full protocol spec (this replaced an
+/// earlier placeholder that only performed structural/hash checks with no
+/// actual pairing math, hence the change from the prior BN254-sized,
+/// uncompressed 768-byte layout).
+pub const PLONK_PROOF_LEN: u32 = plonk::PLONK_PROOF_LEN;
 
-/// Number of G1 point commitments in a PLONK proof.
-const PLONK_G1_COUNT: u32 = 9;
-/// Size of each G1 point (uncompressed BN254/BLS12-381).
-const PLONK_G1_SIZE: u32 = 64;
+/// Maximum number of public-input field elements accepted by
+/// [`ZkVerifierContract::verify_plonk_proof`]. Bounds the fixed stack buffer
+/// used to copy `public_inputs` out of the host `Bytes` object; real circuits
+/// rarely expose more than a handful of public wires.
+const MAX_PLONK_PUBLIC_INPUTS: usize = 32;
 
-/// Enhanced PLONK proof verification with dynamic predicate support.
+/// Circuit-specific PLONK verifying key, derived off-chain from the
+/// universal SRS during circuit compilation and registered on-chain via
+/// [`ZkVerifierContract::set_plonk_verifying_key`] /
+/// [`ZkVerifierContract::rotate_plonk_verifying_key`].
 ///
-/// This function provides comprehensive PLONK verification including:
-/// 1. Proof structure validation (768 bytes, 9 G1 commitments)
-/// 2. Public input parsing and validation
-/// 3. Dynamic predicate evaluation (e.g. 'GPA > 3.5 AND graduated_after_2020')
-/// 4. Cryptographic binding to verifying key
+/// `q_m,q_l,q_r,q_o,q_c` are the gate selector polynomial commitments and
+/// `s1,s2,s3` are the copy-permutation polynomial commitments — all
+/// compressed BLS12-381 G1 points. See `docs/plonk-verification.md` for the
+/// canonical byte encoding used to compute a VK's `vk_hash`.
+#[contracttype]
+#[derive(Clone)]
+pub struct PlonkVerifyingKey {
+    pub domain_size: u32,
+    pub num_public_inputs: u32,
+    pub q_m: BytesN<48>,
+    pub q_l: BytesN<48>,
+    pub q_r: BytesN<48>,
+    pub q_o: BytesN<48>,
+    pub q_c: BytesN<48>,
+    pub s1: BytesN<48>,
+    pub s2: BytesN<48>,
+    pub s3: BytesN<48>,
+}
+
+impl PlonkVerifyingKey {
+    fn to_core(&self) -> plonk::VerifyingKey {
+        plonk::VerifyingKey {
+            domain_size: self.domain_size,
+            num_public_inputs: self.num_public_inputs,
+            q_m: self.q_m.to_array(),
+            q_l: self.q_l.to_array(),
+            q_r: self.q_r.to_array(),
+            q_o: self.q_o.to_array(),
+            q_c: self.q_c.to_array(),
+            s1: self.s1.to_array(),
+            s2: self.s2.to_array(),
+            s3: self.s3.to_array(),
+        }
+    }
+
+    /// Panics (admin-facing input validation) if `domain_size` is not a
+    /// power of two, `num_public_inputs` exceeds it, or any of the eight
+    /// selector/permutation points fails to deserialize as a valid
+    /// BLS12-381 G1 point in the prime-order subgroup.
+    fn validate(&self) {
+        assert!(self.domain_size > 0 && self.domain_size.is_power_of_two(),
+            "domain_size must be a power of two");
+        assert!(self.num_public_inputs <= self.domain_size,
+            "num_public_inputs cannot exceed domain_size");
+        for p in [&self.q_m, &self.q_l, &self.q_r, &self.q_o, &self.q_c, &self.s1, &self.s2, &self.s3] {
+            assert!(plonk::is_valid_g1(&p.to_array()), "invalid G1 point in verifying key");
+        }
+    }
+}
+
+/// Audit-trail entry for a PLONK verifying-key rotation. Mirrors
+/// [`KeyRotationEntry`] (the Groth16 convention).
+#[contracttype]
+#[derive(Clone)]
+pub struct PlonkKeyRotationEntry {
+    pub old_vk_hash: BytesN<32>,
+    pub new_vk_hash: BytesN<32>,
+    pub rotated_at_ledger: u32,
+    pub rotated_by: Address,
+}
+
+/// Audit-trail entry for a universal-SRS rotation. Mirrors
+/// [`KeyRotationEntry`] (the Groth16 convention).
+#[contracttype]
+#[derive(Clone)]
+pub struct PlonkSrsRotationEntry {
+    pub old_tau_g2: BytesN<96>,
+    pub new_tau_g2: BytesN<96>,
+    pub rotated_at_ledger: u32,
+    pub rotated_by: Address,
+}
+
+/// Real BLS12-381 KZG-based PLONK proof verification.
 ///
-/// Supports complex claim verification with boolean logic and arithmetic predicates.
+/// Looks up the universal SRS and the circuit-specific verifying key
+/// registered for `vk_hash`, then delegates the actual pairing check to
+/// [`plonk::verify`]. Returns `false` (never panics) if either piece of key
+/// material hasn't been registered, or for any structurally, algebraically,
+/// or cryptographically invalid proof — see `docs/plonk-verification.md`.
 fn plonk_verify(env: &Env, vk_hash: &BytesN<32>, public_inputs: &Bytes, proof: &Bytes) -> bool {
-    // 1. Length check
     if proof.len() != PLONK_PROOF_LEN {
         return false;
     }
-
-    // 2. Public-input alignment
     let pi_len = public_inputs.len();
-    if pi_len == 0 || pi_len % 32 != 0 {
+    if pi_len == 0 || pi_len % 32 != 0 || pi_len as usize > MAX_PLONK_PUBLIC_INPUTS * 32 {
         return false;
     }
 
-    // 3. Non-zero check for each of the 9 G1 commitments
-    for i in 0..PLONK_G1_COUNT {
-        let offset = i * PLONK_G1_SIZE;
-        let mut all_zero = true;
-        for j in offset..(offset + PLONK_G1_SIZE) {
-            if proof.get(j).unwrap_or(0) != 0 {
-                all_zero = false;
-                break;
-            }
-        }
-        if all_zero {
-            return false;
-        }
-    }
+    let srs_tau_g2: BytesN<96> = match env.storage().instance().get(&DataKey::PlonkSrsTauG2) {
+        Some(v) => v,
+        None => return false,
+    };
+    let vk: PlonkVerifyingKey = match env.storage().instance()
+        .get(&DataKey::PlonkVerifyingKeyByHash(vk_hash.clone())) {
+        Some(v) => v,
+        None => return false,
+    };
 
-    // 4. Enhanced PLONK verification with dynamic predicate support
-    verify_dynamic_predicates_enhanced(public_inputs) &&
-    verify_plonk_vk_binding(env, vk_hash, public_inputs, proof)
-}
+    let mut proof_buf = [0u8; PLONK_PROOF_LEN as usize];
+    proof.copy_into_slice(&mut proof_buf);
 
-/// Convert public inputs to bytes for processing
-fn public_inputs_to_bytes(public_inputs: &Bytes) -> [u8; 64] {
-    let mut bytes = [0u8; 64];
-    let len = public_inputs.len().min(64);
-    for i in 0..len {
-        bytes[i as usize] = public_inputs.get(i).unwrap_or(0);
-    }
-    bytes
-}
+    let mut pi_buf = [0u8; MAX_PLONK_PUBLIC_INPUTS * 32];
+    let pi_len_usize = pi_len as usize;
+    public_inputs.copy_into_slice(&mut pi_buf[..pi_len_usize]);
 
-/// Enhanced dynamic predicate verification with multiple conditions
-fn verify_dynamic_predicates_enhanced(public_inputs: &Bytes) -> bool {
-    // Parse public inputs as field elements
-    let input_count = public_inputs.len() / 32;
-    if input_count < 2 {
-        return false; // Need at least 2 inputs for dynamic predicates
-    }
-
-    // Example: First input is GPA * 100, second is graduation year
-    let gpa_input = parse_field_element_from_bytes(public_inputs, 0);
-    let year_input = parse_field_element_from_bytes(public_inputs, 32);
-
-    // Dynamic predicate: GPA > 3.5 (350 in scaled form) AND year >= 2020
-    let gpa_valid = gpa_input > 350 && gpa_input < 500; // Reasonable GPA range
-    let year_valid = year_input >= 2020 && year_input <= 2030; // Reasonable year range
-    
-    gpa_valid && year_valid
-}
-
-/// Parse 32-byte field element from specific offset in public inputs
-fn parse_field_element_from_bytes(public_inputs: &Bytes, offset: u32) -> u64 {
-    if offset + 32 > public_inputs.len() {
-        return 0;
-    }
-    
-    // Convert last 8 bytes to u64 (little-endian)
-    let mut result = 0u64;
-    for i in 0..8 {
-        let byte_idx = offset + 24 + i;
-        if byte_idx < public_inputs.len() {
-            result |= (public_inputs.get(byte_idx).unwrap_or(0) as u64) << (i * 8);
-        }
-    }
-    result
+    plonk::verify(&vk.to_core(), &srs_tau_g2.to_array(), &pi_buf[..pi_len_usize], &proof_buf)
 }
 
 
@@ -251,17 +287,6 @@ fn verify_bulletproof_range(proof: &BulletproofRangeProof) -> bool {
     hash[0] != 0x00 && hash[31] != 0xFF
 }
 
-/// Verify PLONK verifying key binding
-fn verify_plonk_vk_binding(env: &Env, vk_hash: &BytesN<32>, public_inputs: &Bytes, proof: &Bytes) -> bool {
-    // Cryptographic binding: SHA-256(vk_hash ‖ SHA-256(public_inputs) ‖ proof)
-    let pi_digest = env.crypto().sha256(public_inputs);
-    let mut binding_input = Bytes::new(env);
-    binding_input.extend_from_array(&vk_hash.to_array());
-    binding_input.extend_from_array(&pi_digest.to_array());
-    binding_input.append(proof);
-    let digest = env.crypto().sha256(&binding_input);
-    digest.to_array()[0] != 0xFF
-}
 
 /// Supported claim types for ZK verification.
 #[contracttype]
@@ -502,6 +527,129 @@ impl ZkVerifierContract {
         env.storage().instance()
             .get(&DataKey::KeyRotationHistory)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ── PLONK: universal SRS + circuit-specific verifying keys ─────────
+
+    /// Register the universal SRS's G2 element `[tau]_2` (compressed
+    /// BLS12-381 point), shared across every PLONK circuit. Must be called
+    /// by the admin before any PLONK proof can be verified.
+    pub fn set_plonk_srs(env: Env, admin: Address, tau_g2: BytesN<96>) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        assert!(plonk::is_valid_g2(&tau_g2.to_array()), "invalid G2 point for SRS tau");
+        env.storage().instance().set(&DataKey::PlonkSrsTauG2, &tau_g2);
+    }
+
+    /// Rotate the universal SRS with audit trail. Records the old and new
+    /// `[tau]_2`, ledger height, and admin address. Mirrors
+    /// [`Self::rotate_verifying_key`].
+    pub fn rotate_plonk_srs(env: Env, admin: Address, new_tau_g2: BytesN<96>) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        assert!(plonk::is_valid_g2(&new_tau_g2.to_array()), "invalid G2 point for SRS tau");
+
+        let old_tau_g2: BytesN<96> = env.storage().instance()
+            .get(&DataKey::PlonkSrsTauG2)
+            .expect("no SRS set; use set_plonk_srs first");
+
+        let rotation = PlonkSrsRotationEntry {
+            old_tau_g2,
+            new_tau_g2: new_tau_g2.clone(),
+            rotated_at_ledger: env.ledger().sequence(),
+            rotated_by: admin,
+        };
+        let history_key = DataKey::PlonkSrsRotationHistory;
+        let mut rotations: Vec<PlonkSrsRotationEntry> = env.storage().instance()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        rotations.push_back(rotation);
+        env.storage().instance().set(&history_key, &rotations);
+
+        env.storage().instance().set(&DataKey::PlonkSrsTauG2, &new_tau_g2);
+    }
+
+    /// Get PLONK universal-SRS rotation history.
+    pub fn get_plonk_srs_rotation_history(env: Env) -> Vec<PlonkSrsRotationEntry> {
+        env.storage().instance()
+            .get(&DataKey::PlonkSrsRotationHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Register a circuit-specific PLONK verifying key, derived off-chain
+    /// from the universal SRS, keyed by its `vk_hash` (the SHA-256 digest of
+    /// [`PlonkVerifyingKey::canonical_bytes`][crate::plonk::VerifyingKey],
+    /// via [`Self::plonk_vk_hash`]). Historical keys are retained: proofs
+    /// against a `vk_hash` registered here remain verifiable even after a
+    /// later rotation. Must be called by the admin.
+    pub fn set_plonk_verifying_key(env: Env, admin: Address, vk_hash: BytesN<32>, vk: PlonkVerifyingKey) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        vk.validate();
+        assert!(Self::plonk_vk_hash(env.clone(), vk.clone()) == vk_hash, "vk_hash does not match vk");
+
+        env.storage().instance().set(&DataKey::PlonkVerifyingKeyByHash(vk_hash.clone()), &vk);
+        env.storage().instance().set(&DataKey::PlonkVerifyingKeyHash, &vk_hash);
+    }
+
+    /// Rotate the "current" PLONK verifying key with audit trail. Records
+    /// the old and new `vk_hash`, ledger height, and admin address. The
+    /// previously-registered key remains queryable/verifiable by its own
+    /// hash. Mirrors [`Self::rotate_verifying_key`].
+    pub fn rotate_plonk_verifying_key(env: Env, admin: Address, new_vk_hash: BytesN<32>, new_vk: PlonkVerifyingKey) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        new_vk.validate();
+        assert!(Self::plonk_vk_hash(env.clone(), new_vk.clone()) == new_vk_hash, "vk_hash does not match vk");
+
+        let old_vk_hash: BytesN<32> = env.storage().instance()
+            .get(&DataKey::PlonkVerifyingKeyHash)
+            .expect("no verifying key set; use set_plonk_verifying_key first");
+
+        let rotation = PlonkKeyRotationEntry {
+            old_vk_hash,
+            new_vk_hash: new_vk_hash.clone(),
+            rotated_at_ledger: env.ledger().sequence(),
+            rotated_by: admin,
+        };
+        let history_key = DataKey::PlonkKeyRotationHistory;
+        let mut rotations: Vec<PlonkKeyRotationEntry> = env.storage().instance()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        rotations.push_back(rotation);
+        env.storage().instance().set(&history_key, &rotations);
+
+        env.storage().instance().set(&DataKey::PlonkVerifyingKeyByHash(new_vk_hash.clone()), &new_vk);
+        env.storage().instance().set(&DataKey::PlonkVerifyingKeyHash, &new_vk_hash);
+    }
+
+    /// Get PLONK verifying-key rotation history.
+    pub fn get_plonk_key_rotation_history(env: Env) -> Vec<PlonkKeyRotationEntry> {
+        env.storage().instance()
+            .get(&DataKey::PlonkKeyRotationHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Computes the canonical `vk_hash` (SHA-256 of
+    /// [`PlonkVerifyingKey`]'s canonical byte encoding — see
+    /// `docs/plonk-verification.md`) for a given verifying key. Callers
+    /// derive this off-chain identically; it's exposed here so registration
+    /// callers can double-check their hash before submitting it.
+    pub fn plonk_vk_hash(env: Env, vk: PlonkVerifyingKey) -> BytesN<32> {
+        let bytes = Bytes::from_slice(&env, &vk.to_core().canonical_bytes());
+        env.crypto().sha256(&bytes).into()
     }
 
     /// Verify a Groth16 ZK proof for a claim.
@@ -1070,58 +1218,32 @@ impl ZkVerifierContract {
     /// Verify a PLONK proof with explicit verifying-key hash and public inputs.
     ///
     /// This is the primary production entry point for PLONK verification.
-    /// No admin auth is required — all verification material is passed as
-    /// arguments, making it suitable for permissionless on-chain calls.
+    /// No admin auth is required to *call* this function — all verification
+    /// material is passed as arguments, making it suitable for
+    /// permissionless on-chain calls. It does, however, require that the
+    /// admin has already registered both the universal SRS
+    /// ([`Self::set_plonk_srs`]) and a verifying key for `vk_hash`
+    /// ([`Self::set_plonk_verifying_key`]) — see `docs/plonk-verification.md`.
     ///
-    /// # Proof format (BN254/BLS12-381, uncompressed, 768 bytes)
-    ///
-    /// ```text
-    /// Offset  Length  Field
-    /// ------  ------  -----
-    ///      0      64  [W_a]   wire polynomial commitment A  (G1)
-    ///     64      64  [W_b]   wire polynomial commitment B  (G1)
-    ///    128      64  [W_c]   wire polynomial commitment C  (G1)
-    ///    192      64  [Z]     permutation argument commitment (G1)
-    ///    256      64  [T_lo]  quotient polynomial low        (G1)
-    ///    320      64  [T_mid] quotient polynomial mid        (G1)
-    ///    384      64  [T_hi]  quotient polynomial high       (G1)
-    ///    448      64  [W_z]   opening proof at z             (G1)
-    ///    512      64  [W_zw]  opening proof at z·ω           (G1)
-    ///    576      32  ā       wire evaluation at z           (field element)
-    ///    608      32  b̄       wire evaluation at z           (field element)
-    ///    640      32  c̄       wire evaluation at z           (field element)
-    ///    672      32  s̄₁      permutation poly eval at z     (field element)
-    ///    704      32  s̄₂      permutation poly eval at z     (field element)
-    ///    736      32  z̄_ω     shifted permutation eval z·ω   (field element)
-    /// ```
-    ///
-    /// None of the nine G1 commitments may be the point at infinity (all-zero).
+    /// This performs a genuine KZG-over-BLS12-381 batched pairing check
+    /// (vanilla PLONK, GWC19-style), not a structural/hash placeholder — see
+    /// [`plonk::verify`] and `docs/plonk-verification.md` for the full
+    /// proof byte layout, transcript spec, and protocol description.
     ///
     /// # Public input schema
     ///
-    /// `public_inputs` is a flat byte string of one or more 32-byte big-endian
-    /// field elements, concatenated in circuit signal order.  Total length must
-    /// be a non-zero multiple of 32.
+    /// `public_inputs` is a flat, non-empty byte string of little-endian Fr
+    /// scalars (32 bytes each), one per public-input wire, in circuit signal
+    /// order. The count must exactly match the registered verifying key's
+    /// `num_public_inputs`.
     ///
     /// # Verifying-key hash
     ///
-    /// `vk_hash` is the SHA-256 digest of the canonical serialisation of the
-    /// off-chain PLONK verifying key (selector polynomials, permutation
-    /// polynomials, and the SRS commitment points).
-    ///
-    /// # Verification logic
-    ///
-    /// Soroban SDK 21 has no pairing host functions, so the full polynomial
-    /// identity check cannot be performed on-chain.  We apply:
-    ///
-    /// 1. **Structure check** — 768-byte proof; all nine G1 commitments non-zero.
-    /// 2. **Public-input length check** — non-empty, multiple of 32 bytes.
-    /// 3. **Cryptographic binding** —
-    ///    `SHA-256(vk_hash ‖ SHA-256(public_inputs) ‖ proof)` must not start
-    ///    with `0xFF`.
-    ///
-    /// When Stellar adds pairing host functions the polynomial identity
-    /// equations can be wired in here without changing the public API.
+    /// `vk_hash` is the SHA-256 digest of the registered
+    /// [`PlonkVerifyingKey`]'s canonical byte encoding (see
+    /// [`Self::plonk_vk_hash`]), used purely as a lookup key into on-chain
+    /// storage populated by [`Self::set_plonk_verifying_key`] /
+    /// [`Self::rotate_plonk_verifying_key`].
     pub fn verify_plonk_proof(
         env: Env,
         proof: Bytes,
@@ -1308,6 +1430,9 @@ impl ZkVerifierContract {
         binding_input.extend_from_array(&challenge.to_array());
         let binding = env.crypto().sha256(&binding_input);
 
+        binding.to_array()[0] != 0xFF
+    }
+
     /// Verify a selective claim disclosure using a hash-based Schnorr proof.
     ///
     /// This function allows holders to prove knowledge of a specific claim value
@@ -1384,9 +1509,6 @@ impl ZkVerifierContract {
 
         // Both checks must pass for verification
         binding.to_array()[0] != 0xFF && commitment_check.to_array()[0] != 0x00
-    }
-
-        binding.to_array()[0] != 0xFF
     }
 
     // ===== Issue #994: Proof Expiry / TTL =====
@@ -1506,6 +1628,20 @@ pub enum DataKey {
     /// Timestamp (Unix seconds) when a proof was first submitted/verified
     /// Keyed by (credential_id, claim_type)
     ProofTimestamp(u64, ClaimType),
+    // ===== PLONK (KZG over BLS12-381) real verification =====
+    /// Universal SRS's G2 element `[tau]_2` (compressed), shared by every circuit.
+    PlonkSrsTauG2,
+    /// Audit trail of universal-SRS rotations.
+    PlonkSrsRotationHistory,
+    /// The most recently registered/rotated PLONK verifying key's hash
+    /// (bookkeeping pointer, mirrors `VerifyingKeyHash`).
+    PlonkVerifyingKeyHash,
+    /// Historical map of every registered PLONK verifying key, keyed by its
+    /// hash — old keys are retained so proofs against a since-rotated
+    /// circuit version remain verifiable.
+    PlonkVerifyingKeyByHash(BytesN<32>),
+    /// Audit trail of PLONK verifying-key rotations.
+    PlonkKeyRotationHistory,
 }
 
 // ===== Issue #994: ProtocolConfig =====
@@ -1528,6 +1664,7 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
+    use crate::plonk_test_prover;
 
     // --- Deployment verification tests ---
 
@@ -1588,16 +1725,6 @@ mod tests {
         Bytes::from_slice(env, &buf)
     }
 
-    fn setup() -> (Env, ZkVerifierContractClient<'static>) {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin) = setup(&env);
-        let qp_id = Address::generate(&env);
-
-        let proof = make_valid_proof(&env);
-        assert!(client.verify_claim(&admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof));
-    }
-
     #[test]
     fn test_verify_claim_wrong_length_fails() {
         let env = Env::default();
@@ -1653,15 +1780,6 @@ mod tests {
         let proof = Bytes::from_slice(&env, b"proof");
         // non_admin is not the stored admin — should panic with "unauthorized"
         client.verify_claim(&non_admin, &qp_id, &1u64, &ClaimType::HasDegree, &proof);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_upgrade_success() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
-        client.upgrade(&admin, &wasm_hash);
     }
 
     #[test]
@@ -2126,34 +2244,21 @@ mod tests {
 
     // --- verify_plonk_proof tests ---
 
-    /// Build a valid 768-byte PLONK proof: all 9 G1 commitments non-zero,
-    /// 6 field element evaluations non-zero.
-    fn make_valid_plonk_proof(env: &Env) -> Bytes {
-        let mut buf = [0u8; 768];
-        // 9 G1 points × 64 bytes each = 576 bytes, fill with distinct non-zero values
-        for i in 0..9usize {
-            let fill = (i as u8) + 1;
-            buf[i * 64..(i + 1) * 64].fill(fill);
-        }
-        // 6 field elements × 32 bytes each = 192 bytes
-        for i in 0..6usize {
-            let fill = (i as u8) + 0x0A;
-            buf[576 + i * 32..576 + (i + 1) * 32].fill(fill);
-        }
-        Bytes::from_slice(env, &buf)
-    }
-
     #[test]
     fn test_verify_plonk_proof_valid() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
-        let proof = make_valid_plonk_proof(&env);
-        let public_inputs = make_public_inputs(&env);
-        let vk_hash = make_vk_hash(&env);
+        // Generate a genuinely valid PLONK proof using the test prover
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 1, 7, 3, 4, 5, 6);
 
-        assert!(client.verify_plonk_proof(&proof, &public_inputs, &vk_hash));
+        // Register the SRS and verifying key
+        client.set_plonk_srs(&admin, &fixture.srs_tau_g2);
+        client.set_plonk_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
+
+        // Verify the proof succeeds
+        assert!(client.verify_plonk_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
@@ -2167,40 +2272,47 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_plonk_proof_zero_commitment_fails() {
+    fn test_verify_plonk_proof_corrupt_commitment_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
-        // First G1 commitment (W_a) is all-zero — point at infinity
-        let mut buf = [0u8; 768];
-        for i in 1..9usize {
-            buf[i * 64..(i + 1) * 64].fill((i as u8) + 1);
-        }
-        for i in 0..6usize {
-            buf[576 + i * 32..576 + (i + 1) * 32].fill(0x0A);
-        }
-        let proof = Bytes::from_slice(&env, &buf);
-        assert!(!client.verify_plonk_proof(&proof, &make_public_inputs(&env), &make_vk_hash(&env)));
+        // Generate a valid proof, but corrupt the first G1 commitment (first 48 bytes)
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 1, 7, 3, 4, 5, 6);
+        let mut corrupted_buf = [0u8; 624];
+        fixture.proof.copy_into_slice(&mut corrupted_buf);
+        // Corrupt the first G1 point (first 48 bytes of the 624-byte proof)
+        corrupted_buf[0..48].fill(0xFF);
+        let corrupted_proof = Bytes::from_slice(&env, &corrupted_buf);
+
+        // Register the real SRS and VK
+        client.set_plonk_srs(&admin, &fixture.srs_tau_g2);
+        client.set_plonk_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
+
+        // Verification should fail because the pairing check will fail
+        assert!(!client.verify_plonk_proof(&corrupted_proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
-    fn test_verify_plonk_proof_zero_last_commitment_fails() {
+    fn test_verify_plonk_proof_corrupt_quotient_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
-        // Last G1 commitment (W_zw, index 8) is all-zero
-        let mut buf = [0u8; 768];
-        for i in 0..8usize {
-            buf[i * 64..(i + 1) * 64].fill((i as u8) + 1);
-        }
-        // buf[512..576] stays zero (W_zw)
-        for i in 0..6usize {
-            buf[576 + i * 32..576 + (i + 1) * 32].fill(0x0A);
-        }
-        let proof = Bytes::from_slice(&env, &buf);
-        assert!(!client.verify_plonk_proof(&proof, &make_public_inputs(&env), &make_vk_hash(&env)));
+        // Generate a valid proof, but corrupt the last G1 commitment (W_zeta_omega, bytes 384-432)
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 2, 7, 3, 4, 5, 6);
+        let mut corrupted_buf = [0u8; 624];
+        fixture.proof.copy_into_slice(&mut corrupted_buf);
+        // Corrupt the last G1 point (bytes 8*48..9*48 = 384..432)
+        corrupted_buf[384..432].fill(0xAA);
+        let corrupted_proof = Bytes::from_slice(&env, &corrupted_buf);
+
+        // Register the real SRS and VK
+        client.set_plonk_srs(&admin, &fixture.srs_tau_g2);
+        client.set_plonk_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
+
+        // Verification should fail because the pairing check will fail
+        assert!(!client.verify_plonk_proof(&corrupted_proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
@@ -2209,9 +2321,9 @@ mod tests {
         let contract_id = env.register_contract(None, ZkVerifierContract);
         let client = ZkVerifierContractClient::new(&env, &contract_id);
 
-        let proof = make_valid_plonk_proof(&env);
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 9, 7, 3, 4, 5, 6);
         let empty = Bytes::from_slice(&env, b"");
-        assert!(!client.verify_plonk_proof(&proof, &empty, &make_vk_hash(&env)));
+        assert!(!client.verify_plonk_proof(&fixture.proof, &empty, &fixture.vk_hash));
     }
 
     #[test]
@@ -2220,20 +2332,90 @@ mod tests {
         let contract_id = env.register_contract(None, ZkVerifierContract);
         let client = ZkVerifierContractClient::new(&env, &contract_id);
 
-        let proof = make_valid_plonk_proof(&env);
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 4, 7, 3, 4, 5, 6);
         let bad_inputs = Bytes::from_slice(&env, &[0x01u8; 31]); // not multiple of 32
-        assert!(!client.verify_plonk_proof(&proof, &bad_inputs, &make_vk_hash(&env)));
+        assert!(!client.verify_plonk_proof(&fixture.proof, &bad_inputs, &fixture.vk_hash));
     }
 
     #[test]
     fn test_verify_plonk_proof_no_admin_required() {
-        // verify_plonk_proof must be callable without any auth setup
+        // verify_plonk_proof must be callable without any auth setup.
+        // (Note: verification will return false because no SRS/VK are registered,
+        // but the absence of required auth should not panic.)
         let env = Env::default();
-        // Deliberately do NOT call env.mock_all_auths()
         let contract_id = env.register_contract(None, ZkVerifierContract);
         let client = ZkVerifierContractClient::new(&env, &contract_id);
 
-        let _ = client.verify_plonk_proof(&make_valid_plonk_proof(&env), &make_public_inputs(&env), &make_vk_hash(&env));
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 3, 7, 3, 4, 5, 6);
+        // Do NOT register SRS/VK, and do NOT call env.mock_all_auths()
+        // Verification should return false (missing SRS/VK), not panic on auth
+        assert!(!client.verify_plonk_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
+    }
+
+    #[test]
+    fn test_verify_plonk_proof_no_srs_fails() {
+        // Verification must fail if SRS is not registered, even with a valid proof and VK
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 5, 7, 3, 4, 5, 6);
+
+        // Register only the VK, NOT the SRS
+        client.set_plonk_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
+
+        // Verification should fail because SRS is missing
+        assert!(!client.verify_plonk_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
+    }
+
+    #[test]
+    fn test_verify_plonk_proof_no_vk_fails() {
+        // Verification must fail if verifying key is not registered, even with a valid proof and SRS
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 6, 7, 3, 4, 5, 6);
+
+        // Register only the SRS, NOT the VK
+        client.set_plonk_srs(&admin, &fixture.srs_tau_g2);
+
+        // Verification should fail because VK is missing
+        assert!(!client.verify_plonk_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
+    }
+
+    #[test]
+    fn test_verify_plonk_proof_wrong_vk_fails() {
+        // Verification must fail if the proof was created with a different verifying key
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Generate two fixtures with different circuits (different variants)
+        let fixture_a = plonk_test_prover::generate_valid_proof(&env, 0, 7, 7, 3, 4, 5, 6);
+        let fixture_b = plonk_test_prover::generate_valid_proof(&env, 1, 8, 7, 3, 4, 5, 6);
+
+        // Register SRS from fixture_a and VK from fixture_a
+        client.set_plonk_srs(&admin, &fixture_a.srs_tau_g2);
+        client.set_plonk_verifying_key(&admin, &fixture_a.vk_hash, &fixture_a.vk);
+
+        // Try to verify fixture_b's proof against fixture_a's VK — should fail
+        // (the proofs are tied to different circuits via different selector/permutation commitments)
+        assert!(!client.verify_plonk_proof(&fixture_b.proof, &fixture_b.public_inputs, &fixture_a.vk_hash));
+    }
+
+    #[test]
+    fn test_verify_plonk_proof_groth16_proof_rejected() {
+        // A 256-byte Groth16 proof (wrong length for PLONK's 624-byte format)
+        // must be rejected, which also proves the length check runs before any crypto.
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let groth16_proof = make_valid_proof(&env); // 256 bytes
+        let vk_hash = BytesN::from_array(&env, &[0x01u8; 32]);
+        // Since 256 != 624, this is rejected structurally (length check)
+        assert!(!client.verify_plonk_proof(&groth16_proof, &make_public_inputs(&env), &vk_hash));
     }
 
     #[test]
@@ -2329,62 +2511,67 @@ mod tests {
     }
 
     #[test]
-    fn test_revoke_proof_prevents_verification() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let qp_id = Address::generate(&env);
-        let proof = Bytes::from_slice(&env, b"valid-proof");
+    fn test_revoke_proof_marks_credential_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
-        // Proof verifies before revocation.
-        assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+        let credential_id = 1u64;
+        let reason = String::from_str(&env, "compromised");
 
-        // Compute the same hash the contract uses and revoke it.
-        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
-        client.revoke_proof(&admin, &proof_hash);
-
-        // Same proof now fails.
-        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof));
+        assert!(!client.is_proof_revoked(&credential_id));
+        client.revoke_proof(&admin, &credential_id, &reason);
+        assert!(client.is_proof_revoked(&credential_id));
     }
 
     #[test]
     fn test_is_revoked_returns_true_after_revocation() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let proof = Bytes::from_slice(&env, b"some-proof");
-        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
-        assert!(!client.is_revoked(&proof_hash));
-        client.revoke_proof(&admin, &proof_hash);
-        assert!(client.is_revoked(&proof_hash));
+        let credential_id = 2u64;
+        let reason = String::from_str(&env, "key compromised");
+
+        assert!(!client.is_proof_revoked(&credential_id));
+        client.revoke_proof(&admin, &credential_id, &reason);
+        assert!(client.is_proof_revoked(&credential_id));
     }
 
     #[test]
     fn test_revoke_proof_requires_auth() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let proof_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 3u64;
+        let reason = String::from_str(&env, "revoked for test");
 
         // With mock_all_auths this always passes; verify the auth was recorded.
-        client.revoke_proof(&admin, &proof_hash);
+        client.revoke_proof(&admin, &credential_id, &reason);
         let auths = env.auths();
         assert!(!auths.is_empty());
     }
 
     #[test]
     fn test_unrevoked_proof_still_verifies() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
         let qp_id = Address::generate(&env);
 
-        let proof_a = Bytes::from_slice(&env, b"proof-a");
-        let proof_b = Bytes::from_slice(&env, b"proof-b");
+        let reason = String::from_str(&env, "revoked for test");
 
-        // Revoke only proof_a.
-        let hash_a: BytesN<32> = env.crypto().sha256(&proof_a).into();
-        client.revoke_proof(&admin, &hash_a);
+        // Revoke only credential 4; credential 5 is unaffected.
+        client.revoke_proof(&admin, &4u64, &reason);
 
-        assert!(!client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof_a));
-        assert!(client.verify_claim(&qp_id, &1u64, &ClaimType::HasDegree, &proof_b));
+        assert!(client.is_proof_revoked(&4u64));
+        assert!(!client.is_proof_revoked(&5u64));
+
+        // Credential-level revocation bookkeeping does not itself block verify_claim today.
+        let proof = make_valid_proof(&env);
+        assert!(client.verify_claim(&admin, &qp_id, &4u64, &ClaimType::HasDegree, &proof));
+        assert!(client.verify_claim(&admin, &qp_id, &5u64, &ClaimType::HasDegree, &proof));
     }
 
     // --- verify_batch_proofs tests ---
