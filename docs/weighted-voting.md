@@ -51,6 +51,52 @@ records achieved, required, and total weight when a decision reaches threshold.
 - Change weights prospectively when evidence changes. Revoke or expire an attestation when its
   underlying evidence, rather than the attestor's general trust level, is no longer valid.
 
+## Economic Security Analysis
+
+QuorumProof provides tools to quantify and mitigate the cost of attacking a slice's consensus threshold. See `docs/economic-security-model.md` for the complete formal model.
+
+### Attack Cost Estimation
+
+Query `get_slice_attack_cost_estimate` to understand your slice's vulnerability:
+```
+attack_cost = get_slice_attack_cost_estimate(slice_id)
+```
+
+Returns:
+- `corrupt_existing_cost`: Minimum cost to corrupt existing attestors for threshold
+- `sybil_attack_cost`: Cost to launch a Sybil attack
+- `concentration_risk_score`: 0-100, where 100 is maximum vulnerability
+- `has_single_point_of_failure`: true if `maximum_weight >= required_weight`
+- `attack_detection_probability`: Likelihood attacker is detected
+
+### Reputation-Tied Weighting Mitigation
+
+If a slice detects the concentration risk score is too high, enable reputation-tied weighting:
+
+```
+set_reputation_weighting_enabled(creator, slice_id, enabled: true)
+```
+
+When enabled:
+- Effective weight = base_weight × (reputation_score / 100)
+- Corrupted attestors face reputation penalties, reducing their effective weight
+- Sybil attackers cannot immediately vote at full weight
+- Attack costs increase 2-10x for representative configurations
+
+See `docs/economic-security-model.md` for attack cost multipliers and configuration guidance.
+
+### Monitoring Attestor Security
+
+Query `get_slice_security_profiles` to monitor each attestor's trustworthiness:
+```
+profiles = get_slice_security_profiles(slice_id)
+```
+
+Returns for each attestor:
+- `weight`: Base voting weight
+- `reputation_score`: Current reputation (0-100, 100 is fully trusted)
+- `confirmed_malicious_count`: Number of proven equivocations
+
 ## API summary
 
 - `create_slice`: create a slice with an absolute weight threshold.
@@ -60,3 +106,7 @@ records achieved, required, and total weight when a decision reaches threshold.
 - `update_percentage_threshold`: switch to or update a percentage threshold (creator only).
 - `get_slice_threshold_config`: inspect mode, configured value, and effective required weight.
 - `get_weight_distribution` / `get_weight_audit`: inspect metrics and change history.
+- `get_slice_attack_cost_estimate`: estimate economic cost to attack slice consensus.
+- `get_slice_security_profiles`: monitor reputation and trustworthiness of attestors.
+- `set_reputation_weighting_enabled`: enable/disable reputation-tied weighting (creator only).
+- `get_effective_weight`: query effective weight of attestor considering reputation.
