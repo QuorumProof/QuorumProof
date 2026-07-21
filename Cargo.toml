@@ -4,6 +4,7 @@ members = [
     "contracts/sbt_registry",
     "contracts/zk_verifier",
     "contracts/integration_tests",
+    "contracts/bbs_plus_v1",
 ]
 exclude = ["benches", "fuzz"]
 resolver = "2"
