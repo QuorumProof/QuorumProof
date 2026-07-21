@@ -10,6 +10,14 @@ crate-type = ["cdylib", "rlib"]
 soroban-sdk = { workspace = true }
 # Simplified range proof implementation using native hashing
 sha2 = { version = "0.10", default-features = false }
+# BLS12-381 field/curve/pairing arithmetic for real PLONK (KZG) verification.
+# no_std, no host-function dependency: Soroban has no native pairing host
+# functions, so the pairing check itself runs in-contract via pure Rust field
+# arithmetic. Unaudited upstream (see docs/plonk-verification.md).
+bls12_381 = { version = "0.8", default-features = false, features = ["groups", "pairings"] }
+# Only needed for the `PrimeField` trait (domain generator / 2-adicity
+# constants) on `bls12_381::Scalar`; must match bls12_381's own `ff` version.
+ff = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
