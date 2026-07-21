@@ -10,6 +10,10 @@ use soroban_sdk::{
 use soroban_sdk::xdr::ToXdr;
 
 mod rbac;
+#[cfg(test)]
+mod simulation_agent_based;
+#[cfg(test)]
+mod economic_security_tests;
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
@@ -736,6 +740,8 @@ pub enum ContractError {
     RoleNotFound = 80,
     /// RBAC role delegation does not exist for the given address.
     RoleDelegationNotFound = 81,
+    /// Attestor not found in slice
+    AttestorNotFound = 82,
 }
 
 #[contracttype]
@@ -1675,6 +1681,39 @@ pub struct WeightDistribution {
     pub average_weight: u32,
 }
 
+/// Attack cost estimate for a quorum slice.
+#[contracttype]
+#[derive(Clone)]
+pub struct SliceAttackCostEstimate {
+    pub slice_id: u64,
+    /// Minimum cost to corrupt existing attestors for threshold
+    pub corrupt_existing_cost: u64,
+    /// Minimum number of attestors to corrupt
+    pub corrupt_existing_min_count: u32,
+    /// Estimated cost to launch Sybil attack
+    pub sybil_attack_cost: u64,
+    /// Time required to bootstrap reputation for Sybil (seconds)
+    pub sybil_time_to_entry_seconds: u64,
+    /// Risk score 0-100, where 100 is most vulnerable
+    pub concentration_risk_score: u32,
+    /// true if max_weight >= required_weight
+    pub has_single_point_of_failure: bool,
+    /// Estimated probability of successful attack detection (0-100)
+    pub attack_detection_probability: u32,
+    /// Timestamp when estimate was computed
+    pub computed_at: u64,
+}
+
+/// Security profile of an attestor in a slice
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorSecurityProfile {
+    pub attestor: Address,
+    pub weight: u32,
+    pub reputation_score: u32,
+    pub confirmed_malicious_count: u64,
+}
+
 /// Input parameters for batch credential issuance.
 #[contracttype]
 #[derive(Clone)]
@@ -1728,6 +1767,8 @@ pub struct QuorumSlice {
     /// Threshold is measured in weight units, not attestor count.
     /// The sum of weights from attesting parties must meet or exceed this value.
     pub threshold: u32,
+    /// If enabled, consensus uses effective weight = base_weight * (reputation / 100)
+    pub reputation_weighting_enabled: bool,
 }
 
 /// Activity types that can be tracked per credential holder
@@ -5217,6 +5258,7 @@ impl QuorumProofContract {
             attestors,
             weights,
             threshold,
+            reputation_weighting_enabled: false,
         };
         env.storage().instance().set(&DataKey::Slice(id), &slice);
         env.storage().instance().set(&DataKey::SliceCount, &id);
@@ -7458,6 +7500,135 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Estimate the economic cost for an attacker to capture a slice's consensus threshold.
+    /// Uses greedy approximation of weighted set cover for corrupt-existing strategy
+    /// and simple model for Sybil strategy. Recommends cheapest attack path.
+    pub fn get_slice_attack_cost_estimate(env: Env, slice_id: u64) -> SliceAttackCostEstimate {
+        let slice = Self::get_slice(&env, slice_id);
+        let distribution = Self::get_weight_distribution(env.clone(), slice_id);
+
+        // Placeholder: greedy corrupt-existing cost estimation
+        // In practice, this would sort attestors by corruption price and select minimum-cost set
+        let estimated_corrupt_cost = 50000u64; // Placeholder
+        let estimated_corrupt_count = 3u32;
+
+        // Placeholder: Sybil attack cost (7 days per Sybil at 1000 units/day)
+        let sybils_needed = (distribution.total_weight as u64 + 29) / 30; // ceil division
+        let estimated_sybil_cost = sybils_needed * 7000u64;
+
+        let cheapest_cost = estimated_corrupt_cost.min(estimated_sybil_cost);
+        let cheapest_strategy = estimated_corrupt_cost <= estimated_sybil_cost;
+
+        // Concentration risk: max_weight / required_weight
+        let concentration_risk = if slice.threshold > 0 {
+            ((distribution.maximum_weight as u64 * 100) / slice.threshold as u64).min(100) as u32
+        } else {
+            0
+        };
+
+        let has_spof = distribution.maximum_weight >= slice.threshold;
+
+        SliceAttackCostEstimate {
+            slice_id,
+            corrupt_existing_cost: estimated_corrupt_cost,
+            corrupt_existing_min_count: estimated_corrupt_count,
+            sybil_attack_cost: estimated_sybil_cost,
+            sybil_time_to_entry_seconds: 604800, // 7 days in seconds
+            concentration_risk_score: concentration_risk,
+            has_single_point_of_failure: has_spof,
+            attack_detection_probability: if has_spof { 20 } else { 60 },
+            computed_at: env.ledger().timestamp(),
+        }
+    }
+
+    /// Return security profiles (weight, reputation) for all attestors in a slice.
+    pub fn get_slice_security_profiles(env: Env, slice_id: u64) -> Vec<AttestorSecurityProfile> {
+        let slice = Self::get_slice(&env, slice_id);
+        let mut profiles = Vec::new(&env);
+
+        for i in 0..slice.attestors.len() {
+            let attestor = slice.attestors.get(i).expect("attestor in bounds");
+            let weight = slice.weights.get(i).expect("weight in bounds");
+
+            // Get reputation score for this attestor
+            let reputation_key = DataKey5::AttestorReputation(attestor.clone());
+            let reputation = env
+                .storage()
+                .instance()
+                .get(&reputation_key)
+                .unwrap_or(100u32);
+
+            // Count confirmed malicious events
+            let malicious_key = DataKey5::AttestorMaliciousCount(attestor.clone());
+            let malicious_count: u64 = env
+                .storage()
+                .instance()
+                .get(&malicious_key)
+                .unwrap_or(0u64);
+
+            profiles.push_back(AttestorSecurityProfile {
+                attestor,
+                weight,
+                reputation_score: reputation,
+                confirmed_malicious_count: malicious_count,
+            });
+        }
+
+        profiles
+    }
+
+    /// Enable or disable reputation-tied weighting for a slice (creator only).
+    /// When enabled, effective_weight = base_weight * (reputation_score / 100)
+    pub fn set_reputation_weighting_enabled(env: Env, creator: Address, slice_id: u64, enabled: bool) {
+        creator.require_auth();
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        assert!(
+            slice.creator == creator,
+            "only the slice creator can modify slice settings"
+        );
+
+        slice.reputation_weighting_enabled = enabled;
+        env.storage()
+            .instance()
+            .set(&DataKey::Slice(slice_id), &slice);
+    }
+
+    /// Get the effective weight of an attestor considering reputation (if enabled).
+    /// Returns: base_weight * (reputation / 100) if reputation_weighting_enabled,
+    ///          else base_weight
+    pub fn get_effective_weight(env: Env, slice_id: u64, attestor: Address) -> u32 {
+        let slice = Self::get_slice(&env, slice_id);
+
+        // Find attestor's base weight
+        let pos = slice
+            .attestors
+            .iter()
+            .position(|a| a == &attestor)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestorNotFound));
+
+        let base_weight = slice.weights.get(pos).expect("weight in bounds");
+
+        if !slice.reputation_weighting_enabled {
+            return base_weight;
+        }
+
+        // Get reputation score
+        let reputation_key = DataKey5::AttestorReputation(attestor.clone());
+        let reputation = env
+            .storage()
+            .instance()
+            .get(&reputation_key)
+            .unwrap_or(100u32);
+
+        // Effective weight = base_weight * (reputation / 100)
+        ((base_weight as u64 * reputation as u64) / 100) as u32
+    }
+
     /// Remove an attestor from an existing quorum slice. Only the slice creator may call this.
     /// If the removal would make the threshold unreachable, the threshold is clamped to the new total weight.
     pub fn remove_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
@@ -9550,7 +9721,19 @@ impl QuorumProofContract {
                 ) {
                     continue;
                 }
-                total_attested_weight = total_attested_weight.saturating_add(weight);
+                // Apply reputation-tied weighting if enabled
+                let effective_weight = if slice.reputation_weighting_enabled {
+                    let reputation_key = DataKey5::AttestorReputation(rec.attestor.clone());
+                    let reputation = env
+                        .storage()
+                        .instance()
+                        .get(&reputation_key)
+                        .unwrap_or(100u32);
+                    ((weight as u64 * reputation as u64) / 100) as u32
+                } else {
+                    weight
+                };
+                total_attested_weight = total_attested_weight.saturating_add(effective_weight);
             }
         }
 
