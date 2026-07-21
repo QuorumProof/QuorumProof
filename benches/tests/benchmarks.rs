@@ -34,7 +34,7 @@
 use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, Vec};
 use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
 use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
-use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+use zk_verifier::{AggregateProof, ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 use quorum_proof_benches::scaling;
 
 // ── Regression thresholds (CPU instructions) ─────────────────────────────────
@@ -54,6 +54,15 @@ const THRESHOLD_VERIFY_PLONK_PROOF_CPU: u64  = 20_000_000;
 const THRESHOLD_VERIFY_ENGINEER_CPU: u64     = 8_000_000;
 const THRESHOLD_BATCH_ISSUE_5_CPU: u64       = 12_000_000;
 const THRESHOLD_BATCH_VERIFY_5_CPU: u64      = 6_000_000;
+
+// ── Aggregate-verify regression thresholds (CPU instructions) ─────────────────
+// These reflect O(n·hash) cost — significantly cheaper than n independent full
+// pairing verifications. Set at ~2× per-proof hash cost × n, with headroom.
+// Raise only with written justification.
+const THRESHOLD_AGGREGATE_VERIFY_5_CPU: u64   = 8_000_000;
+const THRESHOLD_AGGREGATE_VERIFY_25_CPU: u64  = 20_000_000;
+const THRESHOLD_AGGREGATE_VERIFY_50_CPU: u64  = 35_000_000;
+const THRESHOLD_AGGREGATE_VERIFY_100_CPU: u64 = 60_000_000;
 
 // ── Regression thresholds (memory bytes) ─────────────────────────────────────
 const THRESHOLD_ISSUE_CREDENTIAL_MEM: u64    = 2_000_000;
@@ -546,4 +555,110 @@ fn bench_verify_attestations_batch_scaling() {
         println!("[bench_verify_attestations_batch_scaling n={}] cpu={} mem={}", n, m.cpu, m.mem);
         scaling::record_point("verify_attestations_batch", n, m.cpu, m.mem);
     }
+}
+
+// ── verify_aggregate_proof benchmarks ─────────────────────────────────────────
+//
+// These extend the batch_verify (5) baseline by measuring the aggregate-proof
+// entry point at batch sizes 5, 25, 50, and 100.
+//
+// Expected cost: O(n·hash) — sublinear vs n×single_proof_pairing_cost.
+
+/// Helper: build n valid proofs, public inputs, and vk_hashes for ZK benchmarks.
+fn make_zk_batch(
+    env: &Env,
+    n: usize,
+) -> (Vec<Bytes>, Vec<Bytes>, Vec<BytesN<32>>) {
+    let mut buf = [0u8; 256];
+    buf[0..64].fill(0x01);
+    buf[64..192].fill(0x02);
+    buf[192..256].fill(0x03);
+    let proof = Bytes::from_slice(env, &buf);
+    let pi = Bytes::from_slice(env, &[0x42u8; 32]);
+    let vk = BytesN::from_array(env, &[0x01u8; 32]);
+
+    let mut proofs: Vec<Bytes> = Vec::new(env);
+    let mut pis: Vec<Bytes> = Vec::new(env);
+    let mut vks: Vec<BytesN<32>> = Vec::new(env);
+    for _ in 0..n {
+        proofs.push_back(proof.clone());
+        pis.push_back(pi.clone());
+        vks.push_back(vk.clone());
+    }
+    (proofs, pis, vks)
+}
+
+/// Measure verify_aggregate_proof for a given batch size.
+fn bench_aggregate_verify(env: &Env, client: &ZkVerifierContractClient, n: usize) -> Metrics {
+    let (proofs, pis, vks) = make_zk_batch(env, n);
+    let agg = AggregateProof {
+        proof_bytes: {
+            let mut buf = [0u8; 256];
+            buf[0..64].fill(0x01);
+            buf[64..192].fill(0x02);
+            buf[192..256].fill(0x03);
+            Bytes::from_slice(env, &buf)
+        },
+        agg_nonce: BytesN::from_array(env, &[0xABu8; 32]),
+        batch_size: n as u32,
+    };
+    measure(env, || {
+        let _ = client.verify_aggregate_proof(&agg, &proofs, &pis, &vks);
+    })
+}
+
+#[test]
+fn bench_aggregate_verify_5() {
+    let env = Env::default();
+    let (client, _) = setup_zk(&env);
+    let m = bench_aggregate_verify(&env, &client, 5);
+    println!("[bench_aggregate_verify n=5] cpu={} mem={}", m.cpu, m.mem);
+    assert!(
+        m.cpu <= THRESHOLD_AGGREGATE_VERIFY_5_CPU,
+        "verify_aggregate_proof(5) CPU regression: {} > {}",
+        m.cpu,
+        THRESHOLD_AGGREGATE_VERIFY_5_CPU
+    );
+}
+
+#[test]
+fn bench_aggregate_verify_25() {
+    let env = Env::default();
+    let (client, _) = setup_zk(&env);
+    let m = bench_aggregate_verify(&env, &client, 25);
+    println!("[bench_aggregate_verify n=25] cpu={} mem={}", m.cpu, m.mem);
+    assert!(
+        m.cpu <= THRESHOLD_AGGREGATE_VERIFY_25_CPU,
+        "verify_aggregate_proof(25) CPU regression: {} > {}",
+        m.cpu,
+        THRESHOLD_AGGREGATE_VERIFY_25_CPU
+    );
+}
+
+#[test]
+fn bench_aggregate_verify_50() {
+    let env = Env::default();
+    let (client, _) = setup_zk(&env);
+    let m = bench_aggregate_verify(&env, &client, 50);
+    println!("[bench_aggregate_verify n=50] cpu={} mem={}", m.cpu, m.mem);
+    assert!(
+        m.cpu <= THRESHOLD_AGGREGATE_VERIFY_50_CPU,
+        "verify_aggregate_proof(50) CPU regression: {} > {}",
+        m.cpu,
+        THRESHOLD_AGGREGATE_VERIFY_50_CPU
+    );
+}
+
+#[test]
+fn bench_aggregate_verify_100() {
+    let env = Env::default();
+    let (client, _) = setup_zk(&env);
+    let m = bench_aggregate_verify(&env, &client, 100);
+    println!("[bench_aggregate_verify n=100] cpu={} mem={}", m.cpu, m.mem);
+    assert!(
+        m.cpu <= THRESHOLD_AGGREGATE_VERIFY_100_CPU,
+        "verify_aggregate_proof(100) CPU regression: {} > {}",
+        m.cpu,
+        THRESHOLD_AGGREGATE_VERIFY_100_CPU
+    );
 }
