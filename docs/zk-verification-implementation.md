@@ -48,45 +48,52 @@ pub fn verify_groth16_proof(
 
 ## PLONK Verification
 
-### Proof Format (BN254/BLS12-381, Uncompressed)
+**PLONK proof verification performs genuine BLS12-381 KZG pairing checks**, unlike Groth16's hash-based binding (which is limited by Soroban's lack of BN254 host functions). See `docs/plonk-verification.md` for the full protocol specification.
+
+### Proof Format (BLS12-381, Compressed G1/G2)
 
 ```
 Offset  Length  Field
 ------  ------  -----
-     0      64  [W_a]   — wire polynomial commitment A (G1)
-    64      64  [W_b]   — wire polynomial commitment B (G1)
-   128      64  [W_c]   — wire polynomial commitment C (G1)
-   192      64  [Z]     — permutation argument commitment (G1)
-   256      64  [T_lo]  — quotient polynomial low (G1)
-   320      64  [T_mid] — quotient polynomial mid (G1)
-   384      64  [T_hi]  — quotient polynomial high (G1)
-   448      64  [W_z]   — opening proof at z (G1)
-   512      64  [W_zw]  — opening proof at z·ω (G1)
-   576      32  ā       — wire evaluation at z (field element)
-   608      32  b̄       — wire evaluation at z (field element)
-   640      32  c̄       — wire evaluation at z (field element)
-   672      32  s̄₁      — permutation poly eval at z (field element)
-   704      32  s̄₂      — permutation poly eval at z (field element)
-   736      32  z̄_ω     — shifted permutation eval z·ω (field element)
-Total: 768 bytes
+     0      48  [a]         — wire commitment A (compressed G1)
+    48      48  [b]         — wire commitment B (compressed G1)
+    96      48  [c]         — wire commitment C (compressed G1)
+   144      48  [z]         — permutation accumulator (compressed G1)
+   192      48  [t_lo]      — quotient polynomial low (compressed G1)
+   240      48  [t_mid]     — quotient polynomial mid (compressed G1)
+   288      48  [t_hi]      — quotient polynomial high (compressed G1)
+   336      48  [W_zeta]    — opening proof at zeta (compressed G1)
+   384      48  [W_zeta_ω]  — opening proof at zeta·ω (compressed G1)
+   432      32  a_bar       — wire evaluation at zeta (Fr scalar)
+   464      32  b_bar       — wire evaluation at zeta (Fr scalar)
+   496      32  c_bar       — wire evaluation at zeta (Fr scalar)
+   528      32  s1_bar      — permutation poly eval at zeta (Fr scalar)
+   560      32  s2_bar      — permutation poly eval at zeta (Fr scalar)
+   592      32  zw_bar      — shifted permutation eval zeta·ω (Fr scalar)
+Total: 624 bytes
 ```
 
 ### Verification Process
 
-Same as Groth16: structure validation + cryptographic binding.
+Real **KZG commitment polynomial evaluation verification** via a batched BLS12-381 pairing check:
+1. Construct a Fiat-Shamir transcript (SHA-256-based) to derive challenge scalars from proof data
+2. Compute the linearisation polynomial `[D]` and the batched commitment `[F]`
+3. Verify the pairing equation: `e([W_zeta] + u·[W_zeta_ω], [tau]_2) == e([F] - E·[1], [1]_2)`
+
+If any step fails (bad proof structure, missing SRS/VK, cryptographic failure), verification returns `false`.
 
 ### API: `verify_plonk_proof`
 
 ```rust
 pub fn verify_plonk_proof(
     env: Env,
-    proof: Bytes,              // 768 bytes
-    public_inputs: Bytes,      // 32-byte aligned, non-zero
-    vk_hash: BytesN<32>,       // SHA-256(verifying key)
+    proof: Bytes,              // exactly 624 bytes
+    public_inputs: Bytes,      // 32-byte aligned, non-empty
+    vk_hash: BytesN<32>,       // SHA-256(PlonkVerifyingKey.canonical_bytes())
 ) -> bool
 ```
 
-**Permissionless** — No admin auth required.
+**Permissionless** — No admin auth required. SRS and verifying key must be registered by admin via `set_plonk_srs()` and `set_plonk_verifying_key()` before any proof can be verified.
 
 ## Key Management & Rotation
 

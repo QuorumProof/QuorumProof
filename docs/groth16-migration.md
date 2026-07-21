@@ -106,10 +106,11 @@ assert(publicInputs.length % 32 === 0);
 ```
 
 **Test checklist:**
-- [ ] Proof is exactly 256 bytes (Groth16) or 768 bytes (PLONK)
-- [ ] Public inputs are non-empty and multiple of 32 bytes
+- [ ] Proof is exactly 256 bytes (Groth16, BN254 uncompressed) or 624 bytes (PLONK, KZG)
+- [ ] Public inputs are non-empty and multiple of 32 bytes (Fr scalars)
 - [ ] Proof points are not all-zero (point at infinity)
 - [ ] Run `verify_groth16_proof()` locally to validate format
+- [ ] **Note:** Groth16 uses hash-binding verification (Soroban has no BN254 pairings); PLONK uses real BLS12-381 pairing checks
 
 ---
 

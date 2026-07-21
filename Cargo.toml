@@ -5,6 +5,7 @@ members = [
     "contracts/zk_verifier",
     "contracts/integration_tests",
 ]
+exclude = ["benches", "fuzz"]
 resolver = "2"
 
 [workspace.dependencies]
