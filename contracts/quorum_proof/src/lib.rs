@@ -59,6 +59,14 @@ const METADATA_CACHE_TTL_SECS: u64 = 3_600;
 const DEFAULT_REVOCATION_TIME_LOCK_SECONDS: u64 = 172_800; // 48 hours
 const MAX_REVOCATION_BATCH_SIZE: u32 = 128;
 
+// ── Nested quorum slice & FBA intersection verification ──────────────────────
+/// Maximum depth for nested quorum slice references (prevents excessive recursion)
+const MAX_SLICE_DEPTH: u32 = 4;
+/// Cache TTL for quorum intersection verification results (~1 hour)
+const QUORUM_INTERSECTION_CACHE_TTL: u32 = 3600;
+/// Maximum slices to check in a single intersection verification
+const MAX_SLICES_PER_INTERSECTION_CHECK: u32 = 100;
+
 // ── Reputation & staking defaults ────────────────────────────────────────────
 /// Score deducted from an attestor on each confirmed malicious attestation.
 const DEFAULT_REPUTATION_PENALTY_PER_SLASH: u32 = 20;
@@ -740,8 +748,12 @@ pub enum ContractError {
     RoleNotFound = 80,
     /// RBAC role delegation does not exist for the given address.
     RoleDelegationNotFound = 81,
-    /// Attestor not found in slice
-    AttestorNotFound = 82,
+    /// Maximum quorum slice nesting depth exceeded
+    MaxDepthExceeded = 82,
+    /// Cycle detected in nested quorum slice references
+    CycleDetected = 83,
+    /// Quorum intersection check failed or partition detected
+    QuorumIntersectionFailed = 84,
 }
 
 #[contracttype]
@@ -919,6 +931,16 @@ pub enum DataKey10 {
     // ── Feature (c): Contract-state validation history ───────────────────────
     /// Most-recent diagnostic report produced by validate_contract_state.
     LastDiagnosticReport,
+    /// Nested quorum slice node with recursive child references (slice_id -> QuorumSliceNode)
+    NestedSliceNode(u64),
+    /// Child slice IDs for a parent slice (parent_id -> Vec<u64>)
+    ChildSliceIds(u64),
+    /// Depth of a slice in the nesting tree (slice_id -> u32)
+    SliceDepth(u64),
+    /// Cached quorum-intersection verification result (hash -> IntersectionReport)
+    QuorumIntersectionCache(Bytes),
+    /// Parent slice IDs for transitive suspension (child_id -> Vec<u64>) (reverse index)
+    ParentSliceIds(u64),
 }
 
 /// Storage keys for issue #881: consent management.
@@ -1769,6 +1791,45 @@ pub struct QuorumSlice {
     pub threshold: u32,
     /// If enabled, consensus uses effective weight = base_weight * (reputation / 100)
     pub reputation_weighting_enabled: bool,
+}
+
+/// Nested Federated Byzantine Agreement quorum slice node.
+/// Supports recursive quorum references up to MAX_SLICE_DEPTH for proper FBA partition detection.
+/// Either contains direct attestors (depth=1 flat) or references to child slices (depth>1 nested).
+#[contracttype]
+#[derive(Clone)]
+pub struct QuorumSliceNode {
+    pub id: u64,
+    pub creator: Address,
+    pub attestors: Vec<Address>,        // populated if is_nested=false; empty if is_nested=true
+    pub weights: Vec<u32>,              // populated if is_nested=false; empty if is_nested=true
+    pub threshold: u32,
+    pub is_nested: bool,                // true if this node references child slices
+    pub child_slice_ids: Vec<u64>,      // populated if is_nested=true; empty if is_nested=false
+    pub depth: u32,                     // cached depth in tree: 1=leaf, 2+=nested
+}
+
+/// Result of quorum intersection verification.
+/// Used by check_quorum_intersection to report safety and common quorum nodes.
+#[contracttype]
+#[derive(Clone)]
+pub struct IntersectionReport {
+    pub is_safe: bool,                  // true if quorum intersection exists and is safe
+    pub common_nodes: Vec<Address>,     // addresses in the quorum intersection
+    pub partition_count: u32,           // 0 if safe, >1 if partition detected
+    pub proof_hash: Bytes,              // hash of the certificate for caching
+    pub certificate_version: u32,       // for forwards compatibility
+}
+
+/// Off-chain certificate for quorum intersection verification.
+/// Client pre-computes intersection; contract verifies via is_quorum.
+#[contracttype]
+#[derive(Clone)]
+pub struct QuorumIntersectionCertificate {
+    pub slice_ids: Vec<u64>,            // slices being checked for intersection
+    pub safe_nodes: Vec<Address>,       // candidate quorum node set
+    pub proof_hash: Bytes,              // hash of certificate data
+    pub signature: Option<Bytes>,       // optional oracle co-signature
 }
 
 /// Activity types that can be tracked per credential holder
@@ -8547,6 +8608,11 @@ impl QuorumProofContract {
             topics.push_back(topic);
             env.events().publish(topics, event_data);
 
+            // Wire equivocating attestors into transitive suspension across parent slices
+            for conflicting in conflicting_attestors.iter() {
+                Self::suspend_attestor_recursive(&env, slice_id, conflicting);
+            }
+
             panic_with_error!(&env, ContractError::ForkDetected);
         }
 
@@ -9807,6 +9873,230 @@ impl QuorumProofContract {
             .get(&DataKey::CredentialAttestationCount(credential_id))
             .unwrap_or(0u32);
         count >= credential.required_attestations
+    }
+
+    /// Recursive Federated Byzantine Agreement quorum function per SCP definition.
+    /// A candidate set is a quorum iff it contains the union of one or more disjoint quorum slices.
+    /// For flat slices: candidates must meet the weighted threshold.
+    /// For nested slices: candidates must form quorum in ALL child slices (strict intersection).
+    ///
+    /// # Parameters
+    /// - `slice_id`: The quorum slice to check
+    /// - `candidates`: The set of nodes to verify as a quorum
+    ///
+    /// # Returns
+    /// `true` if candidates form a quorum relative to this slice
+    fn is_quorum_impl(env: &Env, slice_id: u64, candidates: &Vec<Address>) -> bool {
+        // Try to load nested slice node first; fall back to flat QuorumSlice
+        let is_nested = env
+            .storage()
+            .instance()
+            .has(&DataKey10::NestedSliceNode(slice_id));
+
+        if is_nested {
+            let node = env
+                .storage()
+                .instance()
+                .get::<DataKey10, QuorumSliceNode>(&DataKey10::NestedSliceNode(slice_id))
+                .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
+
+            // Safety net: depth guard
+            if node.depth > MAX_SLICE_DEPTH {
+                panic_with_error!(env, ContractError::MaxDepthExceeded);
+            }
+
+            if !node.is_nested {
+                // Flat case: weighted quorum check
+                let mut total_weight: u32 = 0;
+                for (i, attestor) in node.attestors.iter().enumerate() {
+                    if candidates.contains(attestor)
+                        && !Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
+                        total_weight = total_weight
+                            .saturating_add(node.weights.get(i as u32).unwrap_or(0));
+                    }
+                }
+                let required = Self::required_weight_nested(env, slice_id);
+                return total_weight >= required;
+            } else {
+                // Nested case: ALL children must form quorum
+                for child_id in node.child_slice_ids.iter() {
+                    if !Self::is_quorum_impl(env, *child_id, candidates) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        } else {
+            // Fallback to flat QuorumSlice for backwards compatibility
+            let slice: QuorumSlice = env
+                .storage()
+                .instance()
+                .get(&DataKey::Slice(slice_id))
+                .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
+
+            let mut total_weight: u32 = 0;
+            for (i, attestor) in slice.attestors.iter().enumerate() {
+                if candidates.contains(attestor)
+                    && !Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
+                    total_weight = total_weight
+                        .saturating_add(slice.weights.get(i as u32).unwrap_or(0));
+                }
+            }
+            let required = Self::required_weight(env, &slice);
+            return total_weight >= required;
+        }
+    }
+
+    /// Public interface to is_quorum for testing and diagnostics
+    pub fn is_quorum(env: Env, slice_id: u64, candidates: Vec<Address>) -> bool {
+        Self::is_quorum_impl(&env, slice_id, &candidates)
+    }
+
+    /// Helper: Load required weight for a nested slice node (handles both absolute and percentage)
+    fn required_weight_nested(env: &Env, slice_id: u64) -> u32 {
+        let node = env
+            .storage()
+            .instance()
+            .get::<DataKey10, QuorumSliceNode>(&DataKey10::NestedSliceNode(slice_id))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::SliceNotFound));
+
+        let threshold_type_opt = env
+            .storage()
+            .instance()
+            .get::<DataKey5, ThresholdType>(&DataKey5::SliceThresholdType(slice_id));
+
+        match threshold_type_opt {
+            Some(ThresholdType::Percentage) => {
+                let total: u64 = node.weights.iter().map(|w| *w as u64).sum();
+                ((total * node.threshold as u64 + 99) / 100) as u32
+            }
+            _ => node.threshold,
+        }
+    }
+
+    /// Detect cycles in nested slice references using DFS
+    fn detect_cycle_dfs(
+        env: &Env,
+        slice_id: u64,
+        visited: &mut soroban_sdk::Vec<u64>,
+        rec_stack: &mut soroban_sdk::Vec<u64>,
+    ) -> bool {
+        // Check if in current recursion stack (back edge = cycle)
+        for id in rec_stack.iter() {
+            if id == slice_id {
+                return true;
+            }
+        }
+
+        // Check if already fully processed
+        for id in visited.iter() {
+            if id == slice_id {
+                return false;
+            }
+        }
+
+        visited.push_back(slice_id);
+        rec_stack.push_back(slice_id);
+
+        // Check all children for cycles
+        let children_opt = env
+            .storage()
+            .instance()
+            .get::<DataKey10, soroban_sdk::Vec<u64>>(&DataKey10::ChildSliceIds(slice_id));
+
+        if let Some(children) = children_opt {
+            for child_id in children.iter() {
+                if Self::detect_cycle_dfs(env, child_id, visited, rec_stack) {
+                    return true;
+                }
+            }
+        }
+
+        // Remove from recursion stack before returning
+        if let Some(last_idx) = rec_stack.last_index_of(&slice_id) {
+            rec_stack.remove(last_idx);
+        }
+
+        false
+    }
+
+    /// Find all parent slices that reference a given child slice (reverse index lookup)
+    fn find_parent_slices(env: &Env, child_id: u64) -> soroban_sdk::Vec<u64> {
+        env.storage()
+            .instance()
+            .get::<DataKey10, soroban_sdk::Vec<u64>>(&DataKey10::ParentSliceIds(child_id))
+            .unwrap_or(soroban_sdk::Vec::new(env))
+    }
+
+    /// Recursively suspend an attestor in a slice and all parent slices (transitive suspension)
+    fn suspend_attestor_recursive(env: &Env, slice_id: u64, attestor: Address) {
+        // Mark as suspended in this slice
+        env.storage()
+            .instance()
+            .set(&DataKey2::SuspendedAttestor(slice_id, attestor.clone()), &true);
+
+        // Recursively suspend in all parents
+        let parents = Self::find_parent_slices(env, slice_id);
+        for parent_id in parents.iter() {
+            Self::suspend_attestor_recursive(env, parent_id, attestor.clone());
+        }
+    }
+
+    /// Verify quorum intersection using an off-chain certificate.
+    /// Client pre-computes intersection proof; contract verifies in O(k*d*n) time.
+    pub fn check_quorum_intersection(
+        env: Env,
+        slice_ids: Vec<u64>,
+        certificate: QuorumIntersectionCertificate,
+    ) -> IntersectionReport {
+        require_auth!(env, env.current_contract_address());
+
+        // Validate certificate structure
+        if slice_ids.len() > MAX_SLICES_PER_INTERSECTION_CHECK as usize
+            || certificate.slice_ids.len() != slice_ids.len() {
+            panic_with_error!(&env, ContractError::InvalidInput);
+        }
+
+        // Verify slice_ids match certificate
+        for (i, id) in slice_ids.iter().enumerate() {
+            if certificate.slice_ids.get(i as u32) != Some(*id) {
+                panic_with_error!(&env, ContractError::InvalidInput);
+            }
+        }
+
+        let safe_nodes = &certificate.safe_nodes;
+
+        // Verify that safe_nodes form quorum relative to EVERY slice
+        for slice_id in slice_ids.iter() {
+            if !Self::is_quorum_impl(&env, slice_id, safe_nodes) {
+                panic_with_error!(&env, ContractError::QuorumIntersectionFailed);
+            }
+        }
+
+        // Certificate is valid; cache and return report
+        let proof_hash = certificate.proof_hash.clone();
+        let report = IntersectionReport {
+            is_safe: true,
+            common_nodes: safe_nodes.clone(),
+            partition_count: 0,
+            proof_hash: proof_hash.clone(),
+            certificate_version: 1,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey10::QuorumIntersectionCache(proof_hash), &report);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit audit event
+        env.events().publish(
+            (symbol_short!("intersection"), slice_ids),
+            safe_nodes,
+        );
+
+        report
     }
 
     /// Returns true if the credential has been revoked.
@@ -23113,6 +23403,9 @@ mod proptest_state_transitions;
 
 #[path = "weighted_voting_tests.rs"]
 mod weighted_voting_tests;
+
+#[path = "integration_nested_slices.rs"]
+mod integration_nested_slices;
 
 #[cfg(test)]
 #[path = "migration_tests.rs"]
