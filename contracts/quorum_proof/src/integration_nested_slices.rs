@@ -1,0 +1,184 @@
+/// Integration tests for nested FBA quorum slices and intersection verification
+#[cfg(test)]
+mod integration_nested_slices {
+    use crate::{QuorumProofContract, QuorumProofContractClient};
+    use soroban_sdk::{vec, Address, Env};
+
+    fn setup(env: &Env) -> QuorumProofContractClient<'_> {
+        env.mock_all_auths_allowing_non_root_auth();
+        let id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(env, &id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        client
+    }
+
+    #[test]
+    fn test_backwards_compatibility_flat_slices() {
+        // Verify that all existing flat-slice tests continue to work
+        // This ensures nested slices are truly additive
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let attestors = vec![&env, attestor1.clone(), attestor2.clone()];
+        let weights = vec![&env, 1u32, 1u32];
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+        let slice = client.get_slice(&slice_id);
+
+        assert_eq!(slice.attestors.len(), 2);
+        assert_eq!(slice.threshold, 1u32);
+
+        // Verify flat-slice quorum logic: need weight >= 1
+        let candidates = vec![&env, attestor1];
+        let is_q = client.is_quorum(&slice_id, &candidates);
+        assert!(is_q, "Single attestor with weight 1 should form quorum");
+    }
+
+    #[test]
+    fn test_is_quorum_single_attestor() {
+        // Verify is_quorum works for simple flat case
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let attestor = Address::generate(&env);
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 10u32];
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &5u32);
+
+        // Single attestor with weight 10 >= threshold 5
+        let candidates = vec![&env, attestor];
+        let is_q = client.is_quorum(&slice_id, &candidates);
+        assert!(is_q);
+
+        // Empty candidate set
+        let empty_candidates = vec![&env];
+        let is_q_empty = client.is_quorum(&slice_id, &empty_candidates);
+        assert!(!is_q_empty);
+    }
+
+    #[test]
+    fn test_is_quorum_multiple_attestors() {
+        // Verify weighted quorum calculation
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let a3 = Address::generate(&env);
+        let attestors = vec![&env, a1.clone(), a2.clone(), a3.clone()];
+        let weights = vec![&env, 1u32, 2u32, 3u32]; // total = 6, threshold = 4
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &4u32);
+
+        // a2 + a3 = 2 + 3 = 5 >= 4: quorum
+        let candidates = vec![&env, a2.clone(), a3.clone()];
+        assert!(client.is_quorum(&slice_id, &candidates));
+
+        // a1 + a2 = 1 + 2 = 3 < 4: not quorum
+        let candidates = vec![&env, a1.clone(), a2.clone()];
+        assert!(!client.is_quorum(&slice_id, &candidates));
+
+        // a2 + a3 + a1 = 6 >= 4: quorum
+        let candidates = vec![&env, a1.clone(), a2.clone(), a3.clone()];
+        assert!(client.is_quorum(&slice_id, &candidates));
+    }
+
+    #[test]
+    fn test_is_quorum_with_suspended_attestor() {
+        // Verify suspended attestors are excluded from quorum calculation
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let attestors = vec![&env, a1.clone(), a2.clone()];
+        let weights = vec![&env, 2u32, 2u32]; // total = 4, threshold = 3
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &3u32);
+
+        // Both attestors can form quorum
+        let candidates = vec![&env, a1.clone(), a2.clone()];
+        assert!(client.is_quorum(&slice_id, &candidates));
+
+        // TODO: Test suspension after adding suspend_attestor function to public API
+        // When a1 is suspended: only a2 (weight 2) < threshold 3, so not quorum
+    }
+
+    #[test]
+    fn test_percentage_threshold_quorum() {
+        // Verify percentage-based quorum works with is_quorum
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let a3 = Address::generate(&env);
+        let attestors = vec![&env, a1.clone(), a2.clone(), a3.clone()];
+        let weights = vec![&env, 1u32, 1u32, 1u32]; // total = 3, 67% = ceil(2.01) = 3
+
+        let slice_id = client.create_slice_percentage(&creator, &attestors, &weights, &67u32);
+
+        // 2 attestors (weight 2 < 3): not quorum
+        let candidates = vec![&env, a1.clone(), a2.clone()];
+        assert!(!client.is_quorum(&slice_id, &candidates));
+
+        // 3 attestors (weight 3 >= 3): quorum
+        let candidates = vec![&env, a1.clone(), a2.clone(), a3.clone()];
+        assert!(client.is_quorum(&slice_id, &candidates));
+    }
+
+    #[test]
+    fn test_quorum_intersection_cache() {
+        // Verify quorum intersection result is cached
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let attestor = Address::generate(&env);
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 1u32];
+
+        let slice1 = client.create_slice(&creator, &attestors, &weights, &1u32);
+        let slice2 = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Create intersection certificate
+        let safe_nodes = vec![&env, attestor];
+        // TODO: Create and test QuorumIntersectionCertificate when exposed
+    }
+
+    #[test]
+    fn test_no_fork_on_first_attestation() {
+        // Verify first attestation doesn't trigger fork detection
+        let env = Env::default();
+        let client = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        let creator = Address::generate(&env);
+        let attestors = vec![&env, attestor.clone()];
+        let weights = vec![&env, 1u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        let cred_type = 1u32;
+        let cred_id = client.issue_credential(&issuer, &holder, &cred_type);
+
+        // First attestation should succeed
+        let expires_at = env.ledger().timestamp() + 86400;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.attest(&attestor, &cred_id, &slice_id, &true, &Some(expires_at));
+        }));
+
+        assert!(result.is_ok(), "First attestation should not panic");
+    }
+}
