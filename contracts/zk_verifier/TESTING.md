@@ -2,7 +2,7 @@
 
 ## Test Suite Overview
 
-The `zk_verifier` contract includes 50+ comprehensive unit tests covering all verification scenarios, key management operations, and edge cases.
+The `zk_verifier` contract includes 67 comprehensive unit tests covering Groth16 and BLS12-381 KZG-PLONK verification, key rotation/audit trails, caching, proof revocation, and edge cases. PLONK tests exercise genuine cryptographic verification (real pairing checks) via the `plonk_test_prover` fixture, not mock data.
 
 ## Running Tests
 
@@ -86,27 +86,45 @@ cargo test -- --nocapture --test-threads=1
 
 ---
 
-### 3. PLONK Proof Verification (7 tests)
+### 3. PLONK Proof Verification (11 tests)
 
 #### `test_verify_plonk_proof_valid`
-- **Purpose:** Valid PLONK proof passes
-- **Proof:** 768 bytes, all 9 G1 commitments non-zero
+- **Purpose:** Valid BLS12-381 KZG PLONK proof passes verification
+- **Proof:** 624 bytes (genuinely valid via `plonk_test_prover` fixture)
+- **Setup:** SRS and verifying key must be registered by admin
 - **Expected:** `true`
 
 #### `test_verify_plonk_proof_wrong_length_fails`
-- **Purpose:** Reject incorrect PLONK lengths
-- **Proof:** < 768 bytes
+- **Purpose:** Reject incorrect PLONK proof lengths
+- **Proof:** != 624 bytes
 - **Expected:** `false`
 
-#### `test_verify_plonk_proof_zero_commitment_fails`
-- **Purpose:** Reject all-zero G1 commitment (point at infinity)
-- **Proof:** First G1 commitment is zero
+#### `test_verify_plonk_proof_corrupt_commitment_fails`
+- **Purpose:** Reject corrupted G1 commitments (pairing check fails)
+- **Corruption:** Bit-flip or zero in first G1 commitment (`[a]`)
+- **Setup:** Real SRS + VK registered (to isolate pairing failure, not missing-key)
+- **Expected:** `false` (cryptographic rejection, not structural)
+
+#### `test_verify_plonk_proof_corrupt_quotient_fails`
+- **Purpose:** Reject corrupted opening proofs (e.g., `[W_zeta_omega]`)
+- **Corruption:** Bit-flip in last G1 commitment
+- **Setup:** Real SRS + VK registered
 - **Expected:** `false`
 
-#### `test_verify_plonk_proof_zero_last_commitment_fails`
-- **Purpose:** Reject all-zero last G1 commitment
-- **Proof:** Last G1 commitment (W_zw) is zero
+#### `test_verify_plonk_proof_no_srs_fails`
+- **Purpose:** Verification fails if SRS is not registered
+- **Setup:** VK registered, SRS missing
 - **Expected:** `false`
+
+#### `test_verify_plonk_proof_no_vk_fails`
+- **Purpose:** Verification fails if verifying key is not registered
+- **Setup:** SRS registered, VK missing for the given `vk_hash`
+- **Expected:** `false`
+
+#### `test_verify_plonk_proof_wrong_vk_fails`
+- **Purpose:** Verification fails if proof is for a different circuit (different VK)
+- **Setup:** Register VK_A and SRS, attempt to verify proof_B (created for circuit_B) against VK_A
+- **Expected:** `false` (commitment mismatch causes pairing failure)
 
 #### `test_verify_plonk_proof_empty_public_inputs_fails`
 - **Purpose:** Reject empty public inputs
@@ -114,17 +132,19 @@ cargo test -- --nocapture --test-threads=1
 - **Expected:** `false`
 
 #### `test_verify_plonk_proof_misaligned_public_inputs_fails`
-- **Purpose:** Reject non-32-byte-aligned inputs
-- **Inputs:** 31 bytes
+- **Purpose:** Reject non-32-byte-aligned public inputs
+- **Inputs:** 31 bytes (not multiple of 32)
 - **Expected:** `false`
 
 #### `test_verify_plonk_proof_no_admin_required`
-- **Purpose:** Permissionless verification
-- **Expected:** No auth required
+- **Purpose:** Permissionless verification (no auth required)
+- **Setup:** NO SRS/VK registration (intentional to test auth, not crypto)
+- **Expected:** Returns `false` (missing keys), does not panic on auth
 
 #### `test_verify_plonk_proof_groth16_proof_rejected`
-- **Purpose:** 256-byte Groth16 proof rejected by PLONK verifier
-- **Expected:** `false` (wrong length)
+- **Purpose:** 256-byte Groth16 proofs rejected structurally by PLONK (wrong length)
+- **Proof:** 256 bytes (BN254 uncompressed format)
+- **Expected:** `false` (length check rejects before pairing attempt)
 
 ---
 
@@ -436,7 +456,7 @@ cargo test -- --nocapture --test-threads=1
 |----------|-------|----------|
 | Initialization | 3 | 100% |
 | Groth16 | 7 | 100% |
-| PLONK | 7 | 100% |
+| PLONK | 11 | 100% |
 | Batch | 5 | 100% |
 | Key Rotation | 8 | 100% |
 | Caching | 8 | 100% |
@@ -445,7 +465,7 @@ cargo test -- --nocapture --test-threads=1
 | Revocation | 5 | 100% |
 | Authorization | 4 | 100% |
 | Edge Cases | 5 | 100% |
-| **Total** | **63** | **100%** |
+| **Total** | **67** | **100%** |
 
 ## Test Patterns
 

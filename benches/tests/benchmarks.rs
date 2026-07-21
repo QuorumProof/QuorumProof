@@ -47,6 +47,9 @@ const THRESHOLD_REVOKE_CREDENTIAL_CPU: u64   = 1_500_000;
 const THRESHOLD_MINT_SBT_CPU: u64            = 3_000_000;
 const THRESHOLD_BURN_SBT_CPU: u64            = 2_000_000;
 const THRESHOLD_VERIFY_CLAIM_CPU: u64        = 1_500_000;
+// PLONK with real BLS12-381 pairing check is significantly more expensive than Groth16's hash-binding.
+// Estimated ~5-10x heavier, set conservatively for real field arithmetic.
+const THRESHOLD_VERIFY_PLONK_PROOF_CPU: u64  = 20_000_000;
 // Cross-contract operations carry inherently higher cost.
 const THRESHOLD_VERIFY_ENGINEER_CPU: u64     = 8_000_000;
 const THRESHOLD_BATCH_ISSUE_5_CPU: u64       = 12_000_000;
@@ -271,6 +274,33 @@ fn bench_verify_claim() {
         "verify_claim CPU regression: {} > {}", m.cpu, THRESHOLD_VERIFY_CLAIM_CPU);
     assert!(m.mem <= THRESHOLD_VERIFY_CLAIM_MEM,
         "verify_claim MEM regression: {} > {}", m.mem, THRESHOLD_VERIFY_CLAIM_MEM);
+}
+
+#[test]
+fn bench_verify_plonk_proof() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_zk(&env);
+
+    // Generate a genuinely valid PLONK proof using the test prover fixture.
+    // The fixture includes the SRS (tau_g2) and verifying key with public inputs.
+    use zk_verifier::plonk_test_prover;
+    let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 1, 7, 3, 4, 5, 6);
+
+    // Register the universal SRS and circuit-specific verifying key
+    client.set_plonk_srs(&admin, &fixture.srs_tau_g2);
+    client.set_plonk_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
+
+    // Measure the cost of verifying the PLONK proof.
+    // This includes: Fiat-Shamir transcript construction, linearisation arithmetic,
+    // and the final KZG batched pairing check (two single pairings over BLS12-381).
+    let m = measure(&env, || {
+        client.verify_plonk_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash);
+    });
+
+    println!("[bench_verify_plonk_proof] cpu={} mem={}", m.cpu, m.mem);
+    assert!(m.cpu <= THRESHOLD_VERIFY_PLONK_PROOF_CPU,
+        "verify_plonk_proof CPU regression: {} > {}", m.cpu, THRESHOLD_VERIFY_PLONK_PROOF_CPU);
 }
 
 // ── Scaling benchmarks (regression detection for N-item operations) ───────────
