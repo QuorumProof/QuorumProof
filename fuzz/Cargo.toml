@@ -57,6 +57,12 @@ path = "fuzz_targets/fuzz_contract_entry_points.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_aggregate_proof"
+path = "fuzz_targets/fuzz_aggregate_proof.rs"
+test = false
+doc = false
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
