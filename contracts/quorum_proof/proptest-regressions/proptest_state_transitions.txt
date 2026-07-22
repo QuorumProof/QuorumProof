@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e994596a8134f7bb486de0cdfcebca279ac910a9d3f2303bdf97c6faa5ef0d56 # shrinks to ops_a = [Suspend, Suspend], ops_b = [Suspend, Suspend]
+cc 2ffc0875c1eb431273a753d86d82b95fe5b69d89cbebcc123f63e9bf042a3d31 # shrinks to ops_before = [Attest, Attest], ops_after = [Suspend]

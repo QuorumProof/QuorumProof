@@ -9,8 +9,8 @@ use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
 use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 use soroban_sdk::{
     symbol_short,
-    testutils::Address as _,
-    Bytes, BytesN, Env, String, Vec,
+    testutils::{Address as _, Events as _},
+    Bytes, BytesN, Env, IntoVal, String, TryFromVal, Vec,
 };
 
 struct Contracts<'a> {
@@ -22,7 +22,10 @@ struct Contracts<'a> {
 }
 
 fn setup(env: &Env) -> Contracts<'_> {
-    env.mock_all_auths();
+    // verify_engineer makes a nested cross-contract call to zk_verifier that
+    // requires zk_admin's auth, which isn't part of the root invocation —
+    // plain mock_all_auths() only mocks auth tied to the root call.
+    env.mock_all_auths_allowing_non_root_auth();
     let admin = soroban_sdk::Address::generate(env);
 
     let qp_id = env.register_contract(None, QuorumProofContract);
@@ -196,11 +199,13 @@ fn revocation_history_proof_multiple_revocations() {
     let issuer = soroban_sdk::Address::generate(&env);
     let holder = soroban_sdk::Address::generate(&env);
 
-    // Issue a fresh credential (not previously revoked)
+    // Issue two fresh credentials (not previously revoked). They must use
+    // distinct credential_type values — issue_credential rejects a second
+    // credential for the same (subject, issuer, credential_type) tuple.
     let cred_id1 =
         c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
     let cred_id2 =
-        c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
+        c.qp.issue_credential(&issuer, &holder, &2u32, &metadata(&env), &None, &0u64);
 
     let reason1 = String::from_str(&env, "first reason");
     let reason2 = String::from_str(&env, "second reason");
@@ -303,10 +308,11 @@ fn audit_sbt_burn_emits_event() {
         c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
     let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
     let token_id = c.sbt.mint(&holder, &cred_id, &uri);
-    c.sbt.burn_sbt(&holder, &token_id);
+    let proof = Bytes::from_slice(&env, b"proof-of-residency");
+    c.sbt.burn_sbt(&holder, &token_id, &proof);
 
     assert!(
-        has_symbol_topic_event(&env, symbol_short!("burn")),
+        has_symbol_topic_event(&env, soroban_sdk::Symbol::new(&env, "burn_sbt")),
         "audit: burn event must be emitted after burn_sbt"
     );
 }
@@ -348,7 +354,8 @@ fn audit_unauthorized_burn_rejected() {
     let token_id = c.sbt.mint(&holder, &cred_id, &uri);
 
     // try_ variant: Err means the unauthorized call was rejected
-    let result = c.sbt.try_burn_sbt(&stranger, &token_id);
+    let proof = Bytes::from_slice(&env, b"proof-of-residency");
+    let result = c.sbt.try_burn_sbt(&stranger, &token_id, &proof);
     assert!(result.is_err(), "audit: burn_sbt by stranger must be rejected");
 
     // State must be intact
@@ -413,9 +420,10 @@ fn audit_full_lifecycle_all_events_present() {
         "audit: missing SBT mint event"
     );
 
-    c.sbt.burn_sbt(&holder, &token_id);
+    let proof = Bytes::from_slice(&env, b"proof-of-residency");
+    c.sbt.burn_sbt(&holder, &token_id, &proof);
     assert!(
-        has_symbol_topic_event(&env, symbol_short!("burn")),
+        has_symbol_topic_event(&env, soroban_sdk::Symbol::new(&env, "burn_sbt")),
         "audit: missing SBT burn event"
     );
 

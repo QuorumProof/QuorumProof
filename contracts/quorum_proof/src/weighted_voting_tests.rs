@@ -113,6 +113,11 @@ mod weighted_voting_tests {
     fn consensus_and_metrics_cover_five_to_twenty_attestors() {
         for count in 5u32..=20 {
             let env = Env::default();
+            // Up to 20 attestors × attest calls plus the auto-snapshot the
+            // test harness takes on Env drop can exceed the default test
+            // budget; this test genuinely needs more resources, not fewer
+            // attestors, to keep exercising the full 5..=20 range.
+            env.budget().reset_unlimited();
             let client = setup(&env);
             let creator = Address::generate(&env);
             let mut attestors = Vec::new(&env);

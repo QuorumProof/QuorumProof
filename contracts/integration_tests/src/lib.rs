@@ -34,12 +34,20 @@ mod contract_analytics;
 #[cfg(test)]
 mod migration_verification;
 
+// Issue #558: Contract upgrade safety tests — verifies that upgrades
+// preserve existing state, produce no data loss, and that rollback
+// scenarios are handled correctly. This module previously existed on disk
+// but was never wired into the crate's module tree, so it was silently
+// never compiled or run by CI's `-- upgrade_safety` gate.
+#[cfg(test)]
+mod upgrade_safety;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
 #[cfg(test)]
 mod integration {
-    use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
+    use quorum_proof::{ClaimType as QpClaimType, QuorumProofContract, QuorumProofContractClient};
     use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
     use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
     use soroban_sdk::{
@@ -57,7 +65,11 @@ mod integration {
     }
 
     fn setup(env: &Env) -> Contracts<'_> {
-        env.mock_all_auths();
+        // verify_engineer makes a nested cross-contract call to zk_verifier
+        // that requires zk_admin's auth, which isn't part of the root
+        // invocation — plain mock_all_auths() only mocks auth tied to the
+        // root call.
+        env.mock_all_auths_allowing_non_root_auth();
 
         let admin = soroban_sdk::Address::generate(env);
 
@@ -150,7 +162,7 @@ mod integration {
         let holder = soroban_sdk::Address::generate(&env);
 
         let cred_id = c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
-        c.qp.revoke_credential(&issuer, &cred_id);
+        c.qp.revoke_credential(&issuer, &cred_id, &None);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         c.sbt.mint(&holder, &cred_id, &uri); // must panic
@@ -264,7 +276,7 @@ mod integration {
             &c.admin,
             &engineer,
             &cred_id,
-            &ClaimType::HasDegree,
+            &QpClaimType::HasDegree,
             &valid_proof(&env),
         &None,
         );
@@ -288,7 +300,7 @@ mod integration {
             &c.admin,
             &engineer,
             &cred_id,
-            &ClaimType::HasDegree,
+            &QpClaimType::HasDegree,
             &valid_proof(&env),
         &None,
         );
@@ -315,7 +327,7 @@ mod integration {
         weights.push_back(1u32);
         let slice_id = c.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        c.qp.revoke_credential(&issuer, &cred_id);
+        c.qp.revoke_credential(&issuer, &cred_id, &None);
 
         // Attestation on a revoked credential must panic
         c.qp.attest(&attestor, &cred_id, &slice_id, &true, &None);
@@ -372,8 +384,11 @@ mod integration {
         let token_id = c.sbt.mint(&holder, &cred_id, &uri);
 
         // Burn the SBT
-        c.sbt.burn_sbt(&holder, &token_id);
-        assert_eq!(c.sbt.sbt_count(), 0);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
+        c.sbt.burn_sbt(&holder, &token_id, &proof);
+        // sbt_count is a high-water mark of tokens ever minted, not a live
+        // count, so it does not decrease on burn.
+        assert_eq!(c.sbt.get_tokens_by_owner(&holder).len(), 0);
 
         // Re-mint after burn is allowed
         let new_token_id = c.sbt.mint(&holder, &cred_id, &uri);
@@ -621,7 +636,7 @@ mod integration {
             &c.admin,
             &engineer,
             &(cred_id + 1),
-            &ClaimType::HasDegree,
+            &QpClaimType::HasDegree,
             &valid_proof(&env),
             &None,
         );
@@ -789,8 +804,12 @@ mod integration {
         let token_id = c.sbt.mint(&holder, &cred_id, &uri);
 
         assert_eq!(c.sbt.sbt_count(), 1);
-        c.sbt.burn_sbt(&holder, &token_id);
-        assert_eq!(c.sbt.sbt_count(), 0);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
+        c.sbt.burn_sbt(&holder, &token_id, &proof);
+        // sbt_count is a high-water mark of tokens ever minted (used to
+        // generate the next token ID), not a live count, so it does not
+        // decrease on burn — the holder's token list is the source of truth.
+        assert_eq!(c.sbt.sbt_count(), 1);
 
         let tokens = c.sbt.get_tokens_by_owner(&holder);
         assert_eq!(tokens.len(), 0);

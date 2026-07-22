@@ -56,7 +56,7 @@ mod incident_response {
 
         // Verify contract is still operational (not paused yet)
         let valid_cred = setup.qp.get_credential(&cred_id);
-        assert_eq!(valid_cred.holder, holder, "Contract should still be operational");
+        assert_eq!(valid_cred.subject, holder, "Contract should still be operational");
     }
 
     /// Test 2: Detect critical issues - invalid slice operations
@@ -68,8 +68,9 @@ mod incident_response {
         let issuer = soroban_sdk::Address::generate(&env);
 
         // Create valid slice
-        let attestors = soroban_sdk::vec![&env, issuer];
-        let slice_id = setup.qp.create_slice(&attestors, &1u32);
+        let attestors = soroban_sdk::vec![&env, issuer.clone()];
+        let weights = soroban_sdk::vec![&env, 1u32];
+        let slice_id = setup.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
         // Attempt to access non-existent slice (critical issue)
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -114,7 +115,7 @@ mod incident_response {
         // After critical error, contract should still allow reads of valid data
         // (pause would be triggered by external monitoring)
         let valid_cred = setup.qp.get_credential(&cred_id);
-        assert_eq!(valid_cred.holder, holder, "Valid operations should still work");
+        assert_eq!(valid_cred.subject, holder, "Valid operations should still work");
     }
 
     /// Test 4: Notify team of critical incidents
@@ -201,8 +202,8 @@ mod incident_response {
         let cred_1 = setup.qp.get_credential(&cred_id_1);
         let cred_2 = setup.qp.get_credential(&cred_id_2);
 
-        assert_eq!(cred_1.holder, holder, "First credential should exist after incident");
-        assert_eq!(cred_2.holder, holder, "Second credential should exist after recovery");
+        assert_eq!(cred_1.subject, holder, "First credential should exist after incident");
+        assert_eq!(cred_2.subject, holder, "Second credential should exist after recovery");
     }
 
     /// Test 6: Multiple incident detection and response
@@ -240,7 +241,7 @@ mod incident_response {
         );
 
         let cred = setup.qp.get_credential(&cred_id);
-        assert_eq!(cred.holder, holder, "Contract should recover after multiple incidents");
+        assert_eq!(cred.subject, holder, "Contract should recover after multiple incidents");
     }
 
     /// Test 7: Incident severity classification
@@ -276,7 +277,7 @@ mod incident_response {
 
         // Warning: Valid operation after incident
         let valid_cred = setup.qp.get_credential(&cred_id);
-        if valid_cred.holder == holder {
+        if valid_cred.subject == holder {
             warning_incidents += 1; // System recovered
         }
 

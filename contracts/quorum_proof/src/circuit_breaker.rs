@@ -260,6 +260,7 @@ mod tests {
     struct CircuitBreakerTest {
         env: Env,
         admin: Address,
+        contract_id: Address,
     }
 
     fn setup() -> CircuitBreakerTest {
@@ -270,189 +271,213 @@ mod tests {
         let qp = crate::QuorumProofContractClient::new(&env, &contract_id);
         qp.initialize(&admin);
         env.budget().reset_unlimited();
-        CircuitBreakerTest { env, admin }
+        CircuitBreakerTest { env, admin, contract_id }
     }
 
     #[test]
     fn starts_in_normal_state() {
         let test = setup();
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
-        assert!(get_activation(&test.env).is_none());
+        test.env.as_contract(&test.contract_id, || {
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
+            assert!(get_activation(&test.env).is_none());
+        });
     }
 
     #[test]
     fn emergency_pause_transitions_to_paused() {
         let test = setup();
-        let reason = String::from_str(&test.env, "security incident");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "security incident");
 
-        emergency_pause(&test.env, &test.admin, reason.clone());
+            emergency_pause(&test.env, &test.admin, reason.clone());
 
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
-        let act = get_activation(&test.env).unwrap();
-        assert_eq!(act.state, CircuitBreakerState::Paused);
-        assert_eq!(act.reason, reason);
-        assert_eq!(act.activated_by, test.admin);
-        assert!(act.auto_recover_at > act.activated_at);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
+            let act = get_activation(&test.env).unwrap();
+            assert_eq!(act.state, CircuitBreakerState::Paused);
+            assert_eq!(act.reason, reason);
+            assert_eq!(act.activated_by, test.admin);
+            assert!(act.auto_recover_at > act.activated_at);
+        });
     }
 
     #[test]
     fn emergency_pause_sets_storage_paused_flag() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        emergency_pause(&test.env, &test.admin, reason);
+            emergency_pause(&test.env, &test.admin, reason);
 
-        let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
-        assert!(paused);
+            let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+            assert!(paused);
+        });
     }
 
     #[test]
     fn resume_clears_paused_and_returns_to_normal() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        emergency_pause(&test.env, &test.admin, reason);
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
+            emergency_pause(&test.env, &test.admin, reason);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
 
-        resume(&test.env, &test.admin);
+            resume(&test.env, &test.admin);
 
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
-        assert!(get_activation(&test.env).is_none());
-        let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
-        assert!(!paused);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
+            assert!(get_activation(&test.env).is_none());
+            let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+            assert!(!paused);
+        });
     }
 
     #[test]
     fn emergency_degrade_transitions_to_degraded() {
         let test = setup();
-        let reason = String::from_str(&test.env, "load spike");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "load spike");
 
-        emergency_degrade(&test.env, &test.admin, reason.clone());
+            emergency_degrade(&test.env, &test.admin, reason.clone());
 
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Degraded);
-        let act = get_activation(&test.env).unwrap();
-        assert_eq!(act.state, CircuitBreakerState::Degraded);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Degraded);
+            let act = get_activation(&test.env).unwrap();
+            assert_eq!(act.state, CircuitBreakerState::Degraded);
+        });
     }
 
     #[test]
     fn degraded_mode_does_not_set_paused_flag() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        emergency_degrade(&test.env, &test.admin, reason);
+            emergency_degrade(&test.env, &test.admin, reason);
 
-        let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
-        assert!(!paused);
+            let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+            assert!(!paused);
+        });
     }
 
     #[test]
     fn enforce_degraded_write_limit_allows_within_limit() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
-        emergency_degrade(&test.env, &test.admin, reason);
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
+            emergency_degrade(&test.env, &test.admin, reason);
 
-        let config = get_config(&test.env);
-        for _ in 0..config.degraded_write_limit {
-            assert!(enforce_degraded_write_limit(&test.env).is_ok());
-        }
+            let config = get_config(&test.env);
+            for _ in 0..config.degraded_write_limit {
+                assert!(enforce_degraded_write_limit(&test.env).is_ok());
+            }
+        });
     }
 
     #[test]
     fn enforce_degraded_write_limit_rejects_over_limit() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
-        emergency_degrade(&test.env, &test.admin, reason);
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
+            emergency_degrade(&test.env, &test.admin, reason);
 
-        let config = get_config(&test.env);
-        let limit = config.degraded_write_limit;
+            let config = get_config(&test.env);
+            let limit = config.degraded_write_limit;
 
-        // First limit writes should be allowed (1-indexed comparison in the function)
-        for _ in 0..limit {
-            let _ = enforce_degraded_write_limit(&test.env);
-        }
-        // The next one exceeds the limit
-        let result = enforce_degraded_write_limit(&test.env);
-        assert_eq!(result, Err(ContractError::CircuitBreakerDegradedLimitReached));
+            // First limit writes should be allowed (1-indexed comparison in the function)
+            for _ in 0..limit {
+                let _ = enforce_degraded_write_limit(&test.env);
+            }
+            // The next one exceeds the limit
+            let result = enforce_degraded_write_limit(&test.env);
+            assert_eq!(result, Err(ContractError::CircuitBreakerDegradedLimitReached));
 
-        // Verify counter was incremented
-        let count: u32 = test.env.storage().instance().get(&DataKey4::CircuitBreakerDegradedWriteCount).unwrap_or(0);
-        assert_eq!(count, limit + 1);
+            // Verify counter was incremented
+            let count: u32 = test.env.storage().instance().get(&DataKey4::CircuitBreakerDegradedWriteCount).unwrap_or(0);
+            assert_eq!(count, limit + 1);
+        });
     }
 
     #[test]
     fn auto_recover_after_ttl_expiry() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        // Set a short TTL
-        let mut config = get_config(&test.env);
-        config.ttl_seconds = 100;
-        set_config(&test.env, &config);
+            // Set a short TTL
+            let mut config = get_config(&test.env);
+            config.ttl_seconds = 100;
+            set_config(&test.env, &config);
 
-        emergency_pause(&test.env, &test.admin, reason);
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
+            emergency_pause(&test.env, &test.admin, reason);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
 
-        // Jump ledger time past the TTL
-        let act = get_activation(&test.env).unwrap();
-        test.env.ledger().set_timestamp(act.auto_recover_at + 1);
+            // Jump ledger time past the TTL
+            let act = get_activation(&test.env).unwrap();
+            test.env.ledger().set_timestamp(act.auto_recover_at + 1);
 
-        // check_and_recover should transition back to Normal
-        check_and_recover(&test.env);
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
-        let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
-        assert!(!paused);
+            // check_and_recover should transition back to Normal
+            check_and_recover(&test.env);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
+            let paused: bool = test.env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+            assert!(!paused);
+        });
     }
 
     #[test]
     fn auto_recover_does_not_fire_before_ttl() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        emergency_pause(&test.env, &test.admin, reason);
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
+            emergency_pause(&test.env, &test.admin, reason);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
 
-        let act = get_activation(&test.env).unwrap();
-        test.env.ledger().set_timestamp(act.auto_recover_at - 1);
+            let act = get_activation(&test.env).unwrap();
+            test.env.ledger().set_timestamp(act.auto_recover_at - 1);
 
-        check_and_recover(&test.env);
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
+            check_and_recover(&test.env);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Paused);
+        });
     }
 
     #[test]
     fn auto_recover_disabled_when_config_says_no() {
         let test = setup();
-        let mut config = get_config(&test.env);
-        config.auto_recover = false;
-        config.ttl_seconds = 100;
-        set_config(&test.env, &config);
+        test.env.as_contract(&test.contract_id, || {
+            let mut config = get_config(&test.env);
+            config.auto_recover = false;
+            config.ttl_seconds = 100;
+            set_config(&test.env, &config);
 
-        let reason = String::from_str(&test.env, "test");
-        emergency_pause(&test.env, &test.admin, reason);
+            let reason = String::from_str(&test.env, "test");
+            emergency_pause(&test.env, &test.admin, reason);
 
-        let act = get_activation(&test.env).unwrap();
-        test.env.ledger().set_timestamp(act.auto_recover_at + 1);
+            let act = get_activation(&test.env).unwrap();
+            test.env.ledger().set_timestamp(act.auto_recover_at + 1);
 
-        check_and_recover(&test.env);
-        assert_eq!(
-            get_state(&test.env),
-            CircuitBreakerState::Paused,
-            "should remain paused when auto_recover is false"
-        );
+            check_and_recover(&test.env);
+            assert_eq!(
+                get_state(&test.env),
+                CircuitBreakerState::Paused,
+                "should remain paused when auto_recover is false"
+            );
+        });
     }
 
     #[test]
     fn config_persists_and_round_trips() {
         let test = setup();
-        let config = CircuitBreakerConfig {
-            ttl_seconds: 9999,
-            degraded_write_limit: 5,
-            auto_recover: false,
-        };
-        set_config(&test.env, &config);
-        let retrieved = get_config(&test.env);
-        assert_eq!(retrieved.ttl_seconds, 9999);
-        assert_eq!(retrieved.degraded_write_limit, 5);
-        assert_eq!(retrieved.auto_recover, false);
+        test.env.as_contract(&test.contract_id, || {
+            let config = CircuitBreakerConfig {
+                ttl_seconds: 9999,
+                degraded_write_limit: 5,
+                auto_recover: false,
+            };
+            set_config(&test.env, &config);
+            let retrieved = get_config(&test.env);
+            assert_eq!(retrieved.ttl_seconds, 9999);
+            assert_eq!(retrieved.degraded_write_limit, 5);
+            assert_eq!(retrieved.auto_recover, false);
+        });
     }
 
     #[test]
@@ -470,76 +495,88 @@ mod tests {
         let qp = crate::QuorumProofContractClient::new(&env, &contract_id);
         qp.initialize(&admin);
 
-        assert_eq!(get_config(&env).ttl_seconds, default.ttl_seconds);
-        assert_eq!(get_config(&env).degraded_write_limit, default.degraded_write_limit);
-        assert_eq!(get_config(&env).auto_recover, default.auto_recover);
+        env.as_contract(&contract_id, || {
+            assert_eq!(get_config(&env).ttl_seconds, default.ttl_seconds);
+            assert_eq!(get_config(&env).degraded_write_limit, default.degraded_write_limit);
+            assert_eq!(get_config(&env).auto_recover, default.auto_recover);
+        });
     }
 
     #[test]
     fn resume_from_degraded_works() {
         let test = setup();
-        let reason = String::from_str(&test.env, "load spike");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "load spike");
 
-        emergency_degrade(&test.env, &test.admin, reason);
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Degraded);
+            emergency_degrade(&test.env, &test.admin, reason);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Degraded);
 
-        resume(&test.env, &test.admin);
-        assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
+            resume(&test.env, &test.admin);
+            assert_eq!(get_state(&test.env), CircuitBreakerState::Normal);
+        });
     }
 
     #[test]
     fn write_count_resets_after_resume() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        emergency_degrade(&test.env, &test.admin, reason);
-        let config = get_config(&test.env);
+            emergency_degrade(&test.env, &test.admin, reason);
+            let config = get_config(&test.env);
 
-        // Use up the limit
-        for _ in 0..config.degraded_write_limit {
-            let _ = enforce_degraded_write_limit(&test.env);
-        }
+            // Use up the limit
+            for _ in 0..config.degraded_write_limit {
+                let _ = enforce_degraded_write_limit(&test.env);
+            }
 
-        resume(&test.env, &test.admin);
+            resume(&test.env, &test.admin);
 
-        // After resume, counter should be reset and writes should be allowed
-        let count: u32 = test.env.storage().instance().get(&DataKey4::CircuitBreakerDegradedWriteCount).unwrap_or(99);
-        assert_eq!(count, 0, "write count should reset after resume");
+            // After resume, counter should be reset and writes should be allowed
+            let count: u32 = test.env.storage().instance().get(&DataKey4::CircuitBreakerDegradedWriteCount).unwrap_or(99);
+            assert_eq!(count, 0, "write count should reset after resume");
+        });
     }
 
     #[test]
     fn get_state_with_recovery_triggers_recovery() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        let mut config = get_config(&test.env);
-        config.ttl_seconds = 100;
-        set_config(&test.env, &config);
+            let mut config = get_config(&test.env);
+            config.ttl_seconds = 100;
+            set_config(&test.env, &config);
 
-        emergency_pause(&test.env, &test.admin, reason);
+            emergency_pause(&test.env, &test.admin, reason);
 
-        let act = get_activation(&test.env).unwrap();
-        test.env.ledger().set_timestamp(act.auto_recover_at + 1);
+            let act = get_activation(&test.env).unwrap();
+            test.env.ledger().set_timestamp(act.auto_recover_at + 1);
 
-        let state = get_state_with_recovery(&test.env);
-        assert_eq!(state, CircuitBreakerState::Normal);
+            let state = get_state_with_recovery(&test.env);
+            assert_eq!(state, CircuitBreakerState::Normal);
+        });
     }
 
     #[test]
     fn degraded_write_limit_check_is_noop_in_normal() {
         let test = setup();
-        // No circuit breaker activation — state is Normal
-        assert!(enforce_degraded_write_limit(&test.env).is_ok());
+        test.env.as_contract(&test.contract_id, || {
+            // No circuit breaker activation — state is Normal
+            assert!(enforce_degraded_write_limit(&test.env).is_ok());
+        });
     }
 
     #[test]
     fn degraded_write_limit_check_is_noop_in_paused() {
         let test = setup();
-        let reason = String::from_str(&test.env, "test");
+        test.env.as_contract(&test.contract_id, || {
+            let reason = String::from_str(&test.env, "test");
 
-        emergency_pause(&test.env, &test.admin, reason);
-        // In Paused mode, the degraded write limit should not apply
-        // (separate pause mechanism blocks operations entirely)
-        assert!(enforce_degraded_write_limit(&test.env).is_ok());
+            emergency_pause(&test.env, &test.admin, reason);
+            // In Paused mode, the degraded write limit should not apply
+            // (separate pause mechanism blocks operations entirely)
+            assert!(enforce_degraded_write_limit(&test.env).is_ok());
+        });
     }
 }

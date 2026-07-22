@@ -77,11 +77,11 @@ mod economic_security_tests {
         let simulator = MonteCarloSimulator::new(1000, 20, 1000);
         let result = simulator.simulate_corrupt_existing(&config);
 
-        // Need 67 weight: 4 attestors @ 20 weight each = 80
+        // Need 67 weight: each attestor contributes 20, so 3 attestors only
+        // reach 60 (< 67); the 4th pushes the corrupted set to 80 (>= 67).
         assert_eq!(result.corrupted_weight, 80);
         assert_eq!(result.min_cost, 40000);
-        assert_eq!(result.min_corrupted_set.len(), 2); // 2 attestors × 20 weight each = 40 >= 67? No, need 4
-        // Actually: 67/20 = 3.35, so need 4 attestors
+        assert_eq!(result.min_corrupted_set.len(), 4);
         assert!(result.min_cost >= 30000);
     }
 
@@ -361,7 +361,7 @@ mod economic_security_tests {
 
             // Sanity checks
             assert!(
-                analysis.concentrate_risk <= 100,
+                analysis.concentration_risk <= 100,
                 "Risk score must be 0-100"
             );
             assert!(

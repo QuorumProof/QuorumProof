@@ -340,14 +340,24 @@ fn verify_bulletproof_range(proof: &BulletproofRangeProof) -> bool {
 
 
 /// Supported claim types for ZK verification.
+///
+/// Must stay wire-compatible with `quorum_proof::ClaimType`: cross-contract
+/// calls (e.g. `QuorumProofContract::verify_engineer` -> `verify_claim`)
+/// serialize a `ClaimType` value on one side and deserialize it as the
+/// other crate's `ClaimType` on the other. Without `#[repr(u32)]` and
+/// explicit discriminants matching quorum_proof's, `#[contracttype]`
+/// encodes a plain unit-variant enum differently (symbol-tagged rather than
+/// a bare u32), which fails with a ConversionError at the contract
+/// boundary — every cross-contract verification call was broken by this.
 #[contracttype]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
 pub enum ClaimType {
-    HasDegree,
-    HasLicense,
-    HasEmploymentHistory,
-    HasCertification,
-    HasResearchPublication,
+    HasDegree = 1,
+    HasLicense = 2,
+    HasEmploymentHistory = 3,
+    HasCertification = 4,
+    HasResearchPublication = 5,
 }
 
 #[contracttype]

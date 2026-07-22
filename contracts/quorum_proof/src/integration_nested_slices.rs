@@ -2,7 +2,8 @@
 #[cfg(test)]
 mod integration_nested_slices {
     use crate::{QuorumProofContract, QuorumProofContractClient};
-    use soroban_sdk::{vec, Address, Env};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{vec, Address, Bytes, Env};
 
     fn setup(env: &Env) -> QuorumProofContractClient<'_> {
         env.mock_all_auths_allowing_non_root_auth();
@@ -171,7 +172,8 @@ mod integration_nested_slices {
         let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
         let cred_type = 1u32;
-        let cred_id = client.issue_credential(&issuer, &holder, &cred_type);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &holder, &cred_type, &metadata, &None, &0u64);
 
         // First attestation should succeed
         let expires_at = env.ledger().timestamp() + 86400;
