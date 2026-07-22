@@ -7565,7 +7565,7 @@ impl QuorumProofContract {
     /// Uses greedy approximation of weighted set cover for corrupt-existing strategy
     /// and simple model for Sybil strategy. Recommends cheapest attack path.
     pub fn get_slice_attack_cost_estimate(env: Env, slice_id: u64) -> SliceAttackCostEstimate {
-        let slice = Self::get_slice(&env, slice_id);
+        let slice = Self::get_slice(env.clone(), slice_id);
         let distribution = Self::get_weight_distribution(env.clone(), slice_id);
 
         // Placeholder: greedy corrupt-existing cost estimation
@@ -7604,34 +7604,21 @@ impl QuorumProofContract {
 
     /// Return security profiles (weight, reputation) for all attestors in a slice.
     pub fn get_slice_security_profiles(env: Env, slice_id: u64) -> Vec<AttestorSecurityProfile> {
-        let slice = Self::get_slice(&env, slice_id);
+        let slice = Self::get_slice(env.clone(), slice_id);
         let mut profiles = Vec::new(&env);
 
         for i in 0..slice.attestors.len() {
             let attestor = slice.attestors.get(i).expect("attestor in bounds");
             let weight = slice.weights.get(i).expect("weight in bounds");
 
-            // Get reputation score for this attestor
-            let reputation_key = DataKey5::AttestorReputation(attestor.clone());
-            let reputation = env
-                .storage()
-                .instance()
-                .get(&reputation_key)
-                .unwrap_or(100u32);
-
-            // Count confirmed malicious events
-            let malicious_key = DataKey5::AttestorMaliciousCount(attestor.clone());
-            let malicious_count: u64 = env
-                .storage()
-                .instance()
-                .get(&malicious_key)
-                .unwrap_or(0u64);
+            // Get reputation record for this attestor (score + malicious count)
+            let rec = Self::load_or_init_reputation(&env, &attestor);
 
             profiles.push_back(AttestorSecurityProfile {
                 attestor,
                 weight,
-                reputation_score: reputation,
-                confirmed_malicious_count: malicious_count,
+                reputation_score: rec.score,
+                confirmed_malicious_count: rec.confirmed_malicious,
             });
         }
 
@@ -7663,31 +7650,26 @@ impl QuorumProofContract {
     /// Returns: base_weight * (reputation / 100) if reputation_weighting_enabled,
     ///          else base_weight
     pub fn get_effective_weight(env: Env, slice_id: u64, attestor: Address) -> u32 {
-        let slice = Self::get_slice(&env, slice_id);
+        let slice = Self::get_slice(env.clone(), slice_id);
 
         // Find attestor's base weight
         let pos = slice
             .attestors
             .iter()
-            .position(|a| a == &attestor)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttestorNotFound));
+            .position(|a| a == attestor)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInSlice));
 
-        let base_weight = slice.weights.get(pos).expect("weight in bounds");
+        let base_weight = slice.weights.get(pos as u32).expect("weight in bounds");
 
         if !slice.reputation_weighting_enabled {
             return base_weight;
         }
 
         // Get reputation score
-        let reputation_key = DataKey5::AttestorReputation(attestor.clone());
-        let reputation = env
-            .storage()
-            .instance()
-            .get(&reputation_key)
-            .unwrap_or(100u32);
+        let rec = Self::load_or_init_reputation(&env, &attestor);
 
         // Effective weight = base_weight * (reputation / 100)
-        ((base_weight as u64 * reputation as u64) / 100) as u32
+        ((base_weight as u64 * rec.score as u64) / 100) as u32
     }
 
     /// Remove an attestor from an existing quorum slice. Only the slice creator may call this.
@@ -8600,7 +8582,7 @@ impl QuorumProofContract {
             let event_data = ForkDetectedEventData {
                 credential_id,
                 slice_id,
-                conflicting_attestors,
+                conflicting_attestors: conflicting_attestors.clone(),
                 detected_at: env.ledger().timestamp(),
             };
             let topic = String::from_str(&env, TOPIC_FORK_DETECTED);
@@ -9789,13 +9771,8 @@ impl QuorumProofContract {
                 }
                 // Apply reputation-tied weighting if enabled
                 let effective_weight = if slice.reputation_weighting_enabled {
-                    let reputation_key = DataKey5::AttestorReputation(rec.attestor.clone());
-                    let reputation = env
-                        .storage()
-                        .instance()
-                        .get(&reputation_key)
-                        .unwrap_or(100u32);
-                    ((weight as u64 * reputation as u64) / 100) as u32
+                    let rec_reputation = Self::load_or_init_reputation(&env, &rec.attestor);
+                    ((weight as u64 * rec_reputation.score as u64) / 100) as u32
                 } else {
                     weight
                 };
@@ -9909,7 +9886,7 @@ impl QuorumProofContract {
                 // Flat case: weighted quorum check
                 let mut total_weight: u32 = 0;
                 for (i, attestor) in node.attestors.iter().enumerate() {
-                    if candidates.contains(attestor)
+                    if candidates.contains(&attestor)
                         && !Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
                         total_weight = total_weight
                             .saturating_add(node.weights.get(i as u32).unwrap_or(0));
@@ -9920,7 +9897,7 @@ impl QuorumProofContract {
             } else {
                 // Nested case: ALL children must form quorum
                 for child_id in node.child_slice_ids.iter() {
-                    if !Self::is_quorum_impl(env, *child_id, candidates) {
+                    if !Self::is_quorum_impl(env, child_id, candidates) {
                         return false;
                     }
                 }
@@ -9936,7 +9913,7 @@ impl QuorumProofContract {
 
             let mut total_weight: u32 = 0;
             for (i, attestor) in slice.attestors.iter().enumerate() {
-                if candidates.contains(attestor)
+                if candidates.contains(&attestor)
                     && !Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
                     total_weight = total_weight
                         .saturating_add(slice.weights.get(i as u32).unwrap_or(0));
@@ -9967,7 +9944,7 @@ impl QuorumProofContract {
 
         match threshold_type_opt {
             Some(ThresholdType::Percentage) => {
-                let total: u64 = node.weights.iter().map(|w| *w as u64).sum();
+                let total: u64 = node.weights.iter().map(|w| w as u64).sum();
                 ((total * node.threshold as u64 + 99) / 100) as u32
             }
             _ => node.threshold,
@@ -10049,17 +10026,17 @@ impl QuorumProofContract {
         slice_ids: Vec<u64>,
         certificate: QuorumIntersectionCertificate,
     ) -> IntersectionReport {
-        require_auth!(env, env.current_contract_address());
+        env.current_contract_address().require_auth();
 
         // Validate certificate structure
-        if slice_ids.len() > MAX_SLICES_PER_INTERSECTION_CHECK as usize
+        if slice_ids.len() > MAX_SLICES_PER_INTERSECTION_CHECK
             || certificate.slice_ids.len() != slice_ids.len() {
             panic_with_error!(&env, ContractError::InvalidInput);
         }
 
         // Verify slice_ids match certificate
         for (i, id) in slice_ids.iter().enumerate() {
-            if certificate.slice_ids.get(i as u32) != Some(*id) {
+            if certificate.slice_ids.get(i as u32) != Some(id) {
                 panic_with_error!(&env, ContractError::InvalidInput);
             }
         }
@@ -10092,8 +10069,8 @@ impl QuorumProofContract {
 
         // Emit audit event
         env.events().publish(
-            (symbol_short!("intersection"), slice_ids),
-            safe_nodes,
+            (symbol_short!("intersect"), slice_ids),
+            safe_nodes.clone(),
         );
 
         report
