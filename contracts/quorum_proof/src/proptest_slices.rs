@@ -185,24 +185,31 @@ mod proptest_quorum_slices {
             // depth 1 (the only case currently exercised) doesn't need it.
             let _ = n_children_per_node;
         }
+    }
 
-        /// Property: cycle detection prevents self-referential and circular slice nests
-        #[test]
-        fn prop_cycle_detection_self_reference() {
-            let env = Env::default();
-            let client = setup(&env);
-            let creator = Address::generate(&env);
+    /// Property: cycle detection prevents self-referential and circular slice nests
+    ///
+    /// Takes no generator parameters, so it can't live inside the `proptest! {}`
+    /// block above (that macro's item rule requires at least one `pat in
+    /// strategy` clause per function) -- it's a plain #[test] instead, with an
+    /// explicit `Result` return so `prop_assert!` (which expands to a `return
+    /// Err(..)`) type-checks.
+    #[test]
+    fn prop_cycle_detection_self_reference() -> Result<(), TestCaseError> {
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
 
-            let attestor = Address::generate(&env);
-            let attestors = vec![&env, attestor];
-            let weights = vec![&env, 1u32];
+        let attestor = Address::generate(&env);
+        let attestors = vec![&env, attestor];
+        let weights = vec![&env, 1u32];
 
-            // Create a flat slice
-            let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+        // Create a flat slice
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
-            // Attempting to add slice as its own child would require API support (not exposed yet)
-            // For now, this test verifies the infrastructure exists
-            prop_assert!(slice_id > 0);
-        }
+        // Attempting to add slice as its own child would require API support (not exposed yet)
+        // For now, this test verifies the infrastructure exists
+        prop_assert!(slice_id > 0);
+        Ok(())
     }
 }
