@@ -4,9 +4,8 @@ members = [
     "contracts/sbt_registry",
     "contracts/zk_verifier",
     "contracts/integration_tests",
-    "contracts/bbs_plus_v1",
 ]
-exclude = ["benches", "fuzz"]
+exclude = ["benches", "fuzz", "contracts/bbs_plus_v1"]
 resolver = "2"
 
 [workspace.dependencies]
