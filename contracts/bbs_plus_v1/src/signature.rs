@@ -1,114 +1,163 @@
-#![no_std]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use crate::primitives::{Fr, G1, G2, pairing, msm_g1};
-use crate::errors::{BbsError, BbsResult};
-use crate::transcript::Transcript;
-use crate::{DOMAIN_BBS_PLUS, MAX_MESSAGES_PER_CREDENTIAL};
 
-/// BBS+ Signing Key (secret scalar)
+use crate::errors::{BbsError, BbsResult};
+use crate::primitives::{msm_g1, Fr, G1, G2};
+
+/// Domain-separation tags for generator derivation. Distinct tags (fed
+/// through RFC 9380 hash-to-curve) guarantee P1/Q1/H_i have no discoverable
+/// discrete-log relationship to one another -- see `G1::hash_to_curve`.
+const DST_BASE_P1: &[u8] = b"QUORUMPROOF-BBS-BASE_XMD:SHA-256_SSWU_RO_P1_";
+const DST_BLINDING_Q1: &[u8] = b"QUORUMPROOF-BBS-BASE_XMD:SHA-256_SSWU_RO_Q1_";
+const DST_MESSAGE_GEN: &[u8] = b"QUORUMPROOF-BBS-BASE_XMD:SHA-256_SSWU_RO_H_";
+
+/// The library-wide base generator P1. Fixed (not per-signer, not
+/// per-credential-type) so every verifier reconstructs the identical point.
+pub fn base_generator() -> G1 {
+    G1::hash_to_curve(b"P1", DST_BASE_P1)
+}
+
+/// BBS+ Signing Key (secret scalar). Never zero -- SK=0 would make the
+/// public key the identity, which breaks unforgeability entirely.
 #[derive(Clone)]
 pub struct SigningKey {
     sk: Fr,
 }
 
 impl SigningKey {
-    /// Generate a random signing key
-    pub fn random() -> BbsResult<Self> {
-        // In production, would use a secure RNG
-        // For now, use a placeholder that would be replaced
-        Ok(SigningKey {
-            sk: Fr::one(),
-        })
+    /// Generate a fresh signing key. Only available under `std`: Soroban
+    /// contracts have no entropy source, so key generation -- like signing
+    /// and presentation-proof generation -- is a host-side/wallet-side
+    /// operation by design. On-chain code only ever calls `verify`.
+    #[cfg(feature = "std")]
+    pub fn generate<R: rand::RngCore>(rng: &mut R) -> Self {
+        loop {
+            let sk = Fr::random(rng);
+            if !sk.is_zero() {
+                return SigningKey { sk };
+            }
+        }
     }
 
-    /// Create signing key from scalar (for testing)
-    pub fn from_scalar(scalar: Fr) -> Self {
-        SigningKey { sk: scalar }
+    /// Construct from an existing scalar (e.g. loaded from secure storage).
+    pub fn from_scalar(scalar: Fr) -> BbsResult<Self> {
+        if scalar.is_zero() {
+            return Err(BbsError::InvalidScalar);
+        }
+        Ok(SigningKey { sk: scalar })
     }
 
-    /// Derive the corresponding verifying key
-    pub fn to_verifying_key(&self) -> BbsResult<VerifyingKey> {
-        let w = G1::generator().mul(&self.sk);
-        Ok(VerifyingKey {
-            w,
-            generators: Vec::new(),  // Will be filled during setup
-        })
+    /// Derive the public key: W = SK * BP2 (in G2 -- see module docs on why
+    /// this must not be G1).
+    pub fn public_key(&self) -> G2 {
+        G2::generator().mul(&self.sk)
     }
 
-    /// Get the underlying scalar
     pub fn scalar(&self) -> &Fr {
         &self.sk
     }
 }
 
-/// BBS+ Verifying Key (public key commitment)
+/// BBS+ Verifying Key: the signer's public key plus the message generators
+/// for this signing context (credential type / schema). Generators are
+/// always derived deterministically via `derive` -- there is no constructor
+/// that accepts caller-supplied raw points, because doing so would let a
+/// careless caller pick generators with a known discrete-log relationship
+/// to each other, which breaks signature unforgeability outright.
 #[derive(Clone)]
 pub struct VerifyingKey {
-    pub w: G1,                      // W = g^sk (commitment to signing key)
-    pub generators: Vec<G1>,        // [g1, g2, ..., g_n] for n messages
+    /// W = SK * BP2 ∈ G2.
+    pub w: G2,
+    /// Blinding generator for the signer-chosen `s` scalar.
+    pub q1: G1,
+    /// One generator per message slot, in order.
+    pub message_generators: Vec<G1>,
 }
 
 impl VerifyingKey {
-    /// Create a new verifying key with message generators
-    pub fn new(w: G1, generators: Vec<G1>) -> BbsResult<Self> {
-        if generators.len() > MAX_MESSAGES_PER_CREDENTIAL as usize {
+    /// Derive a verifying key for a public key and a signing context.
+    /// `context_id` scopes the generators to e.g. a credential type/schema
+    /// id, so two schemas never accidentally share a message layout; two
+    /// calls with the same (context_id, message_count) always reproduce the
+    /// same generators, so any verifier can regenerate them independently
+    /// from public information -- no generator transport/storage needed.
+    pub fn derive(public_key: G2, context_id: &[u8], message_count: u32) -> BbsResult<Self> {
+        if message_count > crate::MAX_MESSAGES_PER_CREDENTIAL {
             return Err(BbsError::InvalidMessageCount);
         }
-        Ok(VerifyingKey { w, generators })
+        let q1 = G1::hash_to_curve(context_id, DST_BLINDING_Q1);
+        let mut message_generators = Vec::with_capacity(message_count as usize);
+        for i in 0..message_count {
+            let mut msg = Vec::with_capacity(context_id.len() + 4);
+            msg.extend_from_slice(context_id);
+            msg.extend_from_slice(&i.to_le_bytes());
+            message_generators.push(G1::hash_to_curve(&msg, DST_MESSAGE_GEN));
+        }
+        Ok(VerifyingKey {
+            w: public_key,
+            q1,
+            message_generators,
+        })
     }
 
-    /// Return the number of supported messages
     pub fn message_count(&self) -> u32 {
-        self.generators.len() as u32
+        self.message_generators.len() as u32
     }
 
-    /// Serialize to bytes: w || g1 || g2 || ... || g_n
+    /// Serialize to bytes: w(96) || q1(48) || g1 || g2 || ... || g_n
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.w.to_bytes());
-        for gen in &self.generators {
+        bytes.extend_from_slice(&self.q1.to_bytes());
+        for gen in &self.message_generators {
             bytes.extend_from_slice(&gen.to_bytes());
         }
         bytes
     }
 
-    /// Deserialize from bytes
     pub fn from_bytes(bytes: &[u8]) -> BbsResult<Self> {
-        if bytes.len() < 48 {
+        if bytes.len() < 96 + 48 {
             return Err(BbsError::DeserializationError);
         }
-
         let mut offset = 0;
-        let mut w_bytes = [0u8; 48];
-        w_bytes.copy_from_slice(&bytes[offset..offset + 48]);
-        let w = G1::from_bytes(&w_bytes)?;
+
+        let mut w_bytes = [0u8; 96];
+        w_bytes.copy_from_slice(&bytes[offset..offset + 96]);
+        let w = G2::from_bytes(&w_bytes)?;
+        offset += 96;
+
+        let mut q1_bytes = [0u8; 48];
+        q1_bytes.copy_from_slice(&bytes[offset..offset + 48]);
+        let q1 = G1::from_bytes(&q1_bytes)?;
         offset += 48;
 
-        let mut generators = Vec::new();
+        let mut message_generators = Vec::new();
         while offset + 48 <= bytes.len() {
             let mut g_bytes = [0u8; 48];
             g_bytes.copy_from_slice(&bytes[offset..offset + 48]);
-            generators.push(G1::from_bytes(&g_bytes)?);
+            message_generators.push(G1::from_bytes(&g_bytes)?);
             offset += 48;
         }
 
-        Ok(VerifyingKey { w, generators })
+        Ok(VerifyingKey {
+            w,
+            q1,
+            message_generators,
+        })
     }
 }
 
-/// BBS+ Signature (a, e, s)
+/// BBS+ Signature (A, e, s).
 #[derive(Clone)]
 pub struct Signature {
-    pub a: G1,      // G1 element
-    pub e: Fr,      // Scalar
-    pub s: Fr,      // Scalar
+    pub a: G1,
+    pub e: Fr,
+    pub s: Fr,
 }
 
 impl Signature {
-    /// Serialize signature to bytes: a || e || s
     pub fn to_bytes(&self) -> [u8; 112] {
         let mut bytes = [0u8; 112];
         bytes[0..48].copy_from_slice(&self.a.to_bytes());
@@ -117,7 +166,6 @@ impl Signature {
         bytes
     }
 
-    /// Deserialize signature from bytes
     pub fn from_bytes(bytes: &[u8; 112]) -> BbsResult<Self> {
         let mut a_bytes = [0u8; 48];
         a_bytes.copy_from_slice(&bytes[0..48]);
@@ -135,115 +183,114 @@ impl Signature {
     }
 }
 
-/// BBS+ Core Scheme
+/// B = P1 + Q1*s + sum(H_i * m_i). The message commitment that gets signed.
+pub(crate) fn compute_b(vk: &VerifyingKey, messages: &[Fr], s: &Fr) -> BbsResult<G1> {
+    if messages.len() != vk.message_generators.len() {
+        return Err(BbsError::InvalidMessageCount);
+    }
+    let msg_term = if messages.is_empty() {
+        G1::identity()
+    } else {
+        msm_g1(&vk.message_generators, messages)?
+    };
+    Ok(base_generator().add(&vk.q1.mul(s)).add(&msg_term))
+}
+
+/// BBS+ Core Scheme.
 pub struct BbsSignature;
 
 impl BbsSignature {
-    /// Sign a list of messages with BBS+ scheme
-    /// Formula: sig = (a, e, s) where:
-    /// - a = (g1 * prod(m_i^h_i))^(1/(e+sk))
-    /// - e, s are random scalars
-    pub fn sign(
+    /// Sign with an explicit (e, s) rather than freshly sampling them.
+    /// `sign` (below) is the normal entry point; this lower-level form
+    /// exists so `accumulator` can sign a *chosen* exponent (the member
+    /// handle) rather than a random one, while sharing this exact,
+    /// already-verified core-signing algebra instead of re-deriving it.
+    pub fn sign_with_exponent(
+        signing_key: &SigningKey,
+        verifying_key: &VerifyingKey,
+        messages: &[Fr],
+        e: &Fr,
+        s: &Fr,
+    ) -> BbsResult<Signature> {
+        let b = compute_b(verifying_key, messages, s)?;
+        let denom = e.add(&signing_key.sk);
+        // denom == 0 iff e == -sk, i.e. astronomically unlikely for random e
+        // and impossible to arrange without knowing sk; treat it as an
+        // ordinary invalid-input case the caller can retry.
+        let inv = denom.invert()?;
+        let a = b.mul(&inv);
+        Ok(Signature {
+            a,
+            e: *e,
+            s: *s,
+        })
+    }
+
+    /// Sign a list of messages with BBS+, sampling fresh randomness for
+    /// (e, s) as the scheme requires -- signing with fixed/predictable (e,s)
+    /// breaks unforgeability, since an attacker who ever sees two
+    /// signatures sharing e can recover algebraic relationships between
+    /// them.
+    #[cfg(feature = "std")]
+    pub fn sign<R: rand::RngCore>(
+        rng: &mut R,
         signing_key: &SigningKey,
         verifying_key: &VerifyingKey,
         messages: &[Fr],
     ) -> BbsResult<Signature> {
-        if messages.len() > verifying_key.generators.len() {
+        if messages.len() != verifying_key.message_generators.len() {
             return Err(BbsError::InvalidMessageCount);
         }
-
-        if messages.is_empty() {
-            return Err(BbsError::InvalidMessageCount);
+        loop {
+            let e = Fr::random(rng);
+            let s = Fr::random(rng);
+            match Self::sign_with_exponent(signing_key, verifying_key, messages, &e, &s) {
+                Ok(sig) => return Ok(sig),
+                Err(BbsError::InvalidScalar) => continue,
+                Err(other) => return Err(other),
+            }
         }
-
-        // Create message commitment: prod(gen_i^msg_i)
-        let msg_commitment = msm_g1(&verifying_key.generators[..messages.len()], messages)?;
-
-        // In a real implementation, would use proper randomization
-        // For now, use simplified approach
-        let e = Fr::one();  // Would be random in production
-        let s = Fr::one();  // Would be random in production
-
-        // Compute a = (g1 + msg_commitment)^(1/(e + sk))
-        // This is simplified; real implementation uses more complex algebra
-        let base = G1::generator().add(&msg_commitment);
-        let inv_exponent = (e.add(&signing_key.sk)).invert()?;
-        let a = base.mul(&inv_exponent);
-
-        Ok(Signature { a, e, s })
     }
 
-    /// Verify a BBS+ signature
-    /// Check: e(a, W + e*g2) * e(b, g2) = e(g1, g2)
+    /// Verify a BBS+ signature: check e(A, W + e*BP2) == e(B, BP2).
     pub fn verify(
         verifying_key: &VerifyingKey,
         messages: &[Fr],
         signature: &Signature,
     ) -> BbsResult<bool> {
-        if messages.len() > verifying_key.generators.len() {
+        if messages.len() != verifying_key.message_generators.len() {
             return Err(BbsError::InvalidMessageCount);
         }
-
-        if messages.is_empty() {
-            return Err(BbsError::InvalidMessageCount);
-        }
-
         if signature.a.is_identity() {
             return Ok(false);
         }
 
-        // Verify pairing equation (simplified)
-        // In production, would check: e(a, W + e*g2) * e(b, g2) = e(g1, g2)
-        // For MVP, use structural validation
-        let msg_commitment = msm_g1(&verifying_key.generators[..messages.len()], messages)?;
+        let b = compute_b(verifying_key, messages, &signature.s)?;
+        let w_plus_e_bp2 = verifying_key.w.add(&G2::generator().mul(&signature.e));
 
-        // In a real implementation, would perform full pairing check
-        // For now, validate structure
-        Ok(!signature.a.is_identity() && !msg_commitment.is_identity())
-    }
+        let lhs = crate::primitives::pairing(&signature.a, &w_plus_e_bp2);
+        let rhs = crate::primitives::pairing(&b, &G2::generator());
 
-    /// Randomize a signature for presentation (prevents linkability)
-    /// Formula: sig' = (a^t, e, s + t*e) for random t
-    pub fn randomize_signature(signature: &Signature, randomness: &Fr) -> Signature {
-        let a_rand = signature.a.mul(randomness);
-        let e_rand = signature.e.clone();
-        let s_rand = signature.s.add(&randomness.mul(&signature.e));
-
-        Signature {
-            a: a_rand,
-            e: e_rand,
-            s: s_rand,
-        }
-    }
-
-    /// Create a proof of knowledge of signature (for blind issuance)
-    pub fn prove_knowledge(
-        signature: &Signature,
-        verifying_key: &VerifyingKey,
-        messages: &[Fr],
-    ) -> BbsResult<Vec<u8>> {
-        let mut transcript = Transcript::new(DOMAIN_BBS_PLUS.as_bytes());
-        transcript.append_g1(b"a", &signature.a.to_bytes());
-        transcript.append_scalar(b"e", &signature.e);
-        transcript.append_scalar(b"s", &signature.s);
-
-        let challenge = transcript.squeeze_challenge()?;
-        let mut proof = Vec::new();
-        proof.extend_from_slice(&challenge.to_bytes());
-
-        Ok(proof)
+        Ok(lhs == rhs)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    fn rng() -> StdRng {
+        StdRng::seed_from_u64(42)
+    }
 
     #[test]
     fn test_signing_key_generation() {
-        let sk = SigningKey::random().unwrap();
-        let vk = sk.to_verifying_key().unwrap();
-        assert!(!vk.w.is_identity());
+        let sk = SigningKey::generate(&mut rng());
+        let w = sk.public_key();
+        assert!(!w.is_identity());
     }
 
     #[test]
@@ -262,29 +309,136 @@ mod tests {
     }
 
     #[test]
-    fn test_sign_and_verify() {
-        let sk = SigningKey::random().unwrap();
-        let vk = sk.to_verifying_key().unwrap();
+    fn test_verifying_key_serialization_roundtrip() {
+        let sk = SigningKey::generate(&mut rng());
+        let vk = VerifyingKey::derive(sk.public_key(), b"credential-type-1", 3).unwrap();
+        let bytes = vk.to_bytes();
+        let vk2 = VerifyingKey::from_bytes(&bytes).unwrap();
+        assert_eq!(vk.w, vk2.w);
+        assert_eq!(vk.q1, vk2.q1);
+        assert_eq!(vk.message_generators, vk2.message_generators);
+    }
 
-        let messages = vec![Fr::one(), Fr::one()];
-        let sig = BbsSignature::sign(&sk, &vk, &messages).unwrap();
+    #[test]
+    fn test_derive_is_deterministic() {
+        let sk = SigningKey::generate(&mut rng());
+        let vk1 = VerifyingKey::derive(sk.public_key(), b"credential-type-1", 3).unwrap();
+        let vk2 = VerifyingKey::derive(sk.public_key(), b"credential-type-1", 3).unwrap();
+        assert_eq!(vk1.q1, vk2.q1);
+        assert_eq!(vk1.message_generators, vk2.message_generators);
+    }
+
+    #[test]
+    fn test_derive_different_context_gives_different_generators() {
+        let sk = SigningKey::generate(&mut rng());
+        let vk1 = VerifyingKey::derive(sk.public_key(), b"credential-type-1", 3).unwrap();
+        let vk2 = VerifyingKey::derive(sk.public_key(), b"credential-type-2", 3).unwrap();
+        assert_ne!(vk1.q1, vk2.q1);
+        assert_ne!(vk1.message_generators, vk2.message_generators);
+    }
+
+    #[test]
+    fn test_sign_and_verify() {
+        let mut r = rng();
+        let sk = SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"ctx", 2).unwrap();
+
+        let messages = vec![Fr::from_u64(7), Fr::from_u64(9)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
 
         let valid = BbsSignature::verify(&vk, &messages, &sig).unwrap();
         assert!(valid);
     }
 
     #[test]
-    fn test_randomize_signature() {
-        let sig = Signature {
-            a: G1::generator(),
+    fn test_verify_rejects_tampered_message() {
+        let mut r = rng();
+        let sk = SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"ctx", 2).unwrap();
+
+        let messages = vec![Fr::from_u64(7), Fr::from_u64(9)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+
+        let tampered = vec![Fr::from_u64(8), Fr::from_u64(9)];
+        let valid = BbsSignature::verify(&vk, &tampered, &sig).unwrap();
+        assert!(!valid);
+    }
+
+    #[test]
+    fn test_verify_rejects_wrong_key() {
+        let mut r = rng();
+        let sk = SigningKey::generate(&mut r);
+        let other_sk = SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"ctx", 2).unwrap();
+        let other_vk = VerifyingKey::derive(other_sk.public_key(), b"ctx", 2).unwrap();
+
+        let messages = vec![Fr::from_u64(7), Fr::from_u64(9)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+
+        let valid = BbsSignature::verify(&other_vk, &messages, &sig).unwrap();
+        assert!(!valid);
+    }
+
+    #[test]
+    fn test_verify_rejects_forged_identity_a() {
+        // A trivial forgery attempt: identity A always fails structurally,
+        // regardless of e/s -- this is the one cheap check `verify` can do
+        // before the pairing.
+        let mut r = rng();
+        let sk = SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"ctx", 1).unwrap();
+        let messages = vec![Fr::from_u64(1)];
+
+        let forged = Signature {
+            a: G1::identity(),
             e: Fr::one(),
             s: Fr::one(),
         };
+        assert!(!BbsSignature::verify(&vk, &messages, &forged).unwrap());
+    }
 
-        let r = Fr::one();
-        let sig_rand = BbsSignature::randomize_signature(&sig, &r);
+    #[test]
+    fn test_verify_rejects_arbitrary_non_identity_forgery() {
+        // The old implementation's "verify" accepted ANY non-identity A --
+        // this is the regression test for that: a structurally-valid-looking
+        // but algebraically-unrelated point must be rejected by the real
+        // pairing check.
+        let mut r = rng();
+        let sk = SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"ctx", 1).unwrap();
+        let messages = vec![Fr::from_u64(1)];
 
-        // Randomized sig should not equal original
-        assert_ne!(sig.a, sig_rand.a);
+        let forged = Signature {
+            a: G1::generator(),
+            e: Fr::from_u64(123),
+            s: Fr::from_u64(456),
+        };
+        assert!(!BbsSignature::verify(&vk, &messages, &forged).unwrap());
+    }
+
+    #[test]
+    fn test_two_signatures_on_same_messages_are_distinct() {
+        // e, s must be freshly random each time.
+        let mut r = rng();
+        let sk = SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"ctx", 1).unwrap();
+        let messages = vec![Fr::from_u64(1)];
+
+        let sig1 = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+        let sig2 = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+        assert_ne!(sig1.e, sig2.e);
+        assert_ne!(sig1.s, sig2.s);
+        assert_ne!(sig1.a, sig2.a);
+    }
+
+    #[test]
+    fn test_zero_message_signature_for_accumulator_reuse() {
+        // message_generators = [] is the accumulator use-case (see
+        // accumulator.rs): B degenerates to P1 + Q1*s.
+        let mut r = rng();
+        let sk = SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"acc-ctx", 0).unwrap();
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &[]).unwrap();
+        assert!(BbsSignature::verify(&vk, &[], &sig).unwrap());
     }
 }
