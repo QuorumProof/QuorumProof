@@ -32,7 +32,7 @@
 //   cargo run  --manifest-path benches/Cargo.toml --bin scaling_report
 // or just `scripts/scaling_benchmark_report.sh` to do both.
 use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, Vec};
-use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
+use quorum_proof::{ClaimType as QpClaimType, QuorumProofContract, QuorumProofContractClient};
 use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
 use zk_verifier::{AggregateProof, ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 use quorum_proof_benches::scaling;
@@ -86,6 +86,23 @@ struct Metrics {
 /// Resets the budget, runs `f`, then returns consumed CPU + mem.
 fn measure(env: &Env, f: impl FnOnce()) -> Metrics {
     env.budget().reset_default();
+    f();
+    Metrics {
+        cpu: env.budget().cpu_instruction_cost(),
+        mem: env.budget().memory_bytes_cost(),
+    }
+}
+
+/// Like `measure`, but resets to an unlimited budget first. For scaling-curve
+/// data collection only (never for the fixed-threshold regression gates
+/// above): some operations' cost at the larger end of their scaling range
+/// exceeds the mainnet-realistic default budget well before their own
+/// MAX_BATCH_SIZE/MAX_ATTESTORS_PER_SLICE cap is reached, and hitting that
+/// default limit mid-measurement panics instead of returning a value — which
+/// would crash the whole benchmark binary instead of just producing a data
+/// point demonstrating superlinear cost growth.
+fn measure_unlimited(env: &Env, f: impl FnOnce()) -> Metrics {
+    env.budget().reset_unlimited();
     f();
     Metrics {
         cpu: env.budget().cpu_instruction_cost(),
@@ -197,7 +214,7 @@ fn bench_revoke_credential() {
     let cid = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
     let m = measure(&env, || {
-        client.revoke_credential(&issuer, &cid);
+        client.revoke_credential(&issuer, &cid, &None);
     });
 
     println!("[bench_revoke_credential] cpu={} mem={}", m.cpu, m.mem);
@@ -271,6 +288,8 @@ fn bench_verify_claim() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup_zk(&env);
+    let vk_hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.set_verifying_key(&admin, &vk_hash);
     let qp_id = Address::generate(&env);
     let proof = Bytes::from_slice(&env, b"bench-proof");
 
@@ -361,7 +380,11 @@ fn bench_attest_scaling() {
 #[test]
 fn bench_verify_engineer() {
     let env = Env::default();
-    env.mock_all_auths();
+    // verify_engineer's cross-contract chain (QuorumProof -> ZkVerifier ->
+    // SbtRegistry) needs non-root auth allowed, same as the equivalent
+    // quorum_proof unit tests — plain mock_all_auths() only covers
+    // top-level require_auth() calls.
+    env.mock_all_auths_allowing_non_root_auth();
 
     let qp_id = env.register_contract(None, QuorumProofContract);
     let qp_client = QuorumProofContractClient::new(&env, &qp_id);
@@ -399,7 +422,7 @@ fn bench_verify_engineer() {
             &admin,
             &engineer,
             &cred_id,
-            &ClaimType::HasDegree,
+            &QpClaimType::HasDegree,
             &proof,
             &None,
         );
@@ -527,6 +550,13 @@ fn bench_verify_attestations_batch_5() {
 fn bench_verify_attestations_batch_scaling() {
     for n in [1u32, 5, 10, 25, 50] {
         let env = Env::default();
+        // The n issue_credential/create_slice/attest setup calls below share
+        // the env's default (mainnet-realistic) budget cumulatively, and at
+        // n=25+ that setup alone exceeds it before the measured call even
+        // runs. Setup isn't what's under measurement here — measure_unlimited
+        // resets the budget again right before the timed closure — so give
+        // setup an unlimited budget too.
+        env.budget().reset_unlimited();
         let (client, _) = setup_qp(&env);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -548,7 +578,7 @@ fn bench_verify_attestations_batch_scaling() {
             slice_ids.push_back(sid);
         }
 
-        let m = measure(&env, || {
+        let m = measure_unlimited(&env, || {
             client.verify_attestations_batch(&cred_ids, &slice_ids);
         });
 

@@ -5,8 +5,12 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, 
 use sha2::{Sha256, Digest};
 
 mod plonk;
-#[cfg(test)]
-mod plonk_test_prover;
+// `test` so this crate's own `mod tests` can use it; `testutils` so downstream
+// crates (e.g. benches/) can too, the same way soroban-sdk's own testutils
+// feature works across crate boundaries — plain `#[cfg(test)]` only applies
+// to this crate's own test builds, not to integration tests in other crates.
+#[cfg(any(test, feature = "testutils"))]
+pub mod plonk_test_prover;
 
 /// Groth16 proof byte layout (BN254, uncompressed):
 ///   A  : 64 bytes  (G1 point)

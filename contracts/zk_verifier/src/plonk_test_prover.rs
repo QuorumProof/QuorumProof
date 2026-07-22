@@ -5,9 +5,10 @@
 //! against it, so `mod tests` in `lib.rs` can exercise
 //! [`crate::plonk::verify`] with cryptographically meaningful inputs rather
 //! than well-formed-looking garbage. Not part of the production contract;
-//! compiled only under `#[cfg(test)]`. See `docs/plonk-verification.md` for
-//! the protocol this mirrors.
-#![cfg(test)]
+//! compiled only under `#[cfg(test)]` or the `testutils` feature (so
+//! downstream crates like benches/ can reuse it too). See
+//! `docs/plonk-verification.md` for the protocol this mirrors.
+#![cfg(any(test, feature = "testutils"))]
 extern crate std;
 
 use std::vec;
