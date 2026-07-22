@@ -185,6 +185,7 @@ pub enum PendingAttestationStatus {
     Cancelled = 4,
 }
 
+
 /// An entry in the attestation queue with priority, filter, and sorting support.
 #[contracttype]
 #[derive(Clone)]
@@ -208,8 +209,10 @@ pub struct AttestationQueueFilter {
     pub credential_id: Option<u64>,
     pub slice_id: Option<u64>,
     pub attestor: Option<Address>,
-    pub priority: Option<AttestationPriority>,
-    pub status: Option<PendingAttestationStatus>,
+    /// Discriminant of an `AttestationPriority` to filter on, if any.
+    pub priority: Option<u32>,
+    /// Discriminant of a `PendingAttestationStatus` to filter on, if any.
+    pub status: Option<u32>,
     pub min_created_at: Option<u64>,
     pub max_created_at: Option<u64>,
 }
@@ -2213,7 +2216,7 @@ pub struct BypassAuditEntry {
 pub enum DiagnosticSeverity {
     Info = 1,
     Warning = 2,
-    Error = 3,
+    Failure = 3,
     Critical = 4,
 }
 
@@ -3698,7 +3701,7 @@ impl QuorumProofContract {
         }
         if missing_count > 0 {
             findings.push_back(DiagnosticFinding {
-                severity: DiagnosticSeverity::Error,
+                severity: DiagnosticSeverity::Failure,
                 code: 1003,
                 message: soroban_sdk::String::from_str(
                     &env,
@@ -3720,7 +3723,7 @@ impl QuorumProofContract {
         let rl_cfg = Self::get_rate_limit_config(&env);
         if rl_cfg.max_calls == 0 {
             findings.push_back(DiagnosticFinding {
-                severity: DiagnosticSeverity::Error,
+                severity: DiagnosticSeverity::Failure,
                 code: 1005,
                 message: soroban_sdk::String::from_str(
                     &env,
@@ -3731,7 +3734,7 @@ impl QuorumProofContract {
         }
         if rl_cfg.window_seconds == 0 {
             findings.push_back(DiagnosticFinding {
-                severity: DiagnosticSeverity::Error,
+                severity: DiagnosticSeverity::Failure,
                 code: 1006,
                 message: soroban_sdk::String::from_str(
                     &env,
@@ -3767,7 +3770,7 @@ impl QuorumProofContract {
         {
             if metrics.window_start > now {
                 findings.push_back(DiagnosticFinding {
-                    severity: DiagnosticSeverity::Error,
+                    severity: DiagnosticSeverity::Failure,
                     code: 1008,
                     message: soroban_sdk::String::from_str(
                         &env,
@@ -15008,10 +15011,10 @@ impl QuorumProofContract {
             if entry.attestor != *att { return false; }
         }
         if let Some(p) = filter.priority {
-            if entry.priority != p { return false; }
+            if entry.priority as u32 != p { return false; }
         }
         if let Some(s) = filter.status {
-            if entry.status != s { return false; }
+            if entry.status as u32 != s { return false; }
         }
         if let Some(min) = filter.min_created_at {
             if entry.created_at < min { return false; }
@@ -16311,14 +16314,18 @@ mod tests {
         assert_eq!(before_b.len(), 1);
         assert_eq!(before_b.get(0).unwrap(), id_b1);
 
-client.revoke_credential(&issuer, &id_a1, &None);
-client.revoke_credential(&issuer, &cred_id, &None);
-client.revoke_credential(&issuer, &id1, &None);
-client.revoke_credential(&subject, &id, &None);
-client.revoke_credential(&unauthorized, &id, &None);
-client.revoke_credential(&issuer, &cid, &None);
-        // Attest after revocation — must panic
-        client.attest(&attestor, &cid, &slice_id, &true, &None);
+        client.revoke_credential(&issuer, &id_a1, &None);
+
+        let after_a = client.get_credentials_by_subject(&subject_a, &1, &100);
+        assert_eq!(after_a.len(), 1);
+        assert_eq!(after_a.get(0).unwrap(), id_a2);
+
+        let after_b = client.get_credentials_by_subject(&subject_b, &1, &100);
+        assert_eq!(after_b.len(), 1);
+        assert_eq!(after_b.get(0).unwrap(), id_b1);
+
+        let revoked = client.get_credential(&id_a1);
+        assert!(revoked.revoked);
     }
 
     // --- Issue #339: Time-window attestation tests ---
