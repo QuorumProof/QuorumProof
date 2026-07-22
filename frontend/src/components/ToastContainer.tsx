@@ -1,4 +1,4 @@
-import { useToast, type Toast } from '../context/ToastContext';
+import { useToast, type Toast } from '../context/ToastContextValue';
 
 const ICONS: Record<Toast['type'], string> = {
   pending: '⏳',

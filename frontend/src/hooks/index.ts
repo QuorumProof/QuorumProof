@@ -1,4 +1,4 @@
-export { useWallet } from '../context/WalletContext';
+export { useWallet } from '../context/WalletContextValue';
 export { useRealtimeUpdates } from './useRealtimeUpdates';
 export { useServiceWorker } from './useServiceWorker';
 export { useFormAutosave } from './useFormAutosave';

@@ -1,6 +1,5 @@
 import {
   isConnected,
-  isAllowed,
   setAllowed,
   getAddress,
 } from '@stellar/freighter-api';

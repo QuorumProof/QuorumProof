@@ -31,7 +31,7 @@ export function CredentialCard({ data, sliceId, selectable, selected, onToggle }
   const truncId = idStr.length > 14 ? idStr.slice(0, 6) + '…' + idStr.slice(-4) : idStr;
   const isRevoked = status === 'revoked';
 
-  function handleClick(e: React.MouseEvent) {
+  function handleClick() {
     if (selectable) {
       onToggle?.(idStr);
     } else {

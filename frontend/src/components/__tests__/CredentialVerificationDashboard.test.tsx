@@ -15,7 +15,7 @@ vi.mock('../../lib/credentialUtils', () => ({
 }));
 
 vi.mock('../../components/CredentialSearchFilter', () => ({
-  CredentialSearchFilter: vi.fn(({ onSearch }: any) => (
+  CredentialSearchFilter: vi.fn(() => (
     <div data-testid="search-filter">Mock Search Filter</div>
   )),
 }));

@@ -323,7 +323,7 @@ function credentialTemplate(credential: Credential, id: string, qrUrl: string, v
       <div class="footer-text">Issued ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
     </div>
   </div>
-  <script>window.onload = () => { setTimeout(() => window.print(), 500); };<\/script>
+  <script>window.onload = () => { setTimeout(() => window.print(), 500); };</script>
 </body>
 </html>`;
 }

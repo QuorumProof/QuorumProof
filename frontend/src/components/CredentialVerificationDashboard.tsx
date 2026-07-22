@@ -372,7 +372,7 @@ export function CredentialVerificationDashboard() {
 
         // Sort results
         filtered.sort((a, b) => {
-          let aVal: any, bVal: any;
+          let aVal: bigint | string, bVal: bigint | string;
 
           if (filters.sortField === 'issued') {
             aVal = a.credential.id;
@@ -385,7 +385,8 @@ export function CredentialVerificationDashboard() {
             bVal = b.credential.issuer;
           }
 
-          return filters.sortOrder === 'desc' ? bVal - aVal : aVal - bVal;
+          const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+          return filters.sortOrder === 'desc' ? -cmp : cmp;
         });
 
         resultsRef.current = filtered;

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import IssueCredential from '../IssueCredential';
+import { useFreighter } from '../../lib/hooks/useFreighter';
 
 // Mock useFreighter hook
 vi.mock('../../lib/hooks/useFreighter', () => ({
@@ -28,10 +29,9 @@ describe('IssueCredential page (#237)', () => {
   });
 
   it('passes issuerAddress from wallet to IssueCredentialForm', () => {
-    const { useFreighter } = require('../../lib/hooks/useFreighter');
     const testAddress = 'GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFSNQB37HNU7F5V4Z5SHEOSVBQ';
 
-    useFreighter.mockReturnValue({
+    vi.mocked(useFreighter).mockReturnValue({
       address: testAddress,
       isInitializing: false,
       connect: vi.fn(),
@@ -50,9 +50,7 @@ describe('IssueCredential page (#237)', () => {
   });
 
   it('shows connect wallet prompt when no address is available', () => {
-    const { useFreighter } = require('../../lib/hooks/useFreighter');
-
-    useFreighter.mockReturnValue({
+    vi.mocked(useFreighter).mockReturnValue({
       address: null,
       isInitializing: false,
       connect: vi.fn(),
@@ -71,9 +69,7 @@ describe('IssueCredential page (#237)', () => {
   });
 
   it('shows loading state while wallet is initializing', () => {
-    const { useFreighter } = require('../../lib/hooks/useFreighter');
-
-    useFreighter.mockReturnValue({
+    vi.mocked(useFreighter).mockReturnValue({
       address: null,
       isInitializing: true,
       connect: vi.fn(),
@@ -91,9 +87,7 @@ describe('IssueCredential page (#237)', () => {
   });
 
   it('does not render IssueCredentialForm when address is undefined', () => {
-    const { useFreighter } = require('../../lib/hooks/useFreighter');
-
-    useFreighter.mockReturnValue({
+    vi.mocked(useFreighter).mockReturnValue({
       address: undefined,
       isInitializing: false,
       connect: vi.fn(),
@@ -111,9 +105,7 @@ describe('IssueCredential page (#237)', () => {
   });
 
   it('renders wallet gate with proper accessibility attributes', () => {
-    const { useFreighter } = require('../../lib/hooks/useFreighter');
-
-    useFreighter.mockReturnValue({
+    vi.mocked(useFreighter).mockReturnValue({
       address: null,
       isInitializing: false,
       connect: vi.fn(),

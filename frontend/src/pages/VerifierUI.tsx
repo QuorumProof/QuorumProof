@@ -11,7 +11,7 @@ import {
 import type { Credential } from '../lib/contracts/quorumProof';
 import { decodeMetadataHash, CONTRACT_ID, RPC_URL, NETWORK } from '../stellar';
 import { credTypeLabel, formatTimestamp, formatAddress } from '../lib/credentialUtils';
-import { DEFAULT_SLICE_ID } from './Verify';
+import { DEFAULT_SLICE_ID } from './Verify.utils';
 
 interface VerifyResult {
   credential: Credential;

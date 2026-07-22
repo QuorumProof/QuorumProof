@@ -4,7 +4,8 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import { AttestationProgress, estimateCompletion } from '../../components/AttestationProgress';
+import { AttestationProgress } from '../../components/AttestationProgress';
+import { estimateCompletion } from '../../components/AttestationProgress.utils';
 import type { QuorumSlice } from '../../lib/contracts/quorumProof';
 
 const ADDR_A = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWNN';

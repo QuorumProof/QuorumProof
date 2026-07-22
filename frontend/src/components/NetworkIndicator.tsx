@@ -1,4 +1,4 @@
-import { useNetwork } from '../context/NetworkContext';
+import { useNetwork } from '../context/NetworkContextValue';
 
 export function NetworkIndicator() {
   const { config } = useNetwork();

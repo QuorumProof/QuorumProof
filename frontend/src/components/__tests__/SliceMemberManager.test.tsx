@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { SliceMemberManager, type SliceMember } from '../SliceMemberManager';
 
 const VALID_ADDR = 'GW674PTN7IWEZ6AE6OWW3NBULKVCCJUZOGMUSG6HFG6ZOLSL56XCAMBX';

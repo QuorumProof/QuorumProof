@@ -8,7 +8,7 @@ interface ImportCredentialsDialogProps {
 }
 
 export function ImportCredentialsDialog({ onImport, onClose }: ImportCredentialsDialogProps) {
-  const [format, setFormat] = useState<'json' | 'csv'>('json');
+  const [, setFormat] = useState<'json' | 'csv'>('json');
   const [errors, setErrors] = useState<string[]>([]);
   const [preview, setPreview] = useState<Credential[] | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);

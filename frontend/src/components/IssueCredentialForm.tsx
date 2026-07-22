@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { FormEvent, ChangeEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { issueCredential } from '../lib/contracts/quorumProof';
-import { useToast } from '../context/ToastContext';
+import { useToast } from '../context/ToastContextValue';
 
 // Credential types matching the on-chain enum (1-indexed)
 const CREDENTIAL_TYPES = [

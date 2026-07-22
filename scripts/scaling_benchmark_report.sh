@@ -20,11 +20,11 @@ echo "Clearing stale scaling data points..."
 rm -rf "$RAW_DIR"
 
 echo "Running scaling benchmarks..."
-cargo test --manifest-path "$MANIFEST" --test benchmarks -- --nocapture
+cargo test --manifest-path "$MANIFEST" --target x86_64-unknown-linux-gnu --test benchmarks -- --nocapture
 
 echo ""
 echo "Fitting complexity curves and updating history..."
-if cargo run --manifest-path "$MANIFEST" --bin scaling_report; then
+if cargo run --manifest-path "$MANIFEST" --target x86_64-unknown-linux-gnu --bin scaling_report; then
     STATUS=0
 else
     STATUS=$?

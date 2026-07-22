@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNotification } from '../context/NotificationContext';
+import { useNotification } from '../context/NotificationContextValue';
 
 export function NotificationCenter() {
   const { notifications, markAsRead, markAllAsRead, removeNotification, clearAll, unreadCount } = useNotification();

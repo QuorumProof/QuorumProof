@@ -1,4 +1,4 @@
-import { useWallet } from '../context/WalletContext';
+import { useWallet } from '../context/WalletContextValue';
 import type { WalletType } from '../wallets/types';
 import { getAllWalletAdapters } from '../wallets/registry';
 
@@ -7,12 +7,6 @@ const WALLET_INFO: Record<WalletType, { name: string; icon: string }> = {
   ledger: { name: 'Ledger', icon: '💻' },
   trezor: { name: 'Trezor', icon: '🔒' },
 };
-
-type ConnectorState =
-  | { status: 'disconnected' }
-  | { status: 'connecting' }
-  | { status: 'connected'; publicKey: string; walletType: WalletType }
-  | { status: 'error'; message: string };
 
 export function WalletConnector() {
   const { address, walletType, connect, disconnect, error, hasFreighter, availableWallets, isInitializing } = useWallet();

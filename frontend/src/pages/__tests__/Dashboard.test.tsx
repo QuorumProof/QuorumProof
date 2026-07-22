@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import Dashboard from '../Dashboard';
 import { useWallet, useRealtimeUpdates } from '../../hooks';
 import { getCredentialsBySubject } from '../../stellar';
+import type { WalletState } from '../../context/WalletContextValue';
 
 vi.mock('../../hooks', () => ({
   useWallet: vi.fn(),
@@ -46,7 +47,7 @@ describe('Dashboard (#239)', () => {
   });
 
   it('renders skeleton cards while loading credentials', async () => {
-    vi.mocked(useWallet).mockReturnValue(walletConnected as any);
+    vi.mocked(useWallet).mockReturnValue(walletConnected as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockImplementation(
       () => new Promise((resolve) => setTimeout(() => resolve([]), 100))
     );
@@ -58,7 +59,7 @@ describe('Dashboard (#239)', () => {
   });
 
   it('clears skeletons once data resolves', async () => {
-    vi.mocked(useWallet).mockReturnValue(walletConnected as any);
+    vi.mocked(useWallet).mockReturnValue(walletConnected as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([]);
 
     render(<BrowserRouter><Dashboard /></BrowserRouter>);
@@ -69,7 +70,7 @@ describe('Dashboard (#239)', () => {
   });
 
   it('shows empty state when no credentials exist', async () => {
-    vi.mocked(useWallet).mockReturnValue(walletConnected as any);
+    vi.mocked(useWallet).mockReturnValue(walletConnected as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([]);
 
     render(<BrowserRouter><Dashboard /></BrowserRouter>);
@@ -78,7 +79,7 @@ describe('Dashboard (#239)', () => {
   });
 
   it('does not show skeletons when wallet is not connected', () => {
-    vi.mocked(useWallet).mockReturnValue({ address: null, hasFreighter: true, isInitializing: false, connect: vi.fn(), disconnect: vi.fn() } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: null, hasFreighter: true, isInitializing: false, connect: vi.fn(), disconnect: vi.fn() } as unknown as WalletState);
 
     render(<BrowserRouter><Dashboard /></BrowserRouter>);
 

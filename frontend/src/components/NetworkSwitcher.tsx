@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNetwork } from '../context/NetworkContext';
+import { useNetwork } from '../context/NetworkContextValue';
 import { type StellarNetwork, NETWORK_CONFIGS } from '../lib/networkConfig';
 
 export function NetworkSwitcher() {

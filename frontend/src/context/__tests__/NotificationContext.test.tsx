@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { NotificationProvider, useNotification } from '../context/NotificationContext';
+import { NotificationProvider } from '../NotificationContext';
+import { useNotification } from '../NotificationContextValue';
 
 describe('NotificationContext', () => {
   it('should add a notification', () => {

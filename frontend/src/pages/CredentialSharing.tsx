@@ -350,10 +350,11 @@ interface TokenCardProps {
 }
 
 function TokenCard({ token, copied, onCopy, onRevoke, disabled }: TokenCardProps) {
-  const expired = token.expiresAt <= Date.now();
+  const [now] = useState(() => Date.now());
+  const expired = token.expiresAt <= now;
   const status = token.revoked ? 'Revoked' : expired ? 'Expired' : 'Active';
   const badgeColor = token.revoked ? 'red' : expired ? 'yellow' : 'green';
-  const remaining = token.revoked || expired ? null : Math.max(0, Math.round((token.expiresAt - Date.now()) / 3600000));
+  const remaining = token.revoked || expired ? null : Math.max(0, Math.round((token.expiresAt - now) / 3600000));
 
   return (
     <div className="detail-card" style={{ opacity: disabled ? 0.6 : 1 }}>

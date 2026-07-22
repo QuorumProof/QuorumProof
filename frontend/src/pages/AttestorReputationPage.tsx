@@ -13,9 +13,6 @@ interface ReputationData {
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
 function ScoreGauge({ score }: { score: number }) {
-  const radius = 54;
-  const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference * (1 - score / 100);
   const color = score >= 80 ? '#10b981' : score >= 50 ? '#f59e0b' : '#ef4444';
 
   return (

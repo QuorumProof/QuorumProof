@@ -65,7 +65,7 @@ interface RejectModalProps {
   onCancel: () => void;
 }
 
-function RejectModal({ requestId: _id, onConfirm, onCancel }: RejectModalProps) {
+function RejectModal({ onConfirm, onCancel }: RejectModalProps) {
   const [reason, setReason] = useState('');
   return (
     <div

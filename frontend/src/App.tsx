@@ -39,8 +39,8 @@ const NotFound = () => (
 
 function AppContent() {
   const location = useLocation();
-  const { address, connect, network, wallets, activeIndex, switchWallet } = useWallet();
-  const { isOnline } = useServiceWorker();
+  const { address, connect, wallets, activeIndex, switchWallet } = useWallet();
+  useServiceWorker();
 
   return (
     <AppLayout

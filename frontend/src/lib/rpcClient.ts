@@ -7,9 +7,9 @@ let rpcServer = new StellarRpc.Server(STELLAR_RPC_URL, {
 });
 
 const handler = {
-  get(_target: any, prop: string | symbol) {
-    const val = (rpcServer as any)[prop];
-    return typeof val === 'function' ? val.bind(rpcServer) : val;
+  get(_target: unknown, prop: string | symbol) {
+    const val = (rpcServer as unknown as Record<string | symbol, unknown>)[prop];
+    return typeof val === 'function' ? (val as (...args: unknown[]) => unknown).bind(rpcServer) : val;
   }
 };
 
