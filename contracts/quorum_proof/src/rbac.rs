@@ -346,7 +346,7 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{symbol_short, vec, Env, IntoVal};
 
-    fn setup_env() -> (Env, Address, Address, Address) {
+    fn setup_env() -> (Env, Address, Address, Address, Address) {
         let env = Env::default();
         let admin = Address::generate(&env);
         let user1 = Address::generate(&env);
@@ -364,246 +364,295 @@ mod tests {
             max_entry_ttl: 6312000,
         });
 
-        let contract_id = env.register(QuorumProofContract, ());
+        let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(&env, &contract_id);
         client.initialize(&admin);
+        env.budget().reset_unlimited();
 
-        (env, admin, user1, user2)
+        (env, admin, user1, user2, contract_id)
     }
 
     #[test]
     fn test_assign_role() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Issuer, 0);
-        assert!(has_role(&env, &user, Role::Issuer));
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 0);
+            assert!(has_role(&env, &user, Role::Issuer));
+        });
     }
 
     #[test]
     fn test_assign_role_panics_for_non_admin() {
-        let (env, _admin, user1, user2) = setup_env();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assign_role(&env, &user1, &user2, Role::Issuer, 0);
-        }));
-        assert!(result.is_err());
+        let (env, _admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assign_role(&env, &user1, &user2, Role::Issuer, 0);
+            }));
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_revoke_role() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Verifier, 0);
-        assert!(has_role(&env, &user, Role::Verifier));
-        revoke_role(&env, &admin, &user);
-        assert!(!has_role(&env, &user, Role::Verifier));
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Verifier, 0);
+            assert!(has_role(&env, &user, Role::Verifier));
+            revoke_role(&env, &admin, &user);
+            assert!(!has_role(&env, &user, Role::Verifier));
+        });
     }
 
     #[test]
     fn test_role_expiry() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Issuer, 1_000_500);
-        assert!(has_role(&env, &user, Role::Issuer));
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 1_000_500);
+            assert!(has_role(&env, &user, Role::Issuer));
 
-        env.ledger().set(LedgerInfo {
-            timestamp: 1_000_600,
-            ..env.ledger().get()
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+            assert!(!has_role(&env, &user, Role::Issuer));
         });
-        assert!(!has_role(&env, &user, Role::Issuer));
     }
 
     #[test]
     fn test_delegate_role() {
-        let (env, admin, user1, user2) = setup_env();
-        assign_role(&env, &admin, &user1, Role::Issuer, 0);
-        delegate_role(&env, &user1, &user2, Role::Issuer, 0);
-        assert!(has_role(&env, &user2, Role::Issuer));
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Issuer, 0);
+            delegate_role(&env, &user1, &user2, Role::Issuer, 0);
+            assert!(has_role(&env, &user2, Role::Issuer));
+        });
     }
 
     #[test]
     fn test_delegate_role_panics_without_role() {
-        let (env, _admin, user1, user2) = setup_env();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            delegate_role(&env, &user1, &user2, Role::Issuer, 0);
-        }));
-        assert!(result.is_err());
+        let (env, _admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                delegate_role(&env, &user1, &user2, Role::Issuer, 0);
+            }));
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_delegation_expiry() {
-        let (env, admin, user1, user2) = setup_env();
-        assign_role(&env, &admin, &user1, Role::Verifier, 0);
-        delegate_role(&env, &user1, &user2, Role::Verifier, 1_000_500);
-        assert!(has_role(&env, &user2, Role::Verifier));
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Verifier, 0);
+            delegate_role(&env, &user1, &user2, Role::Verifier, 1_000_500);
+            assert!(has_role(&env, &user2, Role::Verifier));
 
-        env.ledger().set(LedgerInfo {
-            timestamp: 1_000_600,
-            ..env.ledger().get()
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+            assert!(!has_role(&env, &user2, Role::Verifier));
         });
-        assert!(!has_role(&env, &user2, Role::Verifier));
     }
 
     #[test]
     fn test_revoke_delegation() {
-        let (env, admin, user1, user2) = setup_env();
-        assign_role(&env, &admin, &user1, Role::Issuer, 0);
-        delegate_role(&env, &user1, &user2, Role::Issuer, 0);
-        assert!(has_role(&env, &user2, Role::Issuer));
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Issuer, 0);
+            delegate_role(&env, &user1, &user2, Role::Issuer, 0);
+            assert!(has_role(&env, &user2, Role::Issuer));
 
-        revoke_delegation(&env, &user1, &user2);
-        assert!(!has_role(&env, &user2, Role::Issuer));
+            revoke_delegation(&env, &user1, &user2);
+            assert!(!has_role(&env, &user2, Role::Issuer));
+        });
     }
 
     #[test]
     fn test_admin_can_delegate_without_explicit_role() {
-        let (env, admin, user, _) = setup_env();
-        delegate_role(&env, &admin, &user, Role::Admin, 0);
-        assert!(has_role(&env, &user, Role::Admin));
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            delegate_role(&env, &admin, &user, Role::Admin, 0);
+            assert!(has_role(&env, &user, Role::Admin));
+        });
     }
 
     #[test]
     fn test_require_role_panics_when_not_assigned() {
-        let (env, _admin, user, _) = setup_env();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            require_role(&env, &user, Role::Verifier);
-        }));
-        assert!(result.is_err());
+        let (env, _admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                require_role(&env, &user, Role::Verifier);
+            }));
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_require_role_succeeds_when_assigned() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Issuer, 0);
-        require_role(&env, &user, Role::Issuer);
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 0);
+            require_role(&env, &user, Role::Issuer);
+        });
     }
 
     #[test]
     fn test_get_role_assignment_none() {
-        let (env, _admin, user, _) = setup_env();
-        assert!(get_role_assignment(&env, &user).is_none());
+        let (env, _admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assert!(get_role_assignment(&env, &user).is_none());
+        });
     }
 
     #[test]
     fn test_get_role_assignment_some() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::RevocationAgent, 0);
-        let assignment = get_role_assignment(&env, &user).unwrap();
-        assert_eq!(assignment.role, Role::RevocationAgent);
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::RevocationAgent, 0);
+            let assignment = get_role_assignment(&env, &user).unwrap();
+            assert_eq!(assignment.role, Role::RevocationAgent);
+        });
     }
 
     #[test]
     fn test_audit_log_records_assignments() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Issuer, 0);
-        let log = get_audit_log(&env);
-        assert_eq!(log.len(), 1);
-        assert_eq!(log.get(0).unwrap().action, RoleAction::Granted);
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 0);
+            let log = get_audit_log(&env);
+            assert_eq!(log.len(), 1);
+            assert_eq!(log.get(0).unwrap().action, RoleAction::Granted);
+        });
     }
 
     #[test]
     fn test_audit_log_records_revocation() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Issuer, 0);
-        revoke_role(&env, &admin, &user);
-        let log = get_audit_log(&env);
-        assert_eq!(log.len(), 2);
-        assert_eq!(log.get(1).unwrap().action, RoleAction::Revoked);
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 0);
+            revoke_role(&env, &admin, &user);
+            let log = get_audit_log(&env);
+            assert_eq!(log.len(), 2);
+            assert_eq!(log.get(1).unwrap().action, RoleAction::Revoked);
+        });
     }
 
     #[test]
     fn test_revoke_role_panics_when_no_role() {
-        let (env, admin, user, _) = setup_env();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            revoke_role(&env, &admin, &user);
-        }));
-        assert!(result.is_err());
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                revoke_role(&env, &admin, &user);
+            }));
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_revoke_delegation_panics_when_no_delegation() {
-        let (env, admin, user, _) = setup_env();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            revoke_delegation(&env, &admin, &user);
-        }));
-        assert!(result.is_err());
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                revoke_delegation(&env, &admin, &user);
+            }));
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_get_role_delegation() {
-        let (env, admin, user1, user2) = setup_env();
-        assign_role(&env, &admin, &user1, Role::Issuer, 0);
-        delegate_role(&env, &user1, &user2, Role::Issuer, 0);
-        let delegation = get_role_delegation(&env, &user2).unwrap();
-        assert_eq!(delegation.role, Role::Issuer);
-        assert_eq!(delegation.delegator, user1);
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Issuer, 0);
+            delegate_role(&env, &user1, &user2, Role::Issuer, 0);
+            let delegation = get_role_delegation(&env, &user2).unwrap();
+            assert_eq!(delegation.role, Role::Issuer);
+            assert_eq!(delegation.delegator, user1);
+        });
     }
 
     #[test]
     fn test_expired_role_removed_from_audit() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Issuer, 1_000_500);
-        assert!(has_role(&env, &user, Role::Issuer));
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 1_000_500);
+            assert!(has_role(&env, &user, Role::Issuer));
 
-        env.ledger().set(LedgerInfo {
-            timestamp: 1_000_600,
-            ..env.ledger().get()
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+
+            assert!(!has_role(&env, &user, Role::Issuer));
+            let assignment = get_role_assignment(&env, &user);
+            assert!(assignment.is_some());
+            assert_eq!(assignment.unwrap().role, Role::Issuer);
         });
-
-        assert!(!has_role(&env, &user, Role::Issuer));
-        let assignment = get_role_assignment(&env, &user);
-        assert!(assignment.is_some());
-        assert_eq!(assignment.unwrap().role, Role::Issuer);
     }
 
     #[test]
     fn test_admin_can_assign_all_roles() {
-        let (env, admin, user, _) = setup_env();
-        for role in &[Role::Admin, Role::Issuer, Role::Verifier, Role::RevocationAgent] {
-            assign_role(&env, &admin, &user, *role, 0);
-            assert!(has_role(&env, &user, *role));
-            revoke_role(&env, &admin, &user);
-            assert!(!has_role(&env, &user, *role));
-        }
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            for role in &[Role::Admin, Role::Issuer, Role::Verifier, Role::RevocationAgent] {
+                assign_role(&env, &admin, &user, *role, 0);
+                assert!(has_role(&env, &user, *role));
+                revoke_role(&env, &admin, &user);
+                assert!(!has_role(&env, &user, *role));
+            }
+        });
     }
 
     #[test]
     fn test_delegation_does_not_consume_original_role() {
-        let (env, admin, user1, user2) = setup_env();
-        assign_role(&env, &admin, &user1, Role::Issuer, 0);
-        delegate_role(&env, &user1, &user2, Role::Issuer, 0);
-        assert!(has_role(&env, &user1, Role::Issuer));
-        assert!(has_role(&env, &user2, Role::Issuer));
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Issuer, 0);
+            delegate_role(&env, &user1, &user2, Role::Issuer, 0);
+            assert!(has_role(&env, &user1, Role::Issuer));
+            assert!(has_role(&env, &user2, Role::Issuer));
+        });
     }
 
     #[test]
     fn test_revoke_delegation_does_not_affect_original_role() {
-        let (env, admin, user1, user2) = setup_env();
-        assign_role(&env, &admin, &user1, Role::Issuer, 0);
-        delegate_role(&env, &user1, &user2, Role::Issuer, 0);
-        revoke_delegation(&env, &user1, &user2);
-        assert!(has_role(&env, &user1, Role::Issuer));
-        assert!(!has_role(&env, &user2, Role::Issuer));
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Issuer, 0);
+            delegate_role(&env, &user1, &user2, Role::Issuer, 0);
+            revoke_delegation(&env, &user1, &user2);
+            assert!(has_role(&env, &user1, Role::Issuer));
+            assert!(!has_role(&env, &user2, Role::Issuer));
+        });
     }
 
     #[test]
     fn test_events_emitted_for_role_granted() {
-        let (env, admin, user, _) = setup_env();
-        assign_role(&env, &admin, &user, Role::Issuer, 0);
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 0);
 
-        let events = env.events().all();
-        let last = events.get(events.len() - 1).unwrap();
-        assert!(last.0 == admin || true);
+            let events = env.events().all();
+            let last = events.get(events.len() - 1).unwrap();
+            assert!(last.0 == admin || true);
+        });
     }
 
     #[test]
     fn test_unauthorized_delegation_revocation_by_third_party() {
-        let (env, admin, user1, user2) = setup_env();
-        let attacker = Address::generate(&env);
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let attacker = Address::generate(&env);
 
-        assign_role(&env, &admin, &user1, Role::Issuer, 0);
-        delegate_role(&env, &user1, &user2, Role::Issuer, 0);
+            assign_role(&env, &admin, &user1, Role::Issuer, 0);
+            delegate_role(&env, &user1, &user2, Role::Issuer, 0);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            revoke_delegation(&env, &attacker, &user2);
-        }));
-        assert!(result.is_err());
-        assert!(has_role(&env, &user2, Role::Issuer));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                revoke_delegation(&env, &attacker, &user2);
+            }));
+            assert!(result.is_err());
+            assert!(has_role(&env, &user2, Role::Issuer));
+        });
     }
 }

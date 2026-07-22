@@ -1,4 +1,8 @@
 #![no_std]
+
+#[cfg(test)]
+extern crate std;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Bytes, Env, IntoVal, Symbol, Vec,
@@ -886,7 +890,7 @@ impl SbtRegistryContract {
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
-    fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
@@ -968,7 +972,7 @@ impl SbtRegistryContract {
     /// Panics if no recovery guardians have been configured.
     /// Panics if a recovery request already exists for this holder.
     /// Panics if initiator is the same as new_owner.
-    fn initiate_recovery(env: Env, initiator: Address, new_owner: Address) -> u64 {
+    pub fn initiate_recovery(env: Env, initiator: Address, new_owner: Address) -> u64 {
         initiator.require_auth();
 
         let guardians: Vec<Address> = env
@@ -1063,7 +1067,7 @@ impl SbtRegistryContract {
     /// Panics if the guardian is not in the configured guardians list.
     /// Panics if the guardian has already approved this request.
     /// Panics if the recovery has already been completed.
-    fn approve_recovery(env: Env, guardian: Address, recovery_request_id: u64) {
+    pub fn approve_recovery(env: Env, guardian: Address, recovery_request_id: u64) {
         guardian.require_auth();
 
         let guardians: Vec<Address> = env
@@ -1280,7 +1284,7 @@ impl SbtRegistryContract {
     ///
     /// # Panics
     /// Panics with `ContractError::RecoveryNotFound` if the request doesn't exist.
-    fn get_recovery_request(env: Env, recovery_request_id: u64) -> RecoveryRequest {
+    pub fn get_recovery_request(env: Env, recovery_request_id: u64) -> RecoveryRequest {
         env.storage()
             .instance()
             .get(&DataKey::RecoveryRequest(recovery_request_id))
@@ -1294,7 +1298,7 @@ impl SbtRegistryContract {
     ///
     /// # Returns
     /// Vector of all approvals for the recovery request.
-    fn get_recovery_approvals(env: Env, recovery_request_id: u64) -> Vec<RecoveryApproval> {
+    pub fn get_recovery_approvals(env: Env, recovery_request_id: u64) -> Vec<RecoveryApproval> {
         env.storage()
             .instance()
             .get(&DataKey::RecoveryApprovals(recovery_request_id))
@@ -1383,7 +1387,7 @@ impl SbtRegistryContract {
     /// Return the reputation score for a holder.
     /// score = tokens_held * token_weight + activity_events * activity_weight
     /// Defaults: token_weight = 10, activity_weight = 1.
-    fn get_holder_reputation(env: Env, holder: Address) -> u32 {
+    pub fn get_holder_reputation(env: Env, holder: Address) -> u32 {
         let cfg: ReputationConfig = env
             .storage()
             .instance()
@@ -1534,13 +1538,13 @@ impl SbtRegistryContract {
     }
 
     /// Returns true if the holder is blacklisted.
-    fn is_holder_blacklisted(env: Env, holder: Address) -> bool {
+    pub fn is_holder_blacklisted(env: Env, holder: Address) -> bool {
         env.storage().instance().has(&DataKey::Blacklist(holder))
     }
 
     /// Update the metadata URI of an SBT. Only the token owner may call this.
     /// Increments the token version on each update.
-    fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
+    pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
         owner.require_auth();
         let mut token: SoulboundToken = env
             .storage()
@@ -1683,12 +1687,87 @@ impl SbtRegistryContract {
     }
 }
 
+// A minimal mock of the `quorum_proof` contract, used only by this crate's
+// own test suite (see `mod tests` below). `sbt_registry` deliberately does
+// NOT take a normal (or dev) dependency on the real `quorum_proof` crate —
+// production code reaches it only via `env.invoke_contract` with the
+// `is_revoked` symbol (see the comment above `mint`), specifically to avoid
+// a circular crate dependency. This stub reproduces just the surface the
+// tests need (`initialize` / `issue_credential` / `revoke_credential` /
+// `is_revoked`) so the test suite can deploy a stand-in contract without
+// adding `quorum_proof` as a real Cargo dependency of this crate.
+#[cfg(test)]
+mod mock_quorum_proof {
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, String};
+
+    #[contracttype]
+    enum MockQpKey {
+        Count,
+        Revoked(u64),
+    }
+
+    #[contract]
+    pub struct QuorumProofContract;
+
+    #[contractimpl]
+    impl QuorumProofContract {
+        pub fn initialize(_env: Env, _admin: Address) {}
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn issue_credential(
+            env: Env,
+            issuer: Address,
+            _subject: Address,
+            _credential_type: u32,
+            _metadata_hash: Bytes,
+            _expires_at: Option<u64>,
+            _nonce: u64,
+        ) -> u64 {
+            issuer.require_auth();
+            let next: u64 = env
+                .storage()
+                .instance()
+                .get(&MockQpKey::Count)
+                .unwrap_or(0u64)
+                + 1;
+            env.storage().instance().set(&MockQpKey::Count, &next);
+            env.storage()
+                .instance()
+                .set(&MockQpKey::Revoked(next), &false);
+            next
+        }
+
+        pub fn revoke_credential(
+            env: Env,
+            issuer: Address,
+            credential_id: u64,
+            _reason: Option<String>,
+        ) {
+            issuer.require_auth();
+            env.storage()
+                .instance()
+                .set(&MockQpKey::Revoked(credential_id), &true);
+        }
+
+        pub fn is_revoked(env: Env, credential_id: u64) -> bool {
+            // Matches the real quorum_proof::is_revoked: panics for a
+            // credential_id that was never issued, rather than defaulting
+            // to "not revoked".
+            env.storage()
+                .instance()
+                .get(&MockQpKey::Revoked(credential_id))
+                .expect("credential not found")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
-    use soroban_sdk::testutils::{Address as _, Events as _};
+    use super::mock_quorum_proof::{QuorumProofContract, QuorumProofContractClient};
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::{BytesN, FromVal, TryFromVal};
+    use std::string::ToString;
 
     // --- Deployment verification tests ---
 
@@ -1877,7 +1956,7 @@ mod tests {
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        qp_client.revoke_credential(&issuer, &cred_id);
+        qp_client.revoke_credential(&issuer, &cred_id, &None);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         client.mint(&owner, &cred_id, &uri);
@@ -2273,6 +2352,21 @@ mod tests {
     }
 
     // ── Snapshot upgrade state tests (#556) ──────────────────────────────────
+    //
+    // An `Address` value's underlying Val is an object handle into the specific
+    // `Env` (host) it was created against, so it cannot be passed to, or
+    // compared against a value produced by, a *different* `Env` — doing so
+    // panics with "unknown object reference" or "check_same_env on different
+    // Hosts". These helpers round-trip an Address through its portable
+    // strkey representation (a plain Rust String) so identities can survive
+    // a snapshot reload into a new `Env`.
+    fn portable_address(addr: &Address) -> std::string::String {
+        addr.to_string().to_string()
+    }
+
+    fn address_in_env(env: &Env, s: &std::string::String) -> Address {
+        Address::from_string(&soroban_sdk::String::from_str(env, s))
+    }
 
     /// Snapshots contract state before a simulated upgrade, reloads the snapshot,
     /// re-registers the contract code at the same address (upgrade), and verifies
@@ -2303,24 +2397,31 @@ mod tests {
         let guardians = soroban_sdk::vec![&env, guardian];
         client.setup_recovery_guardians(&admin, &guardians, &1u32);
 
-        // Record all pre-upgrade state values
+        // Record all pre-upgrade state values. Owners/holders are captured
+        // through their portable strkey form (see `portable_address` above)
+        // since they'll be compared against / used with `env2` below.
         let pre_sbt_count = client.sbt_count();
-        let pre_owner1 = client.owner_of(&token_id1);
-        let pre_owner2 = client.owner_of(&token_id2);
-        let pre_owner3 = client.owner_of(&token_id3);
+        let pre_owner1 = portable_address(&client.owner_of(&token_id1));
+        let pre_owner2 = portable_address(&client.owner_of(&token_id2));
+        let pre_owner3 = portable_address(&client.owner_of(&token_id3));
         let pre_holder1_count = client.get_tokens_by_owner(&holder1).len();
         let pre_holder2_count = client.get_tokens_by_owner(&holder2).len();
         let pre_threshold = client.get_recovery_threshold();
+        let holder1_str = portable_address(&holder1);
+        let holder2_str = portable_address(&holder2);
 
-        // Capture contract address and take pre-upgrade snapshot
-        let sbt_address = client.address.clone();
+        // Capture contract address and take pre-upgrade snapshot.
+        let sbt_address_str = portable_address(&client.address);
         env.to_snapshot_file(snap_path);
 
         // Restore snapshot and re-register contract code (simulates WASM upgrade)
         let env2 = Env::from_snapshot_file(snap_path);
         env2.mock_all_auths();
+        let sbt_address = address_in_env(&env2, &sbt_address_str);
         env2.register_contract(Some(&sbt_address), SbtRegistryContract);
         let client2 = SbtRegistryContractClient::new(&env2, &sbt_address);
+        let holder1_2 = address_in_env(&env2, &holder1_str);
+        let holder2_2 = address_in_env(&env2, &holder2_str);
 
         // Ledger metadata must be identical
         assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
@@ -2328,16 +2429,28 @@ mod tests {
 
         // All contract state must be intact — no data loss after upgrade
         assert_eq!(client2.sbt_count(), pre_sbt_count, "token count changed after upgrade");
-        assert_eq!(client2.owner_of(&token_id1), pre_owner1, "token 1 owner changed");
-        assert_eq!(client2.owner_of(&token_id2), pre_owner2, "token 2 owner changed");
-        assert_eq!(client2.owner_of(&token_id3), pre_owner3, "token 3 owner changed");
         assert_eq!(
-            client2.get_tokens_by_owner(&holder1).len(),
+            portable_address(&client2.owner_of(&token_id1)),
+            pre_owner1,
+            "token 1 owner changed"
+        );
+        assert_eq!(
+            portable_address(&client2.owner_of(&token_id2)),
+            pre_owner2,
+            "token 2 owner changed"
+        );
+        assert_eq!(
+            portable_address(&client2.owner_of(&token_id3)),
+            pre_owner3,
+            "token 3 owner changed"
+        );
+        assert_eq!(
+            client2.get_tokens_by_owner(&holder1_2).len(),
             pre_holder1_count,
             "holder1 token count changed after upgrade"
         );
         assert_eq!(
-            client2.get_tokens_by_owner(&holder2).len(),
+            client2.get_tokens_by_owner(&holder2_2).len(),
             pre_holder2_count,
             "holder2 token count changed after upgrade"
         );
@@ -2362,22 +2475,29 @@ mod tests {
         let cred_id = qp_client.issue_credential(&issuer, &holder, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&holder, &cred_id, &uri);
-        client.burn_sbt(&holder, &token_id);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
+        client.burn_sbt(&holder, &token_id, &proof);
 
         // Record state after burn (token no longer owned)
         let pre_tokens = client.get_tokens_by_owner(&holder).len();
 
-        let sbt_address = client.address.clone();
+        // See test_snapshot_upgrade_preserves_state for why addresses are
+        // round-tripped through their portable strkey representation rather
+        // than reused directly across Env instances.
+        let sbt_address_str = portable_address(&client.address);
+        let holder_str = portable_address(&holder);
         env.to_snapshot_file(snap_path);
 
         let env2 = Env::from_snapshot_file(snap_path);
         env2.mock_all_auths();
+        let sbt_address = address_in_env(&env2, &sbt_address_str);
         env2.register_contract(Some(&sbt_address), SbtRegistryContract);
         let client2 = SbtRegistryContractClient::new(&env2, &sbt_address);
+        let holder2 = address_in_env(&env2, &holder_str);
 
         // Burn must not be reversed by the upgrade — no phantom token reappearance
         assert_eq!(
-            client2.get_tokens_by_owner(&holder).len(),
+            client2.get_tokens_by_owner(&holder2).len(),
             pre_tokens,
             "burned token reappeared after upgrade (data loss)"
         );
@@ -2782,7 +2902,7 @@ mod tests {
         let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
-        qp_client.revoke_credential(&issuer, &cred_id);
+        qp_client.revoke_credential(&issuer, &cred_id, &None);
 
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         client.mint(&owner, &cred_id, &uri); // must panic — credential is revoked
@@ -2963,7 +3083,8 @@ mod tests {
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
-        client.burn_sbt(&owner, &token_id);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
+        client.burn_sbt(&owner, &token_id, &proof);
 
         // Token should no longer be retrievable after burn
         assert_eq!(client.get_tokens_by_owner(&owner).len(), 0);
@@ -2983,7 +3104,8 @@ mod tests {
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
-        client.burn_sbt(&owner, &token_id);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
+        client.burn_sbt(&owner, &token_id, &proof);
 
         // Attempting to get a burned token should panic
         let _ = client.get_token(&token_id);
@@ -3090,7 +3212,7 @@ mod tests {
         let _token_id = client.mint(&owner, &cred_id, &uri);
 
         // Revoke the credential, then attempt to log access — must be rejected.
-        qp_client.revoke_credential(&issuer, &cred_id);
+        qp_client.revoke_credential(&issuer, &cred_id, &None);
 
         let verifier = Address::generate(&env);
         client.track_credential_access(&cred_id, &verifier);
@@ -3201,7 +3323,8 @@ mod tests {
         let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
-        client.burn_sbt(&admin, &token_id);
+        let proof = Bytes::from_slice(&env, b"proof-of-residency");
+        client.burn_sbt(&owner, &token_id, &proof);
 
         let log = client.get_sbt_activity_log(&token_id);
         assert_eq!(log.len(), 2);
@@ -3253,7 +3376,7 @@ mod tests {
         let owner = Address::generate(&env);
         let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -3277,7 +3400,7 @@ mod tests {
         let other = Address::generate(&env);
         let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -3297,7 +3420,7 @@ mod tests {
         let owner = Address::generate(&env);
         let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -3306,7 +3429,7 @@ mod tests {
 
         // Delegate with DeFiCollateral scope
         let scope = UsageScope::DeFiCollateral(expires_at);
-        client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
 
         // Verify delegation is active for DeFi
         assert!(client.verify_delegated_sbt(&token_id, &delegatee));
@@ -3326,7 +3449,7 @@ mod tests {
         let owner = Address::generate(&env);
         let delegatee = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
@@ -3334,7 +3457,7 @@ mod tests {
 
         // Delegate with IdentityVerification scope
         let scope = UsageScope::IdentityVerification(expires_at);
-        client.delegate_sbt_usage(&owner, &token_id, &delegatee, &scope);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
 
         // verify_delegated_sbt should return false because it's only for DeFi protocols (DeFiCollateral scope)
         assert!(!client.verify_delegated_sbt(&token_id, &delegatee));
@@ -3350,12 +3473,12 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None);
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         let token_id = client.mint(&owner, &cred_id, &uri);
 
         let expires_at = env.ledger().timestamp() + 1_000;
         let scope = UsageScope::DeFiCollateral(expires_at);
-        client.delegate_sbt_usage(&owner, &token_id, &owner, &scope);
+        client.delegate_sbt_usage(&token_id, &owner, &scope);
     }
 }

@@ -50,7 +50,11 @@ mod migration_tests {
         let meta = Bytes::from_slice(env, b"QmTestHash000000000000000000000000");
         let mut last_id = 0u64;
         for i in 0..n {
-            let id = client.issue_credential(issuer, subject, &1u32, &meta, &None, &0u64);
+            // issue_credential rejects a second credential for the same
+            // (subject, issuer, credential_type) tuple, so vary the type
+            // per iteration to actually issue `n` distinct credentials.
+            let credential_type = (i as u32) + 1;
+            let id = client.issue_credential(issuer, subject, &credential_type, &meta, &None, &0u64);
             let data = Bytes::from_slice(env, &[b"metadata-for-cred-", &i.to_be_bytes()[..]].concat());
             client.set_credential_metadata(issuer, &id, &data, &CompressionType::None);
             last_id = id;
@@ -295,8 +299,14 @@ mod migration_tests {
 
         // ...and brand-new writes (new credentials) succeed too, landing directly
         // at the currently-active schema version without needing migration.
+        // credential_types 1..=30 were already used by issue_credentials_with_metadata above.
+        // Note: issue_credential itself doesn't tag a schema version — that
+        // only happens once schema-versioned metadata is actually written
+        // via set_credential_metadata (get_credential_metadata_schema
+        // otherwise defaults to 0, "issued before schema versioning").
         let fresh_meta = Bytes::from_slice(&env, b"brand-new-credential");
-        let new_id = client.issue_credential(&issuer, &subject, &1u32, &fresh_meta, &None, &1u64);
+        let new_id = client.issue_credential(&issuer, &subject, &31u32, &fresh_meta, &None, &1u64);
+        client.set_credential_metadata(&issuer, &new_id, &fresh_meta, &CompressionType::None);
         assert_eq!(client.get_credential_metadata_schema(&new_id), 2u32);
 
         // The migration can still be resumed and completed afterwards, on top of
@@ -305,7 +315,17 @@ mod migration_tests {
         while latest.status != MigrationStatus::Completed {
             latest = client.migrate_next_chunk(&admin, &2u32, &10u32);
         }
-        assert_eq!(latest.migrated_count, 30);
+        // Credential 20 was already written at the target schema by the concurrent
+        // set_credential_metadata call above, so the migration loop correctly counts
+        // it as skipped (idempotency guard) rather than migrated: 29 of the 30
+        // original credentials are actually transformed by the job itself.
+        assert_eq!(latest.migrated_count, 29);
+        assert_eq!(latest.skipped_count, 1);
+        // What matters end-to-end: every original credential lands on the target
+        // schema, regardless of whether the job or the concurrent write got there first.
+        for id in 1..=30u64 {
+            assert_eq!(client.get_credential_metadata_schema(&id), 2u32);
+        }
     }
 
     // ── Auth / error paths ───────────────────────────────────────────────────

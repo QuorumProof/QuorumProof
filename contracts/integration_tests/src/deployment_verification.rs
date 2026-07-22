@@ -98,17 +98,18 @@ mod deployment_verification {
 
         // Retrieve credential
         let credential = contracts.qp.get_credential(&cred_id);
-        assert_eq!(credential.holder, holder, "Credential holder mismatch");
+        assert_eq!(credential.subject, holder, "Credential holder mismatch");
         assert_eq!(credential.issuer, issuer, "Credential issuer mismatch");
 
         // Create quorum slice
-        let attestors = soroban_sdk::vec![&env, issuer];
-        let slice_id = contracts.qp.create_slice(&attestors, &1u32);
+        let attestors = soroban_sdk::vec![&env, issuer.clone()];
+        let weights = soroban_sdk::vec![&env, 1u32];
+        let slice_id = contracts.qp.create_slice(&issuer, &attestors, &weights, &1u32);
         assert_eq!(slice_id, 1, "First slice should have ID 1");
 
         // Attest credential
-        contracts.qp.attest(&cred_id, &slice_id);
-        let is_attested = contracts.qp.is_attested(&cred_id);
+        contracts.qp.attest(&issuer, &cred_id, &slice_id, &true, &None);
+        let is_attested = contracts.qp.is_attested(&cred_id, &slice_id);
         assert!(is_attested, "Credential should be attested");
     }
 
@@ -141,7 +142,7 @@ mod deployment_verification {
 
         // Verify state is consistent - first credential still exists
         let credential = contracts.qp.get_credential(&cred_id_1);
-        assert_eq!(credential.holder, holder, "State should be consistent after failed operation");
+        assert_eq!(credential.subject, holder, "State should be consistent after failed operation");
 
         // Verify we can continue normal operations
         let cred_id_2 = contracts.qp.issue_credential(
@@ -185,6 +186,6 @@ mod deployment_verification {
 
         // Verify credential still exists in QuorumProof
         let credential = contracts.qp.get_credential(&cred_id);
-        assert_eq!(credential.holder, holder, "Credential should still exist");
+        assert_eq!(credential.subject, holder, "Credential should still exist");
     }
 }

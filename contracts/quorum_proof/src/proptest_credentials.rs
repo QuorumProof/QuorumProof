@@ -81,7 +81,9 @@ mod proptest_credential_lifecycle {
 
             let mut prev = 0u64;
             for i in 0..n_creds {
-                let id = issue_one(&client, &env, &issuer, &subject, 1, i + 1);
+                // issue_credential rejects a repeat (subject, issuer,
+                // credential_type), so vary the type per iteration.
+                let id = issue_one(&client, &env, &issuer, &subject, (i as u32) + 1, i + 1);
                 prop_assert!(id > 0, "credential ID must be positive");
                 prop_assert!(id > prev, "credential IDs must be monotonically increasing");
                 prev = id;
@@ -132,7 +134,7 @@ mod proptest_credential_lifecycle {
             let slice_id = single_attestor_slice(&client, &env, &issuer, &attestor);
 
             // Revoke the credential
-            client.revoke_credential(&issuer, &cred_id);
+            client.revoke_credential(&issuer, &cred_id, &None);
 
             // Attempting to attest a revoked credential must panic
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -155,7 +157,7 @@ mod proptest_credential_lifecycle {
             let subject = Address::generate(&env);
 
             let cred_id = issue_one(&client, &env, &issuer, &subject, cred_type, meta_len);
-            client.revoke_credential(&issuer, &cred_id);
+            client.revoke_credential(&issuer, &cred_id, &None);
 
             let cred = client.get_credential(&cred_id);
             prop_assert!(cred.revoked, "revoked credential must have revoked=true");
@@ -175,10 +177,10 @@ mod proptest_credential_lifecycle {
             let subject = Address::generate(&env);
 
             let cred_id = issue_one(&client, &env, &issuer, &subject, cred_type, meta_len);
-            client.revoke_credential(&issuer, &cred_id);
+            client.revoke_credential(&issuer, &cred_id, &None);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                client.revoke_credential(&issuer, &cred_id);
+                client.revoke_credential(&issuer, &cred_id, &None);
             }));
             prop_assert!(result.is_err(), "double revocation must fail");
         }
@@ -200,7 +202,7 @@ mod proptest_credential_lifecycle {
             let cred_id = issue_one(&client, &env, &issuer, &subject, cred_type, meta_len);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                client.revoke_credential(&stranger, &cred_id);
+                client.revoke_credential(&stranger, &cred_id, &None);
             }));
             prop_assert!(result.is_err(), "non-issuer revocation must fail");
         }
@@ -333,7 +335,7 @@ mod proptest_credential_lifecycle {
             prop_assert_eq!(unique.len(), n_creds, "all credential IDs must be unique");
 
             // Revoking one must not affect others
-            client.revoke_credential(&issuer, &ids[0]);
+            client.revoke_credential(&issuer, &ids[0], &None);
             for &id in &ids[1..] {
                 let cred = client.get_credential(&id);
                 prop_assert!(!cred.revoked, "revoking one credential must not affect others");
@@ -529,7 +531,7 @@ mod proptest_credential_lifecycle {
         #[test]
         fn prop_random_issue_revoke_sequence(
             ops in prop::collection::vec(
-                (1u32..=20u32, 1usize..=20usize, any::<bool>()),
+                (1usize..=20usize, any::<bool>()),
                 5..=15,
             )
         ) {
@@ -540,11 +542,17 @@ mod proptest_credential_lifecycle {
 
             let mut issued: std::vec::Vec<(u64, bool)> = std::vec::Vec::new(); // (id, revoked)
 
-            for (cred_type, meta_len, do_revoke) in ops {
+            // issue_credential rejects a repeat (subject, issuer,
+            // credential_type), so credential_type is derived from the
+            // operation's position (guaranteed unique) rather than randomly
+            // generated — this test is about revoke-state tracking across
+            // an interleaved sequence, not about credential_type diversity.
+            for (i, (meta_len, do_revoke)) in ops.into_iter().enumerate() {
+                let cred_type = (i as u32) + 1;
                 let id = issue_one(&client, &env, &issuer, &subject, cred_type, meta_len);
                 let mut revoked = false;
                 if do_revoke {
-                    client.revoke_credential(&issuer, &id);
+                    client.revoke_credential(&issuer, &id, &None);
                     revoked = true;
                 }
                 issued.push((id, revoked));

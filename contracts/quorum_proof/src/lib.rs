@@ -5,7 +5,7 @@ extern crate std;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, Env, IntoVal, Map, String, Vec,
+    Bytes, Env, IntoVal, Map, String, Symbol, Vec,
 };
 use soroban_sdk::xdr::ToXdr;
 
@@ -2759,22 +2759,28 @@ impl QuorumProofContract {
 
     /// Internal: validate metadata bytes against a given schema version.
     fn validate_metadata_for_schema(
-        _env: &Env,
+        env: &Env,
         version: u32,
         metadata: &soroban_sdk::Bytes,
     ) {
-        match version {
-            1 => {
-                assert!(!metadata.is_empty(), "v1 metadata cannot be empty");
-                assert!(
-                    metadata.len() <= MAX_METADATA_BYTES_SIZE,
-                    "v1 metadata exceeds max size"
-                );
-            }
-            _ => {
-                panic_with_error!(_env, ContractError::InvalidInput);
-            }
+        // Every registered schema version (see register_metadata_schema)
+        // shares the same on-chain structural constraints — non-empty and
+        // within the max size — since the schema's actual field-level shape
+        // is described off-chain by `schema_hash`/`description` and isn't
+        // itself enforced on-chain. Only an *unregistered* version is
+        // rejected outright.
+        if version == 0 {
+            panic_with_error!(env, ContractError::InvalidInput);
         }
+        assert!(
+            env.storage().instance().has(&DataKey::MetadataSchema(version)),
+            "metadata schema version not registered"
+        );
+        assert!(!metadata.is_empty(), "metadata cannot be empty");
+        assert!(
+            metadata.len() <= MAX_METADATA_BYTES_SIZE,
+            "metadata exceeds max size"
+        );
     }
 
     /// Internal: set the metadata schema version for a credential.
@@ -5179,6 +5185,28 @@ impl QuorumProofContract {
         }
     }
 
+    /// Invalidate all attestation verification cache entries for a slice.
+    ///
+    /// Must be called whenever a slice's threshold (or anything else that
+    /// affects whether its current attestations still meet quorum) changes,
+    /// so `is_attested` can't keep serving a stale cached result for any
+    /// credential previously attested against this slice.
+    fn invalidate_verification_caches_for_slice(env: &Env, slice_id: u64) {
+        let credential_count = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::CredentialCount)
+            .unwrap_or(0u64);
+        if credential_count == 0 {
+            return;
+        }
+        for credential_id in 1..=credential_count {
+            env.storage()
+                .instance()
+                .remove(&DataKey2::AttestVerifyCache(credential_id, slice_id));
+        }
+    }
+
     // ── Issue #514: Revocation status cache helpers ───────────────────────────
 
     /// Get cached revocation status for a credential. Returns None if not cached.
@@ -6534,6 +6562,10 @@ impl QuorumProofContract {
             &DataKey::SubjectCredentials(credential.subject.clone()),
             &retained,
         );
+        // Issue #510: get_credentials_by_subject prefers SubjectCredentialIndex
+        // over the legacy SubjectCredentials list, so it must be kept in sync
+        // too or a transferred credential keeps showing up for the old subject.
+        Self::subject_index_remove(&env, credential.subject.clone(), credential_id);
 
         // Add to new subject's list
         let mut new_creds: Vec<u64> = env
@@ -6545,6 +6577,7 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey::SubjectCredentials(to.clone()), &new_creds);
+        Self::subject_index_add(&env, to.clone(), credential_id);
 
         // Update credential subject
         credential.subject = to;
@@ -7715,6 +7748,10 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Removing an attestor (and any resulting threshold clamp) can flip
+        // whether existing attestations still meet quorum, so any cached
+        // is_attested result for this slice is no longer trustworthy.
+        Self::invalidate_verification_caches_for_slice(&env, slice_id);
         // Issue #515: Update slice weight cache after removing attestor
         Self::set_slice_weight_cache(&env, slice_id, total_weight);
         let mut set: Map<Address, bool> = env
@@ -7903,6 +7940,10 @@ impl QuorumProofContract {
             &DataKey5::SliceThresholdType(slice_id),
             &ThresholdType::Absolute,
         );
+        // A changed threshold can flip whether the slice's existing
+        // attestations still meet quorum, so any cached is_attested result
+        // for this slice is no longer trustworthy.
+        Self::invalidate_verification_caches_for_slice(&env, slice_id);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -7978,6 +8019,10 @@ impl QuorumProofContract {
             &DataKey5::SliceThresholdType(slice_id),
             &ThresholdType::Percentage,
         );
+        // A changed threshold can flip whether the slice's existing
+        // attestations still meet quorum, so any cached is_attested result
+        // for this slice is no longer trustworthy.
+        Self::invalidate_verification_caches_for_slice(&env, slice_id);
 
         let audit_entry = ThresholdAuditEntry {
             slice_id,
@@ -10367,7 +10412,7 @@ impl QuorumProofContract {
                 ],
             );
             let result: bool = env
-                .invoke_contract(&zk_verifier_id, &symbol_short!("verify_c"), args);
+                .invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim"), args);
             results.push_back(result);
         }
         results
@@ -10543,7 +10588,7 @@ impl QuorumProofContract {
                 proof.into_val(&env),
             ],
         );
-        env.invoke_contract(&zk_verifier_id, &symbol_short!("verify_c"), args)
+        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim"), args)
     }
 
     /// Check if a caller is authorized to verify a credential.
@@ -10578,7 +10623,7 @@ impl QuorumProofContract {
             if credential.subject == caller {
                 let args = Vec::from_array(env, [caller.clone().into_val(env)]);
                 let tokens: Vec<u64> = env
-                    .invoke_contract(&sbt_registry_id, &symbol_short!("tokens_by"), args);
+                    .invoke_contract(&sbt_registry_id, &Symbol::new(env, "get_tokens_by_owner"), args);
                 let found = tokens.iter().any(|token_id| {
                     let t_args = Vec::from_array(env, [token_id.into_val(env)]);
                     let token: SoulboundToken = env
@@ -10647,7 +10692,7 @@ impl QuorumProofContract {
                 proof.into_val(&env),
             ],
         );
-        env.invoke_contract(&zk_verifier_id, &symbol_short!("verify_an"), args)
+        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim_anonymous"), args)
     }
 
     /// Register a human-readable label for a credential type with optional parent type.
@@ -12841,7 +12886,7 @@ impl QuorumProofContract {
         if let Some(registry_id) = sbt_registry_id {
             let t_args = Vec::from_array(&env, [prev_subject.clone().into_val(&env)]);
             let tokens: Vec<u64> = env
-                .invoke_contract(&registry_id, &symbol_short!("tokens_by"), t_args);
+                .invoke_contract(&registry_id, &Symbol::new(&env, "get_tokens_by_owner"), t_args);
             for i in 0..tokens.len() {
                 let token_id = tokens.get(i).unwrap();
                 let tk_args = Vec::from_array(&env, [token_id.into_val(&env)]);
@@ -12858,7 +12903,7 @@ impl QuorumProofContract {
                     );
                     env.invoke_contract::<()>(
                         &registry_id,
-                        &symbol_short!("recover_s"),
+                        &Symbol::new(&env, "recover_sbt"),
                         rc_args,
                     );
                 }
@@ -15375,6 +15420,10 @@ impl QuorumProofContract {
             .instance()
             .set(&DataKey::Slice(slice_id), &slice);
         Self::set_slice_weight_cache(&env, slice_id, new_total);
+        // Rebalanced weights/threshold can flip whether the slice's existing
+        // attestations still meet quorum, so any cached is_attested result
+        // for this slice is no longer trustworthy.
+        Self::invalidate_verification_caches_for_slice(&env, slice_id);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -15521,6 +15570,21 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, LedgerInfo};
     use soroban_sdk::{vec, Bytes, Env, FromVal, IntoVal};
 
+    /// A 256-byte "proof" that passes zk_verifier's mock Groth16 structural
+    /// checks (non-zero, non-0xFF A/C points) — NOT a real cryptographic
+    /// proof, just a fixture shape zk_verifier::groth16_verify accepts.
+    /// Must be paired with a registered verifying key (`set_verifying_key`)
+    /// or verify_claim panics with "verifying key not set" before even
+    /// looking at the proof bytes.
+    fn structurally_valid_proof(env: &Env) -> Bytes {
+        let mut proof_bytes = [0u8; 256];
+        proof_bytes[0] = 1;
+        proof_bytes[63] = 1;
+        proof_bytes[192] = 1;
+        proof_bytes[255] = 1;
+        Bytes::from_slice(env, &proof_bytes)
+    }
+
     // --- Deployment verification tests ---
 
     #[test]
@@ -15591,6 +15655,18 @@ mod tests {
         client.issue_credential(issuer, subject, &credential_type, &metadata, &None, &0u64)
     }
 
+    // NOTE: this whole block originally exercised a standalone "revocation
+    // registry" API (initiate_revocation_with_lock / get_revocation_registry_request /
+    // finalize_revocation_request / cancel_revocation_request /
+    // batch_initiate_revocations / batch_finalize_revocations /
+    // get_revocation_metrics / emergency_revoke_credential / is_revocation_agent /
+    // initiate_revocation). None of those are exposed as contract entry points
+    // any more (the RevocationRequest/RegistryRevocationStatus-based private
+    // helpers they'd have called still exist in this file but have no public
+    // wrapper — see production-bug note in the task report). These tests are
+    // rewritten against the current time-locked revocation API: schedule_revocation /
+    // finalize_scheduled_revocation / cancel_scheduled_revocation /
+    // add_revocation_agent / remove_revocation_agent / get_revocation_audit_trail.
     #[test]
     fn test_revocation_registry_time_lock_window_behavior() {
         let env = Env::default();
@@ -15598,48 +15674,49 @@ mod tests {
         set_ledger_timestamp(&env, 1_000);
         let issuer = Address::generate(&env);
         let holder = Address::generate(&env);
+        let agent = Address::generate(&env);
         let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
 
-        let request_id = client.initiate_revocation_with_lock(
-            &issuer,
+        // Delegate to an agent: finalize_scheduled_revocation lets the
+        // *issuer* finalize early, so we exercise the time-lock itself
+        // through a delegated agent instead.
+        client.add_revocation_agent(&issuer, &agent);
+
+        client.schedule_revocation(
+            &agent,
             &cred_id,
-            &String::from_str(&env, "key compromise investigation"),
-            &100u64,
+            &Some(100u64),
+            &Some(String::from_str(&env, "key compromise investigation")),
         );
-        let request = client.get_revocation_registry_request(&request_id).unwrap();
-        assert_eq!(request.status, RegistryRevocationStatus::Pending);
-        assert_eq!(request.timestamp, 1_000);
-        assert_eq!(request.unlocks_at, 1_100);
         assert!(!client.is_revoked(&cred_id));
 
         set_ledger_timestamp(&env, 1_050);
         let early = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.finalize_revocation_request(&issuer, &request_id);
+            client.finalize_scheduled_revocation(&agent, &cred_id);
         }));
         assert!(early.is_err(), "request should not finalize before unlock");
         assert!(!client.is_revoked(&cred_id));
 
-        client.cancel_revocation_request(
-            &issuer,
-            &request_id,
-            &String::from_str(&env, "incident cleared"),
-        );
-        let cancelled = client.get_revocation_registry_request(&request_id).unwrap();
-        assert_eq!(cancelled.status, RegistryRevocationStatus::Cancelled);
+        client.cancel_scheduled_revocation(&agent, &cred_id);
+        let after_cancel = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.finalize_scheduled_revocation(&agent, &cred_id);
+        }));
+        assert!(after_cancel.is_err(), "cancelled request must not finalize");
         assert!(!client.is_revoked(&cred_id));
 
-        let second_id = client.initiate_revocation_with_lock(
-            &issuer,
+        client.schedule_revocation(
+            &agent,
             &cred_id,
-            &String::from_str(&env, "confirmed compromise"),
-            &100u64,
+            &Some(100u64),
+            &Some(String::from_str(&env, "confirmed compromise")),
         );
         set_ledger_timestamp(&env, 1_200);
-        let active = client.finalize_revocation_request(&issuer, &second_id);
-        assert_eq!(active.status, RegistryRevocationStatus::Active);
+        client.finalize_scheduled_revocation(&agent, &cred_id);
         assert!(client.is_revoked(&cred_id));
-        let audit = client.get_revocation_registry_audit(&second_id);
-        assert_eq!(audit.len(), 3);
+
+        // Scheduled, Cancelled, Scheduled, Finalized.
+        let audit = client.get_revocation_audit_trail(&cred_id);
+        assert_eq!(audit.len(), 4);
     }
 
     #[test]
@@ -15653,87 +15730,101 @@ mod tests {
         let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
 
         let unauthorized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.initiate_revocation(
+            client.schedule_revocation(
                 &stranger,
                 &cred_id,
-                &String::from_str(&env, "not authorized"),
+                &Some(1u64),
+                &Some(String::from_str(&env, "not authorized")),
             );
         }));
-        assert!(unauthorized.is_err(), "stranger must not initiate revocation");
+        assert!(unauthorized.is_err(), "stranger must not schedule revocation");
 
         client.add_revocation_agent(&issuer, &agent);
-        assert!(client.is_revocation_agent(&issuer, &agent));
-        let request_id = client.initiate_revocation_with_lock(
+        client.schedule_revocation(
             &agent,
             &cred_id,
-            &String::from_str(&env, "agent detected compromise"),
-            &1u64,
+            &Some(1u64),
+            &Some(String::from_str(&env, "agent detected compromise")),
         );
         set_ledger_timestamp(&env, 2);
-        client.finalize_revocation_request(&agent, &request_id);
+        client.finalize_scheduled_revocation(&agent, &cred_id);
         assert!(client.is_revoked(&cred_id));
     }
 
     #[test]
     fn test_revocation_registry_batch_operations_over_100_requests() {
+        // batch_initiate_revocations / batch_finalize_revocations no longer
+        // exist as a distinct bulk API; the closest current equivalent is
+        // scheduling and finalizing the same volume of revocations one at a
+        // time via schedule_revocation / finalize_scheduled_revocation.
         let env = Env::default();
+        // 101 full issue+schedule+finalize cycles exceed the default test
+        // budget (this loop replaced a single batch call — see comment
+        // above — with per-item entry points, which costs much more CPU).
+        env.budget().reset_unlimited();
         let (client, _) = setup(&env);
         let issuer = Address::generate(&env);
-        let mut inputs: Vec<RevocationInput> = Vec::new(&env);
-        let mut request_ids_for_finalize: Vec<u64> = Vec::new(&env);
-        let reason = String::from_str(&env, "issuer key rotation");
+        let mut cred_ids: Vec<u64> = Vec::new(&env);
 
         for i in 0..101u32 {
             let holder = Address::generate(&env);
             let cred_id = issue_test_credential(&env, &client, &issuer, &holder, i + 1);
-            inputs.push_back(RevocationInput {
-                credential_id: cred_id,
-                reason: reason.clone(),
-            });
+            client.schedule_revocation(
+                &issuer,
+                &cred_id,
+                &Some(10u64),
+                &Some(String::from_str(&env, "issuer key rotation")),
+            );
+            cred_ids.push_back(cred_id);
         }
-
-        let request_ids = client.batch_initiate_revocations(&issuer, &inputs, &10u64);
-        assert_eq!(request_ids.len(), 101);
-        for request_id in request_ids.iter() {
-            request_ids_for_finalize.push_back(request_id);
-        }
+        assert_eq!(cred_ids.len(), 101);
 
         set_ledger_timestamp(&env, 11);
-        let finalized = client.batch_finalize_revocations(&issuer, &request_ids_for_finalize);
-        assert_eq!(finalized, 101u32);
-        let metrics = client.get_revocation_metrics();
-        assert_eq!(metrics.request_count, 101);
-        assert_eq!(metrics.active_count, 101);
+        for cred_id in cred_ids.iter() {
+            client.finalize_scheduled_revocation(&issuer, &cred_id);
+        }
+
+        for cred_id in cred_ids.iter() {
+            assert!(client.is_revoked(&cred_id), "credential {} should be revoked", cred_id);
+        }
     }
 
     #[test]
     fn test_revocation_registry_emergency_fast_track_is_admin_only() {
+        // emergency_revoke_credential (an admin-only fast-track revoke) no
+        // longer exists; there is no current API letting the ledger admin
+        // bypass issuer/agent authorization for an arbitrary credential. The
+        // closest current equivalent behavior: the *issuer* can fast-track a
+        // revocation with a zero-length time-lock, while an unrelated admin
+        // address (who is neither issuer nor delegated agent) still cannot
+        // touch the credential at all.
         let env = Env::default();
         let (client, admin) = setup(&env);
         let issuer = Address::generate(&env);
         let holder = Address::generate(&env);
-        let stranger = Address::generate(&env);
         let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
 
         let unauthorized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.emergency_revoke_credential(
-                &stranger,
+            client.schedule_revocation(
+                &admin,
                 &cred_id,
-                &String::from_str(&env, "security incident"),
+                &Some(0u64),
+                &Some(String::from_str(&env, "security incident")),
             );
         }));
-        assert!(unauthorized.is_err(), "only admin can emergency revoke");
-
-        let request_id = client.emergency_revoke_credential(
-            &admin,
-            &cred_id,
-            &String::from_str(&env, "security incident"),
+        assert!(
+            unauthorized.is_err(),
+            "admin has no special revocation authority over an issuer's credential"
         );
-        let request = client.get_revocation_registry_request(&request_id).unwrap();
-        assert_eq!(request.status, RegistryRevocationStatus::Active);
+
+        client.schedule_revocation(
+            &issuer,
+            &cred_id,
+            &Some(0u64),
+            &Some(String::from_str(&env, "security incident")),
+        );
+        client.finalize_scheduled_revocation(&issuer, &cred_id);
         assert!(client.is_revoked(&cred_id));
-        let metrics = client.get_revocation_metrics();
-        assert_eq!(metrics.emergency_count, 1);
     }
 
     #[test]
@@ -15750,14 +15841,14 @@ mod tests {
         client.attest(&attestor, &cred_id, &slice_id, &true, &None);
         assert!(client.verify_credential(&issuer, &cred_id, &slice_id));
 
-        let request_id = client.initiate_revocation_with_lock(
+        client.schedule_revocation(
             &issuer,
             &cred_id,
-            &String::from_str(&env, "verification should fail after revoke"),
-            &1u64,
+            &Some(1u64),
+            &Some(String::from_str(&env, "verification should fail after revoke")),
         );
         set_ledger_timestamp(&env, 2);
-        client.finalize_revocation_request(&issuer, &request_id);
+        client.finalize_scheduled_revocation(&issuer, &cred_id);
         assert!(!client.verify_credential(&issuer, &cred_id, &slice_id));
     }
 
@@ -15959,7 +16050,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "attestors exceed maximum allowed per slice")]
+    #[should_panic(expected = "metadata_hash cannot be empty")]
     fn test_empty_metadata_hash_rejection() {
         let env = Env::default();
         env.mock_all_auths();
@@ -16199,7 +16290,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "threshold cannot exceed attestors length")]
+    #[should_panic(expected = "threshold cannot exceed total weight sum")]
     fn test_threshold_exceeds_attestors() {
         let env = Env::default();
         env.mock_all_auths();
@@ -16392,7 +16483,7 @@ mod tests {
         client.set_attestation_window(&issuer, &cid, &1000u64, &2000u64);
         set_ledger_timestamp(&env, 500); // before window
 
-        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
+        let result = client.try_attest(&attestor, &cid, &slice_id, &true, &None);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -16421,7 +16512,7 @@ mod tests {
         client.set_attestation_window(&issuer, &cid, &500u64, &1000u64);
         set_ledger_timestamp(&env, 1500); // after window
 
-        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
+        let result = client.try_attest(&attestor, &cid, &slice_id, &true, &None);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -16633,7 +16724,7 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
-        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let cred2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -16668,7 +16759,7 @@ mod tests {
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
         let cred1 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
-        let cred2 = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        let cred2 = client.issue_credential(&issuer, &subject, &2u32, &metadata, &None, &0u64);
 
         let mut attestors = Vec::new(&env);
         attestors.push_back(attestor.clone());
@@ -16708,7 +16799,7 @@ mod tests {
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
         client.attest(&attestor, &cred_id, &slice_id, &true, &None);
-        client.revoke_credential(&issuer, &cred_id);
+        client.revoke_credential(&issuer, &cred_id, &None);
 
         let mut cred_ids = Vec::new(&env);
         cred_ids.push_back(cred_id);
@@ -16823,7 +16914,7 @@ mod tests {
     #[test]
     fn test_verify_engineer_success() {
         use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -16837,6 +16928,8 @@ mod tests {
         let zk_admin = Address::generate(&env);
         ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
         sbt.initialize(&zk_admin, &qp_id);
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -16847,7 +16940,7 @@ mod tests {
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
 
-        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let proof = structurally_valid_proof(&env);
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
@@ -16863,7 +16956,7 @@ mod tests {
 
     #[test]
     fn test_verify_engineer_fails_without_sbt() {
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths();
@@ -16900,7 +16993,7 @@ mod tests {
     #[test]
     fn test_verify_engineer_fails_with_empty_proof() {
         use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -16914,6 +17007,8 @@ mod tests {
         let zk_admin = Address::generate(&env);
         ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
         sbt.initialize(&zk_admin, &qp_id);
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -16940,7 +17035,7 @@ mod tests {
     #[test]
     fn test_verify_engineer_with_active_delegate_succeeds() {
         use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -16954,6 +17049,8 @@ mod tests {
         let zk_admin = Address::generate(&env);
         ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
         sbt.initialize(&zk_admin, &qp_id);
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -16962,12 +17059,16 @@ mod tests {
 
         let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
-        let token_id = sbt.mint(&subject, &cred_id, &sbt_uri);
+        sbt.mint(&subject, &cred_id, &sbt_uri);
 
+        // `is_authorized_verifier` checks quorum_proof's own verification-delegation
+        // registry (`delegate_verification`), not sbt_registry's SBT-usage delegation
+        // (`delegate_sbt_rights`) — those are separate delegation mechanisms for
+        // separate concerns.
         let expires_at = env.ledger().timestamp() + 10_000;
-        sbt.delegate_sbt_rights(&subject, &token_id, &hr_delegate, &expires_at);
+        qp.delegate_verification(&subject, &cred_id, &hr_delegate, &expires_at);
 
-        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let proof = structurally_valid_proof(&env);
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
@@ -16984,7 +17085,7 @@ mod tests {
     #[test]
     fn test_verify_engineer_with_revoked_delegate_fails() {
         use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -17029,7 +17130,7 @@ mod tests {
     #[test]
     fn test_verify_engineer_with_unauthorized_verifier_fails() {
         use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -17177,7 +17278,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "DuplicateCredential")]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn test_batch_issue_credentials_duplicate_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -17384,7 +17485,7 @@ mod tests {
 
         assert_eq!(client.get_credential_count(), 3);
 
-        client.revoke_credential(&issuer, &id1);
+        client.revoke_credential(&issuer, &id1, &None);
         assert_eq!(client.get_credential_count(), 3);
     }
 
@@ -17433,7 +17534,7 @@ mod tests {
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
         // Revoke the credential
-        client.revoke_credential(&issuer, &cred_id);
+        client.revoke_credential(&issuer, &cred_id, &None);
 
         // Attempting to attest a revoked credential must panic
         client.attest(&attestor, &cred_id, &slice_id, &true, &None);
@@ -17721,7 +17822,7 @@ mod tests {
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Subject should not be able to revoke
-        client.revoke_credential(&subject, &id);
+        client.revoke_credential(&subject, &id, &None);
     }
 
     #[test]
@@ -17739,14 +17840,14 @@ mod tests {
         let id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Unauthorized address should not be able to revoke
-        client.revoke_credential(&unauthorized, &id);
+        client.revoke_credential(&unauthorized, &id, &None);
     }
 
     // Issue #48: Full Credential Lifecycle End-to-End
     #[test]
     fn test_full_credential_lifecycle_e2e() {
         use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
-        use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -17762,6 +17863,8 @@ mod tests {
         ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
         sbt.initialize(&zk_admin, &qp_id);
         qp.initialize(&zk_admin);
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -17821,7 +17924,7 @@ mod tests {
         assert_eq!(token.owner, subject);
 
         // Step 6: Verify ZK claim via verify_engineer
-        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let proof = structurally_valid_proof(&env);
         let verified = qp.verify_engineer(
             &sbt_id,
             &zk_id,
@@ -18097,21 +18200,21 @@ mod tests {
 
     #[test]
     fn test_is_attestation_expired_true_after_expiry() {
+        // is_attestation_expired reflects the issuer-configured blanket
+        // expiry set via set_attestation_expiry (DataKey::AttestationExpiry)
+        // — it is independent of the per-attestation-record `expires_at`
+        // passed to `attest`, which only affects that attestor's
+        // contribution to is_attested's weighted sum.
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
         set_ledger_timestamp(&env, 1_000);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
-        let attestor = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
-        let mut attestors = Vec::new(&env);
-        attestors.push_back(attestor.clone());
-        let mut weights = Vec::new(&env);
-        weights.push_back(1u32);
-        let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.attest(&attestor, &cred_id, &slice_id, &true, &Some(3_000u64));
+        client.set_attestation_expiry(&issuer, &cred_id, &3_000u64);
+        assert!(!client.is_attestation_expired(&cred_id));
 
         set_ledger_timestamp(&env, 4_000);
         assert!(client.is_attestation_expired(&cred_id));
@@ -18164,6 +18267,10 @@ mod tests {
 
     #[test]
     fn test_renew_attestation_extends_expiry() {
+        // renew_attestation only touches the per-attestation-record
+        // `expires_at` that feeds into is_attested's weighted sum — it is
+        // unrelated to is_attestation_expired (see
+        // test_is_attestation_expired_true_after_expiry above).
         let env = Env::default();
         env.mock_all_auths();
         let (client, _) = setup(&env);
@@ -18179,15 +18286,14 @@ mod tests {
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
         client.attest(&attestor, &cred_id, &slice_id, &true, &Some(3_000u64));
+        assert!(client.is_attested(&cred_id, &slice_id));
 
         // Expire the attestation
         set_ledger_timestamp(&env, 4_000);
-        assert!(client.is_attestation_expired(&cred_id));
         assert!(!client.is_attested(&cred_id, &slice_id));
 
         // Renew
         client.renew_attestation(&attestor, &cred_id, &10_000u64);
-        assert!(!client.is_attestation_expired(&cred_id));
         assert!(client.is_attested(&cred_id, &slice_id));
 
         let records = client.get_attestation_records(&cred_id);
@@ -18680,7 +18786,7 @@ mod tests {
         let client = QuorumProofContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        // Set admin manually if needed
+        client.initialize(&admin);
         client.set_max_attestors_per_slice(&admin, &30u32);
 
         // Verify new max is set
@@ -18697,6 +18803,7 @@ mod tests {
 
         let creator = Address::generate(&env);
         let admin = Address::generate(&env);
+        client.initialize(&admin);
 
         // Set max attestors to 2
         client.set_max_attestors_per_slice(&admin, &2u32);
@@ -19116,7 +19223,7 @@ mod feature_tests {
         let mut weights = Vec::new(&env);
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
-        client.revoke_credential(&issuer, &cid);
+        client.revoke_credential(&issuer, &cid, &None);
         // Attest after revocation — must panic
         client.attest(&attestor, &cid, &slice_id, &true, &None);
     }
@@ -19185,7 +19292,7 @@ mod feature_tests {
         client.set_attestation_window(&issuer, &cid, &1000u64, &2000u64);
         set_ledger_timestamp(&env, 500); // before window
 
-        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
+        let result = client.try_attest(&attestor, &cid, &slice_id, &true, &None);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -19214,7 +19321,7 @@ mod feature_tests {
         client.set_attestation_window(&issuer, &cid, &500u64, &1000u64);
         set_ledger_timestamp(&env, 1500); // after window
 
-        let result = client.try_attest(&attestor, &cid, &slice_id, &None);
+        let result = client.try_attest(&attestor, &cid, &slice_id, &true, &None);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -20422,7 +20529,7 @@ mod feature_tests {
     #[ignore]
     fn test_verification_stats_increments_on_success() {
         use sbt_registry::SbtRegistryContract;
-        use zk_verifier::{ClaimType, ZkVerifierContract};
+        use zk_verifier::ZkVerifierContract;
 
         let env = Env::default();
         env.mock_all_auths();
@@ -20503,7 +20610,7 @@ mod feature_tests {
     #[ignore]
     fn test_verification_stats_accumulates_across_calls() {
         use sbt_registry::SbtRegistryContract;
-        use zk_verifier::{ClaimType, ZkVerifierContract};
+        use zk_verifier::ZkVerifierContract;
 
         let env = Env::default();
         env.mock_all_auths();

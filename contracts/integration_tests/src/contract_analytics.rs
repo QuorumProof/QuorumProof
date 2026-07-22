@@ -48,7 +48,7 @@ mod contract_analytics {
         // Issue credentials of different types
         for i in 0..10 {
             let holder = soroban_sdk::Address::generate(&env);
-            let cred_type = (i % 3) as u32; // 3 different types
+            let cred_type = (i % 3) as u32 + 1; // 3 different types, credential_type must be > 0
 
             let cred_id = setup.qp.issue_credential(
                 &issuer,
@@ -108,22 +108,24 @@ mod contract_analytics {
         );
 
         // Create slices for attestation
-        let attestors_1 = soroban_sdk::vec![&env, issuer1];
-        let slice_id_1 = setup.qp.create_slice(&attestors_1, &1u32);
+        let attestors_1 = soroban_sdk::vec![&env, issuer1.clone()];
+        let weights_1 = soroban_sdk::vec![&env, 1u32];
+        let slice_id_1 = setup.qp.create_slice(&issuer1, &attestors_1, &weights_1, &1u32);
 
-        let attestors_2 = soroban_sdk::vec![&env, issuer2];
-        let slice_id_2 = setup.qp.create_slice(&attestors_2, &1u32);
+        let attestors_2 = soroban_sdk::vec![&env, issuer2.clone()];
+        let weights_2 = soroban_sdk::vec![&env, 1u32];
+        let slice_id_2 = setup.qp.create_slice(&issuer2, &attestors_2, &weights_2, &1u32);
 
         // Track attestation patterns
         let mut attestation_count = 0;
         let mut attestation_by_slice = std::collections::HashMap::new();
 
         // Attest credentials
-        setup.qp.attest(&cred_id_1, &slice_id_1);
+        setup.qp.attest(&issuer1, &cred_id_1, &slice_id_1, &true, &None);
         attestation_count += 1;
         *attestation_by_slice.entry(slice_id_1).or_insert(0) += 1;
 
-        setup.qp.attest(&cred_id_2, &slice_id_2);
+        setup.qp.attest(&issuer2, &cred_id_2, &slice_id_2, &true, &None);
         attestation_count += 1;
         *attestation_by_slice.entry(slice_id_2).or_insert(0) += 1;
 
@@ -159,7 +161,7 @@ mod contract_analytics {
         // Issue credentials
         for i in 0..5 {
             let holder = soroban_sdk::Address::generate(&env);
-            let cred_type = (i % 2) as u32;
+            let cred_type = (i % 2) as u32 + 1; // credential_type must be > 0
 
             let cred_id = setup.qp.issue_credential(
                 &issuer,
@@ -179,10 +181,18 @@ mod contract_analytics {
             report.total_sbt_minted += 1;
         }
 
-        // Create slices
+        // Create slices. Each slice needs enough total attestor weight to
+        // support its threshold (create_slice rejects threshold > total
+        // weight), so give each slice `threshold` single-weight attestors.
         for threshold in 1..=3 {
-            let attestors = soroban_sdk::vec![&env, issuer];
-            let _slice_id = setup.qp.create_slice(&attestors, &(threshold as u32));
+            let mut attestors = soroban_sdk::Vec::new(&env);
+            let mut weights = soroban_sdk::Vec::new(&env);
+            for _ in 0..threshold {
+                attestors.push_back(soroban_sdk::Address::generate(&env));
+                weights.push_back(1u32);
+            }
+            let _slice_id =
+                setup.qp.create_slice(&issuer, &attestors, &weights, &(threshold as u32));
             report.total_slices_created += 1;
             *report.slice_thresholds.entry(threshold as u32).or_insert(0) += 1;
         }
@@ -212,11 +222,14 @@ mod contract_analytics {
         // Attempt operations
         for i in 0..total_operations {
             if i < 8 {
-                // Successful operations
+                // Successful operations. issue_credential rejects a repeat
+                // (subject, issuer, credential_type), so vary the type per
+                // iteration to actually issue 8 distinct credentials.
+                let cred_type = (i as u32) + 1;
                 let _cred_id = setup.qp.issue_credential(
                     &issuer,
                     &holder,
-                    &1u32,
+                    &cred_type,
                     &metadata,
                     &None,
                     &0u64,
@@ -248,8 +261,10 @@ mod contract_analytics {
         let issuer = soroban_sdk::Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
 
-        let mut active_holders = std::collections::HashSet::new();
-        let mut active_issuers = std::collections::HashSet::new();
+        // soroban_sdk::Address does not implement std::hash::Hash, so track
+        // distinct addresses with a linear-scan Vec instead of a HashSet.
+        let mut active_holders: std::vec::Vec<soroban_sdk::Address> = std::vec::Vec::new();
+        let mut active_issuers: std::vec::Vec<soroban_sdk::Address> = std::vec::Vec::new();
 
         // Track active users
         for _ in 0..5 {
@@ -263,8 +278,12 @@ mod contract_analytics {
                 &0u64,
             );
 
-            active_holders.insert(holder);
-            active_issuers.insert(issuer);
+            if !active_holders.contains(&holder) {
+                active_holders.push(holder);
+            }
+            if !active_issuers.contains(&issuer) {
+                active_issuers.push(issuer.clone());
+            }
         }
 
         assert_eq!(active_holders.len(), 5, "Should have 5 active holders");
@@ -300,9 +319,10 @@ mod contract_analytics {
         lifecycle_metrics.issued += 1;
 
         // Attest credential
-        let attestors = soroban_sdk::vec![&env, issuer];
-        let slice_id = setup.qp.create_slice(&attestors, &1u32);
-        setup.qp.attest(&cred_id, &slice_id);
+        let attestors = soroban_sdk::vec![&env, issuer.clone()];
+        let weights = soroban_sdk::vec![&env, 1u32];
+        let slice_id = setup.qp.create_slice(&issuer, &attestors, &weights, &1u32);
+        setup.qp.attest(&issuer, &cred_id, &slice_id, &true, &None);
         lifecycle_metrics.attested += 1;
 
         // Mint SBT

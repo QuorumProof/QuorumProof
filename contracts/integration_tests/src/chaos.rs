@@ -2,7 +2,7 @@
 // Simulates contract call failures, verifies graceful degradation,
 // and exercises boundary conditions across contract boundaries.
 
-use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
+use quorum_proof::{ClaimType as QpClaimType, QuorumProofContract, QuorumProofContractClient};
 use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
 use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 use soroban_sdk::{testutils::Address as _, Bytes, BytesN, Env, Vec};
@@ -15,7 +15,10 @@ struct Contracts<'a> {
 }
 
 fn setup(env: &Env) -> Contracts<'_> {
-    env.mock_all_auths();
+    // verify_engineer makes a nested cross-contract call to zk_verifier that
+    // requires zk_admin's auth, which isn't part of the root invocation —
+    // plain mock_all_auths() only mocks auth tied to the root call.
+    env.mock_all_auths_allowing_non_root_auth();
     let admin = soroban_sdk::Address::generate(env);
 
     let qp_id = env.register_contract(None, QuorumProofContract);
@@ -63,7 +66,7 @@ fn chaos_revoke_after_mint_graceful_degradation() {
     c.sbt.mint(&engineer, &cred_id, &uri);
 
     // Chaos injection: revoke the credential after the SBT exists
-    c.qp.revoke_credential(&issuer, &cred_id);
+    c.qp.revoke_credential(&issuer, &cred_id, &None);
 
     // System must degrade gracefully — no panic, deterministic result
     let result = c.qp.verify_engineer(
@@ -72,7 +75,7 @@ fn chaos_revoke_after_mint_graceful_degradation() {
         &c.admin,
         &engineer,
         &cred_id,
-        &ClaimType::HasDegree,
+        &QpClaimType::HasDegree,
         &valid_proof(&env),
         &None,
     );
@@ -100,7 +103,7 @@ fn chaos_empty_proof_returns_false() {
         &c.admin,
         &engineer,
         &cred_id,
-        &ClaimType::HasDegree,
+        &QpClaimType::HasDegree,
         &empty_proof,
         &None,
     );
@@ -121,7 +124,7 @@ fn chaos_nonexistent_credential_returns_false() {
         &c.admin,
         &engineer,
         &9999u64,
-        &ClaimType::HasDegree,
+        &QpClaimType::HasDegree,
         &valid_proof(&env),
         &None,
     );
@@ -139,7 +142,7 @@ fn chaos_mint_revoked_credential_panics() {
 
     let cred_id =
         c.qp.issue_credential(&issuer, &holder, &1u32, &metadata(&env), &None, &0u64);
-    c.qp.revoke_credential(&issuer, &cred_id);
+    c.qp.revoke_credential(&issuer, &cred_id, &None);
 
     let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
     // Cross-contract call to is_revoked must cause SBT mint to reject
@@ -165,7 +168,7 @@ fn chaos_attest_after_revocation_panics() {
     let slice_id = c.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
     // Chaos: state changes between slice creation and attestation
-    c.qp.revoke_credential(&issuer, &cred_id);
+    c.qp.revoke_credential(&issuer, &cred_id, &None);
     c.qp.attest(&attestor, &cred_id, &slice_id, &true, &None); // must reject
 }
 
@@ -262,7 +265,7 @@ fn chaos_mismatched_credential_id_returns_false() {
         &c.admin,
         &engineer,
         &(cred_id + 1),
-        &ClaimType::HasDegree,
+        &QpClaimType::HasDegree,
         &valid_proof(&env),
         &None,
     );

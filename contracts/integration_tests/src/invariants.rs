@@ -77,7 +77,7 @@ fn invariant_revocation_is_permanent() {
     assert!(!c.qp.is_revoked(&cred_id));
 
     let count_before_revoke = c.qp.get_credential_count();
-    c.qp.revoke_credential(&issuer, &cred_id);
+    c.qp.revoke_credential(&issuer, &cred_id, &None);
 
     assert!(
         c.qp.is_revoked(&cred_id),
@@ -121,12 +121,17 @@ fn invariant_sbt_count_matches_ownership() {
         "invariant violated: get_tokens_by_owner must return exactly 1 token"
     );
 
-    c.sbt.burn_sbt(&holder, &token_id);
+    let proof = Bytes::from_slice(&env, b"proof-of-residency");
+    c.sbt.burn_sbt(&holder, &token_id, &proof);
 
+    // sbt_count is a high-water mark of tokens ever minted (used to
+    // generate the next token ID), not a live count, so burning does not
+    // decrease it — ownership tracking (get_tokens_by_owner) is the source
+    // of truth for "does this holder currently hold any live tokens".
     assert_eq!(
         c.sbt.sbt_count(),
-        0,
-        "invariant violated: sbt_count must drop to 0 after burn"
+        1,
+        "invariant violated: sbt_count (a high-water mark) must not decrease after burn"
     );
     assert_eq!(
         c.sbt.get_tokens_by_owner(&holder).len(),

@@ -52,14 +52,15 @@ mod contract_upgrade_testing {
             &0u64,
         );
 
-        let attestors = soroban_sdk::vec![&env, issuer];
-        let slice_id = setup.qp.create_slice(&attestors, &1u32);
+        let attestors = soroban_sdk::vec![&env, issuer.clone()];
+        let weights = soroban_sdk::vec![&env, 1u32];
+        let slice_id = setup.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        setup.qp.attest(&cred_id_1, &slice_id);
+        setup.qp.attest(&issuer, &cred_id_1, &slice_id, &true, &None);
 
         // Verify state before upgrade
         let cred_before = setup.qp.get_credential(&cred_id_1);
-        assert_eq!(cred_before.holder, holder, "Credential holder should be preserved");
+        assert_eq!(cred_before.subject, holder, "Credential holder should be preserved");
         assert_eq!(cred_before.issuer, issuer, "Credential issuer should be preserved");
 
         let slice_before = setup.qp.get_slice(&slice_id);
@@ -101,7 +102,7 @@ mod contract_upgrade_testing {
             let cred_id = setup.qp.issue_credential(
                 &issuer,
                 &holder,
-                &(i as u32),
+                &(i as u32 + 1), // credential_type must be > 0
                 &metadata,
                 &None,
                 &0u64,
@@ -112,7 +113,7 @@ mod contract_upgrade_testing {
         // Verify all credentials exist
         for (i, &cred_id) in cred_ids.iter().enumerate() {
             let cred = setup.qp.get_credential(&cred_id);
-            assert_eq!(cred.holder, holder, "Credential {} holder mismatch", i);
+            assert_eq!(cred.subject, holder, "Credential {} holder mismatch", i);
         }
 
         // Simulate upgrade: Deploy new version
@@ -168,7 +169,7 @@ mod contract_upgrade_testing {
         // Rollback: Verify original contract still works
         let rolled_back_cred = setup.qp.get_credential(&cred_id);
         assert_eq!(
-            rolled_back_cred.holder, original_cred.holder,
+            rolled_back_cred.subject, original_cred.subject,
             "Rollback should preserve original state"
         );
         assert_eq!(

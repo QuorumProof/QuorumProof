@@ -160,7 +160,11 @@ mod proptest_quorum_slices {
                     attestors.push_back(Address::generate(&env));
                     weights.push_back(1u32);
                 }
-                client.create_slice(&creator, &attestors, &weights, &((n as u32 + 1) / 2))
+                // Strict majority (must be > half, not merely >= half), to
+                // match this test's oracle formula
+                // `candidates.len() * 2 > slice.attestors.len()` below —
+                // e.g. for n=10 that's threshold=6, not the ceiling-based 5.
+                client.create_slice(&creator, &attestors, &weights, &((n as u32) / 2 + 1))
             };
 
             // For depth 1: just test flat slices (existing behavior)
@@ -171,7 +175,7 @@ mod proptest_quorum_slices {
                 // Create candidate set at specified density
                 let candidate_count = (10.0 * candidate_density) as usize;
                 let mut candidates = soroban_sdk::Vec::new(&env);
-                for i in 0..candidate_count.min(slice.attestors.len()) {
+                for i in 0..candidate_count.min(slice.attestors.len() as usize) {
                     candidates.push_back(slice.attestors.get(i as u32).unwrap());
                 }
 

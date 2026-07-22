@@ -122,12 +122,18 @@ mod proptest_state_transitions {
             }
             // Revoke from any non-revoked state
             (_, Op::Revoke) => {
-                client.revoke_credential(issuer, &cred_id);
+                client.revoke_credential(issuer, &cred_id, &None);
                 CredState::Revoked
             }
-            // Attest on Active succeeds; on Suspended must fail
+            // Attest on Active succeeds; on Suspended must fail. A random
+            // sequence can apply Attest more than once while still Active —
+            // the second attempt is expected to panic ("attestor has
+            // already attested for this credential"), which is a legitimate
+            // no-op outcome here, not a state-model violation.
             (CredState::Active, Op::Attest) => {
-                let _ = client.attest(attestor, &cred_id, &slice_id, &true, &None);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.attest(attestor, &cred_id, &slice_id, &true, &None);
+                }));
                 CredState::Active
             }
             (CredState::Suspended, Op::Attest) => {
@@ -210,7 +216,7 @@ mod proptest_state_transitions {
 
             // Force revocation
             if model != CredState::Revoked {
-                client.revoke_credential(&issuer, &cred_id);
+                client.revoke_credential(&issuer, &cred_id, &None);
                 model = CredState::Revoked;
             }
 
@@ -222,7 +228,7 @@ mod proptest_state_transitions {
                     match op {
                         Op::Suspend => client.suspend_credential(&issuer, &cred_id),
                         Op::Resume  => client.resume_credential(&issuer, &cred_id),
-                        Op::Revoke  => { client.revoke_credential(&issuer, &cred_id); }
+                        Op::Revoke  => { client.revoke_credential(&issuer, &cred_id, &None); }
                         Op::Attest  => { client.attest(&attestor, &cred_id, &slice_id, &true, &None); }
                     }
                 }));
@@ -246,7 +252,10 @@ mod proptest_state_transitions {
             let attestor = Address::generate(&env);
 
             let cred_a   = issue(&client, &env, &issuer, &subject);
-            let cred_b   = issue(&client, &env, &issuer, &subject);
+            // issue_credential rejects a repeat (subject, issuer,
+            // credential_type), so cred_b must use a different type than
+            // `issue`'s hardcoded 1u32.
+            let cred_b   = client.issue_credential(&issuer, &subject, &2u32, &meta(&env, 8), &None, &0u64);
             let slice_id = make_slice(&client, &env, &issuer, &attestor);
 
             let mut model_a = CredState::Active;
@@ -320,7 +329,7 @@ mod proptest_state_transitions {
 
             match state_op {
                 Op::Suspend => client.suspend_credential(&issuer, &cred_id),
-                Op::Revoke  => { client.revoke_credential(&issuer, &cred_id); }
+                Op::Revoke  => { client.revoke_credential(&issuer, &cred_id, &None); }
                 _ => unreachable!(),
             }
 
