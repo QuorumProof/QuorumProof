@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { NotificationProvider, useNotification } from '../../context/NotificationContext';
+import { NotificationProvider } from '../../context/NotificationContext';
+import { useNotification } from '../../context/NotificationContextValue';
 import { NotificationPreferences } from '../NotificationPreferences';
 
 const wrapper = ({ children }: { children: React.ReactNode }) => (

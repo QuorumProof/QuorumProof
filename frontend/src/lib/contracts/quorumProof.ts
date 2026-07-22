@@ -69,7 +69,7 @@ export async function issueCredential(
       nativeToScVal(metadataHash, { type: 'bytes' }),
     )
   );
-  return scValToNative((result as any).result?.retval);
+  return scValToNative(result.result?.retval);
 }
 
 /** Create a new quorum slice on-chain. Returns the new slice ID. */
@@ -88,7 +88,7 @@ export async function createSlice(
       nativeToScVal(threshold, { type: 'u32' }),
     )
   );
-  return scValToNative((result as any).result?.retval);
+  return scValToNative(result.result?.retval);
 }
 
 
@@ -145,8 +145,8 @@ export async function batchVerifyProofs(
     )
   );
   
-  const results = scValToNative(result.result?.retval);
-  return results.map((r: any) => ({
+  const results = scValToNative(result.result?.retval) as Array<[bigint, boolean, boolean]>;
+  return results.map((r) => ({
     credentialId: r[0],
     isValid: r[1],
     isExpired: r[2]

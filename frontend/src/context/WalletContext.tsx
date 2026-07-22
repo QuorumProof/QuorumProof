@@ -1,27 +1,11 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { STELLAR_NETWORK } from '../config/env';
-import type { WalletType, WalletState as WalletStateType } from '../wallets/types';
-import { getWalletAdapter, detectAvailableWallets } from '../wallets/registry';
+import type { WalletType } from '../wallets/types';
+import { detectAvailableWallets } from '../wallets/registry';
 import { isConnected, isAllowed, setAllowed, getAddress } from '@stellar/freighter-api';
-
-interface WalletState {
-  address: string | null;
-  wallets: string[];
-  walletType: WalletType | null;
-  activeIndex: number;
-  isConnected: boolean;
-  hasFreighter: boolean;
-  isInitializing: boolean;
-  network: string;
-  error: string | null;
-  availableWallets: WalletType[];
-  connect: (type?: WalletType) => Promise<void>;
-  disconnect: () => void;
-  switchWallet: (index: number) => void;
-}
-
-const WalletContext = createContext<WalletState | undefined>(undefined);
+import type { WalletState } from './WalletContextValue';
+import { WalletContext } from './WalletContextValue';
 
 const STORAGE_KEY = 'quorum-proof-wallets';
 
@@ -213,12 +197,4 @@ export function WalletProvider({ children }: WalletProviderProps) {
       {children}
     </WalletContext.Provider>
   );
-}
-
-export function useWallet(): WalletState {
-  const context = useContext(WalletContext);
-  if (context === undefined) {
-    throw new Error('useWallet must be used within a WalletProvider');
-  }
-  return context;
 }

@@ -2,7 +2,7 @@
  * Tests for Verify.tsx — public-verify-page feature
  * Covers all 7 correctness properties from design.md plus unit tests for pure helpers.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
 import {
   credTypeLabel,
@@ -11,7 +11,7 @@ import {
   buildShareUrl,
   parseIdFromUrl,
   deriveStatus,
-} from '../Verify';
+} from '../Verify.utils';
 
 // ---------------------------------------------------------------------------
 // Unit tests — pure helper functions (Property 9 / design unit tests)

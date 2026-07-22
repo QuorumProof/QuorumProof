@@ -10,7 +10,7 @@ interface WalletGateProps {
 }
 
 /** Multi-wallet connection prompt */
-export function WalletGate({ hasFreighter, connect, availableWallets: wallets }: WalletGateProps) {
+export function WalletGate({ connect, availableWallets: wallets }: WalletGateProps) {
   const adapters = getAllWalletAdapters();
   const available = wallets
     ? adapters.filter((a) => wallets.includes(a.type))

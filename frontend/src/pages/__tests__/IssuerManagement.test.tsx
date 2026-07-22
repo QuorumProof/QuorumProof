@@ -8,6 +8,7 @@ import {
   getCredentialsBySubject,
   getAttestors,
 } from '../../lib/contracts/quorumProof';
+import type { WalletState } from '../../context/WalletContextValue';
 
 vi.mock('../../components/Navbar', () => ({ Navbar: () => <div>Navbar</div> }));
 vi.mock('../../hooks', () => ({
@@ -42,13 +43,13 @@ describe('IssuerManagement', () => {
   });
 
   it('shows wallet required message when not connected', () => {
-    vi.mocked(useWallet).mockReturnValue({ address: null } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: null } as unknown as WalletState);
     renderPage();
     expect(screen.getByText('Wallet Required')).toBeInTheDocument();
   });
 
   it('renders credentials tab with issued credentials', async () => {
-    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([BigInt(1), BigInt(2)]);
     vi.mocked(getCredential).mockImplementation((id: bigint) => Promise.resolve(mockCred(id)));
     vi.mocked(getAttestors).mockResolvedValue([]);
@@ -61,7 +62,7 @@ describe('IssuerManagement', () => {
   });
 
   it('shows empty state when no credentials', async () => {
-    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([]);
 
     renderPage();
@@ -71,7 +72,7 @@ describe('IssuerManagement', () => {
   });
 
   it('allows selecting credentials and bulk revoking', async () => {
-    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([BigInt(1)]);
     vi.mocked(getCredential).mockResolvedValue(mockCred(BigInt(1)));
     vi.mocked(getAttestors).mockResolvedValue([]);
@@ -88,7 +89,7 @@ describe('IssuerManagement', () => {
   });
 
   it('shows error for invalid attestor address', async () => {
-    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([]);
 
     renderPage();
@@ -102,7 +103,7 @@ describe('IssuerManagement', () => {
   });
 
   it('accepts valid attestor address', async () => {
-    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([]);
 
     renderPage();
@@ -116,7 +117,7 @@ describe('IssuerManagement', () => {
   });
 
   it('select all toggles all credentials', async () => {
-    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as any);
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([BigInt(1), BigInt(2)]);
     vi.mocked(getCredential).mockImplementation((id: bigint) => Promise.resolve(mockCred(id)));
     vi.mocked(getAttestors).mockResolvedValue([]);

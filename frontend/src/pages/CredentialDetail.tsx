@@ -16,7 +16,7 @@ import {
 } from '../lib/contracts/quorumProof';
 import type { Credential, QuorumSlice } from '../lib/contracts/quorumProof';
 import { decodeMetadataHash, getProofRequests } from '../stellar';
-import { credTypeLabel, formatTimestamp, formatAddress } from './Verify';
+import { credTypeLabel, formatTimestamp, formatAddress } from './Verify.utils';
 import { attestorRole, deriveStatus } from '../lib/credentialUtils';
 import { exportToJSON, exportToPDF, downloadFile } from '../lib/exportUtils';
 
@@ -56,7 +56,7 @@ export default function CredentialDetail() {
         setAttestors(attestorList ?? []);
 
         // Load verification history (non-fatal)
-        getProofRequests(credId).then((reqs) => setVerifications(reqs ?? [])).catch(() => {});
+        getProofRequests(credId).then((reqs) => setVerifications((reqs as VerificationRecord[]) ?? [])).catch(() => {});
 
         // Try to load slice from localStorage (same pattern as Dashboard)
         const sliceIdRaw = localStorage.getItem('qp-slice-id');

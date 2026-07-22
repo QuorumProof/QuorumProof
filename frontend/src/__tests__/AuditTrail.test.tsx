@@ -6,7 +6,8 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import { AuditTrail, buildAuditEvents } from '../components/AuditTrail';
+import { AuditTrail } from '../components/AuditTrail';
+import { buildAuditEvents } from '../components/AuditTrail.utils';
 import type { Credential } from '../lib/contracts/quorumProof';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────

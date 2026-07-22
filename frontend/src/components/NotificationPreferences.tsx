@@ -1,4 +1,4 @@
-import { useNotification, type CredentialEventType } from '../context/NotificationContext';
+import { useNotification, type CredentialEventType } from '../context/NotificationContextValue';
 
 const EVENT_LABELS: Record<CredentialEventType, string> = {
   issued: 'Credential Issued',

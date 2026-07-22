@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { FeedbackForm } from '../../components/FeedbackForm';
+import { useFeedback } from '../../hooks/useFeedback';
 
 // Mock useFeedback so we control submission state
 vi.mock('../../hooks/useFeedback', () => ({
@@ -9,8 +10,7 @@ vi.mock('../../hooks/useFeedback', () => ({
 }));
 
 function mockHook(overrides = {}) {
-  const { useFeedback } = require('../../hooks/useFeedback');
-  useFeedback.mockReturnValue({
+  vi.mocked(useFeedback).mockReturnValue({
     status: 'idle',
     error: null,
     submit: vi.fn(),

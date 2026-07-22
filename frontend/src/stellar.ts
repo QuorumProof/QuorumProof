@@ -23,6 +23,7 @@ import {
 import { getRpcClient } from './lib/rpcClient';
 import { handleContractError } from './lib/handleContractError';
 import { onNetworkChange } from './lib/networkConfig';
+import type { Credential, QuorumSlice } from './lib/contracts/quorumProof';
 
 /** Stellar network passphrase map */
 const PASSPHRASES: Record<string, string> = {
@@ -41,7 +42,7 @@ onNetworkChange((config) => {
 /**
  * Simulate a read-only contract call and return the parsed native JS value.
  */
-async function simulate(contractId: string, method: string, args: any[] = []): Promise<any> {
+async function simulate(contractId: string, method: string, args: xdr.ScVal[] = []): Promise<unknown> {
   if (!contractId) {
     throw new Error(
       'Contract ID not configured. Set VITE_CONTRACT_QUORUM_PROOF in .env'
@@ -89,10 +90,10 @@ async function simulate(contractId: string, method: string, args: any[] = []): P
  * metadata_hash, revoked, expires_at.
  * Throws if the credential does not exist.
  */
-export async function getCredential(credentialId: string | number | bigint) {
+export async function getCredential(credentialId: string | number | bigint): Promise<Credential> {
   try {
-    const idVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
-    return await simulate(CONTRACT_QUORUM_PROOF, 'get_credential', [idVal]);
+    const idVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'get_credential', [idVal])) as Credential;
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -102,10 +103,10 @@ export async function getCredential(credentialId: string | number | bigint) {
  * Get all credential IDs issued to a Stellar address (subject lookup).
  * Returns an array of BigInt credential IDs (may be empty).
  */
-export async function getCredentialsBySubject(stellarAddress: string) {
+export async function getCredentialsBySubject(stellarAddress: string): Promise<bigint[]> {
   try {
     const addressVal = new Address(stellarAddress).toScVal();
-    return await simulate(CONTRACT_QUORUM_PROOF, 'get_credentials_by_subject', [addressVal]);
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'get_credentials_by_subject', [addressVal])) as bigint[];
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -116,9 +117,9 @@ export async function getCredentialsBySubject(stellarAddress: string) {
  */
 export async function isAttested(credentialId: string | number | bigint, sliceId: string | number | bigint): Promise<boolean> {
   try {
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
-    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' }) as any;
-    return await simulate(CONTRACT_QUORUM_PROOF, 'is_attested', [credVal, sliceVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'is_attested', [credVal, sliceVal])) as boolean;
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -129,8 +130,8 @@ export async function isAttested(credentialId: string | number | bigint, sliceId
  */
 export async function getAttestors(credentialId: string | number | bigint): Promise<string[]> {
   try {
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
-    return await simulate(CONTRACT_QUORUM_PROOF, 'get_attestors', [credVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'get_attestors', [credVal])) as string[];
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -141,8 +142,8 @@ export async function getAttestors(credentialId: string | number | bigint): Prom
  */
 export async function isExpired(credentialId: string | number | bigint): Promise<boolean> {
   try {
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
-    return await simulate(CONTRACT_QUORUM_PROOF, 'is_expired', [credVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'is_expired', [credVal])) as boolean;
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -152,10 +153,10 @@ export async function isExpired(credentialId: string | number | bigint): Promise
  * Retrieve a quorum slice by ID.
  * Returns the QuorumSlice struct: { id, creator, attestors, threshold }
  */
-export async function getSlice(sliceId: string | number | bigint) {
+export async function getSlice(sliceId: string | number | bigint): Promise<QuorumSlice> {
   try {
-    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' }) as any;
-    return await simulate(CONTRACT_QUORUM_PROOF, 'get_slice', [sliceVal]);
+    const sliceVal = nativeToScVal(BigInt(sliceId), { type: 'u64' });
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'get_slice', [sliceVal])) as QuorumSlice;
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -171,11 +172,11 @@ export async function verifyClaim(credentialId: string | number | bigint, claimT
         'ZK Contract ID not configured. Set VITE_CONTRACT_ZK_VERIFIER in .env'
       );
     }
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
-    const claimVal = nativeToScVal(claimType, { type: 'string' }) as any;
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    const claimVal = nativeToScVal(claimType, { type: 'string' });
     const proofBytes = hexToBytes(proofHex);
     const proofVal = xdr.ScVal.scvBytes(proofBytes);
-    return await simulate(CONTRACT_ZK_VERIFIER, 'verify_claim', [credVal, claimVal, proofVal]);
+    return (await simulate(CONTRACT_ZK_VERIFIER, 'verify_claim', [credVal, claimVal, proofVal])) as boolean;
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -189,7 +190,7 @@ function hexToBytes(hex: string): Uint8Array {
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
   }
-  return bytes as any as Uint8Array;
+  return bytes;
 }
 
 /**
@@ -199,9 +200,9 @@ function hexToBytes(hex: string): Uint8Array {
 export async function generateShareLink(subject: string, credentialId: string | number | bigint, expiryHours: number): Promise<Uint8Array> {
   try {
     const subjectVal = new Address(subject).toScVal();
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
-    const hoursVal = nativeToScVal(expiryHours, { type: 'u32' }) as any;
-    return await simulate(CONTRACT_QUORUM_PROOF, 'generate_share_link', [subjectVal, credVal, hoursVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    const hoursVal = nativeToScVal(expiryHours, { type: 'u32' });
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'generate_share_link', [subjectVal, credVal, hoursVal])) as Uint8Array;
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -214,7 +215,7 @@ export async function generateShareLink(subject: string, credentialId: string | 
 export async function validateShareToken(token: Uint8Array | ArrayLike<number>): Promise<bigint> {
   try {
     const tokenVal = xdr.ScVal.scvBytes(token instanceof Uint8Array ? token : new Uint8Array(token));
-    return await simulate(CONTRACT_QUORUM_PROOF, 'validate_share_token', [tokenVal]);
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'validate_share_token', [tokenVal])) as bigint;
   } catch (error) {
     throw new Error(handleContractError(error));
   }
@@ -262,10 +263,10 @@ export { STELLAR_NETWORK as NETWORK, CONTRACT_QUORUM_PROOF as CONTRACT_ID, STELL
 /**
  * Get proof/verification requests for a credential (returns empty array if none).
  */
-export async function getProofRequests(credentialId: string | number | bigint): Promise<any[]> {
+export async function getProofRequests(credentialId: string | number | bigint): Promise<unknown[]> {
   try {
-    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' }) as any;
-    return await simulate(CONTRACT_QUORUM_PROOF, 'get_proof_requests', [credVal]);
+    const credVal = nativeToScVal(BigInt(credentialId), { type: 'u64' });
+    return (await simulate(CONTRACT_QUORUM_PROOF, 'get_proof_requests', [credVal])) as unknown[];
   } catch {
     return [];
   }

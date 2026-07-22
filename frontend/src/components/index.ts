@@ -1,7 +1,7 @@
 export { ShareCredentialDialog } from './ShareCredentialDialog';
 export type { ShareEntry, SharePermission } from './ShareCredentialDialog';
 export { AuditTrail } from './AuditTrail';
-export type { AuditEvent, AuditEventType } from './AuditTrail';
+export type { AuditEvent, AuditEventType } from './AuditTrail.utils';
 export { VerificationHistory } from './VerificationHistory';
 export type { VerificationRecord } from './VerificationHistory';
 export { WalletGate } from './WalletGate';
@@ -16,7 +16,8 @@ export { ImportCredentialsDialog } from './ImportCredentialsDialog';
 export { NotificationPreferences } from './NotificationPreferences';
 export { SliceMemberManager } from './SliceMemberManager';
 export type { SliceMember } from './SliceMemberManager';
-export { SliceThresholdVisualizer, getSliceHealth } from './SliceThresholdVisualizer';
+export { SliceThresholdVisualizer } from './SliceThresholdVisualizer';
+export { getSliceHealth } from './SliceThresholdVisualizer.utils';
 export type { SliceHealth, SliceThresholdVisualizerProps } from './SliceThresholdVisualizer';
 export { SliceRecommendationPanel } from './SliceRecommendationPanel';
 export { AttestorReputationDisplay } from './AttestorReputationDisplay';

@@ -31,9 +31,6 @@ soroban-sdk = { workspace = true, optional = true }
 # Property-based testing for unlinkability & correctness
 proptest = { version = "1.0", default-features = false, features = ["alloc", "std"] }
 
-# Benchmarking support
-criterion = { version = "0.5", default-features = false, features = ["std"] }
-
 # Random number generation (for testing only)
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
@@ -42,7 +39,3 @@ default = ["std"]
 std = ["zeroize/std", "sha2/std", "ff/std", "bls12_381/std"]
 soroban = ["soroban-sdk"]
 serde_support = ["serde", "serde_bytes"]
-
-[[bench]]
-name = "bbs_plus_benchmarks"
-harness = false

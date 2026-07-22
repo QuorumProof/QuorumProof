@@ -195,7 +195,7 @@ describe('ShareCredentialDialog — generate link flow', () => {
 
 describe('parseIdFromUrl — token param is not an id param', () => {
   it('returns null when only ?token= is present (no ?id=)', async () => {
-    const { parseIdFromUrl } = await import('../pages/Verify');
+    const { parseIdFromUrl } = await import('../pages/Verify.utils');
     expect(parseIdFromUrl('https://app.example.com/verify?token=abcd1234')).toBeNull();
   });
 });

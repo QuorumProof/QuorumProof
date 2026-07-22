@@ -71,7 +71,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add benches/history/*.jsonl
+          shopt -s nullglob
+          history_files=(benches/history/*.jsonl)
+          if [ ${#history_files[@]} -gt 0 ]; then
+            git add "${history_files[@]}"
+          fi
           if git diff --cached --quiet; then
             echo "No history changes to commit."
           else

@@ -1,8 +1,7 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { issueCredential, createSlice } from '../lib/contracts/quorumProof';
-import { useToast } from '../context/ToastContext';
-import { CREDENTIAL_TYPES } from '../lib/credentialUtils';
+import { useToast } from '../context/ToastContextValue';
 
 // ── Constants matching contract constraints ───────────────────────────────────
 

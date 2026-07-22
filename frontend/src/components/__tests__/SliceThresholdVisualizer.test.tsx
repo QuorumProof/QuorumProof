@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { SliceThresholdVisualizer, getSliceHealth } from '../SliceThresholdVisualizer';
+import { SliceThresholdVisualizer } from '../SliceThresholdVisualizer';
+import { getSliceHealth } from '../SliceThresholdVisualizer.utils';
 
 describe('getSliceHealth (#466)', () => {
   it('returns healthy when available >= threshold', () => {

@@ -1,7 +1,6 @@
 import { ReactNode } from 'react';
 import { useWallet } from '../hooks';
 import { getAllWalletAdapters } from '../wallets/registry';
-import type { WalletType } from '../wallets/types';
 
 interface WalletGuardProps {
   children: ReactNode;

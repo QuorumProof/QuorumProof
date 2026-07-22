@@ -4,18 +4,11 @@
  */
 import type { QuorumSlice } from '../lib/contracts/quorumProof';
 import { formatAddress } from '../lib/credentialUtils';
+import { estimateCompletion } from './AttestationProgress.utils';
 
 interface AttestationProgressProps {
   attestors: string[];       // addresses that have already signed
   slice: QuorumSlice | null; // full slice (provides all expected attestors + threshold)
-}
-
-/** Rough estimate: assume each pending attestor takes ~24 h */
-export function estimateCompletion(pendingCount: number): string {
-  if (pendingCount <= 0) return 'Complete';
-  const hours = pendingCount * 24;
-  if (hours < 48) return `~${hours}h`;
-  return `~${Math.ceil(hours / 24)} days`;
 }
 
 export function AttestationProgress({ attestors, slice }: AttestationProgressProps) {

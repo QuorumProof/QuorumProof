@@ -1,5 +1,4 @@
 import { Navbar } from '../components/Navbar';
-import { WalletGuard } from '../components/WalletGate';
 import { IssueCredentialForm } from '../components/IssueCredentialForm';
 import { useWallet } from '../hooks';
 

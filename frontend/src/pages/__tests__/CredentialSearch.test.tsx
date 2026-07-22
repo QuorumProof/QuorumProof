@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import CredentialSearch, { applyFilters } from '../CredentialSearch';
-import type { SearchFilters } from '../CredentialSearch';
+import CredentialSearch from '../CredentialSearch';
+import { applyFilters } from '../CredentialSearch.utils';
+import type { SearchFilters } from '../CredentialSearch.utils';
 import type { Credential } from '../../lib/contracts/quorumProof';
 
 vi.mock('../../components/Navbar', () => ({ Navbar: () => <div>Navbar</div> }));

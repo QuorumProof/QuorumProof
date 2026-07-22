@@ -26,7 +26,9 @@ export function useRealtimeUpdates({
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onUpdateRef = useRef(onUpdate);
-  onUpdateRef.current = onUpdate;
+  useEffect(() => {
+    onUpdateRef.current = onUpdate;
+  }, [onUpdate]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current !== null) {
@@ -97,6 +99,13 @@ export function useRealtimeUpdates({
   }, [wsUrl, closeWs, stopPolling, startPolling]);
 
   useEffect(() => {
+    // `connect()` synchronously calls setStatus as part of establishing the
+    // WebSocket/polling connection (an external system) on mount and whenever
+    // wsUrl/pollIntervalMs change. Deferring this to a microtask would delay
+    // the initial "connecting"/"polling" status by a tick, which callers and
+    // tests rely on being synchronous with mount — so it is intentionally
+    // called directly here rather than deferred.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     connect();
     return () => {
       closeWs();

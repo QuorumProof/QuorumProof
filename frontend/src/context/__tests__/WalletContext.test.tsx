@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { WalletProvider, useWallet } from '../WalletContext';
+import { WalletProvider } from '../WalletContext';
+import { useWallet } from '../WalletContextValue';
 
 jest.mock('@stellar/freighter-api', () => ({
   isConnected: jest.fn().mockResolvedValue({ isConnected: true }),

@@ -3,7 +3,7 @@ import type { ChangeEvent, FormEvent, KeyboardEvent } from 'react';
 import { createSlice } from '../lib/contracts/quorumProof';
 import { SliceRecommendationPanel } from './SliceRecommendationPanel';
 import type { RecommendationContext, SliceRecommendation } from '../lib/sliceRecommendation';
-import { useToast } from '../context/ToastContext';
+import { useToast } from '../context/ToastContextValue';
 import {
   saveDraft,
   loadDraft,
