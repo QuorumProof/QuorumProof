@@ -69,7 +69,7 @@ export function FeedbackForm({ walletAddress }: { walletAddress?: string }) {
       <div className="form-row">
         <fieldset style={{ border: 'none', padding: 0, margin: 0 }}>
           <legend className="form-label">Rating</legend>
-          <div role="group" aria-label="Rating" style={{ display: 'flex', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
             {[1, 2, 3, 4, 5].map(n => (
               <button
                 key={n}

@@ -1,5 +1,6 @@
 import { Navbar } from '../components/Navbar';
 import { IssueCredentialForm } from '../components/IssueCredentialForm';
+import { WalletGuard } from '../components/WalletGate';
 import { useWallet } from '../hooks';
 
 function formatAddress(addr: string) {
@@ -7,9 +8,28 @@ function formatAddress(addr: string) {
   return addr.slice(0, 8) + '…' + addr.slice(-6);
 }
 
-export default function IssueCredential() {
+function IssueCredentialContent() {
   const { address } = useWallet();
 
+  return (
+    <div className="search-card">
+      <div className="detail-card__header" style={{ marginBottom: 24, padding: 0, background: 'none', border: 'none' }}>
+        <span className="detail-card__title">Issuing as</span>
+        <span
+          className="wallet-pill"
+          title={address!}
+          aria-label={`Connected wallet: ${address}`}
+        >
+          <span className="wallet-pill__dot" aria-hidden="true" />
+          {formatAddress(address!)}
+        </span>
+      </div>
+      <IssueCredentialForm issuerAddress={address!} />
+    </div>
+  );
+}
+
+export default function IssueCredential() {
   return (
     <div id="app">
       <Navbar />
@@ -24,20 +44,9 @@ export default function IssueCredential() {
             </div>
           </div>
 
-          <div className="search-card">
-            <div className="detail-card__header" style={{ marginBottom: 24, padding: 0, background: 'none', border: 'none' }}>
-              <span className="detail-card__title">Issuing as</span>
-              <span
-                className="wallet-pill"
-                title={address!}
-                aria-label={`Connected wallet: ${address}`}
-              >
-                <span className="wallet-pill__dot" aria-hidden="true" />
-                {formatAddress(address!)}
-              </span>
-            </div>
-            <IssueCredentialForm issuerAddress={address!} />
-          </div>
+          <WalletGuard>
+            <IssueCredentialContent />
+          </WalletGuard>
         </div>
       </main>
     </div>

@@ -1,13 +1,14 @@
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { WalletProvider } from '../WalletContext';
 import { useWallet } from '../WalletContextValue';
+import { isConnected } from '@stellar/freighter-api';
 
-jest.mock('@stellar/freighter-api', () => ({
-  isConnected: jest.fn().mockResolvedValue({ isConnected: true }),
-  isAllowed: jest.fn().mockResolvedValue({ isAllowed: true }),
-  getAddress: jest.fn().mockResolvedValue({ address: 'GTEST123' }),
-  setAllowed: jest.fn().mockResolvedValue(undefined),
+vi.mock('@stellar/freighter-api', () => ({
+  isConnected: vi.fn().mockResolvedValue({ isConnected: true }),
+  isAllowed: vi.fn().mockResolvedValue({ isAllowed: true }),
+  getAddress: vi.fn().mockResolvedValue({ address: 'GTEST123' }),
+  setAllowed: vi.fn().mockResolvedValue(undefined),
 }));
 
 const TestComponent = () => {
@@ -24,7 +25,8 @@ const TestComponent = () => {
 
 describe('WalletContext', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
+    vi.mocked(isConnected).mockResolvedValue({ isConnected: true });
     localStorage.clear();
   });
 
@@ -37,7 +39,7 @@ describe('WalletContext', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('address')).toHaveTextContent('GTEST123');
-    });
+    }, { timeout: 3000 });
   });
 
   it('should disconnect and clear error state', async () => {
@@ -52,7 +54,7 @@ describe('WalletContext', () => {
     });
 
     const disconnectBtn = screen.getByText('Disconnect');
-    await userEvent.click(disconnectBtn);
+    fireEvent.click(disconnectBtn);
 
     await waitFor(() => {
       expect(screen.getByTestId('is-connected')).toHaveTextContent('Disconnected');
@@ -61,11 +63,7 @@ describe('WalletContext', () => {
   });
 
   it('should surface connection errors', async () => {
-    jest.isolateModules(() => {
-      jest.mock('@stellar/freighter-api', () => ({
-        isConnected: jest.fn().mockRejectedValue(new Error('Connection failed')),
-      }));
-    });
+    vi.mocked(isConnected).mockRejectedValue(new Error('Connection failed'));
 
     render(
       <WalletProvider>

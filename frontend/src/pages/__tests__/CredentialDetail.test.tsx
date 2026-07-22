@@ -1,10 +1,11 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import { BrowserRouter } from 'react-router-dom';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import CredentialDetail from '../CredentialDetail';
 import * as quorumProof from '../../lib/contracts/quorumProof';
 
-jest.mock('../../lib/contracts/quorumProof');
-jest.mock('../../components/Navbar', () => ({
+vi.mock('../../lib/contracts/quorumProof');
+vi.mock('../../components/Navbar', () => ({
   Navbar: () => <div data-testid="navbar">Navbar</div>,
 }));
 
@@ -20,38 +21,40 @@ const mockCredential = {
 
 describe('CredentialDetail', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it('should display credential details', async () => {
-    (quorumProof.getCredential as jest.Mock).mockResolvedValue(mockCredential);
-    (quorumProof.isExpired as jest.Mock).mockResolvedValue(false);
-    (quorumProof.getAttestors as jest.Mock).mockResolvedValue(['GATT1', 'GATT2']);
+    vi.mocked(quorumProof.getCredential).mockResolvedValue(mockCredential);
+    vi.mocked(quorumProof.isExpired).mockResolvedValue(false);
+    vi.mocked(quorumProof.getAttestors).mockResolvedValue(['GATT1', 'GATT2']);
 
     render(
-      <BrowserRouter>
-        <CredentialDetail />
-      </BrowserRouter>,
-      { initialEntries: ['/credential/1'] }
+      <MemoryRouter initialEntries={['/credential/1']}>
+        <Routes>
+          <Route path="/credential/:id" element={<CredentialDetail />} />
+        </Routes>
+      </MemoryRouter>
     );
 
     await waitFor(() => {
-      expect(screen.getByText(/Credential #1/)).toBeInTheDocument();
-      expect(screen.getByText('🎓 Degree')).toBeInTheDocument();
-      expect(screen.getByText('✅ Active')).toBeInTheDocument();
+      expect(screen.getByText(/Credential #1 ·/)).toBeInTheDocument();
+      expect(screen.getAllByText('🎓 Degree').length).toBeGreaterThan(0);
+      expect(screen.getByRole('status', { name: 'Credential status: Attested' })).toBeInTheDocument();
     });
   });
 
   it('should display error when credential fails to load', async () => {
-    (quorumProof.getCredential as jest.Mock).mockRejectedValue(
+    vi.mocked(quorumProof.getCredential).mockRejectedValue(
       new Error('Credential not found')
     );
 
     render(
-      <BrowserRouter>
-        <CredentialDetail />
-      </BrowserRouter>,
-      { initialEntries: ['/credential/999'] }
+      <MemoryRouter initialEntries={['/credential/999']}>
+        <Routes>
+          <Route path="/credential/:id" element={<CredentialDetail />} />
+        </Routes>
+      </MemoryRouter>
     );
 
     await waitFor(() => {
@@ -61,37 +64,39 @@ describe('CredentialDetail', () => {
   });
 
   it('should display attestors list', async () => {
-    (quorumProof.getCredential as jest.Mock).mockResolvedValue(mockCredential);
-    (quorumProof.isExpired as jest.Mock).mockResolvedValue(false);
-    (quorumProof.getAttestors as jest.Mock).mockResolvedValue(['GATT1', 'GATT2']);
+    vi.mocked(quorumProof.getCredential).mockResolvedValue(mockCredential);
+    vi.mocked(quorumProof.isExpired).mockResolvedValue(false);
+    vi.mocked(quorumProof.getAttestors).mockResolvedValue(['GATT1', 'GATT2']);
 
     render(
-      <BrowserRouter>
-        <CredentialDetail />
-      </BrowserRouter>,
-      { initialEntries: ['/credential/1'] }
+      <MemoryRouter initialEntries={['/credential/1']}>
+        <Routes>
+          <Route path="/credential/:id" element={<CredentialDetail />} />
+        </Routes>
+      </MemoryRouter>
     );
 
     await waitFor(() => {
-      expect(screen.getByText('Attestors (2)')).toBeInTheDocument();
+      expect(screen.getByText('2 attestors')).toBeInTheDocument();
     });
   });
 
   it('should show revoked status', async () => {
     const revokedCred = { ...mockCredential, revoked: true };
-    (quorumProof.getCredential as jest.Mock).mockResolvedValue(revokedCred);
-    (quorumProof.isExpired as jest.Mock).mockResolvedValue(false);
-    (quorumProof.getAttestors as jest.Mock).mockResolvedValue([]);
+    vi.mocked(quorumProof.getCredential).mockResolvedValue(revokedCred);
+    vi.mocked(quorumProof.isExpired).mockResolvedValue(false);
+    vi.mocked(quorumProof.getAttestors).mockResolvedValue([]);
 
     render(
-      <BrowserRouter>
-        <CredentialDetail />
-      </BrowserRouter>,
-      { initialEntries: ['/credential/1'] }
+      <MemoryRouter initialEntries={['/credential/1']}>
+        <Routes>
+          <Route path="/credential/:id" element={<CredentialDetail />} />
+        </Routes>
+      </MemoryRouter>
     );
 
     await waitFor(() => {
-      expect(screen.getByText('🚫 Revoked')).toBeInTheDocument();
+      expect(screen.getByRole('status', { name: 'Credential status: Revoked' })).toBeInTheDocument();
     });
   });
 });

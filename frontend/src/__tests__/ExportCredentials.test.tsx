@@ -107,19 +107,26 @@ describe('Export Credentials', () => {
   });
 
   describe('exportToPDF', () => {
-    it('opens a new window with credential data', () => {
-      const mockWrite = vi.fn();
-      const mockClose = vi.fn();
-      vi.spyOn(window, 'open').mockReturnValue({
-        document: { write: mockWrite, close: mockClose },
-      } as unknown as Window);
+    // exportToPDF renders the HTML into a Blob and opens it via a blob: URL
+    // (window.open(URL.createObjectURL(blob), '_blank')), rather than opening
+    // a blank window and calling document.write into it -- so these tests
+    // capture the Blob passed to URL.createObjectURL and read its contents.
+    it('opens a new window with credential data', async () => {
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue({ onload: null } as unknown as Window);
+      let capturedBlob: Blob | undefined;
+      const createObjectURLSpy = vi
+        .spyOn(URL, 'createObjectURL')
+        .mockImplementation((blob: Blob) => {
+          capturedBlob = blob;
+          return 'blob:mock-url';
+        });
 
       exportToPDF(mockCredential, 'https://example.com');
 
-      expect(window.open).toHaveBeenCalledWith('', '_blank');
-      expect(mockWrite).toHaveBeenCalledOnce();
+      expect(openSpy).toHaveBeenCalledWith('blob:mock-url', '_blank');
+      expect(capturedBlob).toBeInstanceOf(Blob);
 
-      const html: string = mockWrite.mock.calls[0][0];
+      const html = await capturedBlob!.text();
       expect(html).toContain(mockCredential.id.toString());
       expect(html).toContain(mockCredential.subject);
       expect(html).toContain(mockCredential.issuer);
@@ -127,6 +134,8 @@ describe('Export Credentials', () => {
       expect(html).toContain('chart.googleapis.com');
       // Verify link present
       expect(html).toContain(`/verify?id=${mockCredential.id}`);
+
+      createObjectURLSpy.mockRestore();
     });
 
     it('does nothing when window.open returns null', () => {
@@ -134,14 +143,22 @@ describe('Export Credentials', () => {
       expect(() => exportToPDF(mockCredential, 'https://example.com')).not.toThrow();
     });
 
-    it('marks revoked credentials in the PDF', () => {
-      const mockWrite = vi.fn();
-      vi.spyOn(window, 'open').mockReturnValue({
-        document: { write: mockWrite, close: vi.fn() },
-      } as unknown as Window);
+    it('marks revoked credentials in the PDF', async () => {
+      vi.spyOn(window, 'open').mockReturnValue({ onload: null } as unknown as Window);
+      let capturedBlob: Blob | undefined;
+      const createObjectURLSpy = vi
+        .spyOn(URL, 'createObjectURL')
+        .mockImplementation((blob: Blob) => {
+          capturedBlob = blob;
+          return 'blob:mock-url';
+        });
 
       exportToPDF({ ...mockCredential, revoked: true }, 'https://example.com');
-      expect(mockWrite.mock.calls[0][0]).toContain('Revoked');
+
+      const html = await capturedBlob!.text();
+      expect(html).toContain('Revoked');
+
+      createObjectURLSpy.mockRestore();
     });
   });
 });

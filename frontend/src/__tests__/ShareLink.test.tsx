@@ -126,7 +126,7 @@ describe('ShareCredentialDialog — generate link flow', () => {
       fireEvent.click(screen.getByLabelText('Generate expiring share link'));
     });
     await waitFor(() => {
-      expect(screen.getByTitle(expect.stringContaining(MOCK_TOKEN_HEX))).toBeInTheDocument();
+      expect(screen.getByTitle(new RegExp(MOCK_TOKEN_HEX))).toBeInTheDocument();
     });
   });
 
@@ -136,7 +136,7 @@ describe('ShareCredentialDialog — generate link flow', () => {
       fireEvent.click(screen.getByLabelText('Generate expiring share link'));
     });
     await waitFor(() => {
-      expect(screen.getByTitle(expect.stringContaining('?token='))).toBeInTheDocument();
+      expect(screen.getByTitle(/\?token=/)).toBeInTheDocument();
     });
   });
 
