@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import IssueCredential from '../IssueCredential';
-import { useFreighter } from '../../lib/hooks/useFreighter';
+import { useWallet } from '../../hooks';
+import type { WalletState } from '../../context/WalletContextValue';
 
-// Mock useFreighter hook
-vi.mock('../../lib/hooks/useFreighter', () => ({
-  useFreighter: vi.fn(),
+// Mock useWallet hook (IssueCredential is gated by <WalletGuard>, which reads
+// address/isInitializing/availableWallets/connect from this hook)
+vi.mock('../../hooks', () => ({
+  useWallet: vi.fn(),
 }));
 
 // Mock IssueCredentialForm component
@@ -31,13 +33,14 @@ describe('IssueCredential page (#237)', () => {
   it('passes issuerAddress from wallet to IssueCredentialForm', () => {
     const testAddress = 'GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFSNQB37HNU7F5V4Z5SHEOSVBQ';
 
-    vi.mocked(useFreighter).mockReturnValue({
+    vi.mocked(useWallet).mockReturnValue({
       address: testAddress,
       isInitializing: false,
+      availableWallets: ['freighter'],
       connect: vi.fn(),
       hasFreighter: true,
       disconnect: vi.fn(),
-    });
+    } as unknown as WalletState);
 
     render(
       <BrowserRouter>
@@ -50,13 +53,14 @@ describe('IssueCredential page (#237)', () => {
   });
 
   it('shows connect wallet prompt when no address is available', () => {
-    vi.mocked(useFreighter).mockReturnValue({
+    vi.mocked(useWallet).mockReturnValue({
       address: null,
       isInitializing: false,
+      availableWallets: ['freighter'],
       connect: vi.fn(),
       hasFreighter: true,
       disconnect: vi.fn(),
-    });
+    } as unknown as WalletState);
 
     render(
       <BrowserRouter>
@@ -64,18 +68,19 @@ describe('IssueCredential page (#237)', () => {
       </BrowserRouter>
     );
 
-    expect(screen.getByText('Connect Your Wallet')).toBeInTheDocument();
-    expect(screen.getByText(/You must connect a Freighter wallet/)).toBeInTheDocument();
+    expect(screen.getByText('Connect your Stellar wallet to continue')).toBeInTheDocument();
+    expect(screen.getByText(/Select a wallet to connect/)).toBeInTheDocument();
   });
 
   it('shows loading state while wallet is initializing', () => {
-    vi.mocked(useFreighter).mockReturnValue({
+    vi.mocked(useWallet).mockReturnValue({
       address: null,
       isInitializing: true,
+      availableWallets: [],
       connect: vi.fn(),
       hasFreighter: true,
       disconnect: vi.fn(),
-    });
+    } as unknown as WalletState);
 
     render(
       <BrowserRouter>
@@ -83,17 +88,18 @@ describe('IssueCredential page (#237)', () => {
       </BrowserRouter>
     );
 
-    expect(screen.getByText('Connecting wallet…')).toBeInTheDocument();
+    expect(screen.getByText('Checking wallet…')).toBeInTheDocument();
   });
 
   it('does not render IssueCredentialForm when address is undefined', () => {
-    vi.mocked(useFreighter).mockReturnValue({
+    vi.mocked(useWallet).mockReturnValue({
       address: undefined,
       isInitializing: false,
+      availableWallets: ['freighter'],
       connect: vi.fn(),
       hasFreighter: true,
       disconnect: vi.fn(),
-    });
+    } as unknown as WalletState);
 
     render(
       <BrowserRouter>
@@ -105,13 +111,14 @@ describe('IssueCredential page (#237)', () => {
   });
 
   it('renders wallet gate with proper accessibility attributes', () => {
-    vi.mocked(useFreighter).mockReturnValue({
+    vi.mocked(useWallet).mockReturnValue({
       address: null,
       isInitializing: false,
+      availableWallets: ['freighter'],
       connect: vi.fn(),
       hasFreighter: true,
       disconnect: vi.fn(),
-    });
+    } as unknown as WalletState);
 
     render(
       <BrowserRouter>

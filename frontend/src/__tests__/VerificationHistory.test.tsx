@@ -120,10 +120,15 @@ describe('VerificationHistory — time filter', () => {
   });
 
   it('shows empty state when filter excludes all records', async () => {
-    render(<VerificationHistory records={RECORDS} />);
+    // All records here are far older than every preset window (24h/7d/30d),
+    // so any non-"All time" filter selection should exclude all of them.
+    const OLD_RECORDS: VerificationRecord[] = [
+      makeRecord(1, ADDR_A, NOW_S - ONE_HOUR * 24n * 365n, ['HasDegree']),
+    ];
+    render(<VerificationHistory records={OLD_RECORDS} />);
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Filter verifications by time'), {
-        target: { value: '1' },
+        target: { value: '24' },
       });
     });
     expect(screen.getByText(/no verifications in this period/i)).toBeInTheDocument();

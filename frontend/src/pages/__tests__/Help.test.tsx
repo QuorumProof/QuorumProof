@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import Help from '../Help';
 
-vi.mock('../components/Navbar', () => ({
+vi.mock('../../components/Navbar', () => ({
   Navbar: () => <div data-testid="navbar">Navbar</div>,
 }));
 
