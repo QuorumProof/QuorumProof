@@ -4,15 +4,35 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# rlib only: this is a support library other Soroban contract crates import,
+# not a contract deployed on its own -- unlike quorum_proof/sbt_registry/
+# zk_verifier (which correctly declare cdylib, since *they* compile to the
+# final wasm binary), a cdylib crate-type here forces every build of this
+# crate to need a `#[global_allocator]`/`#[panic_handler]` on its own even
+# though the actual consuming contract crate already provides both via
+# soroban-sdk.
+crate-type = ["rlib"]
 
 [dependencies]
-# Curve arithmetic (same as zk_verifier uses for PLONK)
-bls12_381 = { version = "0.8", default-features = false, features = ["groups", "pairings"] }
+# Curve arithmetic (same as zk_verifier uses for PLONK). `experimental` pulls
+# in the crate's RFC 9380 hash-to-curve implementation, used to derive
+# "nothing-up-my-sleeve" generators with no known discrete-log relationship
+# to one another -- required for BBS+ generator soundness. It's no_std/no-RNG
+# (pure hashing), so it's safe to use in the default build, not just `std`.
+bls12_381 = { version = "0.8", default-features = false, features = ["groups", "pairings", "experimental"] }
 ff = { version = "0.13", default-features = false }
+# `Bls12` implements `pairing::Engine`, not a type this crate itself exports;
+# needed directly to call the pairing operation and name its `Gt` type.
+pairing = { version = "0.23", default-features = false }
+group = { version = "0.13", default-features = false }
 
 # Hashing (SHA-256 for Fiat-Shamir)
 sha2 = { version = "0.10", default-features = false }
+# bls12_381's hash-to-curve (`experimental` feature) is pinned to `digest 0.9`
+# internally, incompatible with sha2 0.10's `digest 0.10` -- a separately
+# named old-digest-compatible Sha256 is needed for that one call site only;
+# everything else (transcript.rs) keeps using the sha2 0.10 API above.
+sha2_hash_to_curve = { package = "sha2", version = "0.9", default-features = false }
 
 # Secure key handling
 zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
@@ -24,18 +44,27 @@ serde_bytes = { version = "0.11", optional = true, default-features = false, fea
 # For canonical byte encoding
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 
-# Soroban SDK (optional, for contract types)
-soroban-sdk = { workspace = true, optional = true }
+# Soroban SDK (optional, for contract types). Hardcoded to match the
+# workspace's soroban-sdk version -- this crate is deliberately excluded from
+# the root workspace (see root Cargo.toml), so `workspace = true` inheritance
+# isn't available here.
+soroban-sdk = { version = "21.7", optional = true }
+
+# Real key/blinding-factor generation only happens off-chain (Soroban
+# contracts have no entropy source, so signing and proof generation are
+# host-side/wallet-side operations by design) -- gated under `std` since
+# no_std/on-chain code only ever verifies, never signs.
+rand = { version = "0.8", optional = true, default-features = false, features = ["std", "std_rng"] }
 
 [dev-dependencies]
 # Property-based testing for unlinkability & correctness
 proptest = { version = "1.0", default-features = false, features = ["alloc", "std"] }
 
-# Random number generation (for testing only)
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
-
 [features]
 default = ["std"]
-std = ["zeroize/std", "sha2/std", "ff/std", "bls12_381/std"]
+# NOTE: bls12_381 0.8 has no `std` feature of its own (only `alloc`); it's
+# std-agnostic already via `alloc`, which is enabled unconditionally below.
+std = ["zeroize/std", "sha2/std", "ff/std", "rand"]
+alloc = ["bls12_381/alloc"]
 soroban = ["soroban-sdk"]
 serde_support = ["serde", "serde_bytes"]

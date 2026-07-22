@@ -1,4 +1,3 @@
-#![no_std]
 
 extern crate alloc;
 
@@ -52,12 +51,23 @@ impl Transcript {
         self.append(label, point_bytes);
     }
 
-    /// Squeeze a challenge as Fr scalar
+    /// Squeeze a challenge as an Fr scalar via wide (64-byte) reduction.
+    ///
+    /// A naive 32-byte hash truncated straight into `Fr::from_bytes` rejects
+    /// roughly half of all outputs (BLS12-381's scalar field is ~255 bits,
+    /// so a uniform 256-bit value is about as likely to land at or above the
+    /// modulus as below it) -- that's not a rare edge case to special-case
+    /// away, it's a coin flip on every single call. Squeezing 64 bytes and
+    /// reducing mod r (`Fr::from_bytes_wide`) is the standard fix and never
+    /// fails.
     pub fn squeeze_challenge(&mut self) -> BbsResult<Fr> {
-        let hash = self.hash_state.clone().finalize();
-        let mut challenge_bytes = [0u8; 32];
-        challenge_bytes.copy_from_slice(&hash[..32]);
-        Fr::from_bytes(&challenge_bytes)
+        // squeeze_bytes resets hash_state as a side effect; squeeze on a
+        // fork so squeeze_challenge stays non-destructive to `self`, same
+        // as the old single-shot finalize() did.
+        let wide = self.fork().squeeze_bytes(64);
+        let mut challenge_bytes = [0u8; 64];
+        challenge_bytes.copy_from_slice(&wide);
+        Ok(Fr::from_bytes_wide(&challenge_bytes))
     }
 
     /// Squeeze multiple bytes (for arbitrary challenge generation)

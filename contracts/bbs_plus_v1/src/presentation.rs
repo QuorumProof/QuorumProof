@@ -1,397 +1,583 @@
-#![no_std]
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
-use crate::primitives::{Fr, G1, msm_g1};
+use alloc::vec::Vec;
+
 use crate::errors::{BbsError, BbsResult};
+use crate::primitives::{pairing, Fr, G1, G2};
+#[cfg(feature = "std")]
+use crate::signature::{compute_b, Signature};
+use crate::signature::{base_generator, VerifyingKey};
 use crate::transcript::Transcript;
-use crate::signature::{Signature, VerifyingKey};
 use crate::DOMAIN_BBS_PLUS;
 
-/// Index set for revealed message positions
+/// Revealed message positions and their values.
 pub type RevealedSet = BTreeMap<u32, Fr>;
 
-/// Presentation proof for selective disclosure
-/// Proves knowledge of signature on hidden messages without revealing them
+/// Zero-knowledge proof of possession of a BBS+ signature, selectively
+/// disclosing a subset of the signed messages.
+///
+/// This is a Fiat-Shamir non-interactive adaptation of the BBS proof system
+/// from `draft-irtf-cfrg-bbs-signatures` (CoreProofGen/CoreProofVerify),
+/// generalized to also cover the signer-chosen `s` blinding scalar: this
+/// crate's (A, e, s) signature has no separate deterministic `domain` value
+/// the way the IETF draft does, so `s` is treated as an (always-hidden)
+/// extra message bound to the verifying key's `q1` generator -- structurally
+/// identical to an ordinary undisclosed message, which the proof system
+/// already needs to handle, so no separate machinery is needed for it.
 #[derive(Clone)]
 pub struct PresentationProof {
-    /// Challenge for this specific presentation
-    pub challenge: Fr,
-    /// Commitment to the signature
+    /// A_bar = A * (r1*r2): a per-presentation-randomized, unlinkable
+    /// re-blinding of the original signature's A component.
     pub a_bar: G1,
-    /// Commitment to randomness
+    /// B_bar = D*r1 - A_bar*e. Satisfies B_bar = A_bar*SK exactly when the
+    /// prover holds a genuine signature -- this is what the final pairing
+    /// check verifies, without the verifier ever learning SK, A, or e.
     pub b_bar: G1,
-    /// Commitment components
-    pub c_bar: G1,
-    /// Response proving knowledge
-    pub r_hat: Fr,
+    /// D = B*r2, a blinded commitment to the full message vector.
+    pub d: G1,
+    /// Schnorr response for e.
+    pub e_hat: Fr,
+    /// Schnorr response for r1.
+    pub r1_hat: Fr,
+    /// Schnorr response for r3 = r2^-1.
+    pub r3_hat: Fr,
+    /// Schnorr response for s.
     pub s_hat: Fr,
-    pub s_prime: Fr,
-    /// Messages that are revealed (index -> value)
+    /// Schnorr responses for each hidden (undisclosed) real message, keyed
+    /// by message index.
+    pub hidden_message_hats: BTreeMap<u32, Fr>,
+    /// The disclosed messages, keyed by index.
     pub revealed_messages: RevealedSet,
+    /// Fiat-Shamir challenge binding every commitment and disclosed value
+    /// above.
+    pub challenge: Fr,
 }
 
 impl PresentationProof {
-    /// Serialize presentation proof to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        // Challenge (32 bytes)
-        bytes.extend_from_slice(&self.challenge.to_bytes());
-
-        // Commitments (3 * 48 = 144 bytes)
         bytes.extend_from_slice(&self.a_bar.to_bytes());
         bytes.extend_from_slice(&self.b_bar.to_bytes());
-        bytes.extend_from_slice(&self.c_bar.to_bytes());
-
-        // Responses (3 * 32 = 96 bytes)
-        bytes.extend_from_slice(&self.r_hat.to_bytes());
+        bytes.extend_from_slice(&self.d.to_bytes());
+        bytes.extend_from_slice(&self.e_hat.to_bytes());
+        bytes.extend_from_slice(&self.r1_hat.to_bytes());
+        bytes.extend_from_slice(&self.r3_hat.to_bytes());
         bytes.extend_from_slice(&self.s_hat.to_bytes());
-        bytes.extend_from_slice(&self.s_prime.to_bytes());
+        bytes.extend_from_slice(&self.challenge.to_bytes());
 
-        // Revealed messages (variable length)
-        let count = self.revealed_messages.len() as u32;
-        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes.extend_from_slice(&(self.hidden_message_hats.len() as u32).to_le_bytes());
+        for (idx, val) in &self.hidden_message_hats {
+            bytes.extend_from_slice(&idx.to_le_bytes());
+            bytes.extend_from_slice(&val.to_bytes());
+        }
 
-        for (index, value) in &self.revealed_messages {
-            bytes.extend_from_slice(&index.to_le_bytes());
-            bytes.extend_from_slice(&value.to_bytes());
+        bytes.extend_from_slice(&(self.revealed_messages.len() as u32).to_le_bytes());
+        for (idx, val) in &self.revealed_messages {
+            bytes.extend_from_slice(&idx.to_le_bytes());
+            bytes.extend_from_slice(&val.to_bytes());
         }
 
         bytes
     }
 
-    /// Deserialize presentation proof from bytes
     pub fn from_bytes(bytes: &[u8]) -> BbsResult<Self> {
-        if bytes.len() < 304 {  // Minimum: 32 + 144 + 96 + 4 + 0
+        const FIXED_LEN: usize = 48 * 3 + 32 * 4;
+        if bytes.len() < FIXED_LEN + 8 {
             return Err(BbsError::DeserializationError);
         }
-
         let mut offset = 0;
 
-        // Challenge
-        let mut challenge_bytes = [0u8; 32];
-        challenge_bytes.copy_from_slice(&bytes[offset..offset + 32]);
-        let challenge = Fr::from_bytes(&challenge_bytes)?;
-        offset += 32;
+        let a_bar = read_g1(bytes, &mut offset)?;
+        let b_bar = read_g1(bytes, &mut offset)?;
+        let d = read_g1(bytes, &mut offset)?;
+        let e_hat = read_fr(bytes, &mut offset)?;
+        let r1_hat = read_fr(bytes, &mut offset)?;
+        let r3_hat = read_fr(bytes, &mut offset)?;
+        let s_hat = read_fr(bytes, &mut offset)?;
+        let challenge = read_fr(bytes, &mut offset)?;
 
-        // Commitments
-        let mut a_bytes = [0u8; 48];
-        a_bytes.copy_from_slice(&bytes[offset..offset + 48]);
-        let a_bar = G1::from_bytes(&a_bytes)?;
-        offset += 48;
-
-        let mut b_bytes = [0u8; 48];
-        b_bytes.copy_from_slice(&bytes[offset..offset + 48]);
-        let b_bar = G1::from_bytes(&b_bytes)?;
-        offset += 48;
-
-        let mut c_bytes = [0u8; 48];
-        c_bytes.copy_from_slice(&bytes[offset..offset + 48]);
-        let c_bar = G1::from_bytes(&c_bytes)?;
-        offset += 48;
-
-        // Responses
-        let mut r_bytes = [0u8; 32];
-        r_bytes.copy_from_slice(&bytes[offset..offset + 32]);
-        let r_hat = Fr::from_bytes(&r_bytes)?;
-        offset += 32;
-
-        let mut s_bytes = [0u8; 32];
-        s_bytes.copy_from_slice(&bytes[offset..offset + 32]);
-        let s_hat = Fr::from_bytes(&s_bytes)?;
-        offset += 32;
-
-        let mut sp_bytes = [0u8; 32];
-        sp_bytes.copy_from_slice(&bytes[offset..offset + 32]);
-        let s_prime = Fr::from_bytes(&sp_bytes)?;
-        offset += 32;
-
-        // Revealed messages
-        let mut count_bytes = [0u8; 4];
-        count_bytes.copy_from_slice(&bytes[offset..offset + 4]);
-        let count = u32::from_le_bytes(count_bytes) as usize;
-        offset += 4;
-
-        let mut revealed_messages = RevealedSet::new();
-        for _ in 0..count {
-            if offset + 36 > bytes.len() {
-                return Err(BbsError::DeserializationError);
-            }
-
-            let mut index_bytes = [0u8; 4];
-            index_bytes.copy_from_slice(&bytes[offset..offset + 4]);
-            let index = u32::from_le_bytes(index_bytes);
-            offset += 4;
-
-            let mut value_bytes = [0u8; 32];
-            value_bytes.copy_from_slice(&bytes[offset..offset + 32]);
-            let value = Fr::from_bytes(&value_bytes)?;
-            offset += 32;
-
-            revealed_messages.insert(index, value);
-        }
+        let hidden_message_hats = read_indexed_map(bytes, &mut offset)?;
+        let revealed_messages = read_indexed_map(bytes, &mut offset)?;
 
         Ok(PresentationProof {
-            challenge,
             a_bar,
             b_bar,
-            c_bar,
-            r_hat,
+            d,
+            e_hat,
+            r1_hat,
+            r3_hat,
             s_hat,
-            s_prime,
+            hidden_message_hats,
             revealed_messages,
+            challenge,
         })
     }
 }
 
-/// BBS+ Presentation Proof System
+fn read_g1(bytes: &[u8], offset: &mut usize) -> BbsResult<G1> {
+    if *offset + 48 > bytes.len() {
+        return Err(BbsError::DeserializationError);
+    }
+    let mut buf = [0u8; 48];
+    buf.copy_from_slice(&bytes[*offset..*offset + 48]);
+    *offset += 48;
+    G1::from_bytes(&buf)
+}
+
+fn read_fr(bytes: &[u8], offset: &mut usize) -> BbsResult<Fr> {
+    if *offset + 32 > bytes.len() {
+        return Err(BbsError::DeserializationError);
+    }
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&bytes[*offset..*offset + 32]);
+    *offset += 32;
+    Fr::from_bytes(&buf)
+}
+
+fn read_indexed_map(bytes: &[u8], offset: &mut usize) -> BbsResult<BTreeMap<u32, Fr>> {
+    if *offset + 4 > bytes.len() {
+        return Err(BbsError::DeserializationError);
+    }
+    let mut count_bytes = [0u8; 4];
+    count_bytes.copy_from_slice(&bytes[*offset..*offset + 4]);
+    let count = u32::from_le_bytes(count_bytes) as usize;
+    *offset += 4;
+
+    let mut map = BTreeMap::new();
+    for _ in 0..count {
+        if *offset + 4 > bytes.len() {
+            return Err(BbsError::DeserializationError);
+        }
+        let mut idx_bytes = [0u8; 4];
+        idx_bytes.copy_from_slice(&bytes[*offset..*offset + 4]);
+        let idx = u32::from_le_bytes(idx_bytes);
+        *offset += 4;
+        let val = read_fr(bytes, offset)?;
+        map.insert(idx, val);
+    }
+    Ok(map)
+}
+
+/// Random scalars needed by ProofGen. Pulled out so callers control the RNG.
+#[cfg(feature = "std")]
+struct ProofRandomness {
+    r1: Fr,
+    r2: Fr,
+    e_tilde: Fr,
+    r1_tilde: Fr,
+    r3_tilde: Fr,
+    s_tilde: Fr,
+    hidden_tildes: BTreeMap<u32, Fr>,
+}
+
+#[cfg(feature = "std")]
+fn sample_randomness<R: rand::RngCore>(rng: &mut R, hidden_indices: &[u32]) -> ProofRandomness {
+    let nonzero = |rng: &mut R| loop {
+        let f = Fr::random(rng);
+        if !f.is_zero() {
+            return f;
+        }
+    };
+    let mut hidden_tildes = BTreeMap::new();
+    for &idx in hidden_indices {
+        hidden_tildes.insert(idx, Fr::random(rng));
+    }
+    ProofRandomness {
+        r1: nonzero(rng),
+        r2: nonzero(rng),
+        e_tilde: Fr::random(rng),
+        r1_tilde: Fr::random(rng),
+        r3_tilde: Fr::random(rng),
+        s_tilde: Fr::random(rng),
+        hidden_tildes,
+    }
+}
+
+fn compute_challenge(
+    vk: &VerifyingKey,
+    revealed: &RevealedSet,
+    a_bar: &G1,
+    b_bar: &G1,
+    d: &G1,
+    t1: &G1,
+    t2: &G1,
+    presentation_context: &[u8],
+) -> BbsResult<Fr> {
+    let mut transcript = Transcript::new(DOMAIN_BBS_PLUS.as_bytes());
+    transcript.append(b"vk_w", &vk.w.to_bytes());
+    transcript.append_g1(b"a_bar", &a_bar.to_bytes());
+    transcript.append_g1(b"b_bar", &b_bar.to_bytes());
+    transcript.append_g1(b"d", &d.to_bytes());
+    transcript.append_g1(b"t1", &t1.to_bytes());
+    transcript.append_g1(b"t2", &t2.to_bytes());
+    for (idx, val) in revealed {
+        transcript.append(b"rev_idx", &idx.to_le_bytes());
+        transcript.append_scalar(b"rev_val", val);
+    }
+    transcript.append(b"ctx", presentation_context);
+    transcript.squeeze_challenge()
+}
+
+/// BBS+ Presentation Proof System.
 pub struct BbsPresentation;
 
 impl BbsPresentation {
-    /// Create a presentation proof for selective disclosure
+    /// Create a presentation proof for selective disclosure.
     ///
-    /// # Arguments
-    /// * `signature` - The BBS+ signature on all attributes
-    /// * `vk` - Verifying key with generators for attributes
-    /// * `messages` - All attribute values (some will be hidden)
-    /// * `revealed_indices` - Indices of attributes to reveal
-    /// * `nonce` - Fresh nonce to prevent replay
-    ///
-    /// # Returns
-    /// Presentation proof that randomizes signature and selectively discloses
-    pub fn create_presentation(
+    /// `messages` must be the full signed message vector (in the order they
+    /// were signed); `revealed_indices` selects which of those to disclose
+    /// in the clear. `presentation_context` is caller-supplied and MUST be
+    /// fresh (e.g. a verifier-issued nonce) -- it's what makes replaying a
+    /// captured proof against a different verifier/session fail.
+    #[cfg(feature = "std")]
+    pub fn create_presentation<R: rand::RngCore>(
+        rng: &mut R,
         signature: &Signature,
         vk: &VerifyingKey,
         messages: &[Fr],
         revealed_indices: &[u32],
-        nonce: &Fr,
+        presentation_context: &[u8],
     ) -> BbsResult<PresentationProof> {
-        if messages.len() != vk.generators.len() {
+        if messages.len() != vk.message_generators.len() {
             return Err(BbsError::InvalidMessageCount);
         }
-
-        // Verify all revealed indices are in range
         for &idx in revealed_indices {
             if idx as usize >= messages.len() {
                 return Err(BbsError::InvalidProofStructure);
             }
         }
 
-        // Randomization factor for signature
-        let t = Fr::one();  // Would be random in production
+        let l = messages.len() as u32;
+        let hidden_indices: Vec<u32> = (0..l).filter(|i| !revealed_indices.contains(i)).collect();
 
-        // Randomize signature: sig' = sig^t
-        let a_prime = signature.a.mul(&t);
-        let e_prime = signature.e.mul(&t);
-        let s_prime = signature.s.add(&t.mul(&signature.e));
+        let rnd = sample_randomness(rng, &hidden_indices);
 
-        // Create commitments to hidden messages
-        // a_bar = a_prime, b_bar includes randomness, c_bar relates to messages
-        let a_bar = a_prime;
+        let b = compute_b(vk, messages, &signature.s)?;
+        let r3 = rnd.r2.invert()?;
 
-        // Commitment components (simplified for MVP)
-        let b_bar = G1::generator();  // Placeholder: would include randomness
-        let c_bar = G1::generator();  // Placeholder: would relate to hidden messages
+        let d = b.mul(&rnd.r2);
+        let a_bar = signature.a.mul(&rnd.r1.mul(&rnd.r2));
+        let b_bar = d.mul(&rnd.r1).sub(&a_bar.mul(&signature.e));
 
-        // Build revealed messages map
+        // T1 = Abar*e~ + D*r1~
+        let t1 = a_bar.mul(&rnd.e_tilde).add(&d.mul(&rnd.r1_tilde));
+
+        // T2 = D*r3~ + Q1*s~ + sum(H_j * m~_j) over hidden j
+        let mut t2 = d.mul(&rnd.r3_tilde).add(&vk.q1.mul(&rnd.s_tilde));
+        for &idx in &hidden_indices {
+            let h_j = &vk.message_generators[idx as usize];
+            let m_tilde_j = rnd.hidden_tildes.get(&idx).expect("sampled above");
+            t2 = t2.add(&h_j.mul(m_tilde_j));
+        }
+
         let mut revealed_messages = RevealedSet::new();
         for &idx in revealed_indices {
-            if (idx as usize) < messages.len() {
-                revealed_messages.insert(idx, messages[idx as usize].clone());
-            }
+            revealed_messages.insert(idx, messages[idx as usize]);
         }
 
-        // Generate challenge via Fiat-Shamir
-        let mut transcript = Transcript::new(DOMAIN_BBS_PLUS.as_bytes());
-        transcript.append_g1(b"a_bar", &a_bar.to_bytes());
-        transcript.append_g1(b"b_bar", &b_bar.to_bytes());
-        transcript.append_g1(b"c_bar", &c_bar.to_bytes());
-        transcript.append_scalar(b"nonce", nonce);
+        let challenge = compute_challenge(
+            vk,
+            &revealed_messages,
+            &a_bar,
+            &b_bar,
+            &d,
+            &t1,
+            &t2,
+            presentation_context,
+        )?;
 
-        // Include revealed messages in transcript for binding
-        for (idx, msg) in &revealed_messages {
-            let label = format!("msg_{}", idx);
-            transcript.append_scalar(label.as_bytes(), msg);
+        let e_hat = rnd.e_tilde.add(&signature.e.mul(&challenge));
+        let r1_hat = rnd.r1_tilde.sub(&rnd.r1.mul(&challenge));
+        let r3_hat = rnd.r3_tilde.sub(&r3.mul(&challenge));
+        let s_hat = rnd.s_tilde.add(&signature.s.mul(&challenge));
+
+        let mut hidden_message_hats = BTreeMap::new();
+        for &idx in &hidden_indices {
+            let m_tilde_j = rnd.hidden_tildes.get(&idx).expect("sampled above");
+            let m_hat_j = m_tilde_j.add(&messages[idx as usize].mul(&challenge));
+            hidden_message_hats.insert(idx, m_hat_j);
         }
-
-        let challenge = transcript.squeeze_challenge()?;
-
-        // Response values (proof of knowledge)
-        // r_hat, s_hat, s_prime are computed to prove knowledge without revealing secrets
-        let r_hat = Fr::one();  // Would be computed from randomness
-        let s_hat = Fr::one();  // Would be computed from signature
-        let s_prime = s_prime.clone();  // Randomized s value
 
         Ok(PresentationProof {
-            challenge,
             a_bar,
             b_bar,
-            c_bar,
-            r_hat,
+            d,
+            e_hat,
+            r1_hat,
+            r3_hat,
             s_hat,
-            s_prime,
+            hidden_message_hats,
             revealed_messages,
+            challenge,
         })
     }
 
-    /// Verify a presentation proof
-    ///
-    /// # Arguments
-    /// * `vk` - Verifying key
-    /// * `proof` - Presentation proof to verify
-    /// * `nonce` - Nonce to prevent replay
-    ///
-    /// # Returns
-    /// true if proof is valid and reveals only the expected messages
+    /// Verify a presentation proof against a verifying key and the
+    /// `presentation_context` the verifier itself issued/expects.
     pub fn verify_presentation(
         vk: &VerifyingKey,
         proof: &PresentationProof,
-        nonce: &Fr,
+        presentation_context: &[u8],
     ) -> BbsResult<bool> {
-        // Verify no messages are outside range
+        let l = vk.message_generators.len() as u32;
         for &idx in proof.revealed_messages.keys() {
-            if idx as usize >= vk.generators.len() {
+            if idx >= l {
+                return Err(BbsError::InvalidProofStructure);
+            }
+        }
+        for &idx in proof.hidden_message_hats.keys() {
+            if idx >= l {
+                return Err(BbsError::InvalidProofStructure);
+            }
+        }
+        // Every message index must appear in exactly one of the two sets.
+        if (proof.revealed_messages.len() + proof.hidden_message_hats.len()) as u32 != l {
+            return Err(BbsError::InvalidProofStructure);
+        }
+        for idx in proof.revealed_messages.keys() {
+            if proof.hidden_message_hats.contains_key(idx) {
                 return Err(BbsError::InvalidProofStructure);
             }
         }
 
-        // Reconstruct challenge via Fiat-Shamir
-        let mut transcript = Transcript::new(DOMAIN_BBS_PLUS.as_bytes());
-        transcript.append_g1(b"a_bar", &proof.a_bar.to_bytes());
-        transcript.append_g1(b"b_bar", &proof.b_bar.to_bytes());
-        transcript.append_g1(b"c_bar", &proof.c_bar.to_bytes());
-        transcript.append_scalar(b"nonce", nonce);
-
-        // Include revealed messages
-        for (idx, msg) in &proof.revealed_messages {
-            let label = format!("msg_{}", idx);
-            transcript.append_scalar(label.as_bytes(), msg);
-        }
-
-        let expected_challenge = transcript.squeeze_challenge()?;
-
-        // Verify challenge matches
-        if proof.challenge != expected_challenge {
-            return Ok(false);
-        }
-
-        // In production, would verify pairing equations:
-        // e(a_bar, W + challenge*g2) * e(commitment, g2) = e(g1, g2)
-        // For MVP, structural validation is sufficient
-
-        // Commitments must be non-identity
         if proof.a_bar.is_identity() {
             return Ok(false);
         }
 
-        Ok(true)
-    }
+        // T1' = Bbar*c + Abar*e^ + D*r1^
+        let t1 = proof
+            .b_bar
+            .mul(&proof.challenge)
+            .add(&proof.a_bar.mul(&proof.e_hat))
+            .add(&proof.d.mul(&proof.r1_hat));
 
-    /// Verify that two presentations are NOT linked (unlinkability check)
-    /// This is a probabilistic test: two distinct presentations should have
-    /// Hamming distance >> 0 when serialized
-    pub fn verify_unlinkable(proof1: &PresentationProof, proof2: &PresentationProof) -> BbsResult<bool> {
-        let bytes1 = proof1.to_bytes();
-        let bytes2 = proof2.to_bytes();
-
-        if bytes1.len() != bytes2.len() {
-            return Ok(true);  // Different lengths, definitely not linked
+        // Bv = P1 + sum(H_i * revealed_i)
+        let mut bv = base_generator();
+        for (&idx, val) in &proof.revealed_messages {
+            bv = bv.add(&vk.message_generators[idx as usize].mul(val));
         }
 
-        // Count bit differences
-        let mut hamming_distance = 0;
-        for (b1, b2) in bytes1.iter().zip(bytes2.iter()) {
-            hamming_distance += (b1 ^ b2).count_ones();
+        // T2' = Bv*c + D*r3^ + Q1*s^ + sum(H_j * m^_j) over hidden j
+        let mut t2 = bv
+            .mul(&proof.challenge)
+            .add(&proof.d.mul(&proof.r3_hat))
+            .add(&vk.q1.mul(&proof.s_hat));
+        for (&idx, m_hat) in &proof.hidden_message_hats {
+            t2 = t2.add(&vk.message_generators[idx as usize].mul(m_hat));
         }
 
-        // Expect significant bit differences (at least 50% of bits should differ)
-        // This is a heuristic check; real unlinkability is information-theoretic
-        let min_expected_distance = (bytes1.len() * 8) / 2;  // 50%
-        Ok(hamming_distance as usize > min_expected_distance)
+        let expected_challenge = compute_challenge(
+            vk,
+            &proof.revealed_messages,
+            &proof.a_bar,
+            &proof.b_bar,
+            &proof.d,
+            &t1,
+            &t2,
+            presentation_context,
+        )?;
+
+        if proof.challenge != expected_challenge {
+            return Ok(false);
+        }
+
+        // e(Abar, W) == e(Bbar, BP2)  <=>  Bbar == Abar*SK, which only holds
+        // when Abar was derived from a genuine signature (see derivation in
+        // presentation.rs module docs / commit message).
+        let lhs = pairing(&proof.a_bar, &vk.w);
+        let rhs = pairing(&proof.b_bar, &G2::generator());
+
+        Ok(lhs == rhs)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SigningKey, VerifyingKey, BbsSignature};
+    use crate::signature::BbsSignature;
+    use alloc::vec;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    fn rng() -> StdRng {
+        StdRng::seed_from_u64(7)
+    }
+
+    fn setup(n: u32) -> (crate::SigningKey, VerifyingKey) {
+        let mut r = rng();
+        let sk = crate::SigningKey::generate(&mut r);
+        let vk = VerifyingKey::derive(sk.public_key(), b"presentation-test-ctx", n).unwrap();
+        (sk, vk)
+    }
 
     #[test]
-    fn test_presentation_proof_serialization() {
-        let proof = PresentationProof {
-            challenge: Fr::one(),
-            a_bar: G1::generator(),
-            b_bar: G1::generator(),
-            c_bar: G1::generator(),
-            r_hat: Fr::one(),
-            s_hat: Fr::one(),
-            s_prime: Fr::one(),
-            revealed_messages: RevealedSet::new(),
-        };
+    fn test_presentation_proof_serialization_roundtrip() {
+        let (sk, vk) = setup(3);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(1), Fr::from_u64(2), Fr::from_u64(3)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+
+        let proof =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[0], b"nonce-1")
+                .unwrap();
 
         let bytes = proof.to_bytes();
         let proof2 = PresentationProof::from_bytes(&bytes).unwrap();
 
         assert_eq!(proof.challenge, proof2.challenge);
         assert_eq!(proof.a_bar, proof2.a_bar);
+        assert_eq!(proof.b_bar, proof2.b_bar);
+        assert_eq!(proof.d, proof2.d);
         assert_eq!(proof.revealed_messages, proof2.revealed_messages);
+        assert_eq!(proof.hidden_message_hats, proof2.hidden_message_hats);
     }
 
     #[test]
-    fn test_create_and_verify_presentation() {
-        let sk = SigningKey::random().unwrap();
-        let vk = sk.to_verifying_key().unwrap();
+    fn test_create_and_verify_presentation_reveal_one() {
+        let (sk, vk) = setup(2);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(11), Fr::from_u64(22)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
 
-        let messages = vec![Fr::one(), Fr::one()];
-        let sig = BbsSignature::sign(&sk, &vk, &messages).unwrap();
-
-        let nonce = Fr::one();
-        let revealed = vec![0];  // Reveal only first message
-
-        let proof = BbsPresentation::create_presentation(&sig, &vk, &messages, &revealed, &nonce).unwrap();
-        let valid = BbsPresentation::verify_presentation(&vk, &proof, &nonce).unwrap();
-
+        let proof =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[0], b"nonce")
+                .unwrap();
+        let valid = BbsPresentation::verify_presentation(&vk, &proof, b"nonce").unwrap();
         assert!(valid);
+        assert_eq!(proof.revealed_messages.get(&0), Some(&Fr::from_u64(11)));
+        assert!(proof.revealed_messages.get(&1).is_none());
     }
 
     #[test]
-    fn test_unlinkability_different_nonces() {
-        let sk = SigningKey::random().unwrap();
-        let vk = sk.to_verifying_key().unwrap();
+    fn test_create_and_verify_presentation_reveal_none() {
+        let (sk, vk) = setup(2);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(11), Fr::from_u64(22)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
 
-        let messages = vec![Fr::one(), Fr::one()];
-        let sig = BbsSignature::sign(&sk, &vk, &messages).unwrap();
-
-        let revealed = vec![0];
-
-        let nonce1 = Fr::one();
-        let proof1 = BbsPresentation::create_presentation(&sig, &vk, &messages, &revealed, &nonce1).unwrap();
-
-        let nonce2 = Fr::one().add(&Fr::one());
-        let proof2 = BbsPresentation::create_presentation(&sig, &vk, &messages, &revealed, &nonce2).unwrap();
-
-        // Two presentations with different nonces should be unlinkable
-        let unlinkable = BbsPresentation::verify_unlinkable(&proof1, &proof2).unwrap();
-        assert!(unlinkable);
+        let proof =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[], b"nonce")
+                .unwrap();
+        assert!(BbsPresentation::verify_presentation(&vk, &proof, b"nonce").unwrap());
+        assert!(proof.revealed_messages.is_empty());
     }
 
     #[test]
-    fn test_wrong_nonce_fails_verification() {
-        let sk = SigningKey::random().unwrap();
-        let vk = sk.to_verifying_key().unwrap();
+    fn test_create_and_verify_presentation_reveal_all() {
+        let (sk, vk) = setup(2);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(11), Fr::from_u64(22)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
 
-        let messages = vec![Fr::one(), Fr::one()];
-        let sig = BbsSignature::sign(&sk, &vk, &messages).unwrap();
+        let proof =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[0, 1], b"nonce")
+                .unwrap();
+        assert!(BbsPresentation::verify_presentation(&vk, &proof, b"nonce").unwrap());
+    }
 
-        let nonce = Fr::one();
-        let proof = BbsPresentation::create_presentation(&sig, &vk, &messages, &vec![0], &nonce).unwrap();
+    #[test]
+    fn test_wrong_context_fails_verification() {
+        let (sk, vk) = setup(2);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(11), Fr::from_u64(22)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
 
-        let wrong_nonce = Fr::one().add(&Fr::one());
-        let valid = BbsPresentation::verify_presentation(&vk, &proof, &wrong_nonce).unwrap();
+        let proof = BbsPresentation::create_presentation(
+            &mut r,
+            &sig,
+            &vk,
+            &messages,
+            &[0],
+            b"expected-nonce",
+        )
+        .unwrap();
 
+        let valid =
+            BbsPresentation::verify_presentation(&vk, &proof, b"different-nonce").unwrap();
         assert!(!valid);
+    }
+
+    #[test]
+    fn test_tampered_revealed_message_fails_verification() {
+        let (sk, vk) = setup(2);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(11), Fr::from_u64(22)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+
+        let mut proof =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[0], b"nonce")
+                .unwrap();
+        proof.revealed_messages.insert(0, Fr::from_u64(999));
+
+        let valid = BbsPresentation::verify_presentation(&vk, &proof, b"nonce").unwrap();
+        assert!(!valid);
+    }
+
+    #[test]
+    fn test_proof_without_a_genuine_signature_is_rejected() {
+        // The regression test for the old placeholder implementation: a
+        // "proof" built from unrelated points (not derived from an actual
+        // valid signature via r1/r2 randomization) must fail the final
+        // pairing check, even though transcript/challenge bookkeeping alone
+        // might look internally consistent.
+        let (_, vk) = setup(1);
+        let forged = PresentationProof {
+            a_bar: G1::generator(),
+            b_bar: G1::generator(),
+            d: G1::generator(),
+            e_hat: Fr::one(),
+            r1_hat: Fr::one(),
+            r3_hat: Fr::one(),
+            s_hat: Fr::one(),
+            hidden_message_hats: BTreeMap::new(),
+            revealed_messages: {
+                let mut m = RevealedSet::new();
+                m.insert(0, Fr::one());
+                m
+            },
+            challenge: Fr::one(),
+        };
+        // Either the challenge recomputation fails to match (most likely)
+        // or, in the vanishingly unlikely case it did match, the pairing
+        // check must still catch it -- both paths return `Ok(false)`, never
+        // `Ok(true)`.
+        assert!(!BbsPresentation::verify_presentation(&vk, &forged, b"nonce").unwrap());
+    }
+
+    #[test]
+    fn test_two_presentations_of_same_signature_are_unlinkable() {
+        // A_bar, B_bar, D are independently randomized by fresh r1, r2 each
+        // call, so two presentations of the *same* underlying signature
+        // must not share any of their EC commitments.
+        let (sk, vk) = setup(1);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(5)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+
+        let proof1 =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[], b"ctx-a")
+                .unwrap();
+        let proof2 =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[], b"ctx-b")
+                .unwrap();
+
+        assert_ne!(proof1.a_bar, proof2.a_bar);
+        assert_ne!(proof1.b_bar, proof2.b_bar);
+        assert_ne!(proof1.d, proof2.d);
+    }
+
+    #[test]
+    fn test_reveal_index_out_of_range_rejected() {
+        let (sk, vk) = setup(2);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(1), Fr::from_u64(2)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+
+        let result =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[5], b"nonce");
+        assert!(result.is_err());
     }
 }
