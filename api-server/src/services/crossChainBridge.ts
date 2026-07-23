@@ -42,10 +42,14 @@
  * TRUST MODEL: step 3 (`verifyAnchorReceiptProof`) is what makes an anchor
  * `verified`, and it is backed by cryptographic MPT proof verification
  * against a self-consistency-checked, finality-gated header — see
- * `blockHeaderStore.ts` for the precise remaining trust assumption. This
- * replaces a prior design where `verified` could be set from an HMAC keyed
- * by a single shared secret (`BRIDGE_HMAC_SECRET`) with no dependency on
- * real chain state at all.
+ * `blockHeaderStore.ts` for the three available finality modes and their
+ * precise trust assumptions. For Ethereum mainnet/Sepolia, checkpointing a
+ * header via `{ mode: 'light-client' }` verifies real BLS sync-committee
+ * finality (`beaconLightClient.ts`) instead of trusting the relay's RPC —
+ * see that module for how to bootstrap and feed it updates. This replaces a
+ * prior design where `verified` could be set from an HMAC keyed by a single
+ * shared secret (`BRIDGE_HMAC_SECRET`) with no dependency on real chain
+ * state at all.
  */
 import {
   ProofType,
@@ -63,6 +67,14 @@ import {
   type CheckpointedHeader,
 } from './blockHeaderStore.js';
 import { verifyReceiptProof, ReceiptProofError, type ReceiptProof } from './mptProof.js';
+import {
+  getDefaultBeaconLightClientStore,
+  LightClientError,
+  type BeaconLightClientStore,
+  type LightClientBootstrap,
+  type LightClientUpdate,
+  type LightClientHeader,
+} from './beaconLightClient.js';
 import { decodeCredentialLog, UnrecognizedLogError, type DecodedCredentialEvent } from './ethAbi.js';
 import { createHash } from 'crypto';
 
@@ -247,4 +259,29 @@ export function checkpointHeader(
   store: BlockHeaderStore = getDefaultBlockHeaderStore(),
 ): CheckpointedHeader {
   return store.checkpoint(input);
+}
+
+// ---------------------------------------------------------------------------
+// Beacon-chain light client (thin re-export for route convenience — see
+// beaconLightClient.ts for the actual BLS sync-committee verification)
+// ---------------------------------------------------------------------------
+
+export { LightClientError, getDefaultBeaconLightClientStore };
+export type { LightClientBootstrap, LightClientUpdate };
+
+export function bootstrapLightClient(
+  chainId: number,
+  trustedBlockRoot: Uint8Array,
+  bootstrap: LightClientBootstrap,
+  store: BeaconLightClientStore = getDefaultBeaconLightClientStore(),
+): void {
+  store.bootstrap(chainId, trustedBlockRoot, bootstrap);
+}
+
+export function applyLightClientUpdate(
+  chainId: number,
+  update: LightClientUpdate,
+  store: BeaconLightClientStore = getDefaultBeaconLightClientStore(),
+): LightClientHeader {
+  return store.applyUpdate(chainId, update);
 }

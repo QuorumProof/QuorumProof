@@ -32,13 +32,55 @@ import {
   computeProofHash,
   checkpointHeader,
   verifyAnchorReceiptProof,
+  bootstrapLightClient,
+  applyLightClientUpdate,
   HeaderVerificationError,
   ReceiptProofError,
   UnrecognizedLogError,
   AnchorVerificationError,
+  LightClientError,
   type ForeignChainEvent,
   type ReceiptProof,
+  type LightClientBootstrap,
+  type LightClientUpdate,
 } from '../services/crossChainBridge.js';
+
+function hex(value: unknown, label: string): Uint8Array {
+  if (typeof value !== 'string' || !/^0x[0-9a-fA-F]+$/.test(value)) {
+    throw new Error(`${label} must be a 0x-prefixed hex string`);
+  }
+  return Buffer.from(value.slice(2), 'hex');
+}
+function hexArray(value: unknown, label: string): Uint8Array[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array of 0x-prefixed hex strings`);
+  return value.map((v, i) => hex(v, `${label}[${i}]`));
+}
+function parseLightClientHeader(value: unknown, label: string): { beacon: ReturnType<typeof parseBeaconBlockHeader> } {
+  const obj = value as Record<string, unknown> | undefined;
+  if (!obj || typeof obj !== 'object' || !obj.beacon) throw new Error(`${label}.beacon is required`);
+  return { beacon: parseBeaconBlockHeader(obj.beacon, `${label}.beacon`) };
+}
+function parseBeaconBlockHeader(value: unknown, label: string) {
+  const obj = value as Record<string, unknown> | undefined;
+  if (!obj || typeof obj !== 'object') throw new Error(`${label} is required`);
+  if (typeof obj.slot !== 'number') throw new Error(`${label}.slot is required`);
+  if (typeof obj.proposer_index !== 'number') throw new Error(`${label}.proposer_index is required`);
+  return {
+    slot: obj.slot,
+    proposerIndex: obj.proposer_index,
+    parentRoot: hex(obj.parent_root, `${label}.parent_root`),
+    stateRoot: hex(obj.state_root, `${label}.state_root`),
+    bodyRoot: hex(obj.body_root, `${label}.body_root`),
+  };
+}
+function parseSyncCommittee(value: unknown, label: string) {
+  const obj = value as Record<string, unknown> | undefined;
+  if (!obj || typeof obj !== 'object') throw new Error(`${label} is required`);
+  return {
+    pubkeys: hexArray(obj.pubkeys, `${label}.pubkeys`),
+    aggregatePubkey: hex(obj.aggregate_pubkey, `${label}.aggregate_pubkey`),
+  };
+}
 
 const router = Router();
 
@@ -108,8 +150,17 @@ router.post('/headers', rbac.requirePermission('admin:all'), (req: Request, res:
       return;
     }
     finalityInput = { mode: 'confirmations', headBlockNumber: finalityObj.head_block_number };
+  } else if (finalityObj.mode === 'light-client') {
+    if (!Array.isArray(finalityObj.execution_payload_proof)) {
+      res.status(400).json({ error: 'finality.execution_payload_proof (array of 0x-prefixed hashes) is required for light-client mode' });
+      return;
+    }
+    finalityInput = {
+      mode: 'light-client',
+      executionPayloadProof: finalityObj.execution_payload_proof as `0x${string}`[],
+    };
   } else {
-    res.status(400).json({ error: "finality.mode must be 'tag' or 'confirmations'" });
+    res.status(400).json({ error: "finality.mode must be 'tag', 'confirmations', or 'light-client'" });
     return;
   }
 
@@ -439,5 +490,122 @@ router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/bridge/light-client/bootstrap
+//
+// Establishes the light client's trust anchor for a beacon-chain network
+// (mainnet/Sepolia — see beaconChainConfig.ts) from a weak-subjectivity
+// checkpoint. `trusted_block_root` must come from an out-of-band source (a
+// checkpoint-sync provider, or your own beacon node) — see
+// beaconLightClient.ts's module doc for why that's the one fact this whole
+// chain of trust rests on. Relay/admin only.
+//
+// Body:
+//   chain_id            number  required
+//   trusted_block_root  string  required – 0x-prefixed 32-byte beacon block root
+//   bootstrap            object required – {
+//     header: { beacon: { slot, proposer_index, parent_root, state_root, body_root } },
+//     current_sync_committee: { pubkeys: string[512], aggregate_pubkey: string },
+//     current_sync_committee_branch: string[],
+//   }
+// ---------------------------------------------------------------------------
+router.post('/light-client/bootstrap', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
+  const { chain_id, trusted_block_root, bootstrap } = req.body as Record<string, unknown>;
+  if (typeof chain_id !== 'number') {
+    res.status(400).json({ error: 'chain_id is required' });
+    return;
+  }
+  try {
+    const trustedBlockRoot = hex(trusted_block_root, 'trusted_block_root');
+    const bootstrapObj = bootstrap as Record<string, unknown> | undefined;
+    if (!bootstrapObj || typeof bootstrapObj !== 'object') throw new Error('bootstrap is required');
+    const parsed: LightClientBootstrap = {
+      header: parseLightClientHeader(bootstrapObj.header, 'bootstrap.header'),
+      currentSyncCommittee: parseSyncCommittee(bootstrapObj.current_sync_committee, 'bootstrap.current_sync_committee'),
+      currentSyncCommitteeBranch: hexArray(bootstrapObj.current_sync_committee_branch, 'bootstrap.current_sync_committee_branch'),
+    };
+    bootstrapLightClient(chain_id, trustedBlockRoot, parsed);
+    res.status(201).json({ success: true, chain_id });
+  } catch (err: unknown) {
+    if (err instanceof LightClientError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/bridge/light-client/update
+//
+// Feeds the light client a new sync-committee-signed update, advancing its
+// finalized header when (and only when) a real supermajority BLS aggregate
+// signature verifies. See beaconLightClient.ts for the full protocol. Relay
+// only — this only ever advances state via cryptographic verification, so a
+// malicious relay can at worst submit garbage that gets rejected.
+//
+// Body:
+//   chain_id   number  required
+//   update     object  required – {
+//     attested_header, next_sync_committee?, next_sync_committee_branch?,
+//     finalized_header?, finality_branch?, signature_slot: number,
+//     sync_aggregate: { sync_committee_bits: boolean[512], sync_committee_signature: string },
+//   }
+// ---------------------------------------------------------------------------
+router.post('/light-client/update', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
+  const { chain_id, update } = req.body as Record<string, unknown>;
+  if (typeof chain_id !== 'number') {
+    res.status(400).json({ error: 'chain_id is required' });
+    return;
+  }
+  try {
+    const updateObj = update as Record<string, unknown> | undefined;
+    if (!updateObj || typeof updateObj !== 'object') throw new Error('update is required');
+    if (typeof updateObj.signature_slot !== 'number') throw new Error('update.signature_slot is required');
+    const syncAggregate = updateObj.sync_aggregate as Record<string, unknown> | undefined;
+    if (!syncAggregate || !Array.isArray(syncAggregate.sync_committee_bits)) {
+      throw new Error('update.sync_aggregate.sync_committee_bits (boolean[512]) is required');
+    }
+
+    const parsed: LightClientUpdate = {
+      attestedHeader: parseLightClientHeader(updateObj.attested_header, 'update.attested_header'),
+      signatureSlot: updateObj.signature_slot,
+      syncAggregate: {
+        syncCommitteeBits: syncAggregate.sync_committee_bits as boolean[],
+        syncCommitteeSignature: hex(syncAggregate.sync_committee_signature, 'update.sync_aggregate.sync_committee_signature'),
+      },
+    };
+    if (updateObj.next_sync_committee) {
+      parsed.nextSyncCommittee = parseSyncCommittee(updateObj.next_sync_committee, 'update.next_sync_committee');
+      parsed.nextSyncCommitteeBranch = hexArray(updateObj.next_sync_committee_branch, 'update.next_sync_committee_branch');
+    }
+    if (updateObj.finalized_header) {
+      parsed.finalizedHeader = parseLightClientHeader(updateObj.finalized_header, 'update.finalized_header');
+      parsed.finalityBranch = hexArray(updateObj.finality_branch, 'update.finality_branch');
+    }
+
+    const finalized = applyLightClientUpdate(chain_id, parsed);
+    res.json({
+      success: true,
+      chain_id,
+      finalized_header: {
+        slot: finalized.beacon.slot,
+        state_root: bytesToHexString(finalized.beacon.stateRoot),
+        body_root: bytesToHexString(finalized.beacon.bodyRoot),
+      },
+    });
+  } catch (err: unknown) {
+    if (err instanceof LightClientError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+function bytesToHexString(bytes: Uint8Array): string {
+  return '0x' + Buffer.from(bytes).toString('hex');
+}
 
 export default router;
