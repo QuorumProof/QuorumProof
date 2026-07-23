@@ -7598,39 +7598,120 @@ impl QuorumProofContract {
     }
 
     /// Estimate the economic cost for an attacker to capture a slice's consensus threshold.
-    /// Uses greedy approximation of weighted set cover for corrupt-existing strategy
-    /// and simple model for Sybil strategy. Recommends cheapest attack path.
+    ///
+    /// "Corrupt existing" is a real greedy weighted-set-cover approximation over the slice's
+    /// actual attestors: each attestor's on-chain staked amount (`AttestorReputationRecord.stake`,
+    /// the same balance `deposit_attestor_stake`/`slash_attestor` manage) is the capital an
+    /// attacker must control to corrupt them — an unstaked attestor (stake=0) costs nothing to
+    /// corrupt, which is a real and useful signal, not a placeholder. Attestors are ranked by
+    /// stake-per-weight ascending and the cheapest set is accumulated until the slice's actual
+    /// required weight is reached, using the exact same effective-weight (reputation-weighting)
+    /// and threshold-type (absolute/percentage) rules `attest`/`is_attested` use, via
+    /// `get_effective_weight`/`required_weight`.
+    ///
+    /// "Sybil" cost also ties to real slice state: new identities are assumed capped at the
+    /// smallest weight the creator has already granted an existing attestor (`minimum_weight`)
+    /// — a brand-new, unproven attestor getting more than that would be unusual — and priced at
+    /// the smallest active stake among current attestors (0 if staking is disabled or unused,
+    /// which correctly signals a Sybil attack is economically free in that configuration).
+    /// Time-to-entry stays a conservative fixed estimate: the contract has no on-chain notion of
+    /// how long reputation-bootstrapping takes.
     pub fn get_slice_attack_cost_estimate(env: Env, slice_id: u64) -> SliceAttackCostEstimate {
         let slice = Self::get_slice(env.clone(), slice_id);
         let distribution = Self::get_weight_distribution(env.clone(), slice_id);
+        let required_weight = Self::required_weight(&env, &slice);
 
-        // Placeholder: greedy corrupt-existing cost estimation
-        // In practice, this would sort attestors by corruption price and select minimum-cost set
-        let estimated_corrupt_cost = 50000u64; // Placeholder
-        let estimated_corrupt_count = 3u32;
+        let len = slice.attestors.len();
+        let mut weights: Vec<u32> = Vec::new(&env);
+        let mut stakes: Vec<u64> = Vec::new(&env);
+        for i in 0..len {
+            let attestor = slice.attestors.get(i).expect("attestor in bounds");
+            weights.push_back(Self::get_effective_weight(env.clone(), slice_id, attestor.clone()));
+            stakes.push_back(Self::load_or_init_reputation(&env, &attestor).stake);
+        }
 
-        // Placeholder: Sybil attack cost (7 days per Sybil at 1000 units/day)
-        let sybils_needed = (distribution.total_weight as u64 + 29) / 30; // ceil division
-        let estimated_sybil_cost = sybils_needed * 7000u64;
+        // Bubble-sort attestor indices by stake-per-weight ascending (cross-multiplied to
+        // avoid floating point, which Soroban contracts must not use for determinism).
+        let mut order: Vec<u32> = Vec::new(&env);
+        for i in 0..len {
+            order.push_back(i);
+        }
+        if len >= 2 {
+            for i in 0..len {
+                for j in 0..(len - 1 - i) {
+                    let a = order.get(j).expect("index in bounds");
+                    let b = order.get(j + 1).expect("index in bounds");
+                    let (wa, sa) = (
+                        weights.get(a).expect("index in bounds"),
+                        stakes.get(a).expect("index in bounds"),
+                    );
+                    let (wb, sb) = (
+                        weights.get(b).expect("index in bounds"),
+                        stakes.get(b).expect("index in bounds"),
+                    );
+                    // sa/wa > sb/wb  <=>  sa*wb > sb*wa (cross-multiplied, no division)
+                    let should_swap = (sa as u128) * (wb as u128) > (sb as u128) * (wa as u128);
+                    if should_swap {
+                        order.set(j, b);
+                        order.set(j + 1, a);
+                    }
+                }
+            }
+        }
 
-        let cheapest_cost = estimated_corrupt_cost.min(estimated_sybil_cost);
-        let cheapest_strategy = estimated_corrupt_cost <= estimated_sybil_cost;
+        let mut corrupt_cost: u64 = 0;
+        let mut corrupt_weight: u32 = 0;
+        let mut corrupt_count: u32 = 0;
+        for i in 0..len {
+            if corrupt_weight >= required_weight {
+                break;
+            }
+            let idx = order.get(i).expect("index in bounds");
+            corrupt_cost = corrupt_cost.saturating_add(stakes.get(idx).expect("index in bounds"));
+            corrupt_weight = corrupt_weight.saturating_add(weights.get(idx).expect("index in bounds"));
+            corrupt_count += 1;
+        }
 
-        // Concentration risk: max_weight / required_weight
-        let concentration_risk = if slice.threshold > 0 {
-            ((distribution.maximum_weight as u64 * 100) / slice.threshold as u64).min(100) as u32
+        // Sybil model — see doc comment above for the on-chain data this draws from.
+        let sybil_cap = distribution.minimum_weight.max(1);
+        let sybils_needed = ((required_weight as u64) + (sybil_cap as u64) - 1) / sybil_cap as u64;
+        let mut min_active_stake: Option<u64> = None;
+        for i in 0..len {
+            let stake = stakes.get(i).expect("index in bounds");
+            if stake > 0 {
+                min_active_stake = Some(match min_active_stake {
+                    Some(m) => m.min(stake),
+                    None => stake,
+                });
+            }
+        }
+        let cost_per_sybil = min_active_stake.unwrap_or(0);
+        let sybil_attack_cost = cost_per_sybil.saturating_mul(sybils_needed);
+
+        // Concentration risk / SPOF use *effective* weight (post reputation-weighting,
+        // same as the greedy set-cover above) rather than raw base weight — a slashed
+        // attestor's raw weight grant doesn't change, but their real ability to single-
+        // handedly clear the threshold does, and that's what these fields must track.
+        let mut max_effective_weight: u32 = 0;
+        for i in 0..len {
+            max_effective_weight = max_effective_weight.max(weights.get(i).expect("index in bounds"));
+        }
+
+        let concentration_risk = if required_weight > 0 {
+            ((max_effective_weight as u64 * 100) / required_weight as u64).min(100) as u32
         } else {
             0
         };
 
-        let has_spof = distribution.maximum_weight >= slice.threshold;
+        let has_spof = max_effective_weight >= required_weight;
 
         SliceAttackCostEstimate {
             slice_id,
-            corrupt_existing_cost: estimated_corrupt_cost,
-            corrupt_existing_min_count: estimated_corrupt_count,
-            sybil_attack_cost: estimated_sybil_cost,
-            sybil_time_to_entry_seconds: 604800, // 7 days in seconds
+            corrupt_existing_cost: corrupt_cost,
+            corrupt_existing_min_count: corrupt_count,
+            sybil_attack_cost,
+            sybil_time_to_entry_seconds: 604800, // 7 days — conservative fixed estimate; the
+            // contract has no on-chain notion of reputation-bootstrap duration.
             concentration_risk_score: concentration_risk,
             has_single_point_of_failure: has_spof,
             attack_detection_probability: if has_spof { 20 } else { 60 },
@@ -12089,12 +12170,12 @@ impl QuorumProofContract {
         }
 
         // Accused must have actually attested this credential
-        let attestors: Vec<Address> = env
+        let attestation_records: Vec<AttestationRecord> = env
             .storage()
             .instance()
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
-        if !attestors.iter().any(|a| a == accused) {
+        if !attestation_records.iter().any(|r| r.attestor == accused) {
             panic_with_error!(&env, ContractError::NotAttested);
         }
 
@@ -12218,15 +12299,15 @@ impl QuorumProofContract {
             challenge.status = ChallengeStatus::Upheld;
 
             // Remove accused's attestation from the credential
-            let attestors: Vec<Address> = env
+            let records: Vec<AttestationRecord> = env
                 .storage()
                 .instance()
                 .get(&DataKey::Attestors(challenge.credential_id))
                 .unwrap_or(Vec::new(&env));
-            let mut retained: Vec<Address> = Vec::new(&env);
-            for a in attestors.iter() {
-                if a != challenge.accused {
-                    retained.push_back(a);
+            let mut retained: Vec<AttestationRecord> = Vec::new(&env);
+            for rec in records.iter() {
+                if rec.attestor != challenge.accused {
+                    retained.push_back(rec);
                 }
             }
             env.storage()
@@ -13534,15 +13615,15 @@ impl QuorumProofContract {
                     .set(&DataKey::SlashCount(challenge.accused.clone()), &(count + 1));
 
                 // Remove the accused's attestation from the credential.
-                let attestors: Vec<Address> = env
+                let records: Vec<AttestationRecord> = env
                     .storage()
                     .instance()
                     .get(&DataKey::Attestors(challenge.credential_id))
                     .unwrap_or(Vec::new(&env));
-                let mut retained: Vec<Address> = Vec::new(&env);
-                for a in attestors.iter() {
-                    if a != challenge.accused {
-                        retained.push_back(a);
+                let mut retained: Vec<AttestationRecord> = Vec::new(&env);
+                for rec in records.iter() {
+                    if rec.attestor != challenge.accused {
+                        retained.push_back(rec);
                     }
                 }
                 env.storage()
@@ -15653,6 +15734,198 @@ mod tests {
     ) -> u64 {
         let metadata = Bytes::from_slice(env, b"QmRevocationRegistryTestHash000000");
         client.issue_credential(issuer, subject, &credential_type, &metadata, &None, &0u64)
+    }
+
+    // ============ get_slice_attack_cost_estimate: real stake-driven economic
+    // security model (was previously a hardcoded-constant placeholder that
+    // ignored actual attestor state entirely) ============
+
+    #[test]
+    fn test_attack_cost_estimate_unstaked_attestors_are_free_to_corrupt() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let creator = Address::generate(&env);
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let c = Address::generate(&env);
+
+        // No stake deposited anywhere: corrupting any attestor should cost
+        // nothing (a real, informative signal — not a placeholder).
+        let attestors = vec![&env, a, b, c];
+        let weights = vec![&env, 34u32, 33u32, 33u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &51u32);
+
+        let estimate = client.get_slice_attack_cost_estimate(&slice_id);
+        assert_eq!(estimate.corrupt_existing_cost, 0);
+        // 34 alone is short of 51; +33 reaches 67 >= 51.
+        assert_eq!(estimate.corrupt_existing_min_count, 2);
+    }
+
+    #[test]
+    fn test_attack_cost_estimate_greedy_selection_follows_stake_per_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let creator = Address::generate(&env);
+        let cheap1 = Address::generate(&env);
+        let cheap2 = Address::generate(&env);
+        let cheap3 = Address::generate(&env);
+        let expensive = Address::generate(&env);
+
+        client.set_attestor_reputation_config(&admin, &20u32, &1u32, &true, &1000u32, &20u32);
+
+        // `expensive` alone has enough weight (50) to clear the threshold
+        // (30) by itself, but costs far more per unit weight (100/weight)
+        // than the three `cheap*` attestors (10/weight each). A correct
+        // weighted-set-cover greedy must prefer the three cheap attestors
+        // over the single high-weight one.
+        client.deposit_attestor_stake(&cheap1, &100u64);
+        client.deposit_attestor_stake(&cheap2, &100u64);
+        client.deposit_attestor_stake(&cheap3, &100u64);
+        client.deposit_attestor_stake(&expensive, &5000u64);
+
+        let attestors = vec![&env, expensive, cheap1, cheap2, cheap3];
+        let weights = vec![&env, 50u32, 10u32, 10u32, 10u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &30u32);
+
+        let estimate = client.get_slice_attack_cost_estimate(&slice_id);
+        assert_eq!(estimate.corrupt_existing_min_count, 3, "should pick the 3 cheap attestors, not the 1 expensive one");
+        assert_eq!(estimate.corrupt_existing_cost, 300);
+    }
+
+    #[test]
+    fn test_attack_cost_estimate_percentage_threshold_uses_real_required_weight() {
+        // Regression test: the old placeholder used `slice.threshold` (the
+        // raw percentage value, e.g. 60) directly as if it were an absolute
+        // weight, which is nonsensical for percentage-type slices. It must
+        // use the actual computed required weight instead.
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let creator = Address::generate(&env);
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let c = Address::generate(&env);
+        let d = Address::generate(&env);
+
+        let attestors = vec![&env, a, b, c, d];
+        let weights = vec![&env, 50u32, 50u32, 50u32, 50u32];
+        // total weight = 200; 60% required = ceil(200*60/100) = 120
+        let slice_id = client.create_slice_percentage(&creator, &attestors, &weights, &60u32);
+
+        let estimate = client.get_slice_attack_cost_estimate(&slice_id);
+        // 50+50=100 < 120; +50=150 >= 120 -> 3 attestors needed, not 2
+        // (which is what dividing max_weight by the raw 60 would suggest).
+        assert_eq!(estimate.corrupt_existing_min_count, 3);
+        // concentration_risk = (max_weight * 100) / required_weight = 5000/120 = 41,
+        // not (50*100)/60 = 83 as the old placeholder-adjacent bug would compute.
+        assert_eq!(estimate.concentration_risk_score, 41);
+        assert!(!estimate.has_single_point_of_failure);
+    }
+
+    #[test]
+    fn test_attack_cost_estimate_reflects_reputation_weighting_after_a_real_slash() {
+        // Adversarial sequence driven through real contract calls: issue a
+        // credential, have an attestor attest, challenge and slash them via
+        // the actual on-chain challenge/vote flow, then verify the attack
+        // cost estimate reflects their now-reduced effective weight — not a
+        // static formula computed once at slice creation.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let target = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let challenger = Address::generate(&env);
+
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+
+        let cred_id = issue_test_credential(&env, &client, &issuer, &holder, 1);
+
+        // `target` alone (weight 50) is enough to reach the 45 threshold --
+        // a single point of failure. `voter` (44) and `challenger` (10) are
+        // each individually short of it, and together (54) can uphold a
+        // challenge against `target`.
+        let attestors = vec![&env, target.clone(), voter.clone(), challenger.clone()];
+        let weights = vec![&env, 50u32, 44u32, 10u32];
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &45u32);
+        client.set_reputation_weighting_enabled(&issuer, &slice_id, &true);
+
+        let before = client.get_slice_attack_cost_estimate(&slice_id);
+        assert_eq!(before.corrupt_existing_min_count, 1);
+        assert!(before.has_single_point_of_failure);
+
+        client.attest(&target, &cred_id, &slice_id, &true, &None);
+        let challenge_id = client.challenge_attestation(&challenger, &cred_id, &slice_id, &target);
+        // voter (44) alone is short of the 45 required to uphold; challenger's
+        // own vote (10) is needed too, for 54 total.
+        client.vote_on_challenge(&voter, &challenge_id, &true);
+        client.vote_on_challenge(&challenger, &challenge_id, &true);
+        assert!(client.is_attestor_suspended(&slice_id, &target));
+
+        // `target`'s reputation score has now been penalised (default
+        // penalty_per_slash = 20 -> score 80), so their effective weight
+        // under reputation-weighting drops from 50 to 40 -- no longer
+        // enough alone to clear the threshold of 45, and no other single
+        // attestor (44, 10) can either: the slice is no longer a SPOF.
+        let after = client.get_slice_attack_cost_estimate(&slice_id);
+        assert_eq!(
+            client.get_effective_weight(&slice_id, &target),
+            40,
+            "effective weight should reflect the real post-slash reputation score"
+        );
+        assert!(
+            after.corrupt_existing_min_count >= before.corrupt_existing_min_count,
+            "a real slash should never make the slice easier to attack"
+        );
+        assert!(!after.has_single_point_of_failure);
+    }
+
+    #[test]
+    fn test_attack_cost_estimate_min_count_matches_real_quorum_outcome() {
+        // Ties the estimate directly to real attest()/is_attested() behavior:
+        // corrupting exactly `corrupt_existing_min_count` of the cheapest
+        // attestors (as the model predicts) must reach real quorum;
+        // corrupting one fewer must not.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let holder1 = Address::generate(&env);
+        let holder2 = Address::generate(&env);
+        let a0 = Address::generate(&env);
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let a3 = Address::generate(&env);
+
+        client.set_attestor_reputation_config(&admin, &20u32, &1u32, &true, &1000u32, &20u32);
+        client.deposit_attestor_stake(&a0, &100u64);
+        client.deposit_attestor_stake(&a1, &200u64);
+        client.deposit_attestor_stake(&a2, &300u64);
+        client.deposit_attestor_stake(&a3, &400u64);
+
+        let attestors = vec![&env, a0.clone(), a1.clone(), a2.clone(), a3.clone()];
+        let weights = vec![&env, 25u32, 25u32, 25u32, 25u32];
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &51u32);
+
+        let estimate = client.get_slice_attack_cost_estimate(&slice_id);
+        assert_eq!(estimate.corrupt_existing_min_count, 3);
+        assert_eq!(estimate.corrupt_existing_cost, 600); // 100+200+300, the 3 cheapest
+
+        // The 3 cheapest (a0, a1, a2) attesting must reach real quorum.
+        let cred_reaches = issue_test_credential(&env, &client, &issuer, &holder1, 1);
+        client.attest(&a0, &cred_reaches, &slice_id, &true, &None);
+        client.attest(&a1, &cred_reaches, &slice_id, &true, &None);
+        client.attest(&a2, &cred_reaches, &slice_id, &true, &None);
+        assert!(client.is_attested(&cred_reaches, &slice_id));
+
+        // Only 2 of them (one short of the model's predicted minimum) must not.
+        let cred_short = issue_test_credential(&env, &client, &issuer, &holder2, 1);
+        client.attest(&a0, &cred_short, &slice_id, &true, &None);
+        client.attest(&a1, &cred_short, &slice_id, &true, &None);
+        assert!(!client.is_attested(&cred_short, &slice_id));
     }
 
     // NOTE: this whole block originally exercised a standalone "revocation
