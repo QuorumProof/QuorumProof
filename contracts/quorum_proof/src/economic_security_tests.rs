@@ -426,4 +426,65 @@ mod economic_security_tests {
         // At reputation 0: effective = 100 * (0/100) = 0
         assert_eq!(agent.effective_weight(), 0);
     }
+
+    #[test]
+    fn test_monte_carlo_sweep_skips_mismatched_length_distributions() {
+        let configs = generate_test_configurations();
+        let base_config = &configs[0]; // 5 attestors, required_weight 67
+        let simulator = MonteCarloSimulator::new(100, 20, 1000);
+
+        let distributions = vec![
+            vec![100, 100, 100, 100, 100], // valid: len 5
+            vec![50, 50, 50],              // invalid: len 3, must be skipped
+            vec![20, 100, 100, 100, 100],  // valid: len 5
+            vec![100; 10],                 // invalid: len 10, must be skipped
+        ];
+
+        let results = simulator.monte_carlo_sweep(base_config, distributions);
+
+        // Only the two length-5 distributions should produce results.
+        assert_eq!(results.len(), 2);
+        for analysis in &results {
+            assert!(analysis.minimum_attack_cost > 0);
+            assert!(analysis.concentration_risk <= 100);
+            assert!(!analysis.cheapest_strategy.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_monte_carlo_sweep_reputation_currently_does_not_affect_attack_cost() {
+        // Documents the current behavior of the attack-cost model: corrupt-existing
+        // and Sybil cost calculations key off `base_weight` and `corruption_price`
+        // only (see `simulate_corrupt_existing`/`simulate_sybil`), never
+        // `AttestorAgent::effective_weight()`. `concentration_risk_score` and
+        // `has_single_point_of_failure` are likewise `base_weight`-only. So sweeping
+        // over different reputation distributions currently yields byte-identical
+        // `AttackCostAnalysis` results for every trial — the variance this sweep is
+        // meant to surface is a no-op today. This is a modeling gap versus the
+        // on-chain contract, which *does* weight consensus by reputation when
+        // `reputation_weighting_enabled` is set (see `get_effective_weight` in
+        // lib.rs) — the off-chain simulator has not been updated to match.
+        let configs = generate_test_configurations();
+        let base_config = &configs[2]; // 7 attestors, mixed reputation, 75% threshold
+        let simulator = MonteCarloSimulator::new(100, 20, 1000);
+
+        let distributions = vec![
+            vec![100, 100, 100, 100, 100, 100, 100],
+            vec![10, 10, 10, 10, 10, 10, 10],
+            vec![100, 10, 100, 10, 100, 10, 100],
+        ];
+
+        let results = simulator.monte_carlo_sweep(base_config, distributions);
+        assert_eq!(results.len(), 3);
+
+        let baseline_cost = results[0].minimum_attack_cost;
+        let baseline_strategy = &results[0].cheapest_strategy;
+        for analysis in &results[1..] {
+            assert_eq!(
+                analysis.minimum_attack_cost, baseline_cost,
+                "attack cost is currently independent of reputation distribution"
+            );
+            assert_eq!(&analysis.cheapest_strategy, baseline_strategy);
+        }
+    }
 }
