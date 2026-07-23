@@ -113,6 +113,9 @@ export function createCredentialsRouter(soroban: SorobanClient) {
    *   - issuer_type: issuer type (supports multiple)
    *   - subject: subject address
    *   - status: active|revoked|suspended
+   *   - jurisdiction: ISO 3166-1/3166-2 or supranational group code
+   *     (supports multiple: jurisdiction=US&jurisdiction=EU). Hierarchical —
+   *     "US" matches "US-CA" etc., "EU" matches any EU member country.
    *   - attestation_count_min, attestation_count_max: attestation count range
    *   - created_after, created_before: creation date range (ISO 8601)
    *   - expires_after, expires_before: expiration date range (ISO 8601)
@@ -131,7 +134,7 @@ export function createCredentialsRouter(soroban: SorobanClient) {
    *     updated_at|recency|reputation (default: relevance if `q` is set,
    *     otherwise id)
    *   - sort_order: asc|desc (default: desc for recency/reputation, else asc)
-   *   - facets: comma-separated facet names (default: issuer,credential_type,status,issuer_type)
+   *   - facets: comma-separated facet names (default: issuer,credential_type,status,issuer_type,jurisdiction)
    */
   router.get('/search', async (req: Request, res: Response) => {
     try {
@@ -147,6 +150,7 @@ export function createCredentialsRouter(soroban: SorobanClient) {
         issuer_type,
         subject,
         status,
+        jurisdiction,
         attestation_count_min,
         attestation_count_max,
         created_after,
@@ -197,7 +201,7 @@ export function createCredentialsRouter(soroban: SorobanClient) {
       }
 
       // Parse facets
-      const facets = (facetsQ || 'issuer,credential_type,status,issuer_type').split(',').map(f => f.trim());
+      const facets = (facetsQ || 'issuer,credential_type,status,issuer_type,jurisdiction').split(',').map(f => f.trim());
 
       // Build search options
       const options: SearchOptions = {
@@ -235,6 +239,14 @@ export function createCredentialsRouter(soroban: SorobanClient) {
         options.issuer_type = Array.isArray(issuer_type) ? issuer_type : [issuer_type];
         if ((options.issuer_type as string[]).length === 1) {
           options.issuer_type = (options.issuer_type as string[])[0];
+        }
+      }
+
+      // Parse jurisdiction filter (can be multiple)
+      if (jurisdiction) {
+        options.jurisdiction = Array.isArray(jurisdiction) ? jurisdiction : [jurisdiction];
+        if ((options.jurisdiction as string[]).length === 1) {
+          options.jurisdiction = (options.jurisdiction as string[])[0];
         }
       }
 

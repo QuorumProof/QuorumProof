@@ -12,6 +12,7 @@
  *   - issuer          (weight 3)
  *   - subject         (weight 2)
  *   - issuer_type     (weight 2)
+ *   - jurisdiction    (weight 2)
  *   - id              (weight 1.5)
  *   - credential_type (weight 1)
  *   - metadata values (weight 0.5)
@@ -27,6 +28,15 @@
  * a text query) narrow the candidate set via index lookups *before* any
  * per-record scan — the per-record filter pass below only runs over that
  * narrowed candidate set, not the full corpus.
+ *
+ * ## Jurisdiction
+ * A credential's jurisdiction (`jurisdiction`, falling back to
+ * `metadata.jurisdiction`) is an ISO 3166-1 country code ("US"), ISO 3166-2
+ * subdivision code ("US-CA"), or supranational group code ("EU"). It is
+ * indexed hierarchically — under itself, its parent country, and any groups
+ * the country belongs to — so filtering by "EU" matches every EU member
+ * country's credentials and filtering by "US" matches "US" and every
+ * "US-*" subdivision. See jurisdictionAncestors().
  */
 
 export type CredentialRecord = {
@@ -45,6 +55,12 @@ export type CredentialRecord = {
   updated_at?: string;
   version: number;
   owner?: string;
+  /**
+   * ISO 3166-1 alpha-2 country code ("US"), ISO 3166-2 subdivision code
+   * ("US-CA"), or a supranational group code ("EU"). Falls back to
+   * `metadata.jurisdiction` if not set directly — see jurisdictionOf().
+   */
+  jurisdiction?: string;
 };
 
 export type SearchFacet = {
@@ -92,6 +108,13 @@ export type SearchFilters = {
   created_before?: string;
   expires_after?: string;
   expires_before?: string;
+  /**
+   * ISO 3166-1/3166-2 or supranational group code(s), e.g. "US", "US-CA",
+   * "EU". Matching is hierarchical: querying "US" matches credentials in
+   * "US" and any "US-*" subdivision; querying "EU" matches credentials in
+   * any EU member country (and their subdivisions). See jurisdictionAncestors().
+   */
+  jurisdiction?: string | string[];
 };
 
 // ---------------------------------------------------------------------------
@@ -128,6 +151,7 @@ const FIELD_WEIGHTS: Record<string, number> = {
   issuer: 3,
   subject: 2,
   issuer_type: 2,
+  jurisdiction: 2,
   id: 1.5,
   credential_type: 1,
   metadata: 0.5,
@@ -144,6 +168,67 @@ function reputationScore(cred: CredentialRecord): number {
   const attestation = cred.attestation_count ?? 0;
   const issuerWeight = ISSUER_TYPE_REPUTATION_WEIGHT[(cred.issuer_type || '').toLowerCase()] ?? 0;
   return attestation * 10 + issuerWeight;
+}
+
+// ---------------------------------------------------------------------------
+// Jurisdiction modeling
+//
+// Codes are ISO 3166-1 alpha-2 country codes ("US"), ISO 3166-2 subdivision
+// codes ("US-CA", country + "-" + subdivision), or a supranational group
+// code ("EU"). Hierarchy is two-level by design (country -> subdivision),
+// matching the ISO 3166-2 standard, plus a static country -> group mapping
+// for supranational bodies. A credential's jurisdiction is indexed at every
+// ancestor level so a query for any level (country, group) matches without
+// needing to know the full descendant set at query time.
+// ---------------------------------------------------------------------------
+
+const SUPRANATIONAL_GROUPS: Record<string, string[]> = {
+  EU: [
+    'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR',
+    'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK',
+    'SI', 'ES', 'SE',
+  ],
+};
+
+const COUNTRY_TO_GROUPS: Map<string, string[]> = (() => {
+  const map = new Map<string, string[]>();
+  for (const [group, members] of Object.entries(SUPRANATIONAL_GROUPS)) {
+    for (const country of members) {
+      const groups = map.get(country);
+      if (groups) groups.push(group);
+      else map.set(country, [group]);
+    }
+  }
+  return map;
+})();
+
+export function normalizeJurisdiction(code: string): string {
+  return code.trim().toUpperCase();
+}
+
+/** Read a credential's jurisdiction, preferring the top-level field and falling back to metadata. */
+export function jurisdictionOf(cred: CredentialRecord): string | undefined {
+  const raw = cred.jurisdiction ?? (cred.metadata?.jurisdiction as string | undefined);
+  if (typeof raw !== 'string' || raw.trim().length === 0) return undefined;
+  return normalizeJurisdiction(raw);
+}
+
+/**
+ * Every level a credential's jurisdiction code should be indexed/matched
+ * under: itself, its parent country (if it's a subdivision), and any
+ * supranational groups its country belongs to.
+ *
+ * e.g. "US-CA" -> ["US-CA", "US"]; "DE" -> ["DE", "EU"]; "FR-75" -> ["FR-75", "FR", "EU"]
+ */
+export function jurisdictionAncestors(code: string): string[] {
+  const normalized = normalizeJurisdiction(code);
+  const ancestors = [normalized];
+  const dashIndex = normalized.indexOf('-');
+  const country = dashIndex === -1 ? normalized : normalized.slice(0, dashIndex);
+  if (dashIndex !== -1) ancestors.push(country);
+  const groups = COUNTRY_TO_GROUPS.get(country);
+  if (groups) ancestors.push(...groups);
+  return ancestors;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +258,7 @@ function extractFields(cred: CredentialRecord): Array<{ field: string; text: str
     { field: 'issuer', text: cred.issuer || '' },
     { field: 'subject', text: cred.subject || '' },
     { field: 'issuer_type', text: cred.issuer_type || '' },
+    { field: 'jurisdiction', text: jurisdictionOf(cred) || '' },
     { field: 'id', text: String(cred.id) },
     { field: 'credential_type', text: String(cred.credential_type) },
   ];
@@ -462,6 +548,12 @@ export class SearchIndex {
     credential_type: new Map(),
     status: new Map(),
   };
+  /**
+   * Jurisdiction is indexed separately from fieldIndex because a single
+   * credential is indexed under *multiple* keys (itself + ancestors —
+   * see jurisdictionAncestors()), unlike the single-value fields above.
+   */
+  private jurisdictionIndex: Map<string, Set<string>> = new Map();
   private lastIndexed: Date | null = null;
 
   // ── Index management ──────────────────────────────────────────────────────
@@ -473,11 +565,13 @@ export class SearchIndex {
     this.credentials.clear();
     this.invertedIndex.clear();
     for (const field of INDEXED_FIELDS) this.fieldIndex[field].clear();
+    this.jurisdictionIndex.clear();
 
     for (const cred of creds) {
       this.credentials.set(cred.id, cred);
       this._addToInvertedIndex(cred);
       this._addToFieldIndex(cred);
+      this._addToJurisdictionIndex(cred);
     }
     this.lastIndexed = new Date();
   }
@@ -492,10 +586,12 @@ export class SearchIndex {
     if (existing) {
       this._removeFromInvertedIndex(existing);
       this._removeFromFieldIndex(existing);
+      this._removeFromJurisdictionIndex(existing);
     }
     this.credentials.set(cred.id, cred);
     this._addToInvertedIndex(cred);
     this._addToFieldIndex(cred);
+    this._addToJurisdictionIndex(cred);
     if (!this.lastIndexed) this.lastIndexed = new Date();
   }
 
@@ -507,6 +603,7 @@ export class SearchIndex {
     if (existing) {
       this._removeFromInvertedIndex(existing);
       this._removeFromFieldIndex(existing);
+      this._removeFromJurisdictionIndex(existing);
       this.credentials.delete(credentialId);
     }
   }
@@ -518,6 +615,7 @@ export class SearchIndex {
     this.credentials.clear();
     this.invertedIndex.clear();
     for (const field of INDEXED_FIELDS) this.fieldIndex[field].clear();
+    this.jurisdictionIndex.clear();
     this.lastIndexed = null;
   }
 
@@ -590,6 +688,32 @@ export class SearchIndex {
       if (!set) continue;
       set.delete(cred.id);
       if (set.size === 0) map.delete(value);
+    }
+  }
+
+  // ── Jurisdiction index maintenance (multi-key: self + ancestors) ──────────
+
+  private _addToJurisdictionIndex(cred: CredentialRecord): void {
+    const jurisdiction = jurisdictionOf(cred);
+    if (!jurisdiction) return;
+    for (const key of jurisdictionAncestors(jurisdiction)) {
+      let set = this.jurisdictionIndex.get(key);
+      if (!set) {
+        set = new Set();
+        this.jurisdictionIndex.set(key, set);
+      }
+      set.add(cred.id);
+    }
+  }
+
+  private _removeFromJurisdictionIndex(cred: CredentialRecord): void {
+    const jurisdiction = jurisdictionOf(cred);
+    if (!jurisdiction) return;
+    for (const key of jurisdictionAncestors(jurisdiction)) {
+      const set = this.jurisdictionIndex.get(key);
+      if (!set) continue;
+      set.delete(cred.id);
+      if (set.size === 0) this.jurisdictionIndex.delete(key);
     }
   }
 
@@ -733,6 +857,12 @@ export class SearchIndex {
     if (options.status !== undefined) {
       narrowByField(this.fieldIndex.status, [options.status]);
     }
+    if (options.jurisdiction !== undefined) {
+      const jurisdictions = (Array.isArray(options.jurisdiction) ? options.jurisdiction : [options.jurisdiction]).map(
+        normalizeJurisdiction,
+      );
+      narrowByField(this.jurisdictionIndex, jurisdictions);
+    }
 
     const baseRecords: CredentialRecord[] =
       candidateIds !== null
@@ -767,6 +897,16 @@ export class SearchIndex {
       }
 
       if (options.subject !== undefined && cred.subject !== options.subject) return false;
+
+      if (options.jurisdiction !== undefined) {
+        const jurisdiction = jurisdictionOf(cred);
+        if (!jurisdiction) return false;
+        const requested = (Array.isArray(options.jurisdiction) ? options.jurisdiction : [options.jurisdiction]).map(
+          normalizeJurisdiction,
+        );
+        const ancestors = jurisdictionAncestors(jurisdiction);
+        if (!requested.some(r => ancestors.includes(r))) return false;
+      }
 
       if (options.status !== undefined) {
         if (options.status === 'revoked' && !cred.revoked) return false;
@@ -866,6 +1006,10 @@ export class SearchIndex {
         const it = cred.issuer_type || 'unknown';
         facetData.issuer_type.set(it, (facetData.issuer_type.get(it) ?? 0) + 1);
       }
+      if (facets.includes('jurisdiction')) {
+        const j = jurisdictionOf(cred) || 'unknown';
+        facetData.jurisdiction.set(j, (facetData.jurisdiction.get(j) ?? 0) + 1);
+      }
     }
 
     // ── Step 7: Cursor pagination (binary search) ─────────────────────────────
@@ -935,6 +1079,7 @@ export class SearchIndex {
           issuer_type: options.issuer_type,
           subject: options.subject,
           status: options.status,
+          jurisdiction: options.jurisdiction,
           attestation_count_min: options.attestation_count_min,
           attestation_count_max: options.attestation_count_max,
           created_after: options.created_after,
