@@ -4,9 +4,7 @@
 # operation, fits an empirical complexity class via
 # benches/src/bin/scaling_report.rs (scripts/scaling_benchmark_report.sh
 # orchestrates both), and uploads the resulting Markdown report as a build
-# artifact on every run. On pushes to `main`, the updated
-# benches/history/*.jsonl files are committed back to the repo so gradual
-# regressions are visible across commits, not just within a single run.
+# artifact on every run.
 #
 # This is additive to the existing fixed-threshold gate — it does not
 # replace scripts/benchmark_compare.sh, scripts/profile_contracts.sh, or the
@@ -30,8 +28,6 @@ jobs:
   scaling-report:
     name: Scaling benchmarks & complexity report
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -65,23 +61,6 @@ jobs:
             benches/target/bench-scaling/raw.jsonl
           retention-days: 90
           if-no-files-found: warn
-
-      - name: Commit updated history (push to main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          shopt -s nullglob
-          history_files=(benches/history/*.jsonl)
-          if [ ${#history_files[@]} -gt 0 ]; then
-            git add "${history_files[@]}"
-          fi
-          if git diff --cached --quiet; then
-            echo "No history changes to commit."
-          else
-            git commit -m "chore(benches): update scaling history [skip ci]"
-            git push || echo "::warning::Failed to push history update (non-fatal)"
-          fi
 
       - name: Fail if complexity gate failed
         if: steps.report.outputs.exit_code != '0'
