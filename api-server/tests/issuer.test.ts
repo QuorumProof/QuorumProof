@@ -44,8 +44,8 @@ describe('GET /api/issuer/:address/metrics', () => {
 
   it('computes avg_attestation_time_ms from attested events', async () => {
     metricsStore.recordEvent({ type: 'issued', credential_id: 'c1', timestamp: new Date().toISOString(), issuer: ISSUER });
-    metricsStore.recordEvent({ type: 'attested', credential_id: 'c1', timestamp: new Date().toISOString(), issuer: ISSUER, attestation_time_ms: 1000 });
-    metricsStore.recordEvent({ type: 'attested', credential_id: 'c1', timestamp: new Date().toISOString(), issuer: ISSUER, attestation_time_ms: 3000 });
+    metricsStore.recordEvent({ type: 'attested', credential_id: 'c1', timestamp: new Date().toISOString(), issuer: ISSUER, attestation_duration_ms: 1000 });
+    metricsStore.recordEvent({ type: 'attested', credential_id: 'c1', timestamp: new Date().toISOString(), issuer: ISSUER, attestation_duration_ms: 3000 });
 
     const res = await request(app).get(`/api/issuer/${ISSUER}/metrics`);
     expect(res.status).toBe(200);
@@ -64,8 +64,7 @@ describe('GET /api/issuer/:address/metrics', () => {
   it('computes dispute_rate correctly', async () => {
     metricsStore.recordEvent({ type: 'issued', credential_id: 'c1', timestamp: new Date().toISOString(), issuer: ISSUER });
     metricsStore.recordEvent({ type: 'issued', credential_id: 'c2', timestamp: new Date().toISOString(), issuer: ISSUER });
-    metricsStore.recordEvent({ type: 'issued', credential_id: 'c3', timestamp: new Date().toISOString(), issuer: ISSUER, disputed: true });
-    metricsStore.recordEvent({ type: 'issued', credential_id: 'c4', timestamp: new Date().toISOString(), issuer: ISSUER, disputed: true });
+    metricsStore.recordEvent({ type: 'disputed', credential_id: 'c1', timestamp: new Date().toISOString(), issuer: ISSUER });
 
     const res = await request(app).get(`/api/issuer/${ISSUER}/metrics`);
     expect(res.status).toBe(200);
@@ -83,8 +82,8 @@ describe('GET /api/issuer/:address/metrics', () => {
     expect(res.status).toBe(200);
     const trend = res.body.reputation_trend;
     expect(trend).toHaveLength(2);
-    expect(trend[0]).toEqual({ date: '2026-06-27', issued_count: 2 });
-    expect(trend[1]).toEqual({ date: '2026-06-28', issued_count: 1 });
+    expect(trend[0]).toEqual({ date: '2026-06-27', issued: 2, disputed: 0 });
+    expect(trend[1]).toEqual({ date: '2026-06-28', issued: 1, disputed: 0 });
   });
 
   it('respects period_days query parameter', async () => {

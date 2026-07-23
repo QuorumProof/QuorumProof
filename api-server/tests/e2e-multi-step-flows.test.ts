@@ -674,7 +674,8 @@ describe('Flow 5: Issue → Notification → History', () => {
       });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('credential_id');
+    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.location).toBe('body');
   });
 
   it('returns notification preferences for a registered holder', async () => {
