@@ -7,6 +7,7 @@ import {
   getPreferences,
   getHistory,
   dispatchNotification,
+  flushPendingBatch,
 } from '../src/notifications.js';
 import express from 'express';
 import request from 'supertest';
@@ -43,9 +44,8 @@ describe('dispatchNotification (#928 credential_type_filters)', () => {
       enabled: true,
     });
 
-    await expect(
-      dispatchNotification('G_TYPE_MATCH', 'credential_issued', 10, 1)
-    ).resolves.toBeUndefined();
+    await dispatchNotification('G_TYPE_MATCH', 'credential_issued', 10, undefined, 1);
+    await flushPendingBatch('G_TYPE_MATCH');
 
     const history = getHistory('G_TYPE_MATCH');
     expect(history.some((h) => h.credential_id === 10)).toBe(true);
@@ -62,7 +62,8 @@ describe('dispatchNotification (#928 credential_type_filters)', () => {
     });
 
     const historyBefore = getHistory('G_TYPE_SKIP').length;
-    await dispatchNotification('G_TYPE_SKIP', 'credential_issued', 20, 1); // type=1 (Degree)
+    await dispatchNotification('G_TYPE_SKIP', 'credential_issued', 20, undefined, 1); // type=1 (Degree)
+    await flushPendingBatch('G_TYPE_SKIP');
     const historyAfter = getHistory('G_TYPE_SKIP').length;
 
     expect(historyAfter).toBe(historyBefore); // no new record
