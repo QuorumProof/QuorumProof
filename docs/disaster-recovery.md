@@ -61,6 +61,53 @@ cursor, not in the orchestrator process.
 1. Redeploy from the latest tagged release on the `main` branch via the CI/CD pipeline (`workflow_dispatch` on `deploy.yml`).
 2. If the hosting provider is unavailable, deploy to an alternate static host using `npm run build` output from `frontend/` or `dashboard/`.
 
+### 1.6 API Server Compromise
+
+Use this procedure if there is evidence the `api-server` process, its host, or one of its secrets (`HMAC_SIGNING_SECRET`, `SHARE_LINK_HMAC_SECRET`, `BRIDGE_HMAC_SECRET`) has been compromised. The API server never holds credential-issuing authority itself — it only relays requests to the contracts and serves the search index — so compromise here is a confidentiality/availability incident, not a direct threat to on-chain state, but a compromised signing secret can be used to forge request signatures against downstream consumers.
+
+1. **Contain**: take the affected `api-server` instance(s) out of rotation at the load balancer / DNS level immediately. Do not wait for root-cause analysis to pull it offline.
+2. **Rotate every secret** the compromised instance had access to, even if you are not sure which one was used:
+   - `HMAC_SIGNING_SECRET`, `SHARE_LINK_HMAC_SECRET`, `BRIDGE_HMAC_SECRET` — generate new values, update the secret store / GitHub Actions secrets, redeploy.
+   - Any RPC credentials or `TRUSTED_IPS`/`TRUSTED_HEADER_VALUE` bypass values.
+   - Note: contract-level secrets (`STELLAR_SECRET_KEY`) are **not** stored on the API server; only rotate those too if the same host or operator also held them (see §1.1).
+3. **Invalidate sessions/tokens**: any share links or signed requests issued under the old `HMAC_SIGNING_SECRET`/`SHARE_LINK_HMAC_SECRET` become unverifiable once rotated — this is intentional; treat pre-rotation links as revoked.
+4. **Redeploy clean**: rebuild and redeploy `api-server` from a known-good `main` commit rather than restarting the compromised instance, in case of a persisted backdoor.
+5. **Audit**: pull request logs (rate limiter / DDoS protection middleware logs, see `api-server/src/middleware/`) for the suspected compromise window to scope what the attacker could have read (the search index is read-only relative to credential data — nothing in it grants issuance/attestation rights) or done (forged signatures on outbound requests).
+6. **Post-incident**: log cause and resolution per Step 5 of the [Recovery Runbook](#3-recovery-runbook); if the compromise involved a code-level vulnerability, follow the coordinated disclosure process in [SECURITY.md](../SECURITY.md).
+
+### 1.7 Contract Bug Discovery — Emergency Pause
+
+Use this procedure the moment a contract bug is discovered that could be exploited before a fix ships — do not wait for a full root-cause before pausing.
+
+1. **Pause immediately.** Two mechanisms exist; prefer the circuit breaker unless you need the simpler binary pause:
+   - `soroban contract invoke -- emergency_pause --admin <ADMIN> --reason "<short description>"` — moves the contract to `CircuitBreakerState::Paused`, blocks all mutating calls, and is logged as a `CircuitBreaker` event with the reason attached.
+   - `soroban contract invoke -- pause --admin <ADMIN>` — the simpler legacy binary pause flag (`is_paused()`), does not carry a reason and is not part of the circuit breaker state machine. Prefer `emergency_pause` for anything worth a postmortem.
+   - A lighter option for issues that only need writes slowed, not stopped, is `emergency_degrade --admin <ADMIN> --reason "..."` (`CircuitBreakerState::Degraded`), which rate-limits writes per ledger instead of blocking them entirely — use this for suspected-but-unconfirmed issues where halting the system entirely is a disproportionate response.
+   - Both circuit breaker states auto-recover after `ttl_seconds` if `auto_recover` is enabled in `CircuitBreakerConfig` — check `get_circuit_breaker_state()` and do not assume a pause is permanent without also disabling auto-recovery or tracking the TTL.
+2. **Confirm the pause took effect**: `soroban contract invoke -- get_circuit_breaker_state` (or `is_paused` for the legacy flag) before communicating "system is safe" to anyone.
+3. **Assess exploitability**: can the bug be triggered by a read-only call, or does it require a mutating call that is now blocked? A read-path bug is not mitigated by pausing writes.
+4. **Fix, test, redeploy**: develop the fix against a testnet fork, run the full contract test suite plus a regression test that reproduces the original bug, then follow §1.2 (Contract Redeployment).
+5. **Resume**: `soroban contract invoke -- resume --admin <ADMIN>` once the fix is live and verified — or `unpause` if the legacy flag was used. Do not resume on a timer; resume only after the fix is confirmed deployed.
+6. **Disclose** per [SECURITY.md](../SECURITY.md)'s embargo guidance once affected users have had a chance to act.
+
+#### Emergency Withdrawal Considerations
+
+There is **no separate "emergency withdrawal" function that bypasses the pause** — attestor stake withdrawal (`withdraw_attestor_stake`) itself calls `require_not_paused`, so **pausing the contract also blocks attestors from withdrawing their bonded stake** until it is unpaused or degraded-mode-only writes are re-enabled. This is a deliberate trade-off (a paused contract must not leak funds through any path, including withdrawal, while its integrity is in question) but it means:
+
+- Do not pause and then leave the contract paused indefinitely while attestors have funds locked — resolve the bug and resume as quickly as safely possible.
+- If a bug is scoped narrowly enough that stake withdrawal is definitely unaffected, prefer `emergency_degrade` over a full `emergency_pause` so legitimate withdrawals can continue at a rate-limited pace while the issue is investigated.
+- Communicate the pause and its expected duration to attestors — locked stake during an active pause is expected operator communication, not a silent freeze.
+
+### 1.8 Credential Database / Search Index Corruption
+
+QuorumProof has no traditional off-chain database of record — the source of truth is always on-chain contract state. "Database corruption" in this system means the **search index** (`api-server/src/searchIndex.ts`) or a **local state snapshot** (§2.1) diverging from on-chain truth, not corruption of a SQL/NoSQL store.
+
+1. **Detect**: `./scripts/verify_snapshot.sh` (§2.2) or a manual comparison of `get_credential_count()` against the search index's indexed count surfaces divergence.
+2. **Do not trust the index for verification decisions** while corruption is suspected — `verify_engineer` and other verification paths ultimately check on-chain state via cross-contract calls, but any API-server-side caching or search results should be treated as advisory only until rebuilt.
+3. **Rebuild from chain**: the search index is derived data, not authoritative — take the affected `api-server` instance out of rotation, clear its in-memory/cached index, and rebuild it by replaying on-chain credential/slice/attestation state from genesis (or from the last known-good snapshot per §2.1, then catching up from the current ledger).
+4. **Verify**: re-run `./scripts/verify_snapshot.sh` and spot-check a sample of credentials via `get_credential` directly against the contract to confirm the rebuilt index matches chain state.
+5. **Root-cause** before returning to service if the divergence was caused by an API-server bug (e.g. a missed event) rather than an infrastructure fault — otherwise the rebuilt index will drift again.
+
 ---
 
 ## 2. Backup Strategy
@@ -113,6 +160,34 @@ The verifier checks:
 - Credential count matches `get_credential_count()` on-chain
 - Slice count matches `get_slice_count()` on-chain
 - No credential IDs are missing from the sequence
+
+### 2.3 Recovery Time & Recovery Point Objectives (RTO/RPO)
+
+RTO is the target time to restore service; RPO is the maximum acceptable
+data loss, measured in time since the last durable backup/state. Because
+credential and attestation data is written directly to the Stellar chain,
+on-chain data has an effective RPO of zero — it is never behind a backup
+cadence. RPO only applies to off-chain supporting state (snapshots, search
+index, frontend deployments) that is not itself blockchain-native.
+
+| Scenario | RTO (target) | RPO (target) | Basis |
+|---|---|---|---|
+| Lost deployer/admin key (backup key exists) | < 1 hour | 0 (no data loss — on-chain state untouched) | §1.1 |
+| Lost deployer/admin key (no backup) | Not recoverable — full redeploy + re-issuance | Full loss of on-chain credential history under the old contract address | §1.1 |
+| Contract redeployment (bug fix) | 2–4 hours (build, deploy, restore state) | 0 for chain data; up to 24h for off-chain snapshot freshness | §1.2, §3 |
+| RPC / network outage | < 15 minutes (config change only) | 0 | §1.3 |
+| Migration interrupted mid-run | < 30 minutes (resume from cursor) | 0 — cursor lives on-chain | §1.4 |
+| Frontend / dashboard outage | < 1 hour | 0 (stateless, redeployed from source) | §1.5 |
+| API server compromise | < 1 hour to contain + rotate secrets; full redeploy within 4 hours | 0 for chain data; search index rebuild time is separate (see below) | §1.6 |
+| Contract bug — emergency pause | < 15 minutes to pause; fix timeline varies by severity | 0 (pause blocks writes, does not lose data) | §1.7 |
+| Credential DB / search index corruption | 1–4 hours to rebuild from chain, depending on total credential count | 0 — index is fully derivable from on-chain state | §1.8 |
+| State snapshot loss (off-chain backup) | N/A — snapshots are a convenience, not authoritative | Up to 24 hours (daily snapshot cadence, §2) — acceptable because chain data itself is not lost | §2 |
+
+These targets assume the backup key, contract IDs, and off-chain snapshots
+required by §2 are actually in place and current — an untested or missing
+backup key changes the "lost key" row from < 1 hour to "not recoverable."
+Recovery drills (§4) exist specifically to validate these targets are
+achievable, not just aspirational.
 
 ---
 
@@ -191,7 +266,21 @@ Run recovery drills on testnet. Do **not** use mainnet for drills.
 2. Run `cargo test` and confirm all contract interactions succeed.
 3. Restore the primary RPC URL.
 
-### 4.5 Checklist
+### 4.5 Emergency Pause Drill (quarterly)
+
+1. On testnet, call `emergency_pause` with a test reason and confirm `get_circuit_breaker_state()` returns `Paused`.
+2. Confirm a mutating call (e.g. `issue_credential`) is rejected while paused.
+3. Confirm `withdraw_attestor_stake` is also rejected while paused (see §1.7, Emergency Withdrawal Considerations) — this is expected behavior, not a bug.
+4. Call `resume` and confirm normal operation returns, including that a previously-blocked withdrawal now succeeds.
+5. Repeat with `emergency_degrade` and confirm writes are rate-limited rather than fully blocked.
+
+### 4.6 API Secret Rotation Drill (quarterly)
+
+1. On a non-production `api-server` instance, rotate `HMAC_SIGNING_SECRET` per §1.6.
+2. Confirm requests signed with the old secret are rejected and requests signed with the new secret succeed.
+3. Confirm the rotation process (secret store update → redeploy) completes within the §2.3 RTO target for API server compromise.
+
+### 4.7 Checklist
 
 - [ ] Deployer key backup verified in cold storage
 - [ ] Contract IDs recorded and accessible to the team
@@ -200,4 +289,6 @@ Run recovery drills on testnet. Do **not** use mainnet for drills.
 - [ ] RPC failover endpoint confirmed reachable
 - [ ] Latest snapshot verified and uploaded to off-chain storage
 - [ ] Restore drill completed successfully on testnet
+- [ ] Emergency pause/resume drill completed, including withdrawal-blocked-while-paused check
+- [ ] API secret rotation drill completed within RTO target
 - [ ] Recovery drill results logged with date and outcome
