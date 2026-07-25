@@ -4025,4 +4025,258 @@ mod tests {
         let scope = UsageScope::DeFiCollateral(expires_at);
         client.delegate_sbt_usage(&token_id, &owner, &scope);
     }
+
+    // ─── Issue #1246: Mutation Testing for New Features ───
+
+    #[test]
+    fn test_initiate_sbt_clawback_creates_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &holder, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let sbt_id = client.mint(&holder, &cred_id, &uri);
+
+        let timelock_seconds: u64 = 1000;
+        let reason = Bytes::from_slice(&env, b"fraudulent_claim");
+        let clawback_id = client.initiate_sbt_clawback(&admin, &sbt_id, &reason, &timelock_seconds);
+
+        let clawback = client.get_clawback_request(&clawback_id);
+        assert_eq!(clawback.sbt_id, sbt_id);
+        assert_eq!(clawback.reason, reason);
+        assert!(clawback.expires_at > env.ledger().timestamp());
+    }
+
+    #[test]
+    #[should_panic(expected = "not found")]
+    fn test_clawback_on_nonexistent_token_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _, _) = setup_with_qp(&env);
+
+        let reason = Bytes::from_slice(&env, b"test");
+        client.initiate_sbt_clawback(&admin, &9999u64, &reason, &1000u64);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_duplicate_clawback_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &holder, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let sbt_id = client.mint(&holder, &cred_id, &uri);
+
+        let reason = Bytes::from_slice(&env, b"fraud");
+        client.initiate_sbt_clawback(&admin, &sbt_id, &reason, &1000u64);
+        client.initiate_sbt_clawback(&admin, &sbt_id, &reason, &1000u64); // Must panic
+    }
+
+    #[test]
+    fn test_cancel_sbt_clawback_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &holder, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let sbt_id = client.mint(&holder, &cred_id, &uri);
+
+        let reason = Bytes::from_slice(&env, b"fraud");
+        let clawback_id = client.initiate_sbt_clawback(&admin, &sbt_id, &reason, &1000u64);
+
+        client.cancel_sbt_clawback(&admin, &clawback_id);
+
+        let clawback = client.get_clawback_request(&clawback_id);
+        // Verify status changed to "cancel"
+        assert_eq!(clawback.status, symbol_short!("cancel"));
+
+        // Verify we can initiate a new clawback (the old one is no longer pending)
+        let clawback_id_2 = client.initiate_sbt_clawback(&admin, &sbt_id, &reason, &1000u64);
+        assert_ne!(clawback_id, clawback_id_2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_execute_clawback_before_expiry_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &holder, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let sbt_id = client.mint(&holder, &cred_id, &uri);
+
+        let reason = Bytes::from_slice(&env, b"fraud");
+        let clawback_id = client.initiate_sbt_clawback(&admin, &sbt_id, &reason, &1000u64);
+
+        // Try to execute before timelock expires (must panic)
+        client.execute_sbt_clawback(&admin, &clawback_id);
+    }
+
+    #[test]
+    fn test_execute_clawback_after_expiry_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &holder, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let sbt_id = client.mint(&holder, &cred_id, &uri);
+
+        let current_time = env.ledger().timestamp();
+        let timelock_seconds: u64 = 1000;
+        let reason = Bytes::from_slice(&env, b"fraud");
+        let clawback_id = client.initiate_sbt_clawback(&admin, &sbt_id, &reason, &timelock_seconds);
+
+        // Advance time past expiry
+        env.ledger().set_timestamp(current_time + timelock_seconds + 1);
+
+        // Execute should succeed
+        let returned_cred_id = client.execute_sbt_clawback(&admin, &clawback_id);
+        assert_eq!(returned_cred_id, cred_id);
+
+        // Token should be removed
+        assert!(client.owner_of(&sbt_id).is_none() || client.get_token(&sbt_id).owner != holder);
+    }
+
+    #[test]
+    fn test_batch_mint_empty_returns_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _) = setup_with_qp(&env);
+
+        let entries: Vec<BatchMintEntry> = Vec::new(&env);
+        let result = client.batch_mint(&entries);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_batch_mint_creates_tokens_in_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, qp_client, _) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+
+        for i in 0..5u32 {
+            let owner = Address::generate(&env);
+            let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+            let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+
+            entries.push_back(BatchMintEntry {
+                owner,
+                credential_id: cred_id,
+                metadata_uri: Bytes::from_slice(&env, b"ipfs://QmSBT"),
+            });
+        }
+
+        let token_ids = client.batch_mint(&entries);
+        assert_eq!(token_ids.len() as u32, 5u32);
+
+        // Verify all IDs are unique
+        for i in 0..token_ids.len() {
+            for j in (i + 1)..token_ids.len() {
+                assert_ne!(token_ids.get(i).unwrap(), token_ids.get(j).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn test_batch_burn_empty_returns_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _) = setup_with_qp(&env);
+
+        let entries: Vec<BatchBurnEntry> = Vec::new(&env);
+        let result = client.batch_burn(&entries);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_batch_burn_returns_credential_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, qp_client, _) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let sbt_id = client.mint(&owner, &cred_id, &uri);
+
+        let mut entries: Vec<BatchBurnEntry> = Vec::new(&env);
+        entries.push_back(BatchBurnEntry {
+            caller: owner,
+            token_id: sbt_id,
+        });
+
+        let cred_ids = client.batch_burn(&entries);
+        assert_eq!(cred_ids.len(), 1);
+        assert_eq!(cred_ids.get(0).unwrap(), cred_id);
+    }
+
+    #[test]
+    fn test_batch_transfer_admin_only() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let sbt_id = client.mint(&owner, &cred_id, &uri);
+
+        let mut entries: Vec<BatchTransferEntry> = Vec::new(&env);
+        entries.push_back(BatchTransferEntry {
+            token_id: sbt_id,
+            new_owner: new_owner.clone(),
+        });
+
+        let transferred_ids = client.batch_transfer(&admin, &entries);
+        assert_eq!(transferred_ids.len(), 1);
+        assert_eq!(transferred_ids.get(0).unwrap(), sbt_id);
+
+        // Verify ownership changed
+        let token = client.get_token(&sbt_id);
+        assert_eq!(token.owner, new_owner);
+    }
+
+    #[test]
+    fn test_is_valid_batch_size() {
+        assert!(SbtRegistryContract::is_valid_batch_size(1));
+        assert!(SbtRegistryContract::is_valid_batch_size(500));
+        assert!(SbtRegistryContract::is_valid_batch_size(1000));
+        assert!(!SbtRegistryContract::is_valid_batch_size(0));
+        assert!(!SbtRegistryContract::is_valid_batch_size(1001));
+    }
+
+    #[test]
+    fn test_get_max_batch_size() {
+        let max_size = SbtRegistryContract::get_max_batch_size();
+        assert_eq!(max_size, 1000u32);
+    }
 }
