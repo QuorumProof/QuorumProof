@@ -12796,20 +12796,38 @@ impl QuorumProofContract {
             .unwrap_or(1u32);
 
         // Compute hashes (simplified: in production use full Merkle root)
-        let credentials_hash = {
-            let data = format!("cred_count={}", credential_count);
-            Bytes::from_slice(&env, data.as_bytes())
-        };
+        let credentials_hash = Bytes::from_slice(&env, &[
+            (credential_count >> 56) as u8,
+            (credential_count >> 48) as u8,
+            (credential_count >> 40) as u8,
+            (credential_count >> 32) as u8,
+            (credential_count >> 24) as u8,
+            (credential_count >> 16) as u8,
+            (credential_count >> 8) as u8,
+            credential_count as u8,
+        ]);
 
-        let slices_hash = {
-            let data = format!("slice_count={}", slice_count);
-            Bytes::from_slice(&env, data.as_bytes())
-        };
+        let slices_hash = Bytes::from_slice(&env, &[
+            (slice_count >> 56) as u8,
+            (slice_count >> 48) as u8,
+            (slice_count >> 40) as u8,
+            (slice_count >> 32) as u8,
+            (slice_count >> 24) as u8,
+            (slice_count >> 16) as u8,
+            (slice_count >> 8) as u8,
+            slice_count as u8,
+        ]);
 
-        let disputes_hash = {
-            let data = format!("dispute_count={}", dispute_count);
-            Bytes::from_slice(&env, data.as_bytes())
-        };
+        let disputes_hash = Bytes::from_slice(&env, &[
+            (dispute_count >> 56) as u8,
+            (dispute_count >> 48) as u8,
+            (dispute_count >> 40) as u8,
+            (dispute_count >> 32) as u8,
+            (dispute_count >> 24) as u8,
+            (dispute_count >> 16) as u8,
+            (dispute_count >> 8) as u8,
+            dispute_count as u8,
+        ]);
 
         // Generate snapshot ID
         let snapshot_id: u64 = env
@@ -12924,7 +12942,7 @@ impl QuorumProofContract {
         // Log the restoration event (emit via soroban event system)
         env.events().publish(
             (soroban_sdk::Symbol::short("restore"), snapshot_id),
-            format!("Restored from snapshot {} created at ledger {}", snapshot_id, snapshot.created_at),
+            soroban_sdk::Symbol::short("restored"),
         );
 
         // In a full implementation:
