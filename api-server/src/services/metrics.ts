@@ -130,6 +130,22 @@ export function buildAnomalyQuery(startDate?: string, endDate?: string, threshol
   return { startDate: s, endDate: e, threshold };
 }
 
+const RANGE_TO_DAYS: Record<string, number> = { '7d': 7, '30d': 30, '90d': 90 };
+
+/**
+ * #1001: translates the `range=7d|30d|90d` query param used by the issuer
+ * analytics endpoints into a `{days, startDate, endDate}` window, reusing
+ * `getDateDaysAgo` the same way `buildMetricsQuery` etc. do.
+ */
+export function parseRangeParam(range: string | undefined): { days: number; startDate: string; endDate: string } {
+  const key = range ?? '30d';
+  const days = RANGE_TO_DAYS[key];
+  if (days === undefined) {
+    throw new Error(`range must be one of: ${Object.keys(RANGE_TO_DAYS).join(', ')}`);
+  }
+  return { days, startDate: getDateDaysAgo(days), endDate: getDateDaysAgo(0) };
+}
+
 function getDateDaysAgo(days: number): string {
   const date = new Date();
   date.setUTCDate(date.getUTCDate() - days);
