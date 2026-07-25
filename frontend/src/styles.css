@@ -51,6 +51,52 @@
   --transition: 0.2s ease;
 }
 
+/* =====================================================
+   Light Mode — applied when <html class="light"> is set
+   ===================================================== */
+.light {
+  --bg-base: #f8f9fc;
+  --bg-surface: #ffffff;
+  --bg-card: #ffffff;
+  --bg-glass: rgba(255, 255, 255, 0.85);
+  --bg-input: #f1f2f6;
+  --bg-hover: rgba(99, 102, 241, 0.06);
+
+  --accent-primary: #4f46e5;
+  --accent-secondary: #7c3aed;
+  --accent-glow: rgba(79, 70, 229, 0.2);
+
+  --green: #059669;
+  --green-subtle: rgba(5, 150, 105, 0.08);
+  --red: #dc2626;
+  --red-subtle: rgba(220, 38, 38, 0.08);
+  --yellow: #d97706;
+  --yellow-subtle: rgba(217, 119, 6, 0.08);
+  --blue: #2563eb;
+  --blue-subtle: rgba(37, 99, 235, 0.08);
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --border: rgba(0, 0, 0, 0.09);
+  --border-active: rgba(79, 70, 229, 0.5);
+
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --shadow-glow: 0 0 40px rgba(79, 70, 229, 0.12);
+
+  color-scheme: light;
+}
+
+/* Light mode body overrides */
+.light body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+
+.light body::before {
+  background: radial-gradient(ellipse, rgba(99, 102, 241, 0.06) 0%, transparent 70%);
+}
+
 /* ---- Reset ---- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
