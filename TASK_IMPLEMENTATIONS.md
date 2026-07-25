@@ -147,6 +147,50 @@ New event topics added:
 3. **Suspension:** Test reversibility, reason tracking, authorization, cache invalidation
 4. **Amendment:** Test history tracking, non-revocation constraint, version increment
 
+## Detailed Implementation: Task #1222 - Credential Amendment
+
+The amendment feature allows issuers to correct incorrect credential data while
+maintaining credential continuity and preserving a complete audit trail.
+
+### Problem Solved:
+- Before: Credentials with errors required revocation + re-issuance (loses history)
+- After: Amendments correct data in-place (preserves ID + adds audit trail)
+
+### Amendment Operation Flow:
+1. Issuer calls amend_credential with credential_id and new_metadata_hash
+2. System validates issuer authorization and credential not revoked
+3. New amendment ID assigned from global AmendmentCount counter
+4. AmendmentEntry created with: previous_hash, new_hash, amender, timestamp
+5. Amendment stored in AmendmentHistory vector for that credential
+6. Credential metadata_hash updated and version incremented
+7. Verification caches invalidated for re-validation
+8. AmendmentEventData published to event log
+9. Metadata audit log updated via record_metadata_audit
+
+### Amendment History Retrieval:
+```rust
+pub fn get_amendment_history(env: Env, credential_id: u64) -> Vec<AmendmentEntry>
+```
+
+Returns complete amendment history with:
+- amendment_id: Unique sequential ID for this amendment
+- previous_metadata_hash: Hash before this amendment
+- new_metadata_hash: Hash after this amendment  
+- amended_by: Address of issuer who made the amendment
+- amended_at: Ledger timestamp of amendment
+
+### Regulatory Compliance:
+- Complete audit trail enables regulatory verification of all changes
+- Timestamps allow temporal analysis of credential modifications
+- Amendment history distinguishes corrections from version updates
+- Supports compliance with data governance requirements
+
+### Constraints:
+- Cannot amend revoked credentials (must re-issue)
+- Only original issuer can amend
+- Empty metadata hash rejected
+- Version number incremented for each amendment
+
 ## Summary of All Changes
 
 All four credential management tasks have been successfully implemented in a single PR:
@@ -165,3 +209,14 @@ The implementation includes:
 
 All changes maintain backward compatibility and follow the existing authorization
 and event emission patterns in the contract.
+
+### Code Locations:
+- **Core implementations**: contracts/quorum_proof/src/lib.rs
+  - Lines: Event data structures, DataKey variants, function implementations
+- **Documentation**: TASK_IMPLEMENTATIONS.md (this file)
+
+### Commits in This PR:
+1. Expiry & Renewal (Task #1220)
+2. Suspension (Task #1221)  
+3. Batch Issuance (Task #1219)
+4. Amendment (Task #1222)
