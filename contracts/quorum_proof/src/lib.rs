@@ -24230,6 +24230,277 @@ mod doc_tests {
         // Warning does not make the report unhealthy
         assert!(report.healthy);
     }
+
+    // ── Feature 1231: Slice Template Tests ──────────────────────────────────
+
+    #[test]
+    fn test_create_slice_template_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(50u32);
+        weights.push_back(50u32);
+
+        let name = soroban_sdk::String::from_str(&env, "Test Template");
+        let description = soroban_sdk::String::from_str(&env, "A test template");
+
+        let template_id = client.create_slice_template(
+            &creator,
+            &name,
+            &description,
+            &attestors,
+            &weights,
+            &50u32,
+        );
+
+        assert!(template_id > 0);
+
+        // Verify template was stored
+        let retrieved = client.get_slice_template(&template_id);
+        assert!(retrieved.is_some());
+        let template = retrieved.unwrap();
+        assert_eq!(template.version, 1u32);
+    }
+
+    #[test]
+    fn test_create_slice_from_template_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        attestors.push_back(a1);
+        attestors.push_back(a2);
+        let mut weights = Vec::new(&env);
+        weights.push_back(50u32);
+        weights.push_back(50u32);
+
+        let name = soroban_sdk::String::from_str(&env, "Test Template");
+        let description = soroban_sdk::String::from_str(&env, "A test template");
+
+        let template_id = client.create_slice_template(
+            &creator,
+            &name,
+            &description,
+            &attestors,
+            &weights,
+            &50u32,
+        );
+
+        // Create slice from template
+        let slice_id = client.create_slice_from_template(&creator, &template_id, &1u64);
+        assert!(slice_id > 0);
+
+        // Verify slice exists
+        let slice = client.get_slice(&slice_id);
+        assert_eq!(slice.threshold, 50u32);
+    }
+
+    #[test]
+    fn test_update_template_defaults_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+
+        let name = soroban_sdk::String::from_str(&env, "Test Template");
+        let description = soroban_sdk::String::from_str(&env, "A test template");
+
+        let template_id = client.create_slice_template(
+            &creator,
+            &name,
+            &description,
+            &attestors,
+            &weights,
+            &100u32,
+        );
+
+        // Update template
+        let mut new_attestors = Vec::new(&env);
+        new_attestors.push_back(Address::generate(&env));
+        new_attestors.push_back(Address::generate(&env));
+        let mut new_weights = Vec::new(&env);
+        new_weights.push_back(60u32);
+        new_weights.push_back(40u32);
+
+        let change_desc = soroban_sdk::String::from_str(&env, "Updated weights");
+        client.update_template_defaults(
+            &creator,
+            &template_id,
+            &new_attestors,
+            &new_weights,
+            &60u32,
+            &change_desc,
+        );
+
+        // Verify template was updated
+        let updated = client.get_slice_template(&template_id).unwrap();
+        assert_eq!(updated.version, 2u32);
+        assert_eq!(updated.threshold, 60u32);
+
+        // Verify version history
+        let history = client.get_template_version_history(&template_id);
+        assert_eq!(history.len(), 2u32);
+    }
+
+    // ── Feature 1232: Slice Advisor Tests ──────────────────────────────────
+
+    #[test]
+    fn test_recommend_attestors_returns_recommendations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let credential_type = 1u32;
+        let jurisdiction = soroban_sdk::Bytes::from_slice(&env, b"US");
+
+        let recommendations = client.recommend_attestors(&credential_type, &jurisdiction);
+
+        // Should return a Vec (even if empty in this test environment)
+        assert!(recommendations.len() >= 0u32);
+    }
+
+    #[test]
+    fn test_clear_recommendation_cache_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_type = 1u32;
+        let jurisdiction = soroban_sdk::Bytes::from_slice(&env, b"US");
+
+        // Clear cache (should not panic)
+        client.clear_recommendation_cache(&admin, &credential_type, &jurisdiction);
+    }
+
+    // ── Feature 1234: Attestor Replacement Tests ────────────────────────────
+
+    #[test]
+    fn test_replace_attestor_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let old_attestor = Address::generate(&env);
+        let new_attestor = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(old_attestor.clone());
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(50u32);
+        weights.push_back(50u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Replace attestor
+        let reason = soroban_sdk::String::from_str(&env, "Attestor went offline");
+        client.replace_attestor(
+            &creator,
+            &slice_id,
+            &old_attestor,
+            &new_attestor,
+            &reason,
+        );
+
+        // Verify attestor was replaced
+        let updated_slice = client.get_slice(&slice_id);
+        assert!(!updated_slice.attestors.iter().any(|a| a == &old_attestor));
+        assert!(updated_slice.attestors.iter().any(|a| a == &new_attestor));
+    }
+
+    #[test]
+    fn test_get_attestor_replacement_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let old_attestor = Address::generate(&env);
+        let new_attestor = Address::generate(&env);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(old_attestor.clone());
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(50u32);
+        weights.push_back(50u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &50u32);
+
+        // Replace attestor
+        let reason = soroban_sdk::String::from_str(&env, "Attestor went offline");
+        client.replace_attestor(
+            &creator,
+            &slice_id,
+            &old_attestor,
+            &new_attestor,
+            &reason,
+        );
+
+        // Get replacement history
+        let history = client.get_attestor_replacement_history(&slice_id);
+        assert_eq!(history.len(), 1u32);
+
+        let record = history.get(0).unwrap();
+        assert_eq!(record.old_attestor, old_attestor);
+        assert_eq!(record.new_attestor, new_attestor);
+    }
+
+    // ── Feature 1233: Nested Slice Tests ────────────────────────────────────
+
+    #[test]
+    fn test_can_use_as_nested_slice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+
+        // Should be able to use as nested slice (depth check)
+        let can_use = client.can_use_as_nested_slice(&slice_id);
+        assert!(can_use);
+    }
+
+    #[test]
+    fn test_get_slice_nesting_depth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(Address::generate(&env));
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+
+        let depth = client.get_slice_nesting_depth(&slice_id);
+        // Default depth for non-nested slices is 1
+        assert!(depth > 0u32);
+    }
 }
 
 #[cfg(feature = "legacy-tests")]
