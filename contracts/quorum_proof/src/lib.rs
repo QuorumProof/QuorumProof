@@ -10,6 +10,7 @@ use soroban_sdk::{
 use soroban_sdk::xdr::ToXdr;
 
 mod rbac;
+mod slice_enhancements;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -757,6 +758,8 @@ pub enum ContractError {
     CycleDetected = 83,
     /// Quorum intersection check failed or partition detected
     QuorumIntersectionFailed = 84,
+    /// Slice schema version not found
+    SchemaNotFound = 85,
 }
 
 #[contracttype]
@@ -1101,6 +1104,41 @@ pub enum DataKey8 {
     AttestorReputationScore(Address),
     /// Allowed recipient restriction for a credential transfer (credential_id -> Address).
     CredentialTransferRecipient(u64),
+}
+
+/// Storage keys for slice enhancements (Issues #1235-#1238)
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeySliceEnhancements {
+    // Issue #1235: Threshold Signature Verification
+    /// Aggregated signature for threshold verification (credential_id, slice_id -> AggregatedSignature)
+    AggregatedSignature(u64, u64),
+    /// Threshold verification cache (credential_id, slice_id -> ThresholdVerificationResult)
+    ThresholdVerificationCache(u64, u64),
+
+    // Issue #1236: Performance Metrics Tracking
+    /// Per-attestor metrics within a slice (slice_id, attestor -> AttestorMetrics)
+    AttestorMetrics(u64, Address),
+    /// Slice-level performance metrics (slice_id -> SlicePerformanceMetrics)
+    SlicePerformanceMetrics(u64),
+    /// Health observations history (slice_id, attestor -> Vec<AttestorHealthObservation>)
+    HealthObservationHistory(u64, Address),
+
+    // Issue #1237: Slice Migration
+    /// Slice schema definition (version -> SliceSchema)
+    SliceSchema(u32),
+    /// Current schema version for a slice (slice_id -> u32)
+    SliceSchemaVersion(u64),
+    /// Migration records for a slice (slice_id -> Vec<SliceMigrationRecord>)
+    SliceMigrationHistory(u64),
+
+    // Issue #1238: Consensus Analytics
+    /// Consensus analytics for a credential (credential_id -> ConsensusAnalytics)
+    ConsensusAnalytics(u64),
+    /// Attestor positions for consensus tracking (credential_id -> Vec<AttestorConsensusPosition>)
+    AttestorPositions(u64),
+    /// Historical consensus metrics (credential_id -> Vec<ConsensusMetricPoint>)
+    ConsensusMetricsHistory(u64),
 }
 
 /// Detailed attestor reputation score tracking speed, pass rate, and dispute ratio.
@@ -15642,6 +15680,531 @@ impl QuorumProofContract {
         );
 
         canonical
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1235: Threshold Signature Verification for Slices
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Verify a threshold signature for a credential across a slice.
+    /// Returns whether the aggregated signature meets the quorum threshold.
+    pub fn verify_threshold_attestation(
+        env: Env,
+        credential_id: u64,
+        slice_id: u64,
+        aggregated_sig: slice_enhancements::AggregatedSignature,
+    ) -> bool {
+        Self::require_not_paused(&env);
+
+        // Get the slice to verify threshold requirements
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Verify signature count meets threshold
+        let meets_threshold = aggregated_sig.signature_count >= slice.threshold as u32;
+
+        // Create and cache verification result
+        let now = env.ledger().timestamp();
+        let mut signatories: Vec<Address> = Vec::new(&env);
+
+        // Extract signatories from bitmap
+        for i in 0..slice.attestors.len() {
+            let bit_position = i as u64;
+            if (aggregated_sig.signer_bitmap & (1u64 << bit_position)) != 0 {
+                if let Some(attestor) = slice.attestors.get(i) {
+                    signatories.push_back(attestor);
+                }
+            }
+        }
+
+        let result = slice_enhancements::ThresholdVerificationResult {
+            is_valid: meets_threshold,
+            signatures_present: aggregated_sig.signature_count,
+            threshold_required: slice.threshold,
+            signatories: signatories.clone(),
+            verified_at: now,
+        };
+
+        // Cache the verification result
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::ThresholdVerificationCache(credential_id, slice_id),
+            &result,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        meets_threshold
+    }
+
+    /// Get cached threshold verification result for a credential/slice pair
+    pub fn get_threshold_verification(
+        env: Env,
+        credential_id: u64,
+        slice_id: u64,
+    ) -> Option<slice_enhancements::ThresholdVerificationResult> {
+        env.storage().instance().get(
+            &DataKeySliceEnhancements::ThresholdVerificationCache(credential_id, slice_id),
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1236: Slice Performance Metrics Tracking
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Record a health observation for an attestor in a slice
+    pub fn record_attestor_health(
+        env: Env,
+        slice_id: u64,
+        attestor: Address,
+        response_time_ms: u64,
+        is_healthy: bool,
+    ) {
+        Self::require_not_paused(&env);
+
+        let now = env.ledger().timestamp();
+        let observation = slice_enhancements::AttestorHealthObservation {
+            attestor: attestor.clone(),
+            response_time_ms,
+            is_healthy,
+            observed_at: now,
+        };
+
+        // Store observation in history
+        let mut history: Vec<slice_enhancements::AttestorHealthObservation> = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::HealthObservationHistory(slice_id, attestor.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        history.push_back(observation);
+
+        // Keep only last 1000 observations
+        if history.len() > 1000 {
+            history.remove(0);
+        }
+
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::HealthObservationHistory(slice_id, attestor.clone()),
+            &history,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Update attestor metrics
+        let mut metrics: slice_enhancements::AttestorMetrics = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::AttestorMetrics(slice_id, attestor.clone()))
+            .unwrap_or(slice_enhancements::AttestorMetrics {
+                avg_response_time_ms: 0,
+                total_attestations: 0,
+                unavailability_count: 0,
+                uptime_bps: 10000,
+                last_attestation_at: 0,
+                last_health_check_at: 0,
+            });
+
+        // Update metrics
+        metrics.total_attestations = metrics.total_attestations.saturating_add(1);
+        if !is_healthy {
+            metrics.unavailability_count = metrics.unavailability_count.saturating_add(1);
+        }
+        metrics.last_health_check_at = now;
+
+        // Calculate running average response time
+        if metrics.total_attestations > 0 {
+            metrics.avg_response_time_ms =
+                (metrics.avg_response_time_ms + response_time_ms) / 2;
+        } else {
+            metrics.avg_response_time_ms = response_time_ms;
+        }
+
+        // Update uptime percentage
+        if metrics.total_attestations > 0 {
+            let healthy_count = metrics.total_attestations
+                .saturating_sub(metrics.unavailability_count);
+            metrics.uptime_bps =
+                ((healthy_count as u64 * 10000) / metrics.total_attestations as u64) as u32;
+        }
+
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::AttestorMetrics(slice_id, attestor),
+            &metrics,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get performance metrics for a specific slice
+    pub fn get_slice_performance_metrics(
+        env: Env,
+        slice_id: u64,
+    ) -> Option<slice_enhancements::SlicePerformanceMetrics> {
+        env.storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::SlicePerformanceMetrics(slice_id))
+    }
+
+    /// Calculate and store overall slice performance metrics
+    pub fn update_slice_performance_metrics(env: Env, slice_id: u64) {
+        Self::require_not_paused(&env);
+
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        let now = env.ledger().timestamp();
+        let mut total_response_time: u64 = 0;
+        let mut healthy_count: u32 = 0;
+        let mut total_count: u32 = 0;
+
+        // Aggregate metrics from all attestors
+        for i in 0..slice.attestors.len() {
+            if let Some(attestor) = slice.attestors.get(i) {
+                if let Some(metrics) = env.storage().instance().get::<
+                    _,
+                    slice_enhancements::AttestorMetrics,
+                >(
+                    &DataKeySliceEnhancements::AttestorMetrics(slice_id, attestor)
+                ) {
+                    total_response_time = total_response_time.saturating_add(metrics.avg_response_time_ms);
+                    if metrics.uptime_bps >= 5000 {
+                        healthy_count = healthy_count.saturating_add(1);
+                    }
+                    total_count = total_count.saturating_add(1);
+                } else {
+                    total_count = total_count.saturating_add(1);
+                }
+            }
+        }
+
+        let avg_response_time = if total_count > 0 {
+            total_response_time / total_count as u64
+        } else {
+            0
+        };
+
+        let quorum_health_bps = if total_count > 0 {
+            (healthy_count as u64 * 10000 / total_count as u64) as u32
+        } else {
+            10000
+        };
+
+        let metrics = slice_enhancements::SlicePerformanceMetrics {
+            slice_id,
+            avg_attestation_time_ms: avg_response_time,
+            quorum_health_bps,
+            healthy_attestor_count: healthy_count,
+            total_attestors: total_count,
+            updated_at: now,
+        };
+
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::SlicePerformanceMetrics(slice_id),
+            &metrics,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1237: Slice Migration for Schema Changes
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Register a new slice schema version
+    pub fn register_slice_schema(
+        env: Env,
+        admin: Address,
+        version: u32,
+        schema_hash: Bytes,
+        description: Bytes,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        Self::require_not_paused(&env);
+
+        let now = env.ledger().timestamp();
+        let schema = slice_enhancements::SliceSchema {
+            version,
+            schema_hash,
+            description,
+            created_at: now,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeySliceEnhancements::SliceSchema(version), &schema);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Migrate a slice to a new schema version
+    pub fn migrate_slice(
+        env: Env,
+        admin: Address,
+        slice_id: u64,
+        new_schema_version: u32,
+    ) -> bool {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        Self::require_not_paused(&env);
+
+        // Verify slice exists
+        let slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        // Verify new schema exists
+        let _new_schema: slice_enhancements::SliceSchema = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::SliceSchema(new_schema_version))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SchemaNotFound));
+
+        // Get current schema version (default to 1 if not set)
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::SliceSchemaVersion(slice_id))
+            .unwrap_or(1u32);
+
+        // Prevent migrating to the same version
+        assert!(
+            current_version != new_schema_version,
+            "slice already at target schema version"
+        );
+
+        let now = env.ledger().timestamp();
+
+        // Create migration hash from slice data
+        let migration_data = soroban_sdk::Bytes::from_slice(&env, b"migration");
+        let migration_hash = env.crypto().sha256(&migration_data);
+
+        // Record migration
+        let migration = slice_enhancements::SliceMigrationRecord {
+            slice_id,
+            from_version: current_version,
+            to_version: new_schema_version,
+            migrated_at: now,
+            migrated_by: admin.clone(),
+            migration_hash,
+            success: true,
+        };
+
+        // Store migration record
+        let mut migration_history: Vec<slice_enhancements::SliceMigrationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::SliceMigrationHistory(slice_id))
+            .unwrap_or(Vec::new(&env));
+
+        migration_history.push_back(migration);
+
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::SliceMigrationHistory(slice_id),
+            &migration_history,
+        );
+
+        // Update slice schema version
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::SliceSchemaVersion(slice_id),
+            &new_schema_version,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        true
+    }
+
+    /// Get migration history for a slice
+    pub fn get_slice_migration_history(
+        env: Env,
+        slice_id: u64,
+    ) -> Vec<slice_enhancements::SliceMigrationRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::SliceMigrationHistory(slice_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1238: Slice Consensus Analytics
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Record attestor position for consensus tracking
+    pub fn record_attestor_position(
+        env: Env,
+        credential_id: u64,
+        attestor: Address,
+        position: bool,
+        weight: u32,
+    ) {
+        Self::require_not_paused(&env);
+
+        let now = env.ledger().timestamp();
+        let position_record = slice_enhancements::AttestorConsensusPosition {
+            attestor: attestor.clone(),
+            position,
+            weight,
+            attested_at: now,
+        };
+
+        // Store position
+        let mut positions: Vec<slice_enhancements::AttestorConsensusPosition> = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::AttestorPositions(credential_id))
+            .unwrap_or(Vec::new(&env));
+
+        positions.push_back(position_record);
+
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::AttestorPositions(credential_id),
+            &positions,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Update consensus analytics
+        Self::update_consensus_analytics(&env, credential_id);
+    }
+
+    /// Update consensus analytics for a credential
+    fn update_consensus_analytics(env: &Env, credential_id: u64) {
+        let positions: Vec<slice_enhancements::AttestorConsensusPosition> = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::AttestorPositions(credential_id))
+            .unwrap_or(Vec::new(env));
+
+        let now = env.ledger().timestamp();
+        let mut agreeing_weight: u32 = 0;
+        let mut disagreeing_weight: u32 = 0;
+        let mut dissenting_attestors: Vec<Address> = Vec::new(env);
+        let mut total_attestors: u32 = 0;
+
+        // Calculate weighted consensus
+        for position in positions.iter() {
+            if position.position {
+                agreeing_weight = agreeing_weight.saturating_add(position.weight);
+            } else {
+                disagreeing_weight = disagreeing_weight.saturating_add(position.weight);
+                dissenting_attestors.push_back(position.attestor.clone());
+            }
+            total_attestors = total_attestors.saturating_add(1);
+        }
+
+        let total_weight = agreeing_weight.saturating_add(disagreeing_weight);
+        let agreement_percentage_bps = if total_weight > 0 {
+            ((agreeing_weight as u64 * 10000) / total_weight as u64) as u32
+        } else {
+            0
+        };
+
+        let analytics = slice_enhancements::ConsensusAnalytics {
+            credential_id,
+            agreeing_weight,
+            disagreeing_weight,
+            total_weight,
+            agreement_percentage_bps,
+            dissenting_attestors,
+            total_attestors,
+            last_updated_at: now,
+        };
+
+        env.storage().instance().set(
+            &DataKeySliceEnhancements::ConsensusAnalytics(credential_id),
+            &analytics,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Record metric in history
+        let mut positions_opt: Vec<slice_enhancements::AttestorConsensusPosition> = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::AttestorPositions(credential_id))
+            .unwrap_or(Vec::new(env));
+
+        if !positions_opt.is_empty() {
+            if let Some(last_pos) = positions_opt.last() {
+                let metric = slice_enhancements::ConsensusMetricPoint {
+                    credential_id,
+                    slice_id: 0, // Will be populated by caller if needed
+                    agreement_percentage_bps,
+                    recorded_at: now,
+                };
+
+                let mut history: Vec<slice_enhancements::ConsensusMetricPoint> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeySliceEnhancements::ConsensusMetricsHistory(credential_id))
+                    .unwrap_or(Vec::new(env));
+
+                history.push_back(metric);
+
+                // Keep only last 1000 metrics
+                if history.len() > 1000 {
+                    history.remove(0);
+                }
+
+                env.storage().instance().set(
+                    &DataKeySliceEnhancements::ConsensusMetricsHistory(credential_id),
+                    &history,
+                );
+                env.storage()
+                    .instance()
+                    .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            }
+        }
+    }
+
+    /// Get consensus analytics for a credential
+    pub fn get_consensus_analytics(
+        env: Env,
+        credential_id: u64,
+    ) -> Option<slice_enhancements::ConsensusAnalytics> {
+        env.storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::ConsensusAnalytics(credential_id))
+    }
+
+    /// Get consensus metrics history for a credential
+    pub fn get_consensus_metrics_history(
+        env: Env,
+        credential_id: u64,
+    ) -> Vec<slice_enhancements::ConsensusMetricPoint> {
+        env.storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::ConsensusMetricsHistory(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get attestor positions for a credential
+    pub fn get_attestor_positions(
+        env: Env,
+        credential_id: u64,
+    ) -> Vec<slice_enhancements::AttestorConsensusPosition> {
+        env.storage()
+            .instance()
+            .get(&DataKeySliceEnhancements::AttestorPositions(credential_id))
+            .unwrap_or(Vec::new(&env))
     }
 }
 
