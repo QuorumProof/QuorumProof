@@ -30,6 +30,14 @@ pub enum ContractError {
     UnauthorizedBurn = 10,
     /// The supplied proof_of_residency is empty or structurally invalid.
     InvalidProof = 11,
+    /// Clawback request not found.
+    ClawbackNotFound = 12,
+    /// Clawback timelock has not yet expired.
+    ClawbackTimelockNotExpired = 13,
+    /// Unauthorized clawback operation (issuer-only).
+    UnauthorizedClawback = 14,
+    /// Clawback already exists for this token.
+    ClawbackAlreadyExists = 15,
 }
 
 #[contracttype]
@@ -65,6 +73,12 @@ pub enum DataKey {
     CompressedMetadata(u64),
     /// Escrow record for pending SBT transfers, keyed by sbt_id
     SBTEscrow(u64),
+    /// Clawback request, keyed by clawback_id
+    ClawbackRequest(u64),
+    /// Clawback request counter
+    ClawbackRequestCount,
+    /// Pending clawback by SBT token_id
+    PendingClawbackBySbt(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -181,6 +195,26 @@ pub struct RecoveryApproval {
     pub guardian: Address,
     /// Time when approval was given
     pub approved_at: u64,
+}
+
+/// Represents a time-locked SBT clawback request (Issue #1243)
+#[contracttype]
+#[derive(Clone)]
+pub struct ClawbackRequest {
+    /// Unique clawback request ID
+    pub id: u64,
+    /// The SBT token ID to be clawed back
+    pub sbt_id: u64,
+    /// The issuer initiating the clawback
+    pub issuer: Address,
+    /// Reason for the clawback (e.g., fraudulent claim)
+    pub reason: Bytes,
+    /// When the clawback was initiated
+    pub initiated_at: u64,
+    /// Timestamp when the timelock expires and clawback can be executed
+    pub expires_at: u64,
+    /// Whether the clawback has been executed or cancelled
+    pub status: Symbol,
 }
 
 /// Audit trail entry for recovery operations
@@ -1684,6 +1718,251 @@ impl SbtRegistryContract {
             .persistent()
             .get(&DataKey::CredentialAccessLog(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Issue #1243: SBT Clawback with Time Locks ──────────────────────
+
+    /// Initiate a time-locked SBT clawback request.
+    /// Only the issuer (stored admin or credential issuer) may call this.
+    ///
+    /// The holder has a grace period (timelock) to appeal before the clawback
+    /// can be executed. After `timelock_seconds` elapse, the issuer can execute
+    /// the clawback to reclaim the token.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer initiating clawback; must authorize this call.
+    /// - `sbt_id`: The SBT token ID to be clawed back.
+    /// - `reason`: Bytes explaining the clawback reason (e.g., fraudulent claim).
+    /// - `timelock_seconds`: Grace period (in seconds) before clawback can be executed.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::TokenNotFound` if the SBT doesn't exist.
+    /// Panics with `ContractError::UnauthorizedClawback` if caller is not admin.
+    /// Panics with `ContractError::ClawbackAlreadyExists` if a clawback is already pending.
+    pub fn initiate_sbt_clawback(
+        env: Env,
+        issuer: Address,
+        sbt_id: u64,
+        reason: Bytes,
+        timelock_seconds: u64,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(issuer == stored_admin, "unauthorized clawback");
+
+        let _token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::PendingClawbackBySbt(sbt_id))
+        {
+            panic_with_error!(&env, ContractError::ClawbackAlreadyExists);
+        }
+
+        let clawback_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClawbackRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let initiated_at = env.ledger().timestamp();
+        let expires_at = initiated_at.saturating_add(timelock_seconds);
+
+        let request = ClawbackRequest {
+            id: clawback_id,
+            sbt_id,
+            issuer: issuer.clone(),
+            reason,
+            initiated_at,
+            expires_at,
+            status: symbol_short!("pending"),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ClawbackRequest(clawback_id), &request);
+        env.storage()
+            .instance()
+            .set(&DataKey::ClawbackRequestCount, &clawback_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingClawbackBySbt(sbt_id), &clawback_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("clawb_in").into_val(&env));
+        topics.push_back(clawback_id.into_val(&env));
+        env.events().publish(topics, (issuer, sbt_id));
+
+        clawback_id
+    }
+
+    /// Execute a time-locked SBT clawback after the timelock expires.
+    /// Only the issuer who initiated the clawback may call this.
+    ///
+    /// Removes the token from its holder and marks it as clawed back.
+    /// The credential_id is returned for potential re-issuance to a legitimate holder.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer who initiated the clawback; must authorize this call.
+    /// - `clawback_id`: The ID of the clawback request to execute.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::ClawbackNotFound` if the request doesn't exist.
+    /// Panics with `ContractError::ClawbackTimelockNotExpired` if timelock hasn't expired.
+    /// Panics with `ContractError::UnauthorizedClawback` if caller is not the issuer.
+    pub fn execute_sbt_clawback(env: Env, issuer: Address, clawback_id: u64) -> u64 {
+        issuer.require_auth();
+
+        let mut clawback: ClawbackRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClawbackRequest(clawback_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ClawbackNotFound));
+
+        assert!(
+            clawback.issuer == issuer,
+            "only the initiating issuer can execute"
+        );
+
+        let current_time = env.ledger().timestamp();
+        assert!(
+            current_time >= clawback.expires_at,
+            "timelock not yet expired"
+        );
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(clawback.sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        let holder = token.owner.clone();
+        let credential_id = token.credential_id;
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Token(clawback.sbt_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Owner(clawback.sbt_id));
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegation(clawback.sbt_id));
+        env.storage().instance().remove(&DataKey::OwnerCredential(
+            holder.clone(),
+            credential_id,
+        ));
+
+        let mut owner_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = owner_tokens.iter().position(|id| id == clawback.sbt_id) {
+            owner_tokens.remove(pos as u32);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(holder.clone()), &owner_tokens);
+
+        clawback.status = symbol_short!("execut");
+        env.storage()
+            .instance()
+            .set(&DataKey::ClawbackRequest(clawback_id), &clawback);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingClawbackBySbt(clawback.sbt_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("clawb_ex").into_val(&env));
+        topics.push_back(clawback_id.into_val(&env));
+        env.events().publish(topics, (issuer, holder, clawback.sbt_id));
+
+        credential_id
+    }
+
+    /// Cancel a time-locked SBT clawback before the timelock expires.
+    /// Only the issuer who initiated the clawback may call this.
+    ///
+    /// After cancellation, the token remains with its holder and no further
+    /// clawback attempts can be made (a new clawback would need to be initiated).
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer who initiated the clawback; must authorize this call.
+    /// - `clawback_id`: The ID of the clawback request to cancel.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::ClawbackNotFound` if the request doesn't exist.
+    /// Panics with `ContractError::UnauthorizedClawback` if caller is not the issuer.
+    pub fn cancel_sbt_clawback(env: Env, issuer: Address, clawback_id: u64) {
+        issuer.require_auth();
+
+        let mut clawback: ClawbackRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClawbackRequest(clawback_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ClawbackNotFound));
+
+        assert!(
+            clawback.issuer == issuer,
+            "only the initiating issuer can cancel"
+        );
+
+        clawback.status = symbol_short!("cancel");
+        env.storage()
+            .instance()
+            .set(&DataKey::ClawbackRequest(clawback_id), &clawback);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingClawbackBySbt(clawback.sbt_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("clawb_ca").into_val(&env));
+        topics.push_back(clawback_id.into_val(&env));
+        env.events()
+            .publish(topics, (issuer, clawback.sbt_id));
+    }
+
+    /// Retrieve a clawback request by ID.
+    ///
+    /// # Parameters
+    /// - `clawback_id`: The clawback request ID to retrieve.
+    ///
+    /// # Panics
+    /// Panics with `ContractError::ClawbackNotFound` if the request doesn't exist.
+    pub fn get_clawback_request(env: Env, clawback_id: u64) -> ClawbackRequest {
+        env.storage()
+            .instance()
+            .get(&DataKey::ClawbackRequest(clawback_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ClawbackNotFound))
+    }
+
+    /// Check if there is a pending clawback for an SBT token.
+    ///
+    /// # Parameters
+    /// - `sbt_id`: The SBT token ID to check.
+    ///
+    /// # Returns
+    /// The clawback ID if a pending clawback exists, otherwise panics.
+    pub fn get_pending_clawback_for_sbt(env: Env, sbt_id: u64) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingClawbackBySbt(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ClawbackNotFound))
     }
 }
 
