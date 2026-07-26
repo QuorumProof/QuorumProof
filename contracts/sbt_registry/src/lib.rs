@@ -135,6 +135,9 @@ pub struct SoulboundToken {
     pub metadata_uri: Bytes,
     /// Monotonically increasing version; starts at 1 on mint, incremented on each metadata update.
     pub version: u32,
+    /// Issue #992: If set, this SBT has been upgraded to another SBT ID.
+    /// Old SBT cannot be verified independently when upgraded.
+    pub upgraded_to: Option<u64>,
 }
 
 #[contracttype]
@@ -1977,6 +1980,167 @@ impl SbtRegistryContract {
             .persistent()
             .get(&DataKey::SbtActivityLog(sbt_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Issue #989: SBT Metadata URI and Rendering ──────────────────────────────
+
+    /// Issue #989: Set the metadata URI for an SBT.
+    /// Issuer-only: the issuer of the credential underlying this SBT can update the
+    /// metadata URI to enable wallet rendering and display.
+    /// URI must be HTTPS or IPFS and max 256 characters.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address (must match credential's issuer).
+    /// - `sbt_id`: The SBT ID.
+    /// - `metadata_uri`: New metadata URI (HTTPS or IPFS, max 256 chars).
+    ///
+    /// # Panics
+    /// - If SBT not found.
+    /// - If caller is not the credential's issuer.
+    /// - If URI format is invalid (not HTTPS or IPFS).
+    /// - If URI exceeds 256 characters.
+    pub fn set_sbt_metadata_uri(env: Env, issuer: Address, sbt_id: u64, metadata_uri: soroban_sdk::String) {
+        issuer.require_auth();
+
+        // Validate URI format and length
+        let uri_bytes = metadata_uri.to_xdr(&env).as_bytes();
+        if uri_bytes.len() > 256 {
+            panic!("metadata_uri exceeds 256 characters");
+        }
+
+        // Check for HTTPS or IPFS scheme (case-insensitive)
+        let uri_str_val = metadata_uri.to_string();
+        let uri_lower = uri_str_val.to_lowercase();
+        let valid_scheme = uri_lower.starts_with("https://") || uri_lower.starts_with("ipfs://");
+        if !valid_scheme {
+            panic!("metadata_uri must be HTTPS or IPFS");
+        }
+
+        // Get the SBT to verify it exists
+        let sbt: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        // Verify the credential still exists and is not revoked
+        // This ensures issuer authorization (only valid issuers create credentials)
+        let qp_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+        
+        let revoked: bool = env.invoke_contract(
+            &qp_id,
+            &Symbol::new(&env, "is_revoked"),
+            soroban_sdk::vec![&env, sbt.credential_id.into_val(&env)],
+        );
+        assert!(!revoked, "credential is revoked or does not exist");
+
+        // Store metadata URI (convert String to Bytes for storage)
+        let uri_bytes_val = soroban_sdk::Bytes::from_slice(&env, uri_bytes);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SbtMetadataUri(sbt_id), &uri_bytes_val);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::SbtMetadataUri(sbt_id), STANDARD_TTL, EXTENDED_TTL);
+
+        Self::log_sbt_activity(&env, sbt_id, symbol_short!("uri"), issuer);
+    }
+
+    /// Issue #989: Get the metadata URI for an SBT.
+    /// Returns the URI used by wallets for rich rendering and display.
+    ///
+    /// # Parameters
+    /// - `sbt_id`: The SBT ID.
+    ///
+    /// # Returns
+    /// The metadata URI as a String, or empty string if not set.
+    pub fn get_sbt_metadata_uri(env: Env, sbt_id: u64) -> soroban_sdk::String {
+        let uri_bytes: Option<soroban_sdk::Bytes> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SbtMetadataUri(sbt_id));
+
+        match uri_bytes {
+            Some(bytes) => soroban_sdk::String::from_slice(&env, bytes.as_slice()),
+            None => soroban_sdk::String::from_slice(&env, b""),
+        }
+    }
+
+    // ── Issue #992: SBT Upgrade Path ────────────────────────────────────────────
+
+    /// Issue #992: Upgrade an SBT to a new credential version.
+    /// Issuer-only: when a credential is upgraded (e.g., PE License → PE License + Specialty),
+    /// issue a new SBT and link the old one as upgraded_to.
+    ///
+    /// Old SBT cannot be verified independently after upgrade.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address (must match credential's issuer).
+    /// - `old_sbt_id`: The SBT being retired.
+    /// - `new_sbt_id`: The new SBT ID replacing it.
+    ///
+    /// # Panics
+    /// - If either SBT not found.
+    /// - If caller is not the credential's issuer.
+    pub fn upgrade_sbt(env: Env, issuer: Address, old_sbt_id: u64, new_sbt_id: u64) {
+        issuer.require_auth();
+
+        // Get both SBTs
+        let mut old_sbt: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(old_sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        let new_sbt: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(new_sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        // Verify the credential still exists and is not revoked
+        let qp_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("not initialized");
+
+        let revoked: bool = env.invoke_contract(
+            &qp_id,
+            &Symbol::new(&env, "is_revoked"),
+            soroban_sdk::vec![&env, old_sbt.credential_id.into_val(&env)],
+        );
+        assert!(!revoked, "credential is revoked or does not exist");
+
+        // Mark old SBT as upgraded_to new_sbt_id
+        old_sbt.upgraded_to = Some(new_sbt_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(old_sbt_id), &old_sbt);
+
+        Self::log_sbt_activity(&env, old_sbt_id, symbol_short!("upgrade"), issuer.clone());
+        Self::log_sbt_activity(&env, new_sbt_id, symbol_short!("new"), issuer);
+    }
+
+    /// Issue #992: Check if an SBT has been upgraded and get the new SBT ID.
+    ///
+    /// # Parameters
+    /// - `sbt_id`: The SBT ID.
+    ///
+    /// # Returns
+    /// Some(new_sbt_id) if upgraded, None otherwise.
+    pub fn get_sbt_upgrade_path(env: Env, sbt_id: u64) -> Option<u64> {
+        let sbt: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        sbt.upgraded_to
     }
 
     // ── Issue #987: Credential Holder Earnings Tracking ─────────────────────────

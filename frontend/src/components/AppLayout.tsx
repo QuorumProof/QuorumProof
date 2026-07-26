@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { NetworkSwitcher } from "./NetworkSwitcher";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface AppLayoutProps {
   currentPath: string;
@@ -40,52 +41,53 @@ export function AppLayout({
   }, []);
 
   return (
-    <div className="flex flex-col h-screen bg-slate-900 text-slate-100">
-      <header className="flex items-center justify-between h-14 px-4 border-b border-slate-700 bg-slate-800">
-        <div className="text-base font-bold tracking-tight text-white">
+    <div className="flex flex-col h-screen bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100">
+      <header className="flex items-center justify-between h-14 px-4 border-b border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800">
+        <div className="text-base font-bold tracking-tight text-slate-900 dark:text-white">
           ⬡ QuorumProof
         </div>
 
         <nav className="hidden md:flex space-x-4">
-          <a href="/dashboard" className={`px-3 py-2 rounded ${isActive('/dashboard') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/dashboard" className={`px-3 py-2 rounded ${isActive('/dashboard') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Dashboard
           </a>
-          <a href="/verify" className={`px-3 py-2 rounded ${isActive('/verify') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/verify" className={`px-3 py-2 rounded ${isActive('/verify') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Verify
           </a>
-          <a href="/verifier" className={`px-3 py-2 rounded ${isActive('/verifier') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/verifier" className={`px-3 py-2 rounded ${isActive('/verifier') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Verifier
           </a>
-          <a href="/verifier/dashboard" className={`px-3 py-2 rounded ${isActive('/verifier/dashboard') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/verifier/dashboard" className={`px-3 py-2 rounded ${isActive('/verifier/dashboard') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Verification
           </a>
-          <a href="/issuer" className={`px-3 py-2 rounded ${isActive('/issuer') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/issuer" className={`px-3 py-2 rounded ${isActive('/issuer') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Issuer
           </a>
-          <a href="/search" className={`px-3 py-2 rounded ${isActive('/search') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/search" className={`px-3 py-2 rounded ${isActive('/search') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Search
           </a>
-          <a href="/slice/new" className={`px-3 py-2 rounded ${isActive('/slice/new') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/slice/new" className={`px-3 py-2 rounded ${isActive('/slice/new') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             New Slice
           </a>
-          <a href="/profile" className={`px-3 py-2 rounded ${isActive('/profile') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/profile" className={`px-3 py-2 rounded ${isActive('/profile') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Profile
           </a>
-          <a href="/compare" className={`px-3 py-2 rounded ${isActive('/compare') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/compare" className={`px-3 py-2 rounded ${isActive('/compare') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Compare
           </a>
-          <a href="/share" className={`px-3 py-2 rounded ${isActive('/share') ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>
+          <a href="/share" className={`px-3 py-2 rounded ${isActive('/share') ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
             Share
           </a>
         </nav>
 
         <div className="flex items-center space-x-4">
+          <ThemeToggle />
           <NetworkSwitcher />
           {walletAddress ? (
             <div style={{ position: 'relative' }} ref={menuRef}>
               <button
                 onClick={() => setShowWalletMenu(prev => !prev)}
-                className="text-sm font-mono text-slate-300 hover:text-white flex items-center gap-1"
+                className="text-sm font-mono text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white flex items-center gap-1"
               >
                 {truncateAddress(walletAddress)}
                 {wallets.length > 1 && <span style={{ fontSize: 10 }}>▼</span>}
