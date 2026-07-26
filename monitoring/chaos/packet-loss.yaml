@@ -1,0 +1,28 @@
+# Issue #1003 — Chaos Mesh: packet loss
+#
+# Drops a percentage of api-server's outbound packets to verify the
+# resilience requirements in docs/resilience.md: a single dropped call must
+# degrade to a scoped error, never crash the process or fail unrelated
+# requests in the same batch.
+#
+# Apply:   kubectl apply -f packet-loss.yaml
+# Remove:  kubectl delete -f packet-loss.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: api-server-packet-loss
+  namespace: quorumproof
+spec:
+  action: loss
+  mode: all
+  selector:
+    namespaces:
+      - quorumproof
+    labelSelectors:
+      app: quorumproof-api-server
+  loss:
+    loss: '15'
+    correlation: '25'
+  duration: '5m'
+  scheduler:
+    cron: '@every 30m'
