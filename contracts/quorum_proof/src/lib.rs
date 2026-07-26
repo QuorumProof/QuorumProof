@@ -5,11 +5,12 @@ extern crate std;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, Env, IntoVal, Map, String, Symbol, Vec,
+    Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Vec,
 };
 use soroban_sdk::xdr::ToXdr;
 
 mod rbac;
+mod key_escrow;
 mod slice_enhancements;
 #[cfg(test)]
 mod simulation_agent_based;
@@ -41,6 +42,8 @@ const TOPIC_MIGRATION_PROGRESS: &str = "MigrationProgress";
 const TOPIC_TEMPLATE_CREATED: &str = "TemplateCreated";
 const TOPIC_TEMPLATE_UPDATED: &str = "TemplateUpdated";
 const TOPIC_ATTESTOR_REPLACEMENT: &str = "AttestorReplaced";
+const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
+const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
 const STANDARD_TTL: u32 = 16_384;
@@ -797,6 +800,18 @@ pub enum ContractError {
     QuorumIntersectionFailed = 84,
     /// Issue #912: Snapshot not found
     SnapshotNotFound = 85,
+    /// Issue #1295: BBS+ key escrow config invalid (threshold/shares mismatch)
+    InvalidEscrowConfig = 86,
+    /// Issue #1295: Key escrow already exists for this issuer
+    EscrowAlreadyExists = 87,
+    /// Issue #1295: Key escrow not found for this issuer
+    EscrowNotFound = 88,
+    /// Issue #1295: Not enough guardian shares submitted to meet threshold
+    InsufficientShares = 89,
+    /// Issue #1295: Guardian already submitted a recovery share
+    DuplicateShareSubmission = 90,
+    /// Issue #1295: Key escrow has already been recovered
+    EscrowAlreadyRecovered = 91,
 }
 
 #[contracttype]
@@ -1138,6 +1153,18 @@ pub enum DataKey6 {
     RoleAssignment(Address),
     RoleDelegation(Address),
     RoleAuditLog,
+}
+
+/// Storage keys for BBS+ issuer key escrow (#1295).
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyEscrow {
+    /// Escrow configuration/status, keyed by issuer.
+    Escrow(Address),
+    /// A single guardian's opaque share blob, keyed by (issuer, guardian).
+    GuardianShare(Address, Address),
+    /// Guardians who have submitted for an in-progress recovery, keyed by issuer.
+    RecoverySubmissions(Address),
 }
 
 /// Storage keys for W3C Decentralized Identifier (DID) support.
@@ -16176,6 +16203,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
         };
         crate::rbac::assign_role(&env, &admin, &target, rbac_role, expires_at);
@@ -16203,6 +16231,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
         };
         crate::rbac::delegate_role(&env, &delegator, &delegatee, rbac_role, expires_at);
@@ -16222,6 +16251,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => return false,
         };
         crate::rbac::has_role(&env, &address, rbac_role)
@@ -16240,6 +16270,49 @@ impl QuorumProofContract {
     /// Get the full RBAC audit log.
     pub fn get_role_audit_log(env: Env) -> Vec<rbac::RoleAuditEntry> {
         crate::rbac::get_audit_log(&env)
+    }
+
+    // ── BBS+ Key Escrow (#1295) ─────────────────────────────────────────
+
+    /// Deposits a threshold (`threshold`-of-`guardians.len()`) Shamir-split
+    /// backup of the issuer's BBS+ signing key. Splitting happens off-chain
+    /// (see `bbs_plus_v1::escrow`); this only stores each guardian's opaque
+    /// share so it can be recovered on threshold-approved request.
+    /// Issuer-only.
+    pub fn deposit_key_escrow(
+        env: Env,
+        issuer: Address,
+        guardians: Vec<Address>,
+        shares: Vec<BytesN<32>>,
+        threshold: u32,
+    ) -> key_escrow::KeyEscrow {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::require_role(&env, &issuer, rbac::Role::Issuer);
+        crate::key_escrow::deposit_key_escrow(&env, &issuer, guardians, shares, threshold)
+    }
+
+    /// A guardian confirms it holds its share and consents to a recovery
+    /// for `issuer`'s escrow. Returns the number of guardians who have
+    /// submitted so far.
+    pub fn submit_recovery_share(env: Env, guardian: Address, issuer: Address) -> u32 {
+        guardian.require_auth();
+        Self::require_not_paused(&env);
+        crate::key_escrow::submit_recovery_share(&env, &guardian, &issuer)
+    }
+
+    /// Once `threshold` guardians have submitted, the issuer (or contract
+    /// admin) retrieves the stored share blobs for off-chain Shamir
+    /// reconstruction.
+    pub fn recover_key(env: Env, caller: Address, issuer: Address) -> Vec<key_escrow::GuardianShare> {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        crate::key_escrow::recover_key(&env, &caller, &issuer)
+    }
+
+    /// Gets the escrow configuration/status for an issuer, if any.
+    pub fn get_key_escrow(env: Env, issuer: Address) -> Option<key_escrow::KeyEscrow> {
+        crate::key_escrow::get_key_escrow(&env, &issuer)
     }
 
     // ── Attestation Queue Management (#843) ────────────────────────────
