@@ -1,4 +1,9 @@
 #![no_std]
+// The quorum-slice / weighted-threshold trust model implemented in this crate
+// (see the `QuorumSlice*` types and `threshold` fields below) follows the
+// Federated Byzantine Agreement design recorded in
+// docs/adr/adr-001-fba-trust-model.md — consult it before changing slice or
+// threshold semantics.
 
 #[cfg(test)]
 extern crate std;

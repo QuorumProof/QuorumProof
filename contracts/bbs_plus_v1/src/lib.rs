@@ -1,5 +1,9 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
+// Rationale for choosing BBS+ over Merkle-redaction or generic zk-SNARK-wrapped
+// signatures for selective disclosure is recorded in
+// docs/adr/adr-007-bbs-plus-selective-disclosure.md. See also
+// docs/bbs-plus-tutorial.md for a developer-facing usage guide.
 
 extern crate alloc;
 
