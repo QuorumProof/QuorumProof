@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest --run",
-    "loadtest:ws": "tsx loadtest/wsLoadTest.ts"
+    "loadtest:ws": "tsx loadtest/wsLoadTest.ts",
+    "loadtest:credentials": "tsx loadtest/credentialLoadTest.ts"
   },
   "dependencies": {
     "@ethereumjs/block": "^10.1.2",
