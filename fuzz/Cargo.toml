@@ -63,6 +63,18 @@ path = "fuzz_targets/fuzz_aggregate_proof.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_verification_functions"
+path = "fuzz_targets/fuzz_verification_functions.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bbs_plus_operations"
+path = "fuzz_targets/fuzz_bbs_plus_operations.rs"
+test = false
+doc = false
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
