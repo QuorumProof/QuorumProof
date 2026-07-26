@@ -73,6 +73,13 @@ Each backup includes:
   "contract_id": "CAAAAAAA...",
   "credential_count": 42,
   "slice_count": 5,
+  "backup_integrity": {
+    "checksum_algorithm": "sha256",
+    "data_checksum": "abc123def456...",
+    "metadata_checksum": "def789ghi012...",
+    "compressed": true,
+    "encrypted": true
+  },
   "credentials": [
     {
       "id": 1,
@@ -94,6 +101,44 @@ Each backup includes:
   ]
 }
 ```
+
+---
+
+## Backup Integrity Verification
+
+### Checksum Calculation
+
+Backups include SHA256 checksums for integrity verification:
+
+```bash
+# Verify backup checksum
+./scripts/verify_backup_integrity.sh \
+  --backup backups/daily/quorumproof-2026-05-29.json.enc \
+  --checksum abc123def456...
+
+# Output:
+# ✓ Data checksum verified: abc123def456...
+# ✓ Metadata checksum verified: def789ghi012...
+# ✓ Backup integrity confirmed
+```
+
+### Checksum Algorithm
+
+- **Data Checksum**: SHA256 hash of all credential and slice data
+- **Metadata Checksum**: SHA256 hash of backup metadata (date, counts, etc.)
+- **Combined Checksum**: HMAC-SHA256 using encryption key
+
+### Integrity Checks
+
+The verification process validates:
+
+1. JSON structure is well-formed
+2. All required fields present
+3. Data checksums match stored values
+4. Credential count is accurate
+5. Slice count is accurate
+6. No data corruption detected
+7. Encryption key matches (if encrypted)
 
 ---
 

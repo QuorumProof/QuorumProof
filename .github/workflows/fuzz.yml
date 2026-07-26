@@ -1,0 +1,83 @@
+name: Fuzzing
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "fuzz/**"
+      - "contracts/**"
+      - ".github/workflows/fuzz.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "fuzz/**"
+      - "contracts/**"
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: "0 2 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fuzz_target:
+          - fuzz_verification_functions
+          - fuzz_bbs_plus_operations
+          - fuzz_zk_verifier
+          - fuzz_credential_issuance
+          - fuzz_batch_operations
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz target (${{ matrix.fuzz_target }}) for 30 seconds
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run ${{ matrix.fuzz_target }} -- -max_total_time=30 -timeout=10
+        continue-on-error: true
+
+  fuzz-nightly:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    strategy:
+      matrix:
+        fuzz_target:
+          - fuzz_verification_functions
+          - fuzz_bbs_plus_operations
+          - fuzz_zk_verifier
+          - fuzz_credential_issuance
+          - fuzz_batch_operations
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run extended fuzzing (${{ matrix.fuzz_target }}) for 5 minutes
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run ${{ matrix.fuzz_target }} -- -max_total_time=300 -timeout=10
+        continue-on-error: true
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.fuzz_target }}
+          path: fuzz/artifacts/
