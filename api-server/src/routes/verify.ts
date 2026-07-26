@@ -7,6 +7,17 @@ import {
   addressVal,
 } from '../soroban.js';
 import { validate, schemas } from '../middleware/validate.js';
+import { metricsStore } from '../services/metrics.js';
+
+/**
+ * Best-effort caller identity for analytics attribution — same header
+ * convention `middleware/rateLimiter.ts` uses to identify callers, since
+ * there's no session/JWT auth in this API (see middleware/rbac.ts).
+ */
+function callerIdentity(req: Request): string {
+  const header = req.header('x-stellar-address');
+  return header && header.length > 0 ? header : 'anonymous';
+}
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -134,6 +145,7 @@ export function createVerifyRouter(soroban: SorobanClient) {
     validate(schemas.verifyBatchClaims),
     async (req: Request, res: Response) => {
       const startedAt = Date.now();
+      const verifier = callerIdentity(req);
       const items = req.body.items as Array<{ credential_id: number; claim_type: string }>;
 
       // ── Deduplicate by (credential_id, claim_type) ─────────────────────────
@@ -285,6 +297,15 @@ export function createVerifyRouter(soroban: SorobanClient) {
               ? 'revoked'
               : 'active';
 
+          // #1001: feed the analytics event log so /api/analytics/verifications
+          // can report verification counts by claim type and verifier.
+          metricsStore.recordEvent({
+            type: 'verified',
+            credential_id: String(pair.credential_id),
+            timestamp: verifiedAt,
+            metadata: { claim_type: pair.claim_type, verifier },
+          });
+
           return {
             credential_id: pair.credential_id,
             claim_type: pair.claim_type,
@@ -324,6 +345,87 @@ export function createVerifyRouter(soroban: SorobanClient) {
       });
     }
   );
+
+  /**
+   * GET /api/verify/:id
+   * #1000: single-credential verification lookup. This is the canonical
+   * "verification endpoint" that a credential export's QR code links to —
+   * anyone who scans the code lands on a page that reports the credential's
+   * current status without needing to know a claim type up front.
+   *
+   * Query params:
+   *   - claim_type: optional; when present, also returns a verification
+   *     proof for that claim (same shape as the `/batch` proof).
+   */
+  router.get('/:id', async (req: Request, res: Response) => {
+    const credentialId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(credentialId) || credentialId <= 0) {
+      res.status(400).json({ error: 'Invalid credential ID' });
+      return;
+    }
+    const claimType = typeof req.query.claim_type === 'string' ? req.query.claim_type : undefined;
+
+    try {
+      const sim = soroban.simulateCall as unknown as (
+        method: string,
+        args: unknown[]
+      ) => Promise<unknown>;
+      const cred = await sim('get_credential', [soroban.u64Val(credentialId)]);
+      const record = serializeBigInt(cred) as Record<string, unknown>;
+
+      const revoked = Boolean(record.revoked);
+      const suspended = Boolean(record.suspended);
+      const expiresAt = record.expires_at ? new Date(record.expires_at as string) : null;
+      const expired = Boolean(expiresAt && !isNaN(expiresAt.getTime()) && expiresAt.getTime() < Date.now());
+
+      const status: BatchVerificationStatus = revoked
+        ? 'revoked'
+        : expired
+          ? 'expired'
+          : 'verified';
+
+      const response: {
+        credential_id: number;
+        status: BatchVerificationStatus;
+        checked_at: string;
+        claim_type?: string;
+        proof?: BatchVerificationProof;
+      } = {
+        credential_id: credentialId,
+        status,
+        checked_at: new Date().toISOString(),
+      };
+
+      if (claimType) {
+        response.claim_type = claimType;
+        if (status === 'verified') {
+          const verifiedAt = response.checked_at;
+          response.proof = {
+            verified_at: verifiedAt,
+            credential_status: suspended ? 'suspended' : 'active',
+            digest: digestHex(`${credentialId} ${claimType} ${verifiedAt}`),
+          };
+          // #1001: feed the analytics event log so /api/analytics/verifications
+          // can report verification counts by claim type and verifier.
+          metricsStore.recordEvent({
+            type: 'verified',
+            credential_id: String(credentialId),
+            timestamp: verifiedAt,
+            metadata: { claim_type: claimType, verifier: callerIdentity(req) },
+          });
+        }
+      }
+
+      res.json(response);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.toLowerCase().includes('credentialnotfound') || msg.toLowerCase().includes('not found')) {
+        res.status(404).json({ error: 'Credential not found', credential_id: credentialId, status: 'not_found' });
+      } else {
+        res.status(500).json({ error: msg });
+      }
+    }
+  });
 
   return router;
 }
