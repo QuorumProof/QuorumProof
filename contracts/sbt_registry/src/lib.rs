@@ -10,6 +10,7 @@ use soroban_sdk::{
 
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
+const MAX_BATCH_SIZE: u32 = 1000;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -201,6 +202,26 @@ pub struct RecoveryApproval {
     pub guardian: Address,
     /// Time when approval was given
     pub approved_at: u64,
+}
+
+/// Represents a time-locked SBT clawback request (Issue #1243)
+#[contracttype]
+#[derive(Clone)]
+pub struct ClawbackRequest {
+    /// Unique clawback request ID
+    pub id: u64,
+    /// The SBT token ID to be clawed back
+    pub sbt_id: u64,
+    /// The issuer initiating the clawback
+    pub issuer: Address,
+    /// Reason for the clawback (e.g., fraudulent claim)
+    pub reason: Bytes,
+    /// When the clawback was initiated
+    pub initiated_at: u64,
+    /// Timestamp when the timelock expires and clawback can be executed
+    pub expires_at: u64,
+    /// Whether the clawback has been executed or cancelled
+    pub status: Symbol,
 }
 
 /// Audit trail entry for recovery operations
@@ -1599,25 +1620,289 @@ impl SbtRegistryContract {
             }
         }
 
-        // ── Execution phase (Task 2.2) ───────────────────────────────────────
-        // Validation passed — execution phase will be added in Task 2.2.
-        Vec::new(&env)
+        // ── Execution phase (Issue #1244) ────────────────────────────────────
+        // Validation passed — now execute the batch mint atomically.
+
+        let mut token_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenCount)
+            .unwrap_or(0);
+
+        let mut result_ids: Vec<u64> = Vec::new(&env);
+
+        for entry in entries.iter() {
+            token_count += 1;
+            let token_id = token_count;
+
+            // Store metadata separately (Issue #512)
+            env.storage()
+                .persistent()
+                .set(&DataKey::CompressedMetadata(token_id), &entry.metadata_uri);
+            env.storage().persistent().extend_ttl(
+                &DataKey::CompressedMetadata(token_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+
+            let token = SoulboundToken {
+                id: token_id,
+                owner: entry.owner.clone(),
+                credential_id: entry.credential_id,
+                metadata_uri: Bytes::new(&env),
+                version: 1,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::Token(token_id), &token);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Token(token_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+            env.storage()
+                .persistent()
+                .set(&DataKey::Owner(token_id), &entry.owner.clone());
+            env.storage().persistent().extend_ttl(
+                &DataKey::Owner(token_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+
+            let mut owner_tokens: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerTokens(entry.owner.clone()))
+                .unwrap_or(Vec::new(&env));
+            owner_tokens.push_back(token_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerTokens(entry.owner.clone()), &owner_tokens);
+            env.storage().persistent().extend_ttl(
+                &DataKey::OwnerTokens(entry.owner.clone()),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+
+            env.storage().instance().set(
+                &DataKey::OwnerCredential(entry.owner.clone(), entry.credential_id),
+                &token_id,
+            );
+
+            let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+            topics.push_back(symbol_short!("mint").into_val(&env));
+            topics.push_back(token_id.into_val(&env));
+            env.events()
+                .publish(topics, (entry.owner.clone(), entry.credential_id));
+
+            Self::record_notification(&env, entry.owner.clone(), token_id, symbol_short!("mint"));
+            Self::log_sbt_activity(&env, token_id, symbol_short!("mint"), entry.owner.clone());
+
+            result_ids.push_back(token_id);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenCount, &token_count);
+
+        result_ids
     }
 
     /// Burn multiple SBTs in a single atomic transaction.
     /// Returns the credential_id values of the burned tokens in input order.
-    pub fn batch_burn(env: Env, _entries: Vec<BatchBurnEntry>) -> Vec<u64> {
-        Vec::new(&env)
+    /// Each caller must authorize this call via require_auth.
+    ///
+    /// # Parameters
+    /// - `entries`: Vector of burn entries, each specifying a caller and token_id.
+    ///   The batch may be paginated by splitting large requests.
+    ///
+    /// # Returns
+    /// Vector of credential_id values of the burned tokens, in input order.
+    ///
+    /// # Panics
+    /// Panics if any token doesn't exist or if caller is not the holder.
+    pub fn batch_burn(env: Env, entries: Vec<BatchBurnEntry>) -> Vec<u64> {
+        if entries.is_empty() {
+            return Vec::new(&env);
+        }
+
+        // Require auth from each distinct caller
+        for i in 0..entries.len() {
+            let caller_i = entries.get(i).unwrap().caller.clone();
+            let mut already_authed = false;
+            for j in 0..i {
+                if entries.get(j).unwrap().caller == caller_i {
+                    already_authed = true;
+                    break;
+                }
+            }
+            if !already_authed {
+                caller_i.require_auth();
+            }
+        }
+
+        let mut result_cred_ids: Vec<u64> = Vec::new(&env);
+
+        for entry in entries.iter() {
+            let token: SoulboundToken = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Token(entry.token_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+            assert!(token.owner == entry.caller, "not the owner");
+
+            let credential_id = token.credential_id;
+
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Token(entry.token_id));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Owner(entry.token_id));
+            env.storage()
+                .instance()
+                .remove(&DataKey::Delegation(entry.token_id));
+            env.storage().instance().remove(&DataKey::OwnerCredential(
+                entry.caller.clone(),
+                credential_id,
+            ));
+
+            let mut owner_tokens: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerTokens(entry.caller.clone()))
+                .unwrap_or(Vec::new(&env));
+            if let Some(pos) = owner_tokens.iter().position(|id| id == entry.token_id) {
+                owner_tokens.remove(pos as u32);
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerTokens(entry.caller.clone()), &owner_tokens);
+
+            let burn_event = BurnEvent {
+                sbt_id: entry.token_id,
+                holder: entry.caller.clone(),
+                timestamp: env.ledger().timestamp(),
+            };
+            let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+            topics.push_back(Symbol::new(&env, "burn_sbt").into_val(&env));
+            topics.push_back(entry.token_id.into_val(&env));
+            env.events().publish(topics, burn_event);
+
+            Self::record_notification(&env, entry.caller.clone(), entry.token_id, symbol_short!("burn"));
+            Self::log_sbt_activity(&env, entry.token_id, symbol_short!("burn"), entry.caller.clone());
+
+            result_cred_ids.push_back(credential_id);
+        }
+
+        result_cred_ids
     }
 
     /// Admin-transfer multiple SBTs in a single atomic transaction.
     /// Returns the transferred token IDs in input order.
+    /// Only the admin may call this.
+    ///
+    /// # Parameters
+    /// - `admin`: The admin address; must authorize this call.
+    /// - `entries`: Vector of transfer entries, each specifying a token_id and new_owner.
+    ///   The batch may be paginated by splitting large requests.
+    ///
+    /// # Returns
+    /// Vector of transferred token IDs, in input order.
     pub fn batch_transfer(
         env: Env,
-        _admin: Address,
-        _entries: Vec<BatchTransferEntry>,
+        admin: Address,
+        entries: Vec<BatchTransferEntry>,
     ) -> Vec<u64> {
-        Vec::new(&env)
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+
+        if entries.is_empty() {
+            return Vec::new(&env);
+        }
+
+        let mut result_ids: Vec<u64> = Vec::new(&env);
+
+        for entry in entries.iter() {
+            let mut token: SoulboundToken = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Token(entry.token_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+            let old_owner = token.owner.clone();
+
+            // Remove from old owner's list
+            let mut old_tokens: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerTokens(old_owner.clone()))
+                .unwrap_or(Vec::new(&env));
+            if let Some(pos) = old_tokens.iter().position(|id| id == entry.token_id) {
+                old_tokens.remove(pos as u32);
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+            env.storage()
+                .instance()
+                .remove(&DataKey::Delegation(entry.token_id));
+            env.storage().instance().remove(&DataKey::OwnerCredential(
+                old_owner.clone(),
+                token.credential_id,
+            ));
+
+            // Add to new owner
+            token.owner = entry.new_owner.clone();
+            env.storage()
+                .persistent()
+                .set(&DataKey::Token(entry.token_id), &token);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Owner(entry.token_id), &entry.new_owner);
+            let mut new_tokens: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerTokens(entry.new_owner.clone()))
+                .unwrap_or(Vec::new(&env));
+            new_tokens.push_back(entry.token_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerTokens(entry.new_owner.clone()), &new_tokens);
+            env.storage().instance().set(
+                &DataKey::OwnerCredential(entry.new_owner.clone(), token.credential_id),
+                &entry.token_id,
+            );
+
+            let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+            topics.push_back(symbol_short!("transfer").into_val(&env));
+            topics.push_back(entry.token_id.into_val(&env));
+            env.events()
+                .publish(topics, (old_owner, entry.new_owner.clone()));
+            Self::record_notification(&env, entry.new_owner.clone(), entry.token_id, symbol_short!("transfer"));
+
+            result_ids.push_back(entry.token_id);
+        }
+
+        result_ids
+    }
+
+    /// Helper function to validate batch size for pagination.
+    /// Returns true if the batch size is within acceptable limits.
+    pub fn is_valid_batch_size(batch_size: u32) -> bool {
+        batch_size > 0 && batch_size <= MAX_BATCH_SIZE
+    }
+
+    /// Get the maximum batch size allowed for batch operations.
+    pub fn get_max_batch_size() -> u32 {
+        MAX_BATCH_SIZE
     }
 
     /// Blacklist a holder address. Admin-only.
