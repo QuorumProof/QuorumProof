@@ -108,7 +108,43 @@ const PORT = parseInt(process.env.PORT ?? '3000', 10);
 const httpServer = createServer(app);
 createWsServer(httpServer, '/ws');
 
-httpServer.listen(PORT, () => console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`));
+/**
+ * Apply any pending database migrations before accepting traffic. Manual
+ * migrations were error-prone (an operator forgets to run them, environments
+ * drift). Skipped entirely when DATABASE_URL isn't set so this stays a no-op
+ * for the file/DurableLog-backed stores the API server also supports.
+ *
+ * A failed migration is treated as fatal for startup — see
+ * docs/database-migrations.md for the rollback procedure.
+ */
+async function runStartupMigrations(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+
+  const { Pool } = await import('pg');
+  const { runMigrations } = await import('./migrations/runner.js');
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    const applied = await runMigrations(pool);
+    if (applied.length > 0) {
+      console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+(async () => {
+  try {
+    await runStartupMigrations();
+  } catch (err) {
+    console.error('Startup migration failed, refusing to start:', err);
+    process.exit(1);
+    return;
+  }
+  httpServer.listen(PORT, () =>
+    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
+  );
+})();
 
 export { broadcastEvent };
 
