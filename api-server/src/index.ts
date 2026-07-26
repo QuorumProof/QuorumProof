@@ -26,6 +26,7 @@ import { createRequestSigning } from './middleware/requestSigning.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
+import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
@@ -102,6 +103,17 @@ app.get('/ws/metrics', (_req, res) => {
 app.get('/metrics/ws', (_req, res) => {
   res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(getWsMetricsPrometheus());
+});
+
+// Circuit breaker state for outbound Soroban RPC calls (issue #2). See
+// api-server/src/services/rpcCircuitBreaker.ts and docs/resilience.md.
+app.get('/metrics/rpc', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
+});
+
+app.get('/rpc/circuit-breaker', (_req, res) => {
+  res.json(getDefaultRpcCircuitBreaker().getMetrics());
 });
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
