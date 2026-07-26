@@ -1,0 +1,111 @@
+name: E2E Testing
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "contracts/e2e_tests/**"
+      - "contracts/*/src/**"
+      - ".github/workflows/e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "contracts/e2e_tests/**"
+      - "contracts/*/src/**"
+  schedule:
+    # Run every 6 hours
+    - cron: "0 */6 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e-testnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build contracts
+        run: |
+          cargo build --release --target wasm32-unknown-unknown -p quorum_proof
+          cargo build --release --target wasm32-unknown-unknown -p sbt_registry
+          cargo build --release --target wasm32-unknown-unknown -p zk_verifier
+
+      - name: Run E2E tests on testnet
+        run: ./scripts/run_e2e_tests.sh
+        env:
+          STELLAR_NETWORK: testnet
+          TEST_THREADS: 1
+        continue-on-error: true
+
+  e2e-futurenet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build contracts
+        run: |
+          cargo build --release --target wasm32-unknown-unknown -p quorum_proof
+          cargo build --release --target wasm32-unknown-unknown -p sbt_registry
+          cargo build --release --target wasm32-unknown-unknown -p zk_verifier
+
+      - name: Run E2E tests on futurenet
+        run: ./scripts/run_e2e_tests.sh
+        env:
+          STELLAR_NETWORK: futurenet
+          TEST_THREADS: 1
+        continue-on-error: true
+
+  e2e-canary:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build contracts
+        run: |
+          cargo build --release --target wasm32-unknown-unknown -p quorum_proof
+          cargo build --release --target wasm32-unknown-unknown -p sbt_registry
+          cargo build --release --target wasm32-unknown-unknown -p zk_verifier
+
+      - name: Run extended canary tests
+        run: |
+          echo "Running comprehensive E2E tests..."
+          ./scripts/run_e2e_tests.sh
+        env:
+          STELLAR_NETWORK: testnet
+          TEST_THREADS: 1
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: target/debug/deps/*.test
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "⚠️ E2E tests failed on canary run"
+          echo "Check logs for network-specific issues"
