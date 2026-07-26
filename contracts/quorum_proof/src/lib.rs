@@ -152,6 +152,35 @@ pub struct RenewalEventData {
     pub new_expires_at: u64,
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct SuspensionEventData {
+    pub credential_id: u64,
+    pub issuer: Address,
+    pub reason: Option<soroban_sdk::Bytes>,
+    pub suspended_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AmendmentEventData {
+    pub credential_id: u64,
+    pub issuer: Address,
+    pub new_metadata_hash: soroban_sdk::Bytes,
+    pub amended_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AmendmentEntry {
+    pub credential_id: u64,
+    pub amendment_id: u64,
+    pub previous_metadata_hash: soroban_sdk::Bytes,
+    pub new_metadata_hash: soroban_sdk::Bytes,
+    pub amended_by: Address,
+    pub amended_at: u64,
+}
+
 /// A single attestation record, capturing who attested, when, and the attestation value.
 #[contracttype]
 #[derive(Clone)]
@@ -6443,6 +6472,27 @@ impl QuorumProofContract {
         true
     }
 
+    /// Check if a credential has expired based on its `expires_at` timestamp.
+    ///
+    /// Returns `true` if the credential has an expiry timestamp and the current
+    /// ledger timestamp is at or past that expiry time. Returns `false` otherwise
+    /// (no expiry set, or not yet expired).
+    ///
+    /// # Panics
+    /// Panics with `ContractError::CredentialNotFound` if no credential exists with that ID.
+    pub fn is_credential_expired(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        if let Some(expires_at) = credential.expires_at {
+            env.ledger().timestamp() >= expires_at
+        } else {
+            false
+        }
+    }
+
     /// Update the metadata hash of a credential and increment its version.
     ///
     /// Only the original issuer may call this function.
@@ -6511,6 +6561,121 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Amend a credential by changing its metadata hash while maintaining amendment history.
+    /// Only the original issuer may call this function.
+    ///
+    /// This allows correcting incorrect credential data (e.g., wrong graduation date)
+    /// while preserving audit trail of all amendments with timestamps.
+    ///
+    /// # Parameters
+    /// - `issuer`: The address that originally issued the credential; must authorize.
+    /// - `credential_id`: The ID of the credential to amend.
+    /// - `new_metadata_hash`: The corrected metadata hash.
+    ///
+    /// # Panics
+    /// Panics if the contract is paused.
+    /// Panics with `ContractError::CredentialNotFound` if the credential does not exist.
+    /// Panics if the caller is not the original issuer.
+    /// Panics if the new_metadata_hash is empty.
+    pub fn amend_credential(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        new_metadata_hash: soroban_sdk::Bytes,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        assert!(
+            !new_metadata_hash.is_empty(),
+            "metadata_hash cannot be empty"
+        );
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(
+            credential.issuer == issuer,
+            "only the issuer may amend credential"
+        );
+        assert!(!credential.revoked, "cannot amend a revoked credential");
+
+        let old_metadata_hash = credential.metadata_hash.clone();
+        let timestamp = env.ledger().timestamp();
+
+        let amendment_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AmendmentCount)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::AmendmentCount, &amendment_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let amendment_entry = AmendmentEntry {
+            credential_id,
+            amendment_id,
+            previous_metadata_hash: old_metadata_hash.clone(),
+            new_metadata_hash: new_metadata_hash.clone(),
+            amended_by: issuer.clone(),
+            amended_at: timestamp,
+        };
+
+        let mut amendment_history: Vec<AmendmentEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AmendmentHistory(credential_id))
+            .unwrap_or(Vec::new(&env));
+        amendment_history.push_back(amendment_entry);
+        env.storage()
+            .instance()
+            .set(&DataKey::AmendmentHistory(credential_id), &amendment_history);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        credential.metadata_hash = new_metadata_hash.clone();
+        credential.version += 1;
+        Self::append_credential_version(
+            &env,
+            credential_id,
+            credential.version,
+            new_metadata_hash.clone(),
+            issuer.clone(),
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        Self::invalidate_verification_caches_for_credential(&env, credential_id);
+
+        let event_data = AmendmentEventData {
+            credential_id,
+            issuer: issuer.clone(),
+            new_metadata_hash,
+            amended_at: timestamp,
+        };
+        let topic = String::from_str(&env, TOPIC_AMENDMENT);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        Self::record_metadata_audit(
+            &env,
+            credential_id,
+            issuer.clone(),
+            old_metadata_hash,
+            new_metadata_hash,
+        );
     }
 
     /// Store credential metadata with compression information.
@@ -6757,6 +6922,23 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .get(&DataKey2::CredentialTypeIndex(credential_type))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Retrieve the amendment history for a credential.
+    ///
+    /// Returns a vector of all amendments made to the credential, in chronological order,
+    /// each containing the previous and new metadata hashes, amendment ID, timestamp, and amender.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The ID of the credential.
+    ///
+    /// # Returns
+    /// Returns a `Vec<AmendmentEntry>` of all amendments (empty if none exist).
+    pub fn get_amendment_history(env: Env, credential_id: u64) -> Vec<AmendmentEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AmendmentHistory(credential_id))
             .unwrap_or(Vec::new(&env))
     }
 
@@ -7427,6 +7609,7 @@ impl QuorumProofContract {
     }
 
     /// Suspend a credential temporarily. Only the original issuer may call this.
+    /// Maintains an audit trail with optional suspension reason.
     ///
     /// # Panics
     /// Panics if the contract is paused.
@@ -7434,7 +7617,7 @@ impl QuorumProofContract {
     /// Panics if the caller is not the original issuer.
     /// Panics if the credential is already suspended or revoked.
     /// Panics with "credential has expired" if the credential's `expires_at` has passed.
-    pub fn suspend_credential(env: Env, issuer: Address, credential_id: u64) {
+    pub fn suspend_credential(env: Env, issuer: Address, credential_id: u64, reason: Option<soroban_sdk::Bytes>) {
         issuer.require_auth();
         Self::require_not_paused(&env);
         let mut credential: Credential = env
@@ -7461,6 +7644,17 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let timestamp = env.ledger().timestamp();
+        if let Some(r) = reason.clone() {
+            env.storage()
+                .instance()
+                .set(&DataKey::SuspensionReason(credential_id), &r);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
+
         Self::invalidate_verification_caches_for_credential(&env, credential_id);
         Self::emit_status_update(
             &env,
@@ -7468,6 +7662,17 @@ impl QuorumProofContract {
             String::from_str(&env, "active"),
             String::from_str(&env, "suspended"),
         );
+
+        let event_data = SuspensionEventData {
+            credential_id,
+            issuer: issuer.clone(),
+            reason,
+            suspended_at: timestamp,
+        };
+        let topic = String::from_str(&env, TOPIC_SUSPENSION);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
     }
 
     /// Resume a previously suspended credential. Only the original issuer may call this.
