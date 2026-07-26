@@ -11986,6 +11986,102 @@ impl QuorumProofContract {
         env.events().publish(topics, new_wasm_hash);
     }
 
+    // ── Scheduled upgrades ("Upgrades require manual timing") ───────────────
+
+    /// Admin-only: schedule an upgrade to `new_wasm_hash` to become executable
+    /// at `execution_time` (ledger timestamp, seconds). Overwrites any prior
+    /// pending schedule. Emits `UpgradeScheduled` so operators/monitoring can
+    /// see the planned maintenance window in advance.
+    ///
+    /// # Panics
+    /// - `admin` does not authorize the call, or is not the stored admin.
+    /// - `new_wasm_hash` is blank, or `execution_time` is not in the future.
+    pub fn schedule_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: soroban_sdk::BytesN<32>,
+        execution_time: u64,
+    ) -> upgrade_schedule::ScheduledUpgrade {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        let schedule = upgrade_schedule::schedule_upgrade(&env, new_wasm_hash.clone(), execution_time);
+
+        let topic = soroban_sdk::String::from_str(&env, "UpgradeScheduled");
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events()
+            .publish(topics, (new_wasm_hash, execution_time));
+
+        schedule
+    }
+
+    /// Admin-only: cancel the pending scheduled upgrade, if any.
+    pub fn cancel_scheduled_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        upgrade_schedule::cancel_scheduled_upgrade(&env);
+
+        let topic = soroban_sdk::String::from_str(&env, "UpgradeScheduleCancelled");
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, ());
+    }
+
+    /// Unauthenticated read of the pending scheduled upgrade, if any. Polled by
+    /// monitoring and the off-chain relayer that drives `execute_scheduled_upgrade`.
+    pub fn get_scheduled_upgrade(env: Env) -> Option<upgrade_schedule::ScheduledUpgrade> {
+        upgrade_schedule::get_scheduled_upgrade(&env)
+    }
+
+    /// Execute the pending scheduled upgrade if its `execution_time` has been
+    /// reached. Callable by anyone — the admin already authorized the target
+    /// WASM hash at schedule time, so a permissionless relayer (e.g. a cron job
+    /// polling this contract) can safely trigger the actual cutover. Returns
+    /// `None` (no-op, storage untouched) if nothing is scheduled or the time
+    /// gate has not yet passed.
+    pub fn execute_scheduled_upgrade(env: Env) -> Option<soroban_sdk::BytesN<32>> {
+        Self::require_not_paused(&env);
+        let applied = upgrade_schedule::execute_scheduled_upgrade(&env);
+        if let Some(ref hash) = applied {
+            let topic = soroban_sdk::String::from_str(&env, "ScheduledUpgradeExecuted");
+            let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, hash.clone());
+        }
+        applied
+    }
+
+    /// Pre-upgrade notification check: if a schedule exists and is within the
+    /// notice window of its execution time, emits `UpgradeImminent` once and
+    /// marks it notified. Intended to be polled periodically (e.g. by the same
+    /// off-chain relayer/cron that later calls `execute_scheduled_upgrade`) so
+    /// holders and operators get advance warning of planned downtime. Returns
+    /// whether a notification was emitted on this call.
+    pub fn check_upgrade_notification(env: Env) -> bool {
+        let fired = upgrade_schedule::notify_if_imminent(&env);
+        if fired {
+            if let Some(schedule) = upgrade_schedule::get_scheduled_upgrade(&env) {
+                let topic = soroban_sdk::String::from_str(&env, "UpgradeImminent");
+                let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+                topics.push_back(topic);
+                env.events()
+                    .publish(topics, (schedule.new_wasm_hash, schedule.execution_time));
+            }
+        }
+        fired
+    }
+
     // ── Reputation Recovery (Issue #298) ─────────────────────────────────────
 
     /// Initiate a reputation recovery request for a slice member.
@@ -26620,3 +26716,4 @@ mod migration_tests;
 mod circuit_breaker;
 mod migration;
 mod state_metrics;
+mod upgrade_schedule;
