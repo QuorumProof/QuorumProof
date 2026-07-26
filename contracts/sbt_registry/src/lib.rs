@@ -45,6 +45,10 @@ pub enum ContractError {
     UnauthorizedAttributeIssuer = 17,
     /// Caller is not authorized to read a private attribute value.
     PrivateAttributeAccessDenied = 18,
+    /// SBT is not registered in the given marketplace.
+    MarketplaceListingNotFound = 19,
+    /// Caller does not own the SBT and cannot (de)register its marketplace listing.
+    UnauthorizedMarketplaceAction = 20,
 }
 
 #[contracttype]
@@ -98,6 +102,15 @@ pub enum DataKey {
     SbtAttributeKeys(u64),
     /// Reverse index for public attributes: (key, value) -> Vec<sbt_id>.
     AttributeIndex(Bytes, Bytes),
+    /// Marketplace listing metadata, keyed by (sbt_id, marketplace_id).
+    MarketplaceListing(u64, Bytes),
+    /// Registry index: marketplace_id -> Vec<sbt_id> registered in it.
+    MarketplaceIndex(Bytes),
+    /// Reverse lookup: sbt_id -> Vec<marketplace_id> it is listed in.
+    SbtMarketplaces(u64),
+    /// Global on-chain registry index of every sbt_id ever listed in any
+    /// marketplace, enabling discovery without knowing a marketplace_id.
+    GlobalMarketplaceRegistry,
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -410,6 +423,24 @@ pub struct SbtAttributeRecord {
     pub private: bool,
     /// Ledger timestamp when the attribute was last set.
     pub set_at: u64,
+}
+
+/// A single SBT's listing in a discoverable marketplace, enabling verifiers
+/// (or marketplace UIs) to enumerate SBTs by marketplace without the holder
+/// having to push data to each marketplace out of band.
+#[contracttype]
+#[derive(Clone)]
+pub struct MarketplaceListingRecord {
+    /// The SBT token ID being listed.
+    pub sbt_id: u64,
+    /// Opaque marketplace identifier (e.g. a namespaced slug).
+    pub marketplace_id: Bytes,
+    /// Marketplace-specific metadata (e.g. listing terms, category tags).
+    pub metadata: Bytes,
+    /// Ledger timestamp when the listing was created or last updated.
+    pub listed_at: u64,
+    /// Whether the listing is currently active (false after deregistration).
+    pub active: bool,
 }
 
 #[contract]
@@ -2920,6 +2951,184 @@ impl SbtRegistryContract {
                 env.storage().persistent().set(&index_key, &ids);
             }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // SBT marketplace registry (Issue: verifier discovery of SBTs)
+    // ---------------------------------------------------------------
+
+    /// Holder-only: register an SBT in a marketplace so verifiers/marketplace
+    /// UIs can discover it via `query_marketplace_sbt` without the holder
+    /// pushing data to each marketplace out of band.
+    pub fn register_sbt_in_marketplace(
+        env: Env,
+        owner: Address,
+        sbt_id: u64,
+        marketplace_id: Bytes,
+        metadata: Bytes,
+    ) {
+        owner.require_auth();
+        let token_owner: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Owner(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+        if owner != token_owner {
+            panic_with_error!(&env, ContractError::UnauthorizedMarketplaceAction);
+        }
+
+        let listing = MarketplaceListingRecord {
+            sbt_id,
+            marketplace_id: marketplace_id.clone(),
+            metadata,
+            listed_at: env.ledger().timestamp(),
+            active: true,
+        };
+        let listing_key = DataKey::MarketplaceListing(sbt_id, marketplace_id.clone());
+        env.storage().persistent().set(&listing_key, &listing);
+        env.storage()
+            .persistent()
+            .extend_ttl(&listing_key, STANDARD_TTL, EXTENDED_TTL);
+
+        let mut marketplace_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketplaceIndex(marketplace_id.clone()))
+            .unwrap_or(Vec::new(&env));
+        if !marketplace_ids.iter().any(|id| id == sbt_id) {
+            marketplace_ids.push_back(sbt_id);
+            env.storage().persistent().set(
+                &DataKey::MarketplaceIndex(marketplace_id.clone()),
+                &marketplace_ids,
+            );
+        }
+
+        let mut sbt_markets: Vec<Bytes> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SbtMarketplaces(sbt_id))
+            .unwrap_or(Vec::new(&env));
+        if !sbt_markets.iter().any(|m| m == marketplace_id) {
+            sbt_markets.push_back(marketplace_id.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::SbtMarketplaces(sbt_id), &sbt_markets);
+        }
+
+        let mut registry: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalMarketplaceRegistry)
+            .unwrap_or(Vec::new(&env));
+        if !registry.iter().any(|id| id == sbt_id) {
+            registry.push_back(sbt_id);
+            env.storage()
+                .instance()
+                .set(&DataKey::GlobalMarketplaceRegistry, &registry);
+        }
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("mkt_reg").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, marketplace_id);
+    }
+
+    /// Holder-only: deactivate an SBT's listing in a marketplace. The listing
+    /// record is retained (with `active = false`) for history, but the SBT
+    /// is removed from the marketplace's discovery index.
+    pub fn deregister_sbt_from_marketplace(
+        env: Env,
+        owner: Address,
+        sbt_id: u64,
+        marketplace_id: Bytes,
+    ) {
+        owner.require_auth();
+        let token_owner: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Owner(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+        if owner != token_owner {
+            panic_with_error!(&env, ContractError::UnauthorizedMarketplaceAction);
+        }
+
+        let listing_key = DataKey::MarketplaceListing(sbt_id, marketplace_id.clone());
+        let mut listing: MarketplaceListingRecord = env
+            .storage()
+            .persistent()
+            .get(&listing_key)
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::MarketplaceListingNotFound)
+            });
+        listing.active = false;
+        env.storage().persistent().set(&listing_key, &listing);
+
+        if let Some(mut ids) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<u64>>(&DataKey::MarketplaceIndex(marketplace_id.clone()))
+        {
+            if let Some(pos) = ids.iter().position(|id| id == sbt_id) {
+                ids.remove(pos as u32);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::MarketplaceIndex(marketplace_id.clone()), &ids);
+            }
+        }
+
+        if let Some(mut markets) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Bytes>>(&DataKey::SbtMarketplaces(sbt_id))
+        {
+            if let Some(pos) = markets.iter().position(|m| m == marketplace_id) {
+                markets.remove(pos as u32);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::SbtMarketplaces(sbt_id), &markets);
+            }
+        }
+    }
+
+    /// Discover all SBTs listed in a given marketplace (callers should check
+    /// `active` via `get_marketplace_metadata`/listing lookup if freshness
+    /// matters — deregistered SBTs are removed from this index).
+    pub fn query_marketplace_sbt(env: Env, marketplace_id: Bytes) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MarketplaceIndex(marketplace_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Marketplace-specific metadata for an SBT's listing.
+    pub fn get_marketplace_metadata(env: Env, sbt_id: u64, marketplace_id: Bytes) -> Bytes {
+        let listing: MarketplaceListingRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketplaceListing(sbt_id, marketplace_id))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::MarketplaceListingNotFound)
+            });
+        listing.metadata
+    }
+
+    /// Which marketplaces an SBT is (or was) listed in — supports verifier
+    /// discovery starting from the SBT rather than the marketplace.
+    pub fn get_sbt_marketplaces(env: Env, sbt_id: u64) -> Vec<Bytes> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SbtMarketplaces(sbt_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// On-chain registry index of every SBT that has ever been registered in
+    /// at least one marketplace — the discovery entry point for marketplace
+    /// aggregators that don't already know a marketplace_id.
+    pub fn get_all_registered_sbts(env: Env) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::GlobalMarketplaceRegistry)
+            .unwrap_or(Vec::new(&env))
     }
 }
 
