@@ -1,0 +1,30 @@
+# Issue #1003 — Chaos Mesh: network delay
+#
+# Injects latency into api-server's outbound traffic (its calls to the
+# Soroban RPC endpoint and Redis) to verify the resilience requirements in
+# docs/resilience.md: a slow upstream call must complete correctly, not
+# corrupt state or hang indefinitely.
+#
+# Apply:   kubectl apply -f network-delay.yaml
+# Remove:  kubectl delete -f network-delay.yaml
+# Watch:   kubectl get networkchaos api-server-network-delay -o yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: api-server-network-delay
+  namespace: quorumproof
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - quorumproof
+    labelSelectors:
+      app: quorumproof-api-server
+  delay:
+    latency: '500ms'
+    jitter: '200ms'
+    correlation: '25'
+  duration: '5m'
+  scheduler:
+    cron: '@every 30m'
