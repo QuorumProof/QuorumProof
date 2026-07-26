@@ -118,3 +118,44 @@ groups:
         annotations:
           summary: "Migration job {{ $labels.migration_id }} has not advanced in 30+ minutes"
           description: "Job {{ $labels.migration_id }} is still InProgress but its cursor hasn't moved since {{ $value | humanizeTimestamp }}. Check whether scripts/migration_orchestrator.py is still running."
+
+      # #3 — Critical contract event monitoring (revocations, disputes, upgrades).
+      # Counters emitted by api-server/src/services/criticalEventListener.ts;
+      # each matching event is *also* pushed in real time to Slack/PagerDuty via
+      # alertChannels.ts, independent of these scrape-interval rules. See
+      # docs/critical-event-alerting.md for interpretation of every alert below.
+      - alert: RevocationSpike
+        expr: increase(quorumproof_critical_events_total{category="revocation"}[15m]) > 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual burst of credential/delegation revocations"
+          description: "{{ $value }} revocation-shaped events observed in the last 15 minutes — verify this matches expected issuer/attestor activity."
+
+      - alert: DisputeRaised
+        expr: increase(quorumproof_critical_events_total{category="dispute"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A credential dispute was raised on-chain"
+          description: "{{ $value }} dispute event(s) in the last 5 minutes. See GET /events/critical/recent for details (topic, ledger, tx hash)."
+
+      - alert: ContractUpgradeDetected
+        expr: increase(quorumproof_critical_events_total{category="upgrade"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Contract upgrade or migration event detected"
+          description: "{{ $value }} upgrade/migration event(s) in the last 5 minutes. Confirm this corresponds to a planned, authorized upgrade — see docs/contract-upgrade-strategy.md."
+
+      - alert: CriticalEventAlertingDegraded
+        expr: increase(quorumproof_critical_event_alert_failures_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Critical event alert dispatch is failing"
+          description: "{{ $value }} critical-event alert(s) failed to reach every configured channel in the last 15 minutes — check Slack/PagerDuty credentials and connectivity; do not assume the absence of other alerts means no critical events occurred."
