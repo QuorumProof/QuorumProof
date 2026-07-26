@@ -46,6 +46,18 @@ indirectly by the chaos tests):
   — trips open after repeated delivery failures and self-recovers via a
   half-open trial, so a down webhook consumer can't cause unbounded retry
   storms against it.
+- **RPC circuit breaker** (`api-server/src/services/rpcCircuitBreaker.ts`,
+  issue #2, wraps every `simulateCall` in `soroban.ts`) — the three-state
+  (closed/open/half-open) counterpart for the Soroban RPC dependency
+  itself, distinct from the webhook breaker above. After
+  `failureThreshold` consecutive RPC failures it trips open and serves the
+  last successful result per `(method, args)` from an in-memory TTL cache
+  instead of hanging on a degraded endpoint; once `resetTimeoutMs` elapses
+  it moves to half-open and lets a small number of trial calls through,
+  fully closing only after `halfOpenSuccessesToClose` consecutive
+  successes (a failed trial reopens it with a doubled backoff, capped at
+  `maxResetTimeoutMs`). State and counters are exposed at `GET
+  /rpc/circuit-breaker` (JSON) and `GET /metrics/rpc` (Prometheus).
 - **Rate limiting with backoff** (`api-server/src/middleware/rateLimiter.ts`)
   and **DDoS protection** (`api-server/src/middleware/ddosProtection.ts`) —
   protect the server itself from being overwhelmed, which is the inverse
