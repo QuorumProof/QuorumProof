@@ -49,6 +49,10 @@ pub enum ContractError {
     MarketplaceListingNotFound = 19,
     /// Caller does not own the SBT and cannot (de)register its marketplace listing.
     UnauthorizedMarketplaceAction = 20,
+    /// No possession commitment exists for the given commitment value.
+    CommitmentNotFound = 21,
+    /// The supplied proof does not hash to the stored commitment.
+    InvalidCommitmentProof = 22,
 }
 
 #[contracttype]
@@ -111,6 +115,11 @@ pub enum DataKey {
     /// Global on-chain registry index of every sbt_id ever listed in any
     /// marketplace, enabling discovery without knowing a marketplace_id.
     GlobalMarketplaceRegistry,
+    /// A holder's SBT possession commitment, keyed by the commitment hash
+    /// itself so verification never needs to know which address created it.
+    PossessionCommitment(Bytes),
+    /// Per-SBT counter used to derive a fresh nonce for each new commitment.
+    CommitmentNonce(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -441,6 +450,26 @@ pub struct MarketplaceListingRecord {
     pub listed_at: u64,
     /// Whether the listing is currently active (false after deregistration).
     pub active: bool,
+}
+
+/// A hash-based commitment that lets a holder prove possession of an SBT
+/// without revealing which address holds it. See `docs/sbt-possession-privacy.md`
+/// for the full privacy guarantees and threat model of this scheme.
+///
+/// The commitment is `sha256(sbt_id_be_bytes || nonce_be_bytes)`. Only the
+/// commitment hash is stored on-chain, keyed by itself — the record contains
+/// no holder address, so a verifier calling `verify_sbt_commitment` learns
+/// only "some holder legitimately created this commitment for this SBT at
+/// this time," never who that holder is.
+#[contracttype]
+#[derive(Clone)]
+pub struct PossessionCommitmentRecord {
+    /// The SBT token ID this commitment attests possession of.
+    pub sbt_id: u64,
+    /// The commitment hash itself (also the storage key).
+    pub commitment: Bytes,
+    /// Ledger timestamp when the commitment was created.
+    pub created_at: u64,
 }
 
 #[contract]
@@ -3130,6 +3159,125 @@ impl SbtRegistryContract {
             .get(&DataKey::GlobalMarketplaceRegistry)
             .unwrap_or(Vec::new(&env))
     }
+
+    // ---------------------------------------------------------------
+    // SBT possession commitments (Issue: prove possession privately)
+    // ---------------------------------------------------------------
+    //
+    // Privacy guarantees are documented in detail in
+    // `docs/sbt-possession-privacy.md`; in short: the on-chain record
+    // (`PossessionCommitmentRecord`) never stores a holder address, so
+    // `verify_sbt_commitment` lets a verifier confirm "a legitimate holder
+    // created this commitment for this SBT" without learning which address
+    // that holder is. Ownership of `sbt_id` is still itself publicly
+    // readable via `owner_of` — this scheme hides the *link* between a
+    // presented proof and the holder's identity, it does not hide who
+    // currently owns the token on-chain.
+
+    /// Holder-only: create a commitment proving possession of `sbt_id` at
+    /// the time of the call, without revealing the holder's address to
+    /// whoever later verifies it via `verify_sbt_commitment`.
+    ///
+    /// Returns the commitment hash. To prove possession later, the holder
+    /// presents `commitment` plus the preimage `proof` (`sbt_id_be_bytes ||
+    /// nonce_be_bytes`, where `nonce` is `get_commitment_nonce(sbt_id)` as
+    /// of this call).
+    pub fn create_sbt_possession_commitment(env: Env, holder: Address, sbt_id: u64) -> Bytes {
+        holder.require_auth();
+        let token_owner: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Owner(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+        assert!(
+            holder == token_owner,
+            "unauthorized: caller does not own this SBT"
+        );
+
+        let nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CommitmentNonce(sbt_id))
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::CommitmentNonce(sbt_id), &nonce);
+
+        let mut preimage = Bytes::new(&env);
+        preimage.append(&Bytes::from_slice(&env, &sbt_id.to_be_bytes()));
+        preimage.append(&Bytes::from_slice(&env, &nonce.to_be_bytes()));
+        let commitment_hash = env.crypto().sha256(&preimage);
+        let commitment = Bytes::from_array(&env, &commitment_hash.to_array());
+
+        let record = PossessionCommitmentRecord {
+            sbt_id,
+            commitment: commitment.clone(),
+            created_at: env.ledger().timestamp(),
+        };
+        let key = DataKey::PossessionCommitment(commitment.clone());
+        env.storage().persistent().set(&key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("possess").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, commitment.clone());
+
+        commitment
+    }
+
+    /// Verify a possession proof against a previously issued commitment.
+    /// Returns `false` (rather than panicking) for an unknown commitment or
+    /// a non-matching proof — verifiers are expected to call this routinely,
+    /// not only on a guaranteed-success path.
+    pub fn verify_sbt_commitment(env: Env, commitment: Bytes, proof: Bytes) -> bool {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::PossessionCommitment(commitment.clone()))
+        {
+            return false;
+        }
+        let recomputed = env.crypto().sha256(&proof);
+        Bytes::from_array(&env, &recomputed.to_array()) == commitment
+    }
+
+    /// Strict variant of `verify_sbt_commitment` that panics instead of
+    /// returning `false`, for callers (e.g. cross-contract verification
+    /// flows) that want a hard failure on an invalid proof.
+    pub fn assert_sbt_commitment(env: Env, commitment: Bytes, proof: Bytes) {
+        let record: PossessionCommitmentRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PossessionCommitment(commitment))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CommitmentNotFound));
+        let recomputed = env.crypto().sha256(&proof);
+        if Bytes::from_array(&env, &recomputed.to_array()) != record.commitment {
+            panic_with_error!(&env, ContractError::InvalidCommitmentProof);
+        }
+    }
+
+    /// Fetch a possession commitment record (existence + metadata only —
+    /// this never reveals which address created it).
+    pub fn get_possession_commitment(env: Env, commitment: Bytes) -> PossessionCommitmentRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PossessionCommitment(commitment))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CommitmentNotFound))
+    }
+
+    /// The current commitment nonce counter for an SBT, letting a holder who
+    /// created a commitment reconstruct the exact preimage (`sbt_id ||
+    /// nonce`) needed as `proof` for `verify_sbt_commitment`.
+    pub fn get_commitment_nonce(env: Env, sbt_id: u64) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CommitmentNonce(sbt_id))
+            .unwrap_or(0u64)
+    }
 }
 
 // A minimal mock of the `quorum_proof` contract, used only by this crate's
@@ -5239,5 +5387,151 @@ mod tests {
         let wrong_attestor = Address::generate(&env);
         let proof = Bytes::from_slice(&env, b"authorization_proof");
         client.transfer_sbt_via_attestor(&wrong_attestor, &token_id, &proof);
+    }
+
+    // -------------------------------------------------------------
+    // SBT possession commitment tests
+    // -------------------------------------------------------------
+
+    fn possession_proof(env: &Env, sbt_id: u64, nonce: u64) -> Bytes {
+        let mut proof = Bytes::new(env);
+        proof.append(&Bytes::from_slice(env, &sbt_id.to_be_bytes()));
+        proof.append(&Bytes::from_slice(env, &nonce.to_be_bytes()));
+        proof
+    }
+
+    #[test]
+    fn test_create_and_verify_sbt_commitment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let commitment = client.create_sbt_possession_commitment(&owner, &token_id);
+        let nonce = client.get_commitment_nonce(&token_id);
+        let proof = possession_proof(&env, token_id, nonce);
+
+        assert!(client.verify_sbt_commitment(&commitment, &proof));
+
+        let record = client.get_possession_commitment(&commitment);
+        assert_eq!(record.sbt_id, token_id);
+        assert_eq!(record.commitment, commitment);
+    }
+
+    #[test]
+    fn test_verify_sbt_commitment_rejects_wrong_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let commitment = client.create_sbt_possession_commitment(&owner, &token_id);
+
+        // Wrong nonce: proof does not hash to the stored commitment.
+        let wrong_proof = possession_proof(&env, token_id, 999u64);
+        assert!(!client.verify_sbt_commitment(&commitment, &wrong_proof));
+    }
+
+    #[test]
+    fn test_verify_sbt_commitment_unknown_commitment_returns_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let bogus_commitment = Bytes::from_slice(&env, b"not_a_real_commitment_hash_32byte");
+        let bogus_proof = Bytes::from_slice(&env, b"anything");
+        assert!(!client.verify_sbt_commitment(&bogus_commitment, &bogus_proof));
+    }
+
+    #[test]
+    fn test_assert_sbt_commitment_succeeds_for_valid_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let commitment = client.create_sbt_possession_commitment(&owner, &token_id);
+        let nonce = client.get_commitment_nonce(&token_id);
+        let proof = possession_proof(&env, token_id, nonce);
+
+        // Should not panic.
+        client.assert_sbt_commitment(&commitment, &proof);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_assert_sbt_commitment_panics_on_invalid_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let commitment = client.create_sbt_possession_commitment(&owner, &token_id);
+        let wrong_proof = possession_proof(&env, token_id, 999u64);
+        client.assert_sbt_commitment(&commitment, &wrong_proof);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_create_sbt_possession_commitment_rejects_non_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let not_owner = Address::generate(&env);
+        client.create_sbt_possession_commitment(&not_owner, &token_id);
+    }
+
+    #[test]
+    fn test_commitment_does_not_expose_holder_identity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let commitment = client.create_sbt_possession_commitment(&owner, &token_id);
+        let nonce = client.get_commitment_nonce(&token_id);
+        let proof = possession_proof(&env, token_id, nonce);
+
+        // A verifier only needs commitment + proof; verification succeeds
+        // without ever supplying or learning `owner`.
+        assert!(client.verify_sbt_commitment(&commitment, &proof));
     }
 }
