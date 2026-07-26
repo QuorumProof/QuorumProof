@@ -1237,6 +1237,37 @@ pub struct CredentialTypeMigration {
     pub completed_at: Option<u64>,
 }
 
+/// Type of attestor for slice composition validation.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum AttestorType {
+    University = 1,
+    EmployerBody = 2,
+    LicensingBody = 3,
+    Other = 4,
+}
+
+/// Composition rule for slices of a given credential type.
+#[contracttype]
+#[derive(Clone)]
+pub struct CompositionRule {
+    pub credential_type: u32,
+    pub required_types: Vec<AttestorType>,
+    pub min_attestors_per_type: u32,
+}
+
+/// Record of a slice reweighting event.
+#[contracttype]
+#[derive(Clone)]
+pub struct ReweightingRecord {
+    pub slice_id: u64,
+    pub old_weights: Vec<u32>,
+    pub new_weights: Vec<u32>,
+    pub reweighted_at: u64,
+    pub reweighted_by: Address,
+}
+
 /// Monotonic credential identifier issued by this contract.
 pub type CredentialId = u64;
 
@@ -5825,6 +5856,45 @@ impl QuorumProofContract {
         // Issue #520: Maintain CredentialTypeIndex
         Self::type_index_add(&env, credential_type, id);
 
+        // Task #1227: Maintain HolderCredentialIndex
+        let mut holder_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::HolderCredentialIndex(subject.clone()))
+            .unwrap_or(Vec::new(&env));
+        holder_creds.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey11::HolderCredentialIndex(subject.clone()), &holder_creds);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Task #1228: Maintain CredentialMetadataIndex
+        let mut metadata_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::CredentialMetadataIndex(
+                issuer.clone(),
+                subject.clone(),
+                credential_type,
+            ))
+            .unwrap_or(Vec::new(&env));
+        metadata_creds.push_back(id);
+        env.storage()
+            .instance()
+            .set(
+                &DataKey11::CredentialMetadataIndex(
+                    issuer.clone(),
+                    subject.clone(),
+                    credential_type,
+                ),
+                &metadata_creds,
+            );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
         let event_data = CredentialIssuedEventData {
             id,
             subject: credential.subject.clone(),
@@ -6000,6 +6070,45 @@ impl QuorumProofContract {
 
         // Issue #520: Maintain CredentialTypeIndex
         Self::type_index_add(env, credential_type, id);
+
+        // Task #1227: Maintain HolderCredentialIndex
+        let mut holder_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::HolderCredentialIndex(subject.clone()))
+            .unwrap_or(Vec::new(env));
+        holder_creds.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey11::HolderCredentialIndex(subject.clone()), &holder_creds);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Task #1228: Maintain CredentialMetadataIndex
+        let mut metadata_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::CredentialMetadataIndex(
+                issuer.clone(),
+                subject.clone(),
+                credential_type,
+            ))
+            .unwrap_or(Vec::new(env));
+        metadata_creds.push_back(id);
+        env.storage()
+            .instance()
+            .set(
+                &DataKey11::CredentialMetadataIndex(
+                    issuer.clone(),
+                    subject.clone(),
+                    credential_type,
+                ),
+                &metadata_creds,
+            );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
         let event_data = CredentialIssuedEventData {
             id,
@@ -17610,6 +17719,344 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKeySliceEnhancements::AttestorPositions(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Task #1227: Bulk Credential Status Query ────────────────────────────────
+
+    /// Retrieve multiple credentials by their IDs in a single call.
+    ///
+    /// # Parameters
+    /// - `credential_ids`: Vector of credential IDs to retrieve.
+    ///
+    /// # Returns
+    /// A vector of `Credential` objects corresponding to the requested IDs.
+    /// Only returns valid (non-expired, non-revoked) credentials.
+    pub fn get_credentials_batch(env: Env, credential_ids: Vec<u64>) -> Vec<Credential> {
+        Self::precondition(&env, !credential_ids.is_empty());
+        Self::precondition(&env, credential_ids.len() <= MAX_BATCH_SIZE as usize);
+
+        let mut result = Vec::new(&env);
+        for i in 0..credential_ids.len() {
+            if let Some(cred_id) = credential_ids.get(i) {
+                if let Ok(credential) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Credential>(&DataKey::Credential(cred_id))
+                {
+                    if !credential.revoked && !credential.suspended {
+                        if let Some(expires_at) = credential.expires_at {
+                            if env.ledger().timestamp() < expires_at {
+                                result.push_back(credential);
+                            }
+                        } else {
+                            result.push_back(credential);
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Retrieve all credentials held by a specific address.
+    ///
+    /// # Parameters
+    /// - `holder`: The address of the credential holder.
+    /// - `page`: Page number (1-indexed) for pagination.
+    /// - `page_size`: Number of credentials per page.
+    ///
+    /// # Returns
+    /// A paginated vector of credential IDs held by the specified address.
+    pub fn get_credentials_by_holder(
+        env: Env,
+        holder: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<u64> {
+        Self::require_valid_address(&env, &holder);
+        Self::precondition(&env, page > 0);
+        Self::precondition(&env, page_size > 0);
+
+        let all_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::HolderCredentialIndex(holder.clone()))
+            .unwrap_or_else(|| {
+                Vec::new(&env)
+            });
+
+        let total = all_creds.len();
+        let start = (page - 1).saturating_mul(page_size);
+        let mut result = Vec::new(&env);
+        for i in start..start.saturating_add(page_size) {
+            if i >= total {
+                break;
+            }
+            if let Some(cred) = all_creds.get(i) {
+                result.push_back(cred);
+            }
+        }
+        result
+    }
+
+    // ── Task #1228: Add Credential Search by Metadata Fields ────────────────────
+
+    /// Search for credentials by metadata fields (issuer, holder, type).
+    ///
+    /// # Parameters
+    /// - `issuer`: Issuer address filter (or Address::generate() for any).
+    /// - `holder`: Holder address filter (or Address::generate() for any).
+    /// - `credential_type`: Credential type filter.
+    /// - `page`: Page number (1-indexed) for pagination.
+    /// - `page_size`: Number of results per page.
+    ///
+    /// # Returns
+    /// A paginated vector of credential IDs matching the search criteria.
+    pub fn search_credentials(
+        env: Env,
+        issuer: Address,
+        holder: Address,
+        credential_type: u32,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<u64> {
+        Self::precondition(&env, page > 0);
+        Self::precondition(&env, page_size > 0);
+
+        let all_creds: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::CredentialMetadataIndex(
+                issuer.clone(),
+                holder.clone(),
+                credential_type,
+            ))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = all_creds.len();
+        let start = (page - 1).saturating_mul(page_size);
+        let mut result = Vec::new(&env);
+        for i in start..start.saturating_add(page_size) {
+            if i >= total {
+                break;
+            }
+            if let Some(cred) = all_creds.get(i) {
+                result.push_back(cred);
+            }
+        }
+        result
+    }
+
+    // ── Task #1229: Implement Slice Reweighting for Reputation Changes ────────────
+
+    /// Reweight a slice's attestor weights. Only the slice creator can call this.
+    ///
+    /// # Parameters
+    /// - `creator`: Address of the slice creator; must authorize.
+    /// - `slice_id`: ID of the slice to reweight.
+    /// - `new_weights`: New weight values for each attestor.
+    ///
+    /// # Panics
+    /// Panics if caller is not the slice creator, if weights length doesn't match
+    /// attestors, or if the new threshold is not achievable.
+    pub fn reweight_slice(
+        env: Env,
+        creator: Address,
+        slice_id: u64,
+        new_weights: Vec<u32>,
+    ) {
+        creator.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        assert_eq!(slice.creator, creator, "only slice creator can reweight");
+        assert_eq!(
+            new_weights.len(),
+            slice.attestors.len(),
+            "weights length must match attestors"
+        );
+
+        let mut total_weight: u32 = 0;
+        for w in new_weights.iter() {
+            total_weight = total_weight.saturating_add(w);
+        }
+
+        assert!(
+            slice.threshold <= total_weight,
+            "new total weight must be >= threshold"
+        );
+
+        let old_weights = slice.weights.clone();
+        let now = env.ledger().timestamp();
+
+        slice.weights = new_weights;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Slice(slice_id), &slice);
+
+        let mut audit_log: Vec<ReweightingRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::SliceReweightingAuditLog(slice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        audit_log.push_back(ReweightingRecord {
+            slice_id,
+            old_weights,
+            new_weights: slice.weights.clone(),
+            reweighted_at: now,
+            reweighted_by: creator.clone(),
+        });
+
+        env.storage()
+            .instance()
+            .set(&DataKey11::SliceReweightingAuditLog(slice_id), &audit_log);
+
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("slice"), symbol_short!("reweight")),
+            (slice_id, now),
+        );
+    }
+
+    // ── Task #1230: Add Slice Composition Validation ────────────────────────────
+
+    /// Validate that a slice has the correct composition of attestor types.
+    ///
+    /// # Parameters
+    /// - `slice`: The quorum slice to validate.
+    /// - `credential_type`: The credential type for composition rules.
+    ///
+    /// # Returns
+    /// `true` if the slice passes composition validation, `false` otherwise.
+    pub fn validate_slice_composition(
+        env: Env,
+        slice: QuorumSlice,
+        credential_type: u32,
+    ) -> bool {
+        let rule: Option<CompositionRule> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::SliceCompositionRule(credential_type));
+
+        if rule.is_none() {
+            return true;
+        }
+
+        let rule = rule.unwrap();
+        let mut type_counts: Map<u32, u32> = Map::new(&env);
+
+        for attestor_addr in slice.attestors.iter() {
+            let attestor_type: AttestorType = env
+                .storage()
+                .instance()
+                .get(&DataKey11::AttestorType(attestor_addr.clone()))
+                .unwrap_or(AttestorType::Other);
+
+            let count = type_counts
+                .get(attestor_type as u32)
+                .unwrap_or(0u32)
+                .saturating_add(1);
+            type_counts.set(attestor_type as u32, count);
+        }
+
+        for required_type in rule.required_types.iter() {
+            let count = type_counts
+                .get(required_type as u32)
+                .unwrap_or(0u32);
+            if count < rule.min_attestors_per_type {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Set composition rules for a credential type.
+    ///
+    /// # Parameters
+    /// - `admin`: Admin address; must authorize.
+    /// - `credential_type`: The credential type to configure.
+    /// - `rule`: The composition rule to apply.
+    pub fn set_slice_composition_rule(
+        env: Env,
+        admin: Address,
+        credential_type: u32,
+        rule: CompositionRule,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        Self::require_not_paused(&env);
+
+        env.storage()
+            .instance()
+            .set(&DataKey11::SliceCompositionRule(credential_type), &rule);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the composition rule for a credential type.
+    ///
+    /// # Parameters
+    /// - `credential_type`: The credential type.
+    ///
+    /// # Returns
+    /// The composition rule, or `None` if not set.
+    pub fn get_slice_composition_rule(
+        env: Env,
+        credential_type: u32,
+    ) -> Option<CompositionRule> {
+        env.storage()
+            .instance()
+            .get(&DataKey11::SliceCompositionRule(credential_type))
+    }
+
+    /// Set the attestor type for an address.
+    ///
+    /// # Parameters
+    /// - `admin`: Admin address; must authorize.
+    /// - `attestor`: The attestor address.
+    /// - `attestor_type`: The type to assign to this attestor.
+    pub fn set_attestor_type(
+        env: Env,
+        admin: Address,
+        attestor: Address,
+        attestor_type: AttestorType,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        Self::require_not_paused(&env);
+
+        env.storage()
+            .instance()
+            .set(&DataKey11::AttestorType(attestor), &attestor_type);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Get the attestor type for an address.
+    ///
+    /// # Parameters
+    /// - `attestor`: The attestor address.
+    ///
+    /// # Returns
+    /// The attestor type, or `Other` if not set.
+    pub fn get_attestor_type(env: Env, attestor: Address) -> AttestorType {
+        env.storage()
+            .instance()
+            .get(&DataKey11::AttestorType(attestor))
+            .unwrap_or(AttestorType::Other)
     }
 }
 
