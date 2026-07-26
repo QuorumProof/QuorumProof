@@ -853,6 +853,10 @@ pub enum DataKey {
     SnapshotCount,
     /// Issue #912: List of all snapshot IDs for querying
     AllSnapshots,
+    /// Operator observability: running count of revoked credentials, maintained
+    /// incrementally alongside `CredentialCount` so `active = issued - revoked`
+    /// can be read in O(1) instead of scanning every credential.
+    RevokedCredentialCount,
 }
 
 #[contracttype]
@@ -3258,6 +3262,13 @@ impl QuorumProofContract {
         migration::get_job(&env, migration_id)
     }
 
+    /// Operator health snapshot: storage usage proxy, active/revoked credential
+    /// counts, slice/DID counts, pause state, and schema version — all in a
+    /// single unauthenticated, O(1) call for the monitoring exporter to poll.
+    pub fn get_state_metrics(env: Env) -> state_metrics::ContractStateMetrics {
+        state_metrics::collect(&env)
+    }
+
     /// Return the schema version distribution across all credentials.
     /// Scans all credential IDs from 1 to current count and returns counts per schema version.
     pub fn get_metadata_schema_distribution(env: Env) -> soroban_sdk::Map<u32, u32> {
@@ -4997,6 +5008,14 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey::Credential(credential_id), credential);
+        let revoked_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RevokedCredentialCount)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::RevokedCredentialCount, &(revoked_count + 1));
         let mut subject_creds: Vec<u64> = env
             .storage()
             .instance()
@@ -26600,3 +26619,4 @@ mod migration_tests;
 
 mod circuit_breaker;
 mod migration;
+mod state_metrics;
