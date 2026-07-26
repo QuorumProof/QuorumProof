@@ -1,0 +1,25 @@
+# Issue #1003 — Chaos Mesh: sustained service unavailability
+#
+# Kills the api-server pod(s) outright (simulating the upstream RPC/service
+# being entirely down) to verify the resilience requirements in
+# docs/resilience.md: aggregate endpoints must still return a well-formed
+# response, and the service must recover cleanly once it comes back.
+#
+# Apply:   kubectl apply -f service-unavailable.yaml
+# Remove:  kubectl delete -f service-unavailable.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: api-server-unavailable
+  namespace: quorumproof
+spec:
+  action: pod-failure
+  mode: one
+  selector:
+    namespaces:
+      - quorumproof
+    labelSelectors:
+      app: quorumproof-api-server
+  duration: '2m'
+  scheduler:
+    cron: '@every 1h'
