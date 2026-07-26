@@ -15,6 +15,8 @@ mod slice_enhancements;
 mod simulation_agent_based;
 #[cfg(test)]
 mod economic_security_tests;
+#[cfg(test)]
+mod tests_new_issues;
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
@@ -421,6 +423,9 @@ pub struct SoulboundToken {
     pub credential_id: u64,
     pub metadata_uri: Bytes,
     pub version: u32,
+    /// Issue #992: If set, this SBT has been upgraded to another SBT ID.
+    /// Old SBT cannot be verified independently when upgraded.
+    pub upgraded_to: Option<u64>,
 }
 
 /// A pending multi-sig attestation request.
@@ -1157,6 +1162,13 @@ pub enum DataKey8 {
     AttestorReputationScore(Address),
     /// Allowed recipient restriction for a credential transfer (credential_id -> Address).
     CredentialTransferRecipient(u64),
+    /// Issue #983: Credential attributes map (credential_id -> Map<String, String>).
+    /// Max 5 KB total per credential.
+    CredentialAttributes(u64),
+    /// Issue #989: SBT metadata URI (sbt_id -> String, max 256 chars).
+    SbtMetadataUri(u64),
+    /// Issue #992: SBT upgrade path (sbt_id -> Option<u64> of upgraded_to SBT id).
+    SbtUpgradedTo(u64),
 }
 
 /// Storage keys for slice enhancements (Issues #1235-#1238)
@@ -1282,6 +1294,16 @@ pub enum RenewalStatus {
     Renewed = 1,
     /// Credential has passed its expiry timestamp without renewal.
     Expired = 2,
+}
+
+/// Dynamic attribute for a credential (key-value pair).
+/// Issued-defined attributes like degree specialization, GPA, license number, etc.
+/// Max 5 KB total per credential attributes.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialAttribute {
+    pub key: soroban_sdk::String,
+    pub value: soroban_sdk::String,
 }
 
 #[contracttype]
@@ -7880,6 +7902,121 @@ impl QuorumProofContract {
             issuer.clone(),
             None,
         );
+    }
+
+    // ── Issue #983: Credential Metadata and Attributes ──────────────────────────
+
+    /// Issue #983: Set a dynamic attribute on a credential.
+    /// Issuer-only: the issuer of the credential can set key-value attributes.
+    /// Max 5 KB total per credential across all attributes.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address (must match credential's issuer).
+    /// - `credential_id`: The credential ID.
+    /// - `key`: Attribute key (e.g., "degree_specialization", "gpa", "license_number").
+    /// - `value`: Attribute value (e.g., "Mechanical Engineering", "3.8", "PE-2024-12345").
+    ///
+    /// # Panics
+    /// - If credential not found.
+    /// - If caller is not the credential's issuer.
+    /// - If total attributes exceed 5 KB.
+    pub fn set_credential_attribute(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        key: soroban_sdk::String,
+        value: soroban_sdk::String,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        // Verify credential exists and issuer matches
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        
+        assert!(
+            credential.issuer == issuer,
+            "only the credential issuer can set attributes"
+        );
+
+        // Get existing attributes
+        let mut attributes: soroban_sdk::Map<soroban_sdk::String, soroban_sdk::String> = env
+            .storage()
+            .instance()
+            .get(&DataKey8::CredentialAttributes(credential_id))
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        // Check total size: estimate 5 KB limit
+        let key_bytes = key.to_xdr(&env).as_bytes().len();
+        let value_bytes = value.to_xdr(&env).as_bytes().len();
+        let new_entry_size = key_bytes + value_bytes;
+
+        // Calculate current size
+        let mut current_size = 0u32;
+        let keys: Vec<soroban_sdk::String> = attributes.keys().collect();
+        for k in keys {
+            let v = attributes.get(k.clone()).unwrap();
+            current_size = current_size.saturating_add(k.to_xdr(&env).as_bytes().len() as u32);
+            current_size = current_size.saturating_add(v.to_xdr(&env).as_bytes().len() as u32);
+        }
+
+        if current_size.saturating_add(new_entry_size as u32) > 5120 {
+            panic!("credential attributes exceed 5 KB limit");
+        }
+
+        // Set the attribute
+        attributes.set(key.clone(), value);
+        env.storage()
+            .instance()
+            .set(&DataKey8::CredentialAttributes(credential_id), &attributes);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Issue #983: Get a credential attribute by key.
+    /// Returns Some(value) if the attribute exists, None otherwise.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential ID.
+    /// - `key`: The attribute key.
+    ///
+    /// # Returns
+    /// Some(value) if attribute exists, None otherwise.
+    pub fn get_credential_attribute(
+        env: Env,
+        credential_id: u64,
+        key: soroban_sdk::String,
+    ) -> Option<soroban_sdk::String> {
+        let attributes: Option<soroban_sdk::Map<soroban_sdk::String, soroban_sdk::String>> = env
+            .storage()
+            .instance()
+            .get(&DataKey8::CredentialAttributes(credential_id));
+
+        match attributes {
+            Some(map) => map.get(key),
+            None => None,
+        }
+    }
+
+    /// Issue #983: Get all credential attributes as a map.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential ID.
+    ///
+    /// # Returns
+    /// A map of all attributes for the credential, or empty map if none exist.
+    pub fn get_credential_attributes(
+        env: Env,
+        credential_id: u64,
+    ) -> soroban_sdk::Map<soroban_sdk::String, soroban_sdk::String> {
+        env.storage()
+            .instance()
+            .get(&DataKey8::CredentialAttributes(credential_id))
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env))
     }
 
     /// Create a quorum slice with weighted attestors. Returns the slice ID.
