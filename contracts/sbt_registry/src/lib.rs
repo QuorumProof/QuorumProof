@@ -30,6 +30,14 @@ pub enum ContractError {
     UnauthorizedBurn = 10,
     /// The supplied proof_of_residency is empty or structurally invalid.
     InvalidProof = 11,
+    /// Unauthorized attestor transfer attempt (Issue #1239).
+    UnauthorizedAttestor = 12,
+    /// Appeal not found (Issue #1242).
+    AppealNotFound = 13,
+    /// Invalid proof of possession (Issue #1241).
+    InvalidPossessionProof = 14,
+    /// Metadata commitment mismatch (Issue #1240).
+    MetadataCommitmentMismatch = 15,
 }
 
 #[contracttype]
@@ -65,6 +73,18 @@ pub enum DataKey {
     CompressedMetadata(u64),
     /// Escrow record for pending SBT transfers, keyed by sbt_id
     SBTEscrow(u64),
+    /// Issue #1242: Revocation reason for an SBT
+    RevocationReason(u64),
+    /// Issue #1242: Appeal record for a revoked SBT, keyed by sbt_id
+    SBTAppeal(u64),
+    /// Issue #1242: Appeal history for an SBT
+    AppealHistory(u64),
+    /// Issue #1241: Proof of possession for an SBT
+    SBTProofOfPossession(u64),
+    /// Issue #1240: Off-chain metadata commitment for an SBT
+    MetadataCommitment(u64),
+    /// Issue #1239: Attestor delegation for SBT transfer
+    AttestorDelegation(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -236,6 +256,80 @@ pub struct SbtActivityEntry {
     pub actor: Address,
     /// Ledger timestamp when the action occurred.
     pub timestamp: u64,
+}
+
+/// Issue #1242: Revocation record for an SBT with reason tracking.
+#[contracttype]
+#[derive(Clone)]
+pub struct RevocationRecord {
+    /// The SBT token ID that was revoked.
+    pub sbt_id: u64,
+    /// Reason for revocation (e.g., "credential_expired", "holder_breach").
+    pub reason: Bytes,
+    /// Address that initiated the revocation.
+    pub revoked_by: Address,
+    /// Ledger timestamp when revocation occurred.
+    pub revoked_at: u64,
+}
+
+/// Issue #1242: Appeal record for a revoked SBT.
+#[contracttype]
+#[derive(Clone)]
+pub struct AppealRecord {
+    /// The SBT token ID being appealed.
+    pub sbt_id: u64,
+    /// Evidence provided for the appeal.
+    pub appeal_evidence: Bytes,
+    /// Address submitting the appeal (typically the holder).
+    pub appealed_by: Address,
+    /// Ledger timestamp when appeal was submitted.
+    pub appealed_at: u64,
+    /// Appeal status: "pending", "approved", "denied"
+    pub status: Symbol,
+}
+
+/// Issue #1241: Proof of possession for an SBT.
+#[contracttype]
+#[derive(Clone)]
+pub struct PossessionProof {
+    /// The SBT token ID this proof is for.
+    pub sbt_id: u64,
+    /// The proof data (e.g., signed challenge).
+    pub proof_data: Bytes,
+    /// Timestamp when the proof was generated.
+    pub generated_at: u64,
+}
+
+/// Issue #1240: Off-chain metadata commitment with verification.
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataCommitmentRecord {
+    /// The SBT token ID this commitment is for.
+    pub sbt_id: u64,
+    /// Hash of the new metadata.
+    pub metadata_hash: Bytes,
+    /// Holder's signature over the metadata hash.
+    pub signature: Bytes,
+    /// Ledger timestamp when commitment was created.
+    pub committed_at: u64,
+}
+
+/// Issue #1239: Attestor delegation for SBT transfer.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorDelegationRecord {
+    /// The SBT token ID being transferred.
+    pub sbt_id: u64,
+    /// The attestor authorized to transfer this SBT.
+    pub attestor: Address,
+    /// The new holder after transfer.
+    pub new_holder: Address,
+    /// Reason for the transfer (e.g., "employment_termination").
+    pub transfer_reason: Bytes,
+    /// Whether the transfer has been executed.
+    pub executed: bool,
+    /// Ledger timestamp when delegation was created.
+    pub created_at: u64,
 }
 
 /// Event emitted when an SBT is burned by its holder via `burn_sbt`.
@@ -1684,6 +1778,464 @@ impl SbtRegistryContract {
             .persistent()
             .get(&DataKey::CredentialAccessLog(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Issue #1242: SBT Revocation Reasons and Appeals ─────────────────────────
+
+    /// Appeal a revoked SBT with evidence.
+    /// Only the holder of the revoked SBT may call this.
+    ///
+    /// # Parameters
+    /// - `holder`: The holder address; must authorize this call.
+    /// - `sbt_id`: The ID of the revoked SBT being appealed.
+    /// - `appeal_evidence`: Evidence supporting the appeal.
+    ///
+    /// # Panics
+    /// Panics if the SBT does not exist or no revocation record found.
+    pub fn appeal_sbt_revocation(
+        env: Env,
+        holder: Address,
+        sbt_id: u64,
+        appeal_evidence: Bytes,
+    ) -> u64 {
+        holder.require_auth();
+
+        // Verify the SBT exists
+        let _token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        // Check if a revocation record exists
+        let _revocation: RevocationRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RevocationReason(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AppealNotFound));
+
+        let appeal_id = sbt_id; // Use sbt_id as appeal identifier for simplicity
+        let appeal_record = AppealRecord {
+            sbt_id,
+            appeal_evidence,
+            appealed_by: holder.clone(),
+            appealed_at: env.ledger().timestamp(),
+            status: symbol_short!("pend"),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SBTAppeal(appeal_id), &appeal_record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::SBTAppeal(appeal_id), STANDARD_TTL, EXTENDED_TTL);
+
+        // Record in appeal history
+        let key = DataKey::AppealHistory(sbt_id);
+        let mut history: Vec<AppealRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+        history.push_back(appeal_record.clone());
+        env.storage().persistent().set(&key, &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("appeal").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (holder, symbol_short!("pend")));
+
+        appeal_id
+    }
+
+    /// Get the appeal record for an SBT.
+    pub fn get_sbt_appeal(env: Env, sbt_id: u64) -> AppealRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SBTAppeal(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AppealNotFound))
+    }
+
+    /// Get the appeal history for an SBT.
+    pub fn get_appeal_history(env: Env, sbt_id: u64) -> Vec<AppealRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AppealHistory(sbt_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get the revocation reason for an SBT.
+    pub fn get_revocation_reason(env: Env, sbt_id: u64) -> RevocationRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RevocationReason(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AppealNotFound))
+    }
+
+    /// Record a revocation reason for an SBT (admin-only).
+    pub fn record_revocation_reason(
+        env: Env,
+        admin: Address,
+        sbt_id: u64,
+        reason: Bytes,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(admin == stored_admin, "unauthorized");
+
+        let revocation_record = RevocationRecord {
+            sbt_id,
+            reason,
+            revoked_by: admin.clone(),
+            revoked_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RevocationReason(sbt_id), &revocation_record);
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &DataKey::RevocationReason(sbt_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("revoke").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (admin, reason));
+    }
+
+    // ── Issue #1241: SBT Proof of Possession ─────────────────────────
+
+    /// Generate a proof of possession for an SBT.
+    /// Only the SBT holder may generate this proof.
+    ///
+    /// # Parameters
+    /// - `holder`: The holder address; must authorize this call.
+    /// - `sbt_id`: The SBT token ID.
+    ///
+    /// # Returns
+    /// A proof of possession as Bytes.
+    pub fn generate_sbt_possession_proof(
+        env: Env,
+        holder: Address,
+        sbt_id: u64,
+    ) -> Bytes {
+        holder.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        assert!(token.owner == holder, "not the owner");
+
+        // Generate proof (simplified: hash of token_id and holder address)
+        let mut proof_data = Bytes::new(&env);
+        proof_data.append(&sbt_id.to_le_bytes()[..].into());
+        proof_data.append(&holder.to_string().as_bytes().into());
+
+        let proof = PossessionProof {
+            sbt_id,
+            proof_data: proof_data.clone(),
+            generated_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SBTProofOfPossession(sbt_id), &proof);
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &DataKey::SBTProofOfPossession(sbt_id),
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("pop_gen").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, holder);
+
+        proof_data
+    }
+
+    /// Verify a proof of possession for an SBT.
+    ///
+    /// # Parameters
+    /// - `sbt_id`: The SBT token ID.
+    /// - `proof`: The proof of possession.
+    ///
+    /// # Returns
+    /// true if the proof is valid, false otherwise.
+    pub fn verify_sbt_possession(env: Env, sbt_id: u64, proof: Bytes) -> bool {
+        if let Some(stored_proof) = env
+            .storage()
+            .persistent()
+            .get::<_, PossessionProof>(&DataKey::SBTProofOfPossession(sbt_id))
+        {
+            stored_proof.proof_data == proof
+        } else {
+            false
+        }
+    }
+
+    // ── Issue #1240: SBT Metadata Update Without Chain ────────────────
+
+    /// Update an SBT's metadata commitment off-chain.
+    /// Only the token owner may call this.
+    ///
+    /// # Parameters
+    /// - `owner`: The owner address; must authorize this call.
+    /// - `sbt_id`: The SBT token ID.
+    /// - `new_metadata_hash`: Hash of the new metadata.
+    /// - `signature`: Owner's signature over the metadata hash.
+    ///
+    /// # Panics
+    /// Panics if the SBT does not exist or caller is not the owner.
+    pub fn update_sbt_metadata_commitment(
+        env: Env,
+        owner: Address,
+        sbt_id: u64,
+        new_metadata_hash: Bytes,
+        signature: Bytes,
+    ) {
+        owner.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        assert!(token.owner == owner, "not the owner");
+
+        let commitment = MetadataCommitmentRecord {
+            sbt_id,
+            metadata_hash: new_metadata_hash.clone(),
+            signature: signature.clone(),
+            committed_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MetadataCommitment(sbt_id), &commitment);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::MetadataCommitment(sbt_id), STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("meta_cmt").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (owner, new_metadata_hash));
+    }
+
+    /// Get the metadata commitment for an SBT.
+    pub fn get_sbt_metadata_commitment(env: Env, sbt_id: u64) -> MetadataCommitmentRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MetadataCommitment(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::MetadataCommitmentMismatch))
+    }
+
+    /// Verify that a metadata hash matches the stored commitment.
+    pub fn verify_metadata_commitment(
+        env: Env,
+        sbt_id: u64,
+        metadata_hash: Bytes,
+        signature: Bytes,
+    ) -> bool {
+        if let Some(commitment) = env
+            .storage()
+            .persistent()
+            .get::<_, MetadataCommitmentRecord>(&DataKey::MetadataCommitment(sbt_id))
+        {
+            commitment.metadata_hash == metadata_hash && commitment.signature == signature
+        } else {
+            false
+        }
+    }
+
+    // ── Issue #1239: SBT Transfer via Attestor Delegation ────────────────
+
+    /// Delegate SBT transfer authority to an attestor.
+    /// Only the token owner or admin may call this.
+    ///
+    /// # Parameters
+    /// - `caller`: The caller (owner or admin); must authorize this call.
+    /// - `sbt_id`: The SBT token ID.
+    /// - `attestor`: The attestor address authorized to transfer.
+    /// - `new_holder`: The address that will receive the SBT.
+    /// - `transfer_reason`: Reason for the transfer (e.g., "employment_termination").
+    ///
+    /// # Panics
+    /// Panics if the SBT does not exist or caller is not authorized.
+    pub fn delegate_sbt_transfer_to_attestor(
+        env: Env,
+        caller: Address,
+        sbt_id: u64,
+        attestor: Address,
+        new_holder: Address,
+        transfer_reason: Bytes,
+    ) {
+        caller.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        let is_owner = token.owner == caller;
+        let is_admin = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Admin)
+            .map_or(false, |admin| admin == caller);
+
+        assert!(is_owner || is_admin, "unauthorized");
+
+        let delegation = AttestorDelegationRecord {
+            sbt_id,
+            attestor: attestor.clone(),
+            new_holder: new_holder.clone(),
+            transfer_reason,
+            executed: false,
+            created_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AttestorDelegation(sbt_id), &delegation);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::AttestorDelegation(sbt_id), STANDARD_TTL, EXTENDED_TTL);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("att_del").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events()
+            .publish(topics, (caller, attestor, new_holder));
+    }
+
+    /// Transfer an SBT as an authorized attestor.
+    /// Only the authorized attestor may call this.
+    ///
+    /// # Parameters
+    /// - `attestor`: The attestor address; must authorize this call.
+    /// - `sbt_id`: The SBT token ID.
+    /// - `proof`: Proof of authorization (e.g., signature from token owner).
+    ///
+    /// # Panics
+    /// Panics if the attestor is not authorized or delegation not found.
+    pub fn transfer_sbt_via_attestor(
+        env: Env,
+        attestor: Address,
+        sbt_id: u64,
+        proof: Bytes,
+    ) {
+        attestor.require_auth();
+
+        let delegation: AttestorDelegationRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AttestorDelegation(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAttestor));
+
+        assert!(delegation.attestor == attestor, "not authorized attestor");
+        assert!(!delegation.executed, "delegation already executed");
+        assert!(!proof.is_empty(), "proof required");
+
+        let mut token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        let old_owner = token.owner.clone();
+        let new_holder = delegation.new_holder.clone();
+
+        // Remove from old owner's list
+        let mut old_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(old_owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = old_tokens.iter().position(|id| id == sbt_id) {
+            old_tokens.remove(pos as u32);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+
+        // Add to new holder's list
+        token.owner = new_holder.clone();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(sbt_id), &token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Owner(sbt_id), &new_holder);
+
+        let mut new_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(new_holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        new_tokens.push_back(sbt_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(new_holder.clone()), &new_tokens);
+
+        env.storage().instance().set(
+            &DataKey::OwnerCredential(new_holder.clone(), token.credential_id),
+            &sbt_id,
+        );
+
+        // Mark delegation as executed
+        let mut updated_delegation = delegation.clone();
+        updated_delegation.executed = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::AttestorDelegation(sbt_id), &updated_delegation);
+
+        // Remove old owner's credential mapping
+        env.storage().instance().remove(&DataKey::OwnerCredential(
+            old_owner.clone(),
+            token.credential_id,
+        ));
+
+        // Remove delegation from old owner
+        env.storage()
+            .instance()
+            .remove(&DataKey::Delegation(sbt_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("xfer_att").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events()
+            .publish(topics, (attestor, old_owner.clone(), new_holder));
+
+        Self::record_notification(&env, new_holder.clone(), sbt_id, symbol_short!("transfer"));
+        Self::log_sbt_activity(&env, sbt_id, symbol_short!("transfer"), attestor);
+    }
+
+    /// Get the attestor delegation record for an SBT.
+    pub fn get_attestor_delegation(env: Env, sbt_id: u64) -> AttestorDelegationRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AttestorDelegation(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAttestor))
     }
 }
 
@@ -3480,5 +4032,319 @@ mod tests {
         let expires_at = env.ledger().timestamp() + 1_000;
         let scope = UsageScope::DeFiCollateral(expires_at);
         client.delegate_sbt_usage(&token_id, &owner, &scope);
+    }
+
+    // ── Issue #1242: SBT Revocation Reasons and Appeals ──────────────────────────
+
+    #[test]
+    fn test_record_revocation_reason_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let reason = Bytes::from_slice(&env, b"credential_expired");
+        client.record_revocation_reason(&admin, &token_id, &reason);
+
+        let revocation = client.get_revocation_reason(&token_id);
+        assert_eq!(revocation.sbt_id, token_id);
+        assert_eq!(revocation.revoked_by, admin);
+    }
+
+    #[test]
+    fn test_appeal_sbt_revocation_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let reason = Bytes::from_slice(&env, b"credential_expired");
+        client.record_revocation_reason(&admin, &token_id, &reason);
+
+        let appeal_evidence = Bytes::from_slice(&env, b"proof_of_legitimacy");
+        let _appeal_id = client.appeal_sbt_revocation(&owner, &token_id, &appeal_evidence);
+
+        let appeal = client.get_sbt_appeal(&token_id);
+        assert_eq!(appeal.sbt_id, token_id);
+        assert_eq!(appeal.appealed_by, owner);
+    }
+
+    #[test]
+    fn test_appeal_history_records_multiple_appeals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let reason = Bytes::from_slice(&env, b"credential_expired");
+        client.record_revocation_reason(&admin, &token_id, &reason);
+
+        let appeal_evidence = Bytes::from_slice(&env, b"proof_of_legitimacy");
+        let _appeal_id = client.appeal_sbt_revocation(&owner, &token_id, &appeal_evidence);
+
+        let history = client.get_appeal_history(&token_id);
+        assert_eq!(history.len(), 1);
+    }
+
+    // ── Issue #1241: SBT Proof of Possession Query ────────────────────────────
+
+    #[test]
+    fn test_generate_sbt_possession_proof_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let proof = client.generate_sbt_possession_proof(&owner, &token_id);
+        assert!(!proof.is_empty());
+    }
+
+    #[test]
+    fn test_verify_sbt_possession_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let proof = client.generate_sbt_possession_proof(&owner, &token_id);
+        let is_valid = client.verify_sbt_possession(&token_id, &proof);
+        assert!(is_valid);
+    }
+
+    #[test]
+    fn test_verify_sbt_possession_invalid_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let _proof = client.generate_sbt_possession_proof(&owner, &token_id);
+        let invalid_proof = Bytes::from_slice(&env, b"invalid_proof_data");
+        let is_valid = client.verify_sbt_possession(&token_id, &invalid_proof);
+        assert!(!is_valid);
+    }
+
+    // ── Issue #1240: SBT Metadata Update Without Chain ───────────────────────────
+
+    #[test]
+    fn test_update_sbt_metadata_commitment_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let metadata_hash = Bytes::from_slice(&env, b"new_metadata_hash");
+        let signature = Bytes::from_slice(&env, b"owner_signature");
+        client.update_sbt_metadata_commitment(&owner, &token_id, &metadata_hash, &signature);
+
+        let commitment = client.get_sbt_metadata_commitment(&token_id);
+        assert_eq!(commitment.sbt_id, token_id);
+        assert_eq!(commitment.metadata_hash, metadata_hash);
+    }
+
+    #[test]
+    fn test_verify_metadata_commitment_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let metadata_hash = Bytes::from_slice(&env, b"new_metadata_hash");
+        let signature = Bytes::from_slice(&env, b"owner_signature");
+        client.update_sbt_metadata_commitment(&owner, &token_id, &metadata_hash, &signature);
+
+        let is_valid =
+            client.verify_metadata_commitment(&token_id, &metadata_hash, &signature);
+        assert!(is_valid);
+    }
+
+    #[test]
+    fn test_verify_metadata_commitment_mismatch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let metadata_hash = Bytes::from_slice(&env, b"new_metadata_hash");
+        let signature = Bytes::from_slice(&env, b"owner_signature");
+        client.update_sbt_metadata_commitment(&owner, &token_id, &metadata_hash, &signature);
+
+        let wrong_hash = Bytes::from_slice(&env, b"wrong_hash");
+        let is_valid = client.verify_metadata_commitment(&token_id, &wrong_hash, &signature);
+        assert!(!is_valid);
+    }
+
+    // ── Issue #1239: SBT Transfer via Attestor Delegation ────────────────────────
+
+    #[test]
+    fn test_delegate_sbt_transfer_to_attestor_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+
+        client.delegate_sbt_transfer_to_attestor(
+            &owner, &token_id, &attestor, &new_holder, &reason,
+        );
+
+        let delegation = client.get_attestor_delegation(&token_id);
+        assert_eq!(delegation.sbt_id, token_id);
+        assert_eq!(delegation.attestor, attestor);
+        assert_eq!(delegation.new_holder, new_holder);
+        assert!(!delegation.executed);
+    }
+
+    #[test]
+    fn test_transfer_sbt_via_attestor_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+
+        client.delegate_sbt_transfer_to_attestor(
+            &owner, &token_id, &attestor, &new_holder, &reason,
+        );
+
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+
+        // Verify the transfer
+        assert_eq!(client.owner_of(&token_id), new_holder);
+        let tokens = client.get_tokens_by_owner(&new_holder);
+        assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    fn test_transfer_sbt_via_attestor_already_executed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+
+        client.delegate_sbt_transfer_to_attestor(
+            &owner, &token_id, &attestor, &new_holder, &reason,
+        );
+
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+
+        // Try to execute again — should fail
+        env.set_auths(&[]);
+        let should_fail = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            env.mock_all_auths();
+            client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+        }));
+        assert!(should_fail.is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_transfer_sbt_via_attestor_unauthorized_attestor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+
+        client.delegate_sbt_transfer_to_attestor(
+            &owner, &token_id, &attestor, &new_holder, &reason,
+        );
+
+        let wrong_attestor = Address::generate(&env);
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&wrong_attestor, &token_id, &proof);
     }
 }
