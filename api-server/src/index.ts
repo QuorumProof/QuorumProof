@@ -4,9 +4,11 @@ import compression from 'compression';
 import zlib from 'zlib';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
+import credentialExportRouter from './routes/credentialExport.js';
 import verifyRouter from './routes/verify.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
+import issuerAnalyticsRouter from './routes/issuerAnalytics.js';
 import attestorRouter from './routes/attestor.js';
 import issuerRouter from './routes/issuer.js';
 import recoveryRouter from './routes/recovery.js';
@@ -14,6 +16,7 @@ import shareLinksRouter from './routes/shareLinks.js';
 import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
+import apiKeysRouter from './routes/apiKeys.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
@@ -66,16 +69,19 @@ app.use((req, _res, next) => {
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
+app.use('/api/credentials', credentialExportRouter); // #1000 credential export (json/pdf/qrcode)
 app.use('/api/verify', verifyRouter);
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
 app.use('/api/attestor', attestorRouter);
 app.use('/api/issuer', issuerRouter);
 app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
+app.use('/api/api-keys', apiKeysRouter); // #999 API key management
 
 app.get('/health', (_req, res) => {
   res.json({
