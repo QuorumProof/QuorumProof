@@ -109,6 +109,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 - [Integration Patterns Guide](docs/integration-patterns-guide.md)
 - [Issuer Security Checklist](docs/issuer-security-checklist.md)
 - [Troubleshooting Guide](docs/troubleshooting-guide.md)
+- [Backup System](docs/backup-system.md)
 - [Roadmap](docs/roadmap.md)
 
 ## 🎓 Smart Contract API
