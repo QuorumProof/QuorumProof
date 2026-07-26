@@ -39,6 +39,12 @@ pub enum ContractError {
     InvalidPossessionProof = 14,
     /// Metadata commitment mismatch (Issue #1240).
     MetadataCommitmentMismatch = 15,
+    /// No attribute exists for the given SBT/key pair.
+    AttributeNotFound = 16,
+    /// Caller is not the issuer (admin) — attribute mutation is issuer-only.
+    UnauthorizedAttributeIssuer = 17,
+    /// Caller is not authorized to read a private attribute value.
+    PrivateAttributeAccessDenied = 18,
 }
 
 #[contracttype]
@@ -86,6 +92,12 @@ pub enum DataKey {
     MetadataCommitment(u64),
     /// Issue #1239: Attestor delegation for SBT transfer
     AttestorDelegation(u64),
+    /// Encoded attribute value for an SBT, keyed by (sbt_id, attribute_key).
+    SbtAttribute(u64, Bytes),
+    /// List of attribute keys that have been set on an SBT, keyed by sbt_id.
+    SbtAttributeKeys(u64),
+    /// Reverse index for public attributes: (key, value) -> Vec<sbt_id>.
+    AttributeIndex(Bytes, Bytes),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -368,6 +380,36 @@ pub struct BurnEvent {
     pub holder: Address,
     /// Ledger timestamp when the burn occurred.
     pub timestamp: u64,
+}
+
+/// An encoded attribute attached to an SBT (e.g. `specialization: mechanical
+/// engineering`), separate from the credential reference itself so verifiers
+/// can query on a narrow claim without needing the full credential.
+///
+/// # Attribute encoding schema
+/// - `key` and `value` are opaque `Bytes` — callers agree on an encoding
+///   off-chain (e.g. UTF-8 strings, or a namespaced `category:value` form
+///   such as `b"specialization"` / `b"mechanical_engineering"`).
+/// - Keys are not required to be unique across the whole contract, only per
+///   SBT: the same `key` can carry different values on different SBTs.
+/// - `private == true` restricts reads of `value` to the issuer (admin) and
+///   the SBT's current owner via [`SbtRegistryContract::get_sbt_attribute`];
+///   private attributes are also excluded from the public
+///   [`SbtRegistryContract::query_sbt_by_attribute`] index so their values
+///   are never revealed through discovery.
+#[contracttype]
+#[derive(Clone)]
+pub struct SbtAttributeRecord {
+    /// The SBT token ID this attribute belongs to.
+    pub sbt_id: u64,
+    /// Attribute name, e.g. `b"specialization"`.
+    pub key: Bytes,
+    /// Attribute value, e.g. `b"mechanical_engineering"`.
+    pub value: Bytes,
+    /// Whether this attribute's value is restricted to issuer/holder reads.
+    pub private: bool,
+    /// Ledger timestamp when the attribute was last set.
+    pub set_at: u64,
 }
 
 #[contract]
@@ -2685,6 +2727,199 @@ impl SbtRegistryContract {
             .persistent()
             .get(&DataKey::AttestorDelegation(sbt_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAttestor))
+    }
+
+    // ---------------------------------------------------------------
+    // SBT attributes (Issue: encoded attributes beyond credential ref)
+    // ---------------------------------------------------------------
+
+    /// Issuer-only: attach an encoded attribute to an SBT (e.g.
+    /// `key = b"specialization"`, `value = b"mechanical_engineering"`).
+    ///
+    /// See [`SbtAttributeRecord`] for the attribute encoding schema. When
+    /// `private` is `true`, the value is excluded from the public
+    /// [`Self::query_sbt_by_attribute`] index and can only be read back via
+    /// [`Self::get_sbt_attribute`] by the issuer or the SBT's current owner —
+    /// this is the attribute privacy control.
+    pub fn add_sbt_attribute(
+        env: Env,
+        issuer: Address,
+        sbt_id: u64,
+        key: Bytes,
+        value: Bytes,
+        private: bool,
+    ) {
+        issuer.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if issuer != stored_admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAttributeIssuer);
+        }
+        if !env.storage().persistent().has(&DataKey::Token(sbt_id)) {
+            panic_with_error!(&env, ContractError::TokenNotFound);
+        }
+
+        // Overwriting an existing public attribute must drop its stale
+        // (key, old_value) index entry before the new value is indexed.
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<_, SbtAttributeRecord>(&DataKey::SbtAttribute(sbt_id, key.clone()))
+        {
+            if !existing.private {
+                Self::remove_from_attribute_index(&env, &existing.key, &existing.value, sbt_id);
+            }
+        }
+
+        let record = SbtAttributeRecord {
+            sbt_id,
+            key: key.clone(),
+            value: value.clone(),
+            private,
+            set_at: env.ledger().timestamp(),
+        };
+        let record_key = DataKey::SbtAttribute(sbt_id, key.clone());
+        env.storage().persistent().set(&record_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&record_key, STANDARD_TTL, EXTENDED_TTL);
+
+        let mut keys: Vec<Bytes> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SbtAttributeKeys(sbt_id))
+            .unwrap_or(Vec::new(&env));
+        if !keys.iter().any(|k| k == key) {
+            keys.push_back(key.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::SbtAttributeKeys(sbt_id), &keys);
+        }
+
+        if !private {
+            Self::add_to_attribute_index(&env, &key, &value, sbt_id);
+        }
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("sbt_attr").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (key, private));
+    }
+
+    /// Issuer-only: remove a previously set attribute from an SBT.
+    pub fn remove_sbt_attribute(env: Env, issuer: Address, sbt_id: u64, key: Bytes) {
+        issuer.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if issuer != stored_admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAttributeIssuer);
+        }
+
+        let record: SbtAttributeRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SbtAttribute(sbt_id, key.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttributeNotFound));
+
+        if !record.private {
+            Self::remove_from_attribute_index(&env, &record.key, &record.value, sbt_id);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::SbtAttribute(sbt_id, key.clone()));
+
+        let mut keys: Vec<Bytes> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SbtAttributeKeys(sbt_id))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = keys.iter().position(|k| k == key) {
+            keys.remove(pos as u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::SbtAttributeKeys(sbt_id), &keys);
+        }
+    }
+
+    /// Read an attribute's value. Requires `caller` authorization; private
+    /// attributes may only be read by the issuer (admin) or the SBT's
+    /// current owner.
+    pub fn get_sbt_attribute(env: Env, caller: Address, sbt_id: u64, key: Bytes) -> Bytes {
+        caller.require_auth();
+        let record: SbtAttributeRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SbtAttribute(sbt_id, key))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AttributeNotFound));
+
+        if record.private {
+            let stored_admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .expect("not initialized");
+            let owner: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Owner(sbt_id))
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+            if caller != stored_admin && caller != owner {
+                panic_with_error!(&env, ContractError::PrivateAttributeAccessDenied);
+            }
+        }
+        record.value
+    }
+
+    /// List the attribute keys set on an SBT. Values are not revealed here —
+    /// use `get_sbt_attribute` for a privacy-checked value read.
+    pub fn get_sbt_attribute_keys(env: Env, sbt_id: u64) -> Vec<Bytes> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SbtAttributeKeys(sbt_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Find all SBTs carrying a public (non-private) attribute matching
+    /// `key`/`value`, enabling granular verification (e.g. "find all SBTs
+    /// where specialization = mechanical_engineering") without exposing the
+    /// full credential. Private attributes are never returned by this query.
+    pub fn query_sbt_by_attribute(env: Env, key: Bytes, value: Bytes) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AttributeIndex(key, value))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    fn add_to_attribute_index(env: &Env, key: &Bytes, value: &Bytes, sbt_id: u64) {
+        let index_key = DataKey::AttributeIndex(key.clone(), value.clone());
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(env));
+        if !ids.iter().any(|id| id == sbt_id) {
+            ids.push_back(sbt_id);
+            env.storage().persistent().set(&index_key, &ids);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, STANDARD_TTL, EXTENDED_TTL);
+        }
+    }
+
+    fn remove_from_attribute_index(env: &Env, key: &Bytes, value: &Bytes, sbt_id: u64) {
+        let index_key = DataKey::AttributeIndex(key.clone(), value.clone());
+        if let Some(mut ids) = env.storage().persistent().get::<_, Vec<u64>>(&index_key) {
+            if let Some(pos) = ids.iter().position(|id| id == sbt_id) {
+                ids.remove(pos as u32);
+                env.storage().persistent().set(&index_key, &ids);
+            }
+        }
     }
 }
 
