@@ -10,6 +10,7 @@ import {
   BASE_FEE,
 } from '@stellar/stellar-sdk';
 import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
+import { getDefaultGasCostTracker } from './services/gasCostTracker.js';
 
 const RPC_URL = process.env.STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org';
 const NETWORK = (process.env.STELLAR_NETWORK ?? 'testnet') as keyof typeof PASSPHRASES;
@@ -32,6 +33,10 @@ const networkPassphrase = PASSPHRASES[NETWORK] ?? Networks.TESTNET;
  * successful result per (method, args) from an in-memory cache instead of
  * hanging on a degraded/unreachable RPC endpoint, then probes recovery via
  * limited half-open trials. See services/rpcCircuitBreaker.ts.
+ *
+ * Every successful simulation's `minResourceFee` (the resource/gas cost
+ * Soroban computed for this call) is recorded against the operation name
+ * by the gas cost tracker (issue #4) — see services/gasCostTracker.ts.
  */
 export async function simulateCall(method: string, args: ReturnType<typeof nativeToScVal>[] = []) {
   if (!CONTRACT_ID) throw new Error('CONTRACT_QUORUM_PROOF env var not set');
@@ -60,6 +65,7 @@ export async function simulateCall(method: string, args: ReturnType<typeof nativ
         throw new Error(result.error ?? 'Simulation failed');
       }
       if (!result.result) throw new Error('No result from simulation');
+      getDefaultGasCostTracker().record(method, result.minResourceFee);
       return scValToNative(result.result.retval);
     },
     { method, args: cacheArgs }

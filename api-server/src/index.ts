@@ -17,6 +17,7 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
+import costsRouter from './routes/costs.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
@@ -84,6 +85,7 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
+app.use('/api/costs', costsRouter); // #4 gas cost tracking
 
 app.get('/health', (_req, res) => {
   res.json({
