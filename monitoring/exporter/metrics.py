@@ -76,6 +76,32 @@ contract_state_size = Gauge(
     registry=registry
 )
 
+# Operator health snapshot, sourced from `get_state_metrics()` on the contract.
+credentials_active_total = Gauge(
+    'quorumproof_credentials_active_total',
+    'Credentials issued minus credentials revoked (issued_total - revoked_total)',
+    registry=registry
+)
+
+credentials_revoked_snapshot_total = Gauge(
+    'quorumproof_credentials_revoked_snapshot_total',
+    'Total credentials revoked, as of the last get_state_metrics() scrape',
+    registry=registry
+)
+
+storage_entries_estimate = Gauge(
+    'quorumproof_storage_entries_estimate',
+    'Coarse proxy for on-chain storage usage: sum of credential, slice and DID '
+    'counters. Not a byte count — track its rate of growth, not its absolute value.',
+    registry=registry
+)
+
+state_version = Gauge(
+    'quorumproof_state_version',
+    'Current on-chain state/schema version reported by the contract',
+    registry=registry
+)
+
 backup_last_success_timestamp = Gauge(
     'quorumproof_backup_last_success_timestamp',
     'Unix timestamp of the last successful backup verification',
