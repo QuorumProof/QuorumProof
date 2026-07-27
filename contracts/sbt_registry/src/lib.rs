@@ -39,6 +39,10 @@ pub enum ContractError {
     InvalidPossessionProof = 14,
     /// Metadata commitment mismatch (Issue #1240).
     MetadataCommitmentMismatch = 15,
+    /// No co-owner is set for this SBT (Issue #1275).
+    CoOwnerNotSet = 16,
+    /// co_owner must differ from owner (Issue #1275).
+    InvalidCoOwner = 17,
 }
 
 #[contracttype]
@@ -86,6 +90,8 @@ pub enum DataKey {
     MetadataCommitment(u64),
     /// Issue #1239: Attestor delegation for SBT transfer
     AttestorDelegation(u64),
+    /// Issue #1275: Ownership history (owner/co-owner changes) for an SBT, keyed by sbt_id
+    OwnershipHistory(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -138,6 +144,24 @@ pub struct SoulboundToken {
     /// Issue #992: If set, this SBT has been upgraded to another SBT ID.
     /// Old SBT cannot be verified independently when upgraded.
     pub upgraded_to: Option<u64>,
+    /// Issue #1275: Optional co-owner (e.g. an organization) for credentials
+    /// issued jointly to an individual and an organization. When set,
+    /// ownership transfer requires signatures from both `owner` and
+    /// `co_owner`.
+    pub co_owner: Option<Address>,
+}
+
+/// Issue #1275: A single entry in an SBT's ownership history, recorded on
+/// mint and on every subsequent owner/co-owner change.
+#[contracttype]
+#[derive(Clone)]
+pub struct OwnershipHistoryEntry {
+    pub owner: Address,
+    pub co_owner: Option<Address>,
+    /// Ledger timestamp when this ownership state took effect.
+    pub changed_at: u64,
+    /// Event kind: "mint", "dual_xfer", "set_co", "rm_co"
+    pub event: Symbol,
 }
 
 #[contracttype]
@@ -499,6 +523,8 @@ impl SbtRegistryContract {
             credential_id,
             metadata_uri: Bytes::new(&env), // stored separately in CompressedMetadata
             version: 1,
+            upgraded_to: None,
+            co_owner: None,
         };
         env.storage()
             .persistent()
@@ -546,6 +572,7 @@ impl SbtRegistryContract {
         env.events().publish(topics, (owner.clone(), credential_id));
         Self::record_notification(&env, owner.clone(), token_id, symbol_short!("mint"));
         Self::log_sbt_activity(&env, token_id, symbol_short!("mint"), owner.clone());
+        Self::record_ownership_history(&env, token_id, owner.clone(), None, symbol_short!("mint"));
         token_id
     }
     ///
@@ -1005,6 +1032,206 @@ impl SbtRegistryContract {
         topics.push_back(token_id.into_val(&env));
         env.events().publish(topics, (old_owner, new_owner.clone()));
         Self::record_notification(&env, new_owner, token_id, symbol_short!("transfer"));
+    }
+
+    // ── Issue #1275: Dual-Ownership (individual + organization) ────────
+
+    /// Assign a co-owner (e.g. an organization) to an SBT already held by an
+    /// individual `owner`. Once set, `transfer_ownership_dual` requires
+    /// signatures from both parties. Only the current `owner` may call this
+    /// (the co-owner is added unilaterally by the primary owner, mirroring
+    /// how `set_co_owner`'s counterpart `remove_co_owner` requires both
+    /// parties to undo it).
+    ///
+    /// # Panics
+    /// - "token not found" if `token_id` does not exist.
+    /// - `ContractError::InvalidCoOwner` if `co_owner == owner`.
+    pub fn set_co_owner(env: Env, owner: Address, token_id: u64, co_owner: Address) {
+        owner.require_auth();
+
+        let mut token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
+        if co_owner == owner {
+            panic_with_error!(&env, ContractError::InvalidCoOwner);
+        }
+
+        token.co_owner = Some(co_owner.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id), &token);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("set_co").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner.clone(), co_owner.clone()));
+        Self::record_ownership_history(
+            &env,
+            token_id,
+            owner,
+            Some(co_owner),
+            symbol_short!("set_co"),
+        );
+    }
+
+    /// Remove the co-owner from an SBT. Requires signatures from **both**
+    /// the current `owner` and the current `co_owner` — neither party can
+    /// unilaterally strip the other's ownership stake.
+    ///
+    /// # Panics
+    /// - "token not found" if `token_id` does not exist.
+    /// - `ContractError::CoOwnerNotSet` if the token has no co-owner.
+    /// - "co-owner mismatch" if `co_owner` does not match the stored co-owner.
+    pub fn remove_co_owner(env: Env, owner: Address, co_owner: Address, token_id: u64) {
+        owner.require_auth();
+        co_owner.require_auth();
+
+        let mut token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
+        match &token.co_owner {
+            Some(stored) => assert!(*stored == co_owner, "co-owner mismatch"),
+            None => panic_with_error!(&env, ContractError::CoOwnerNotSet),
+        }
+
+        token.co_owner = None;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id), &token);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("rm_co").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner.clone(), co_owner));
+        Self::record_ownership_history(&env, token_id, owner, None, symbol_short!("rm_co"));
+    }
+
+    /// Transfer primary ownership of a dual-owned (or single-owned) SBT to
+    /// `new_owner`. If the SBT has a `co_owner` set, **both** the current
+    /// `owner` and `co_owner` must authorize this call; otherwise only
+    /// `owner`'s signature is required. The co-owner slot itself is left
+    /// unchanged by this transfer — only the primary `owner` moves.
+    ///
+    /// # Panics
+    /// - "token not found" if `token_id` does not exist.
+    pub fn transfer_ownership_dual(env: Env, token_id: u64, new_owner: Address) {
+        let mut token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        let old_owner = token.owner.clone();
+        old_owner.require_auth();
+        if let Some(co_owner) = token.co_owner.clone() {
+            co_owner.require_auth();
+        }
+
+        // Remove from old owner's list
+        let mut old_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(old_owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = old_tokens.iter().position(|id| id == token_id) {
+            old_tokens.remove(pos as u32);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
+        env.storage().instance().remove(&DataKey::OwnerCredential(
+            old_owner.clone(),
+            token.credential_id,
+        ));
+
+        // Add to new owner
+        token.owner = new_owner.clone();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id), &token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Owner(token_id), &new_owner);
+        let mut new_tokens: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(new_owner.clone()))
+            .unwrap_or(Vec::new(&env));
+        new_tokens.push_back(token_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(new_owner.clone()), &new_tokens);
+        env.storage().instance().set(
+            &DataKey::OwnerCredential(new_owner.clone(), token.credential_id),
+            &token_id,
+        );
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("dual_xfer").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (old_owner, new_owner.clone()));
+        Self::record_notification(&env, new_owner.clone(), token_id, symbol_short!("dual_xfer"));
+        Self::record_ownership_history(
+            &env,
+            token_id,
+            new_owner,
+            token.co_owner,
+            symbol_short!("dual_xfer"),
+        );
+    }
+
+    /// Returns the co-owner of an SBT, if any.
+    ///
+    /// # Panics
+    /// "token not found" if `token_id` does not exist.
+    pub fn get_co_owner(env: Env, token_id: u64) -> Option<Address> {
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        token.co_owner
+    }
+
+    /// Returns the full ownership history (owner/co-owner changes) for an
+    /// SBT, oldest first. Empty if the token doesn't exist or predates this
+    /// feature.
+    pub fn get_ownership_history(env: Env, token_id: u64) -> Vec<OwnershipHistoryEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwnershipHistory(token_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Internal helper: append an entry to an SBT's ownership history.
+    fn record_ownership_history(
+        env: &Env,
+        token_id: u64,
+        owner: Address,
+        co_owner: Option<Address>,
+        event: Symbol,
+    ) {
+        let key = DataKey::OwnershipHistory(token_id);
+        let mut history: Vec<OwnershipHistoryEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+        history.push_back(OwnershipHistoryEntry {
+            owner,
+            co_owner,
+            changed_at: env.ledger().timestamp(),
+            event,
+        });
+        env.storage().persistent().set(&key, &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
@@ -1654,6 +1881,8 @@ impl SbtRegistryContract {
                 credential_id: entry.credential_id,
                 metadata_uri: Bytes::new(&env),
                 version: 1,
+                upgraded_to: None,
+                co_owner: None,
             };
             env.storage()
                 .persistent()
@@ -1700,6 +1929,7 @@ impl SbtRegistryContract {
 
             Self::record_notification(&env, entry.owner.clone(), token_id, symbol_short!("mint"));
             Self::log_sbt_activity(&env, token_id, symbol_short!("mint"), entry.owner.clone());
+            Self::record_ownership_history(&env, token_id, entry.owner.clone(), None, symbol_short!("mint"));
 
             result_ids.push_back(token_id);
         }
@@ -4795,5 +5025,155 @@ mod tests {
         let wrong_attestor = Address::generate(&env);
         let proof = Bytes::from_slice(&env, b"authorization_proof");
         client.transfer_sbt_via_attestor(&wrong_attestor, &token_id, &proof);
+    }
+
+    // --- Issue #1275: Dual-ownership tests ---
+
+    fn mint_test_token(
+        env: &Env,
+        client: &SbtRegistryContractClient,
+        qp_client: &QuorumProofContractClient,
+        owner: &Address,
+    ) -> u64 {
+        let issuer = Address::generate(env);
+        let meta = soroban_sdk::Bytes::from_slice(env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(env, b"ipfs://QmSBT");
+        client.mint(owner, &cred_id, &uri)
+    }
+
+    #[test]
+    fn test_set_co_owner_and_get_co_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let org = Address::generate(&env);
+        let token_id = mint_test_token(&env, &client, &qp_client, &owner);
+
+        assert_eq!(client.get_co_owner(&token_id), None);
+        client.set_co_owner(&owner, &token_id, &org);
+        assert_eq!(client.get_co_owner(&token_id), Some(org));
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_set_co_owner_rejects_self() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let token_id = mint_test_token(&env, &client, &qp_client, &owner);
+
+        client.set_co_owner(&owner, &token_id, &owner);
+    }
+
+    #[test]
+    fn test_transfer_ownership_dual_requires_both_signatures() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let org = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let token_id = mint_test_token(&env, &client, &qp_client, &owner);
+        client.set_co_owner(&owner, &token_id, &org);
+
+        client.transfer_ownership_dual(&token_id, &new_owner);
+
+        // Both the outgoing owner and the co-owner must have authorized this call.
+        let authed: std::vec::Vec<Address> =
+            env.auths().iter().map(|(addr, _)| addr.clone()).collect();
+        assert!(authed.contains(&owner));
+        assert!(authed.contains(&org));
+
+        assert_eq!(client.owner_of(&token_id), new_owner);
+        // Co-owner is preserved across a primary-ownership transfer.
+        assert_eq!(client.get_co_owner(&token_id), Some(org));
+        // The new owner's token list is updated; the old owner's is not.
+        assert!(client.get_tokens_by_owner(&new_owner).contains(&token_id));
+        assert!(!client.get_tokens_by_owner(&owner).contains(&token_id));
+    }
+
+    #[test]
+    fn test_transfer_ownership_dual_single_owner_no_co_owner_required() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let token_id = mint_test_token(&env, &client, &qp_client, &owner);
+
+        // No co-owner set: transfer only requires the owner's signature.
+        client.transfer_ownership_dual(&token_id, &new_owner);
+        assert_eq!(client.owner_of(&token_id), new_owner);
+    }
+
+    #[test]
+    fn test_remove_co_owner_requires_both_signatures() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let org = Address::generate(&env);
+        let token_id = mint_test_token(&env, &client, &qp_client, &owner);
+        client.set_co_owner(&owner, &token_id, &org);
+
+        client.remove_co_owner(&owner, &org, &token_id);
+
+        let authed: std::vec::Vec<Address> =
+            env.auths().iter().map(|(addr, _)| addr.clone()).collect();
+        assert!(authed.contains(&owner));
+        assert!(authed.contains(&org));
+        assert_eq!(client.get_co_owner(&token_id), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_remove_co_owner_without_existing_co_owner_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let someone_else = Address::generate(&env);
+        let token_id = mint_test_token(&env, &client, &qp_client, &owner);
+
+        client.remove_co_owner(&owner, &someone_else, &token_id);
+    }
+
+    #[test]
+    fn test_ownership_history_tracks_mint_and_dual_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let org = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let token_id = mint_test_token(&env, &client, &qp_client, &owner);
+
+        client.set_co_owner(&owner, &token_id, &org);
+        client.transfer_ownership_dual(&token_id, &new_owner);
+
+        let history = client.get_ownership_history(&token_id);
+        assert_eq!(history.len(), 3);
+
+        let mint_entry = history.get(0).unwrap();
+        assert_eq!(mint_entry.owner, owner);
+        assert_eq!(mint_entry.co_owner, None);
+
+        let set_co_entry = history.get(1).unwrap();
+        assert_eq!(set_co_entry.owner, owner);
+        assert_eq!(set_co_entry.co_owner, Some(org.clone()));
+
+        let transfer_entry = history.get(2).unwrap();
+        assert_eq!(transfer_entry.owner, new_owner);
+        assert_eq!(transfer_entry.co_owner, Some(org));
     }
 }
