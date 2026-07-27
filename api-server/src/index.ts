@@ -17,6 +17,7 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
+import { createDashboardRouter } from './routes/dashboard.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
@@ -27,6 +28,7 @@ import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
+import * as Soroban from './soroban.js';
 
 const app = express();
 
@@ -82,6 +84,15 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
+
+// #997 Credential Holder Dashboard API
+const sorobanClient = {
+  simulateCall: Soroban.simulateCall,
+  u64Val: Soroban.u64Val,
+  u32Val: Soroban.u32Val,
+  addressVal: Soroban.addressVal,
+};
+app.use('/api/me', createDashboardRouter(sorobanClient));
 
 app.get('/health', (_req, res) => {
   res.json({
