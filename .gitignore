@@ -22,6 +22,7 @@ api-server/coverage/
 *.lcov
 .nyc_output/
 lcov.info
+.c8/
 
 # Test snapshots and fixtures generated at runtime
 **/test_snapshots/
@@ -40,12 +41,15 @@ lcov.info
 *.swo
 .vscode/settings.json
 .idea/
+*.iml
+Thumbs.db
 
 # Misc
 .env
 dist/
 dashboard/dist/
 frontend/dist/
+api-server/dist/
 
 # Durable runtime state (GDPR request store, crypto-shredding vault)
 .data/
