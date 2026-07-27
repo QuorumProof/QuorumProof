@@ -1,0 +1,85 @@
+# .github/workflows/db-migrations.yml — Test the API server's database
+# migrations against a real Postgres instance on every change.
+#
+# API server migrations were applied by hand with no automated check that
+# they actually run cleanly (or that rollback actually undoes them). This
+# spins up a throwaway Postgres service container and runs the full
+# up -> rollback -> up cycle. See docs/database-migrations.md.
+
+name: API Server DB Migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api-server/migrations/**"
+      - "api-server/src/migrations/**"
+      - ".github/workflows/db-migrations.yml"
+  pull_request:
+    paths:
+      - "api-server/migrations/**"
+      - "api-server/src/migrations/**"
+
+jobs:
+  test-migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: quorumproof
+          POSTGRES_PASSWORD: quorumproof
+          POSTGRES_DB: quorumproof_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U quorumproof"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://quorumproof:quorumproof@localhost:5432/quorumproof_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: api-server/package-lock.json
+
+      - name: Install dependencies
+        working-directory: api-server
+        run: npm ci
+
+      - name: Apply migrations
+        working-directory: api-server
+        run: npm run migrate
+
+      - name: Re-run migrations (should be a no-op)
+        working-directory: api-server
+        run: npm run migrate
+
+      - name: Roll back the most recent migration
+        working-directory: api-server
+        run: npm run migrate:rollback
+
+      - name: Re-apply after rollback
+        working-directory: api-server
+        run: npm run migrate
+
+      - name: Verify schema_migrations is fully applied
+        working-directory: api-server
+        run: |
+          npx tsx -e "
+          import { Pool } from 'pg';
+          const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+          const res = await pool.query('SELECT filename FROM schema_migrations ORDER BY filename');
+          console.log('Applied migrations:', res.rows.map(r => r.filename));
+          if (res.rows.length === 0) {
+            throw new Error('Expected at least one applied migration');
+          }
+          await pool.end();
+          "

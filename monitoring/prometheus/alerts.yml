@@ -107,6 +107,39 @@ groups:
           summary: "p95 latency for {{ $labels.operation }} exceeds SLA"
           description: "p95={{ $value | humanizeDuration }} exceeds the configured SLA ceiling for {{ $labels.operation }}."
 
+      # Operator health snapshot (get_state_metrics) — docs/operator-health-metrics.md
+      - alert: StorageGrowthAnomaly
+        expr: >
+          rate(quorumproof_storage_entries_estimate[1h]) > 500
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusually fast storage growth"
+          description: "Storage entries estimate is growing at {{ $value | humanize }} entries/s over the last hour, well above normal issuance rates. Check for abuse or a runaway integration."
+
+      - alert: HighCredentialRevocationRate
+        expr: >
+          (increase(quorumproof_credentials_revoked_snapshot_total[1h]) /
+           clamp_min(increase(quorumproof_credentials_active_total[1h]) +
+                     increase(quorumproof_credentials_revoked_snapshot_total[1h]), 1)) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High credential revocation rate"
+          description: "Over 30% of recent credential activity has been revocations in the last hour. Investigate issuer behavior or a possible compromise."
+
+      - alert: StateVersionMismatch
+        expr: >
+          count(count by (state_version) (quorumproof_state_version)) > 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple contract state versions observed"
+          description: "More than one distinct quorumproof_state_version value is being reported. This usually means an upgrade partially rolled out or a stale exporter is scraping an old deployment."
+
       # Paginated/chunked migration protocol (docs/contract-upgrade-strategy.md)
       - alert: MigrationStalled
         expr: >
