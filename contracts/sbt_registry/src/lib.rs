@@ -1,4 +1,8 @@
 #![no_std]
+// Design rationale for the non-transferability enforced throughout this contract
+// (see `transfer()` below and `ContractError::SoulboundNonTransferable`) is recorded
+// in docs/adr/adr-002-sbt-non-transferability.md — read that before changing the
+// transfer/burn/recovery semantics.
 
 #[cfg(test)]
 extern crate std;
@@ -734,6 +738,7 @@ impl SbtRegistryContract {
     }
 
     pub fn transfer(env: Env, _from: Address, _to: Address, _token_id: u64) {
+        // Always rejected by design — see docs/adr/adr-002-sbt-non-transferability.md.
         panic_with_error!(&env, ContractError::SoulboundNonTransferable);
     }
 
