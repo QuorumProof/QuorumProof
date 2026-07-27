@@ -17,12 +17,14 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
+import oauth2Router from './routes/oauth2.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
+import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -34,6 +36,11 @@ const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
+
+// #1297 per-API-key rate limiting: applies whenever a caller presents
+// x-api-key, independently of the general IP-based limiter below, and
+// no-ops for requests that don't authenticate this way.
+app.use(apiKeyRateLimiter);
 
 const requestSigning = createRequestSigning();
 const requestDeduplication = createRequestDeduplication({ ttlMs: 100, enabled: true });
@@ -82,6 +89,8 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
+app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation (spec-mandated path)
+app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 
 app.get('/health', (_req, res) => {
   res.json({

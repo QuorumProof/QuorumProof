@@ -1,15 +1,21 @@
 #![no_std]
+// The quorum-slice / weighted-threshold trust model implemented in this crate
+// (see the `QuorumSlice*` types and `threshold` fields below) follows the
+// Federated Byzantine Agreement design recorded in
+// docs/adr/adr-001-fba-trust-model.md — consult it before changing slice or
+// threshold semantics.
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, Env, IntoVal, Map, String, Symbol, Vec,
+    Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Vec,
 };
 use soroban_sdk::xdr::ToXdr;
 
 mod rbac;
+mod key_escrow;
 mod slice_enhancements;
 #[cfg(test)]
 mod simulation_agent_based;
@@ -41,6 +47,8 @@ const TOPIC_MIGRATION_PROGRESS: &str = "MigrationProgress";
 const TOPIC_TEMPLATE_CREATED: &str = "TemplateCreated";
 const TOPIC_TEMPLATE_UPDATED: &str = "TemplateUpdated";
 const TOPIC_ATTESTOR_REPLACEMENT: &str = "AttestorReplaced";
+const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
+const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
 const STANDARD_TTL: u32 = 16_384;
@@ -797,6 +805,8 @@ pub enum ContractError {
     QuorumIntersectionFailed = 84,
     /// Issue #912: Snapshot not found
     SnapshotNotFound = 85,
+    /// Issue #912: Snapshot integrity hash does not match its recorded counts
+    SnapshotCorrupted = 86,
 }
 
 #[contracttype]
@@ -853,10 +863,8 @@ pub enum DataKey {
     SnapshotCount,
     /// Issue #912: List of all snapshot IDs for querying
     AllSnapshots,
-    /// Operator observability: running count of revoked credentials, maintained
-    /// incrementally alongside `CredentialCount` so `active = issued - revoked`
-    /// can be read in O(1) instead of scanning every credential.
-    RevokedCredentialCount,
+    /// Issue #912: ID of the most recently restored snapshot, for audit purposes
+    LastRestoredSnapshot,
 }
 
 #[contracttype]
@@ -1142,6 +1150,18 @@ pub enum DataKey6 {
     RoleAssignment(Address),
     RoleDelegation(Address),
     RoleAuditLog,
+}
+
+/// Storage keys for BBS+ issuer key escrow (#1295).
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyEscrow {
+    /// Escrow configuration/status, keyed by issuer.
+    Escrow(Address),
+    /// A single guardian's opaque share blob, keyed by (issuer, guardian).
+    GuardianShare(Address, Address),
+    /// Guardians who have submitted for an in-progress recovery, keyed by issuer.
+    RecoverySubmissions(Address),
 }
 
 /// Storage keys for W3C Decentralized Identifier (DID) support.
@@ -13846,38 +13866,9 @@ impl QuorumProofContract {
             .unwrap_or(1u32);
 
         // Compute hashes (simplified: in production use full Merkle root)
-        let credentials_hash = Bytes::from_slice(&env, &[
-            (credential_count >> 56) as u8,
-            (credential_count >> 48) as u8,
-            (credential_count >> 40) as u8,
-            (credential_count >> 32) as u8,
-            (credential_count >> 24) as u8,
-            (credential_count >> 16) as u8,
-            (credential_count >> 8) as u8,
-            credential_count as u8,
-        ]);
-
-        let slices_hash = Bytes::from_slice(&env, &[
-            (slice_count >> 56) as u8,
-            (slice_count >> 48) as u8,
-            (slice_count >> 40) as u8,
-            (slice_count >> 32) as u8,
-            (slice_count >> 24) as u8,
-            (slice_count >> 16) as u8,
-            (slice_count >> 8) as u8,
-            slice_count as u8,
-        ]);
-
-        let disputes_hash = Bytes::from_slice(&env, &[
-            (dispute_count >> 56) as u8,
-            (dispute_count >> 48) as u8,
-            (dispute_count >> 40) as u8,
-            (dispute_count >> 32) as u8,
-            (dispute_count >> 24) as u8,
-            (dispute_count >> 16) as u8,
-            (dispute_count >> 8) as u8,
-            dispute_count as u8,
-        ]);
+        let credentials_hash = Self::u64_to_hash_bytes(&env, credential_count);
+        let slices_hash = Self::u64_to_hash_bytes(&env, slice_count);
+        let disputes_hash = Self::u64_to_hash_bytes(&env, dispute_count);
 
         // Generate snapshot ID
         let snapshot_id: u64 = env
@@ -13947,14 +13938,40 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Encode a `u64` counter as an 8-byte big-endian hash for snapshot
+    /// integrity checks (simplified stand-in for a full Merkle root).
+    ///
+    /// # Issue #912: State Snapshot and Restore
+    fn u64_to_hash_bytes(env: &Env, value: u64) -> Bytes {
+        Bytes::from_slice(
+            env,
+            &[
+                (value >> 56) as u8,
+                (value >> 48) as u8,
+                (value >> 40) as u8,
+                (value >> 32) as u8,
+                (value >> 24) as u8,
+                (value >> 16) as u8,
+                (value >> 8) as u8,
+                value as u8,
+            ],
+        )
+    }
+
     /// Restore contract state from a snapshot.
-    /// Only the admin can restore. This is a no-op stub — full restoration would require
-    /// iterating through all stored credentials and slices.
-    /// 
-    /// In production, this would:
-    /// 1. Validate the snapshot hash matches current state
-    /// 2. Restore credential metadata, slice definitions, and dispute records
-    /// 3. Verify the restoration against the snapshot hash
+    ///
+    /// Only the admin can restore. The snapshot's stored hashes are
+    /// recomputed from its own recorded counts and compared against the
+    /// hashes captured at snapshot time; a mismatch means the snapshot
+    /// entry was corrupted or tampered with in storage and restoration is
+    /// aborted. On success, the aggregate credential/slice/dispute counters
+    /// are reset to the values captured in the snapshot.
+    ///
+    /// Full per-record restoration (individual credentials, slices, and
+    /// disputes) is out of scope for on-chain execution due to gas limits
+    /// on large state; those are restored off-chain via
+    /// `scripts/restore_from_backup.sh` using the same snapshot data
+    /// exported by `create_state_snapshot`. See `docs/backup-system.md`.
     ///
     /// # Parameters
     /// - `admin`: The admin address; must authorize.
@@ -13963,7 +13980,9 @@ impl QuorumProofContract {
     /// # Panics
     /// - If the contract is paused
     /// - If the admin is not authorized
-    /// - If the snapshot does not exist
+    /// - If the snapshot does not exist (`SnapshotNotFound`)
+    /// - If the snapshot's state version is incompatible with the current schema
+    /// - If the snapshot's recorded hashes do not match its recorded counts (`SnapshotCorrupted`)
     ///
     /// # Issue #912: State Snapshot and Restore
     pub fn restore_from_snapshot(env: Env, admin: Address, snapshot_id: u64) {
@@ -13989,20 +14008,56 @@ impl QuorumProofContract {
             "snapshot state version mismatch"
         );
 
+        // Validate snapshot integrity: recompute hashes from the snapshot's
+        // own recorded counts and compare against what was stored. A
+        // mismatch indicates the snapshot record was corrupted after
+        // creation and must not be used to restore state.
+        let expected_credentials_hash = Self::u64_to_hash_bytes(&env, snapshot.credential_count);
+        let expected_slices_hash = Self::u64_to_hash_bytes(&env, snapshot.slice_count);
+        let expected_disputes_hash = Self::u64_to_hash_bytes(&env, snapshot.dispute_count);
+        if expected_credentials_hash != snapshot.credentials_hash
+            || expected_slices_hash != snapshot.slices_hash
+            || expected_disputes_hash != snapshot.disputes_hash
+        {
+            panic_with_error!(&env, ContractError::SnapshotCorrupted);
+        }
+
+        // Restore the aggregate counters captured in the snapshot. Individual
+        // credential/slice/dispute records are restored off-chain (see
+        // docs/backup-system.md) since iterating and rewriting the full data
+        // set on-chain would exceed transaction resource limits for large
+        // registries.
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialCount, &snapshot.credential_count);
+        env.storage()
+            .instance()
+            .set(&DataKey::SliceCount, &snapshot.slice_count);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeCount, &snapshot.dispute_count);
+
+        // Record which snapshot was last restored, for audit purposes.
+        env.storage()
+            .instance()
+            .set(&DataKey::LastRestoredSnapshot, &snapshot_id);
+        env.storage()
+            .instance()
+            .extend_ttl(EXTENDED_TTL, EXTENDED_TTL);
+
         // Log the restoration event (emit via soroban event system)
         env.events().publish(
             (soroban_sdk::Symbol::short("restore"), snapshot_id),
             soroban_sdk::Symbol::short("restored"),
         );
+    }
 
-        // In a full implementation:
-        // 1. Iterate through all credentials and restore from backup storage
-        // 2. Restore slice definitions
-        // 3. Restore dispute records
-        // 4. Verify hashes match
-
-        // For now, just mark that restoration occurred
-        // (actual data restoration would happen incrementally or via batch operations)
+    /// Return the ID of the most recently restored snapshot, if any restore
+    /// has occurred since deployment.
+    ///
+    /// # Issue #912: State Snapshot and Restore
+    pub fn get_last_restored_snapshot(env: Env) -> Option<u64> {
+        env.storage().instance().get(&DataKey::LastRestoredSnapshot)
     }
 
     // ── Credential Holder Recovery (Issue #290) ──────────────────────────────
@@ -16291,6 +16346,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
         };
         crate::rbac::assign_role(&env, &admin, &target, rbac_role, expires_at);
@@ -16318,6 +16374,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
         };
         crate::rbac::delegate_role(&env, &delegator, &delegatee, rbac_role, expires_at);
@@ -16337,6 +16394,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => return false,
         };
         crate::rbac::has_role(&env, &address, rbac_role)
@@ -16355,6 +16413,49 @@ impl QuorumProofContract {
     /// Get the full RBAC audit log.
     pub fn get_role_audit_log(env: Env) -> Vec<rbac::RoleAuditEntry> {
         crate::rbac::get_audit_log(&env)
+    }
+
+    // ── BBS+ Key Escrow (#1295) ─────────────────────────────────────────
+
+    /// Deposits a threshold (`threshold`-of-`guardians.len()`) Shamir-split
+    /// backup of the issuer's BBS+ signing key. Splitting happens off-chain
+    /// (see `bbs_plus_v1::escrow`); this only stores each guardian's opaque
+    /// share so it can be recovered on threshold-approved request.
+    /// Issuer-only.
+    pub fn deposit_key_escrow(
+        env: Env,
+        issuer: Address,
+        guardians: Vec<Address>,
+        shares: Vec<BytesN<32>>,
+        threshold: u32,
+    ) -> key_escrow::KeyEscrow {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::require_role(&env, &issuer, rbac::Role::Issuer);
+        crate::key_escrow::deposit_key_escrow(&env, &issuer, guardians, shares, threshold)
+    }
+
+    /// A guardian confirms it holds its share and consents to a recovery
+    /// for `issuer`'s escrow. Returns the number of guardians who have
+    /// submitted so far.
+    pub fn submit_recovery_share(env: Env, guardian: Address, issuer: Address) -> u32 {
+        guardian.require_auth();
+        Self::require_not_paused(&env);
+        crate::key_escrow::submit_recovery_share(&env, &guardian, &issuer)
+    }
+
+    /// Once `threshold` guardians have submitted, the issuer (or contract
+    /// admin) retrieves the stored share blobs for off-chain Shamir
+    /// reconstruction.
+    pub fn recover_key(env: Env, caller: Address, issuer: Address) -> Vec<key_escrow::GuardianShare> {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        crate::key_escrow::recover_key(&env, &caller, &issuer)
+    }
+
+    /// Gets the escrow configuration/status for an issuer, if any.
+    pub fn get_key_escrow(env: Env, issuer: Address) -> Option<key_escrow::KeyEscrow> {
+        crate::key_escrow::get_key_escrow(&env, &issuer)
     }
 
     // ── Attestation Queue Management (#843) ────────────────────────────
@@ -22072,6 +22173,100 @@ mod feature_tests {
         let env2 = Env::from_snapshot_file(snap_path);
         assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
         assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    // ── State export/restore (Issue #912) ──────────────────────────────────────
+
+    /// `create_state_snapshot` captures the current counters and is
+    /// retrievable via `get_snapshot` and `list_snapshots`.
+    #[test]
+    fn test_create_state_snapshot_captures_counts() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmBackupHash0000000000000000000000");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "pre-upgrade backup"));
+        assert_eq!(snapshot_id, 1);
+        assert_eq!(client.list_snapshots(), Vec::from_array(&env, [1u64]));
+
+        let snapshot = client.get_snapshot(&snapshot_id).unwrap();
+        assert_eq!(snapshot.credential_count, 1);
+        assert_eq!(snapshot.slice_count, 0);
+    }
+
+    /// `restore_from_snapshot` resets the aggregate counters back to what
+    /// was recorded at snapshot time, even after further state changes.
+    #[test]
+    fn test_restore_from_snapshot_resets_counters() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmBackupHash0000000000000000000000");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "checkpoint"));
+        assert_eq!(client.get_credential_count(), 1);
+
+        // Simulate further state changes after the snapshot was taken.
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        assert_eq!(client.get_credential_count(), 3);
+
+        client.restore_from_snapshot(&admin, &snapshot_id);
+
+        assert_eq!(client.get_credential_count(), 1);
+        assert_eq!(client.get_last_restored_snapshot(), Some(snapshot_id));
+    }
+
+    /// Restoring a snapshot ID that was never created fails with `SnapshotNotFound`.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #85)")]
+    fn test_restore_from_snapshot_missing_id_fails() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        client.restore_from_snapshot(&admin, &999u64);
+    }
+
+    /// Restoring is rejected while the contract is paused, matching every
+    /// other admin-gated state mutation.
+    #[test]
+    #[should_panic]
+    fn test_restore_from_snapshot_fails_when_paused() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "checkpoint"));
+        client.pause(&admin);
+        client.restore_from_snapshot(&admin, &snapshot_id);
+    }
+
+    /// A snapshot record whose stored hash no longer matches its own
+    /// recorded counts (e.g. corrupted or tampered storage) is rejected
+    /// with `SnapshotCorrupted` rather than silently restoring bad data.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #86)")]
+    fn test_restore_from_snapshot_detects_corrupted_hash() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "checkpoint"));
+
+        env.as_contract(&client.address, || {
+            let mut snapshot: StateSnapshot = env
+                .storage()
+                .instance()
+                .get(&DataKey::StateSnapshot(snapshot_id))
+                .unwrap();
+            // Tamper with the recorded count without updating its hash.
+            snapshot.credential_count = 42;
+            env.storage()
+                .instance()
+                .set(&DataKey::StateSnapshot(snapshot_id), &snapshot);
+        });
+
+        client.restore_from_snapshot(&admin, &snapshot_id);
     }
 
     // ── Property-based fuzz tests ─────────────────────────────────────────────

@@ -292,3 +292,77 @@ Run recovery drills on testnet. Do **not** use mainnet for drills.
 - [ ] Emergency pause/resume drill completed, including withdrawal-blocked-while-paused check
 - [ ] API secret rotation drill completed within RTO target
 - [ ] Recovery drill results logged with date and outcome
+
+---
+
+## 5. Roles & Responsibilities
+
+DR events fail more often from ambiguity about who does what than from a missing technical step. Every recovery event (declared per §3 Step 1) has exactly one Incident Commander; every other role reports status to that person rather than acting independently.
+
+| Role | Responsibilities | Primary | Backup |
+|---|---|---|---|
+| **Incident Commander (IC)** | Declares the incident, decides which runbook section applies (§1), authorizes pausing/redeploying contracts, calls the "all clear" | On-call lead engineer | Engineering manager |
+| **Chain/Contract Lead** | Executes contract-level actions: `emergency_pause`/`emergency_degrade`, admin key rotation (§1.1), redeployment (§1.2), migration resume (§1.4) | Smart contract maintainer | Second contract maintainer |
+| **Infra Lead** | Executes infrastructure actions: RPC failover (§1.3), frontend/dashboard redeploy (§1.5), API server containment and secret rotation (§1.6) | DevOps/infra owner | Backend maintainer |
+| **Data/Recovery Lead** | Owns snapshot verification and restore (§2, §3 Step 2/4), confirms credential counts post-recovery | Backend maintainer | Chain/Contract Lead |
+| **Communications Lead** | Owns all external and internal messaging per §6; ensures status updates go out on schedule regardless of technical progress | Product/support owner | Incident Commander (if no dedicated owner is available) |
+| **Scribe** | Logs a timestamped record of every action taken during the incident for the post-incident report (§3 Step 5) | Any available team member assigned by the IC | — |
+
+Role assignment happens at the start of Step 1 (Declare Incident) in the Recovery Runbook (§3) — the IC names the Chain/Contract Lead, Infra Lead, Data/Recovery Lead, and Communications Lead explicitly in the ops channel before work begins, even if one person temporarily covers more than one role. A role with no assigned person is treated as a gap and the IC must fill it before proceeding past Step 1.
+
+On-call rotation for each role is maintained outside this document (team calendar / paging tool); this table defines *what each role does*, not the current roster, so it does not go stale as people rotate on and off call.
+
+### 5.1 Escalation Path
+
+1. On-call engineer detects or is paged for an anomaly and makes the initial call on whether it meets the bar for a declared DR incident (see §1 for the list of recognized scenarios).
+2. If yes, the on-call engineer becomes IC by default and immediately names the other roles from §5, or explicitly stays IC and self-covers unfilled roles.
+3. If the incident is more severe than the on-call engineer can resolve alone (e.g. suspected key compromise, exploitable contract bug), the IC escalates to the engineering manager, who may reassign the IC role.
+4. Any team member can trigger escalation to the engineering manager directly if they believe an incident is under-resourced, regardless of what the current IC has decided.
+
+---
+
+## 6. Communication Plan
+
+Communication runs on a fixed cadence during an active incident — it does not wait for the technical situation to change, because "no update" is itself information (it tells stakeholders the team is still working, not stalled).
+
+### 6.1 Internal Communication
+
+| Audience | Channel | Cadence | Owner |
+|---|---|---|---|
+| Engineering / on-call | Ops channel (real-time) | Continuous during incident | All responders |
+| Leadership | Direct message / incident summary doc | At declaration, then every 30–60 minutes until resolved | Communications Lead |
+| Full team | Team-wide channel | At declaration and at resolution | Communications Lead |
+
+### 6.2 External Communication
+
+| Audience | Channel | Trigger | Owner |
+|---|---|---|---|
+| Attestors / institutional issuers | Email / partner channel | Any event that pauses the contract or blocks stake withdrawal (§1.7) | Communications Lead |
+| End users (holders/verifiers) | Status page or in-app banner | Any event affecting availability of verification or issuance | Communications Lead |
+| Security researchers (if applicable) | [SECURITY.md](../SECURITY.md) disclosure process | Contract bug incidents only, after user-facing mitigation is in place | Incident Commander |
+
+### 6.3 Message Content Guidelines
+
+Every external update states, at minimum: what is affected, what is not affected (e.g. "on-chain credential data is not at risk"), and when the next update will be sent. Do not speculate on root cause publicly before it is confirmed — state what is being investigated instead.
+
+### 6.4 Post-Incident Communication
+
+Within 5 business days of resolution, the Communications Lead circulates a summary covering: timeline, impact, root cause, and remediation — sourced from the Scribe's log (§5) and the recovery runbook's Step 5 record (§3).
+
+---
+
+## 7. DR Testing Schedule Summary
+
+This table consolidates the individual drills already defined in §4 into a single quarterly-first schedule, so the cadence is auditable at a glance without reading every subsection.
+
+| Drill | Cadence | Reference | Owner |
+|---|---|---|---|
+| Key Recovery Drill | Quarterly | §4.1 | Chain/Contract Lead |
+| Contract Redeployment Drill | Per release | §4.2 | Chain/Contract Lead |
+| Snapshot & Restore Drill | Monthly | §4.3 | Data/Recovery Lead |
+| RPC Failover Drill | Quarterly | §4.4 | Infra Lead |
+| Emergency Pause Drill | Quarterly | §4.5 | Chain/Contract Lead |
+| API Secret Rotation Drill | Quarterly | §4.6 | Infra Lead |
+| Full DR Tabletop Exercise (all roles, simulated incident end-to-end using §5 role assignments and §6 communication cadence) | Quarterly | New — run alongside the quarterly drills above | Incident Commander |
+
+The Incident Commander is responsible for scheduling the quarterly batch (Key Recovery, RPC Failover, Emergency Pause, API Secret Rotation, and the Tabletop Exercise together) at the start of each calendar quarter and confirming completion against the §4.7 checklist before quarter-end.
