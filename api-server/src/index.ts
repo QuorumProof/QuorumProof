@@ -17,13 +17,14 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
-import costsRouter from './routes/costs.js';
+import oauth2Router from './routes/oauth2.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
+import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -37,6 +38,11 @@ const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
+
+// #1297 per-API-key rate limiting: applies whenever a caller presents
+// x-api-key, independently of the general IP-based limiter below, and
+// no-ops for requests that don't authenticate this way.
+app.use(apiKeyRateLimiter);
 
 const requestSigning = createRequestSigning();
 const requestDeduplication = createRequestDeduplication({ ttlMs: 100, enabled: true });
@@ -85,7 +91,8 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
-app.use('/api/costs', costsRouter); // #4 gas cost tracking
+app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation (spec-mandated path)
+app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -145,7 +152,43 @@ const PORT = parseInt(process.env.PORT ?? '3000', 10);
 const httpServer = createServer(app);
 createWsServer(httpServer, '/ws');
 
-httpServer.listen(PORT, () => console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`));
+/**
+ * Apply any pending database migrations before accepting traffic. Manual
+ * migrations were error-prone (an operator forgets to run them, environments
+ * drift). Skipped entirely when DATABASE_URL isn't set so this stays a no-op
+ * for the file/DurableLog-backed stores the API server also supports.
+ *
+ * A failed migration is treated as fatal for startup — see
+ * docs/database-migrations.md for the rollback procedure.
+ */
+async function runStartupMigrations(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+
+  const { Pool } = await import('pg');
+  const { runMigrations } = await import('./migrations/runner.js');
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    const applied = await runMigrations(pool);
+    if (applied.length > 0) {
+      console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+(async () => {
+  try {
+    await runStartupMigrations();
+  } catch (err) {
+    console.error('Startup migration failed, refusing to start:', err);
+    process.exit(1);
+    return;
+  }
+  httpServer.listen(PORT, () =>
+    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
+  );
+})();
 
 export { broadcastEvent };
 
