@@ -35,6 +35,10 @@ from metrics import (
     migration_migrated_total,
     migration_skipped_total,
     migration_last_progress_timestamp,
+    credentials_active_total,
+    credentials_revoked_snapshot_total,
+    storage_entries_estimate,
+    state_version,
 )
 from performance_regression import PerformanceRegressionDetector
 
@@ -110,6 +114,67 @@ class QuorumProofExporter:
             api_errors_total.labels(error_code="rpc_error").inc()
 
         self._scrape_migration_jobs()
+        self._scrape_state_metrics()
+
+    def _scrape_state_metrics(self):
+        """Poll get_state_metrics for the operator health snapshot (storage
+        usage proxy, active/revoked credential counts, schema version).
+
+        Like _scrape_migration_jobs, this is a plain unauthenticated read that
+        is always available, so a failure here is logged and skipped rather
+        than treated as a contract-health signal.
+        """
+        try:
+            snapshot = self._fetch_state_metrics()
+        except Exception as e:
+            logger.error(f"Failed to fetch state metrics: {e}")
+            return
+        if snapshot is None:
+            return
+
+        contract_paused.set(1 if snapshot["paused"] else 0)
+        credentials_active_total.set(snapshot["credentials_active"])
+        credentials_revoked_snapshot_total.set(snapshot["credentials_revoked_total"])
+        storage_entries_estimate.set(snapshot["storage_entries_estimate"])
+        state_version.set(snapshot["state_version"])
+
+    def _fetch_state_metrics(self) -> Optional[Dict[str, Any]]:
+        """Simulate get_state_metrics() and return a plain dict, following the
+        same simulate-and-decode pattern as _fetch_migration_job.
+        """
+        from stellar_sdk import Keypair, Network, TransactionBuilder, Account
+        import stellar_sdk.scval as scval
+
+        source = Keypair.random()
+        account = Account(source.public_key, 0)
+        tx = (
+            TransactionBuilder(account, Network.TESTNET_NETWORK_PASSPHRASE, base_fee=100)
+            .append_invoke_contract_function_op(
+                contract_id=self.contract_id,
+                function_name="get_state_metrics",
+                parameters=[],
+            )
+            .build()
+        )
+        resp = self.server.simulate_transaction(tx) if hasattr(self.server, "simulate_transaction") else None
+        if not resp or getattr(resp, "error", None):
+            return None
+        result_xdr = resp.results[0].xdr if getattr(resp, "results", None) else None
+        if not result_xdr:
+            return None
+        native = scval.to_native(result_xdr)
+        if native is None:
+            return None
+        return {
+            "credentials_issued_total": int(native["credentials_issued_total"]),
+            "credentials_revoked_total": int(native["credentials_revoked_total"]),
+            "credentials_active": int(native["credentials_active"]),
+            "slices_total": int(native["slices_total"]),
+            "dids_total": int(native["dids_total"]),
+            "paused": bool(native["paused"]),
+            "state_version": int(native["state_version"]),
+            "storage_entries_estimate": int(native["storage_entries_estimate"]),
+        }
 
     def _scrape_migration_jobs(self):
         """Poll get_migration_job for every configured migration id.

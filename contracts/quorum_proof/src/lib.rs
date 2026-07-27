@@ -1,15 +1,21 @@
 #![no_std]
+// The quorum-slice / weighted-threshold trust model implemented in this crate
+// (see the `QuorumSlice*` types and `threshold` fields below) follows the
+// Federated Byzantine Agreement design recorded in
+// docs/adr/adr-001-fba-trust-model.md — consult it before changing slice or
+// threshold semantics.
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, Env, IntoVal, Map, String, Symbol, Vec,
+    Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Vec,
 };
 use soroban_sdk::xdr::ToXdr;
 
 mod rbac;
+mod key_escrow;
 mod slice_enhancements;
 pub mod bbs_plus_features;
 #[cfg(test)]
@@ -45,6 +51,8 @@ const TOPIC_MIGRATION_PROGRESS: &str = "MigrationProgress";
 const TOPIC_TEMPLATE_CREATED: &str = "TemplateCreated";
 const TOPIC_TEMPLATE_UPDATED: &str = "TemplateUpdated";
 const TOPIC_ATTESTOR_REPLACEMENT: &str = "AttestorReplaced";
+const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
+const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
 const STANDARD_TTL: u32 = 16_384;
@@ -801,6 +809,8 @@ pub enum ContractError {
     QuorumIntersectionFailed = 84,
     /// Issue #912: Snapshot not found
     SnapshotNotFound = 85,
+    /// Issue #912: Snapshot integrity hash does not match its recorded counts
+    SnapshotCorrupted = 86,
 }
 
 #[contracttype]
@@ -857,6 +867,8 @@ pub enum DataKey {
     SnapshotCount,
     /// Issue #912: List of all snapshot IDs for querying
     AllSnapshots,
+    /// Issue #912: ID of the most recently restored snapshot, for audit purposes
+    LastRestoredSnapshot,
 }
 
 #[contracttype]
@@ -1144,6 +1156,18 @@ pub enum DataKey6 {
     RoleAuditLog,
 }
 
+/// Storage keys for BBS+ issuer key escrow (#1295).
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyEscrow {
+    /// Escrow configuration/status, keyed by issuer.
+    Escrow(Address),
+    /// A single guardian's opaque share blob, keyed by (issuer, guardian).
+    GuardianShare(Address, Address),
+    /// Guardians who have submitted for an in-progress recovery, keyed by issuer.
+    RecoverySubmissions(Address),
+}
+
 /// Storage keys for W3C Decentralized Identifier (DID) support.
 #[contracttype]
 #[derive(Clone)]
@@ -1208,6 +1232,81 @@ pub enum DataKeySliceEnhancements {
     AttestorPositions(u64),
     /// Historical consensus metrics (credential_id -> Vec<ConsensusMetricPoint>)
     ConsensusMetricsHistory(u64),
+}
+
+// ===== Issue #1286: BBS+ Selective Disclosure + DataKey11 (Task #1227/#1228) =====
+
+/// Storage keys for holder/metadata indexes and BBS+ selective disclosure.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey11 {
+    // Task #1227: Holder credential index
+    HolderCredentialIndex(Address),
+    // Task #1228: Credential metadata index (issuer, subject, type → Vec<u64>)
+    CredentialMetadataIndex(Address, Address, u32),
+    // Slice reweighting audit log
+    SliceReweightingAuditLog(u64),
+    // Composition rule per credential type
+    SliceCompositionRule(u32),
+    // Attestor type registry
+    AttestorType(Address),
+    // ===== Issue #1286 =====
+    /// BBS+ signing key commitment for a credential issuer
+    /// (issuer → SHA-256 of issuer's BBS+ public key bytes)
+    BbsIssuerKeyCommitment(Address),
+    /// BBS+ selective disclosure credential attributes
+    /// (credential_id → Vec<Bytes> of attribute values)
+    BbsCredentialAttributes(u64),
+    /// BBS+ disclosure proof for a credential
+    /// (credential_id → Bytes proof)
+    BbsDisclosureProof(u64),
+    /// Flag indicating a credential was issued with BBS+ selective disclosure
+    BbsCredentialFlag(u64),
+}
+
+/// A BBS+ selective-disclosure credential record.
+///
+/// When a credential is issued with BBS+ signatures, its attributes are stored
+/// individually so the holder can later produce a proof that reveals only
+/// a chosen subset without exposing the rest.
+#[contracttype]
+#[derive(Clone)]
+pub struct BbsCredential {
+    /// The underlying credential ID (matches a regular Credential record)
+    pub credential_id: u64,
+    /// Subject address
+    pub subject: Address,
+    /// Issuer address
+    pub issuer: Address,
+    /// Credential type
+    pub credential_type: u32,
+    /// SHA-256 commitment to the issuer's BBS+ public key
+    /// (derived off-chain; stored on-chain for verification binding)
+    pub issuer_key_commitment: soroban_sdk::BytesN<32>,
+    /// Number of attributes in this credential
+    pub num_attributes: u32,
+    /// Ledger at which this was issued
+    pub issued_at_ledger: u32,
+}
+
+/// An on-chain BBS+ selective-disclosure proof.
+///
+/// The holder creates this off-chain using the BBS+ library and submits it
+/// for verification. It proves knowledge of a valid BBS+ signature over the
+/// full attribute set while only revealing the disclosed subset.
+#[contracttype]
+#[derive(Clone)]
+pub struct BbsDisclosureProofRecord {
+    /// Credential this proof is for
+    pub credential_id: u64,
+    /// Indices of disclosed attributes (0-based)
+    pub disclosed_indices: Vec<u32>,
+    /// The serialised BBS+ presentation proof bytes
+    pub proof_bytes: Bytes,
+    /// Verifier nonce used when creating the proof (replay protection)
+    pub nonce: Bytes,
+    /// Ledger at which this proof was submitted
+    pub submitted_at_ledger: u32,
 }
 
 /// Detailed attestor reputation score tracking speed, pass rate, and dispute ratio.
@@ -3262,6 +3361,13 @@ impl QuorumProofContract {
         migration::get_job(&env, migration_id)
     }
 
+    /// Operator health snapshot: storage usage proxy, active/revoked credential
+    /// counts, slice/DID counts, pause state, and schema version — all in a
+    /// single unauthenticated, O(1) call for the monitoring exporter to poll.
+    pub fn get_state_metrics(env: Env) -> state_metrics::ContractStateMetrics {
+        state_metrics::collect(&env)
+    }
+
     /// Return the schema version distribution across all credentials.
     /// Scans all credential IDs from 1 to current count and returns counts per schema version.
     pub fn get_metadata_schema_distribution(env: Env) -> soroban_sdk::Map<u32, u32> {
@@ -5001,6 +5107,14 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey::Credential(credential_id), credential);
+        let revoked_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RevokedCredentialCount)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::RevokedCredentialCount, &(revoked_count + 1));
         let mut subject_creds: Vec<u64> = env
             .storage()
             .instance()
@@ -11971,6 +12085,102 @@ impl QuorumProofContract {
         env.events().publish(topics, new_wasm_hash);
     }
 
+    // ── Scheduled upgrades ("Upgrades require manual timing") ───────────────
+
+    /// Admin-only: schedule an upgrade to `new_wasm_hash` to become executable
+    /// at `execution_time` (ledger timestamp, seconds). Overwrites any prior
+    /// pending schedule. Emits `UpgradeScheduled` so operators/monitoring can
+    /// see the planned maintenance window in advance.
+    ///
+    /// # Panics
+    /// - `admin` does not authorize the call, or is not the stored admin.
+    /// - `new_wasm_hash` is blank, or `execution_time` is not in the future.
+    pub fn schedule_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: soroban_sdk::BytesN<32>,
+        execution_time: u64,
+    ) -> upgrade_schedule::ScheduledUpgrade {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        let schedule = upgrade_schedule::schedule_upgrade(&env, new_wasm_hash.clone(), execution_time);
+
+        let topic = soroban_sdk::String::from_str(&env, "UpgradeScheduled");
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events()
+            .publish(topics, (new_wasm_hash, execution_time));
+
+        schedule
+    }
+
+    /// Admin-only: cancel the pending scheduled upgrade, if any.
+    pub fn cancel_scheduled_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        upgrade_schedule::cancel_scheduled_upgrade(&env);
+
+        let topic = soroban_sdk::String::from_str(&env, "UpgradeScheduleCancelled");
+        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, ());
+    }
+
+    /// Unauthenticated read of the pending scheduled upgrade, if any. Polled by
+    /// monitoring and the off-chain relayer that drives `execute_scheduled_upgrade`.
+    pub fn get_scheduled_upgrade(env: Env) -> Option<upgrade_schedule::ScheduledUpgrade> {
+        upgrade_schedule::get_scheduled_upgrade(&env)
+    }
+
+    /// Execute the pending scheduled upgrade if its `execution_time` has been
+    /// reached. Callable by anyone — the admin already authorized the target
+    /// WASM hash at schedule time, so a permissionless relayer (e.g. a cron job
+    /// polling this contract) can safely trigger the actual cutover. Returns
+    /// `None` (no-op, storage untouched) if nothing is scheduled or the time
+    /// gate has not yet passed.
+    pub fn execute_scheduled_upgrade(env: Env) -> Option<soroban_sdk::BytesN<32>> {
+        Self::require_not_paused(&env);
+        let applied = upgrade_schedule::execute_scheduled_upgrade(&env);
+        if let Some(ref hash) = applied {
+            let topic = soroban_sdk::String::from_str(&env, "ScheduledUpgradeExecuted");
+            let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, hash.clone());
+        }
+        applied
+    }
+
+    /// Pre-upgrade notification check: if a schedule exists and is within the
+    /// notice window of its execution time, emits `UpgradeImminent` once and
+    /// marks it notified. Intended to be polled periodically (e.g. by the same
+    /// off-chain relayer/cron that later calls `execute_scheduled_upgrade`) so
+    /// holders and operators get advance warning of planned downtime. Returns
+    /// whether a notification was emitted on this call.
+    pub fn check_upgrade_notification(env: Env) -> bool {
+        let fired = upgrade_schedule::notify_if_imminent(&env);
+        if fired {
+            if let Some(schedule) = upgrade_schedule::get_scheduled_upgrade(&env) {
+                let topic = soroban_sdk::String::from_str(&env, "UpgradeImminent");
+                let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
+                topics.push_back(topic);
+                env.events()
+                    .publish(topics, (schedule.new_wasm_hash, schedule.execution_time));
+            }
+        }
+        fired
+    }
+
     // ── Reputation Recovery (Issue #298) ─────────────────────────────────────
 
     /// Initiate a reputation recovery request for a slice member.
@@ -13735,38 +13945,9 @@ impl QuorumProofContract {
             .unwrap_or(1u32);
 
         // Compute hashes (simplified: in production use full Merkle root)
-        let credentials_hash = Bytes::from_slice(&env, &[
-            (credential_count >> 56) as u8,
-            (credential_count >> 48) as u8,
-            (credential_count >> 40) as u8,
-            (credential_count >> 32) as u8,
-            (credential_count >> 24) as u8,
-            (credential_count >> 16) as u8,
-            (credential_count >> 8) as u8,
-            credential_count as u8,
-        ]);
-
-        let slices_hash = Bytes::from_slice(&env, &[
-            (slice_count >> 56) as u8,
-            (slice_count >> 48) as u8,
-            (slice_count >> 40) as u8,
-            (slice_count >> 32) as u8,
-            (slice_count >> 24) as u8,
-            (slice_count >> 16) as u8,
-            (slice_count >> 8) as u8,
-            slice_count as u8,
-        ]);
-
-        let disputes_hash = Bytes::from_slice(&env, &[
-            (dispute_count >> 56) as u8,
-            (dispute_count >> 48) as u8,
-            (dispute_count >> 40) as u8,
-            (dispute_count >> 32) as u8,
-            (dispute_count >> 24) as u8,
-            (dispute_count >> 16) as u8,
-            (dispute_count >> 8) as u8,
-            dispute_count as u8,
-        ]);
+        let credentials_hash = Self::u64_to_hash_bytes(&env, credential_count);
+        let slices_hash = Self::u64_to_hash_bytes(&env, slice_count);
+        let disputes_hash = Self::u64_to_hash_bytes(&env, dispute_count);
 
         // Generate snapshot ID
         let snapshot_id: u64 = env
@@ -13836,14 +14017,40 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Encode a `u64` counter as an 8-byte big-endian hash for snapshot
+    /// integrity checks (simplified stand-in for a full Merkle root).
+    ///
+    /// # Issue #912: State Snapshot and Restore
+    fn u64_to_hash_bytes(env: &Env, value: u64) -> Bytes {
+        Bytes::from_slice(
+            env,
+            &[
+                (value >> 56) as u8,
+                (value >> 48) as u8,
+                (value >> 40) as u8,
+                (value >> 32) as u8,
+                (value >> 24) as u8,
+                (value >> 16) as u8,
+                (value >> 8) as u8,
+                value as u8,
+            ],
+        )
+    }
+
     /// Restore contract state from a snapshot.
-    /// Only the admin can restore. This is a no-op stub — full restoration would require
-    /// iterating through all stored credentials and slices.
-    /// 
-    /// In production, this would:
-    /// 1. Validate the snapshot hash matches current state
-    /// 2. Restore credential metadata, slice definitions, and dispute records
-    /// 3. Verify the restoration against the snapshot hash
+    ///
+    /// Only the admin can restore. The snapshot's stored hashes are
+    /// recomputed from its own recorded counts and compared against the
+    /// hashes captured at snapshot time; a mismatch means the snapshot
+    /// entry was corrupted or tampered with in storage and restoration is
+    /// aborted. On success, the aggregate credential/slice/dispute counters
+    /// are reset to the values captured in the snapshot.
+    ///
+    /// Full per-record restoration (individual credentials, slices, and
+    /// disputes) is out of scope for on-chain execution due to gas limits
+    /// on large state; those are restored off-chain via
+    /// `scripts/restore_from_backup.sh` using the same snapshot data
+    /// exported by `create_state_snapshot`. See `docs/backup-system.md`.
     ///
     /// # Parameters
     /// - `admin`: The admin address; must authorize.
@@ -13852,7 +14059,9 @@ impl QuorumProofContract {
     /// # Panics
     /// - If the contract is paused
     /// - If the admin is not authorized
-    /// - If the snapshot does not exist
+    /// - If the snapshot does not exist (`SnapshotNotFound`)
+    /// - If the snapshot's state version is incompatible with the current schema
+    /// - If the snapshot's recorded hashes do not match its recorded counts (`SnapshotCorrupted`)
     ///
     /// # Issue #912: State Snapshot and Restore
     pub fn restore_from_snapshot(env: Env, admin: Address, snapshot_id: u64) {
@@ -13878,20 +14087,56 @@ impl QuorumProofContract {
             "snapshot state version mismatch"
         );
 
+        // Validate snapshot integrity: recompute hashes from the snapshot's
+        // own recorded counts and compare against what was stored. A
+        // mismatch indicates the snapshot record was corrupted after
+        // creation and must not be used to restore state.
+        let expected_credentials_hash = Self::u64_to_hash_bytes(&env, snapshot.credential_count);
+        let expected_slices_hash = Self::u64_to_hash_bytes(&env, snapshot.slice_count);
+        let expected_disputes_hash = Self::u64_to_hash_bytes(&env, snapshot.dispute_count);
+        if expected_credentials_hash != snapshot.credentials_hash
+            || expected_slices_hash != snapshot.slices_hash
+            || expected_disputes_hash != snapshot.disputes_hash
+        {
+            panic_with_error!(&env, ContractError::SnapshotCorrupted);
+        }
+
+        // Restore the aggregate counters captured in the snapshot. Individual
+        // credential/slice/dispute records are restored off-chain (see
+        // docs/backup-system.md) since iterating and rewriting the full data
+        // set on-chain would exceed transaction resource limits for large
+        // registries.
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialCount, &snapshot.credential_count);
+        env.storage()
+            .instance()
+            .set(&DataKey::SliceCount, &snapshot.slice_count);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeCount, &snapshot.dispute_count);
+
+        // Record which snapshot was last restored, for audit purposes.
+        env.storage()
+            .instance()
+            .set(&DataKey::LastRestoredSnapshot, &snapshot_id);
+        env.storage()
+            .instance()
+            .extend_ttl(EXTENDED_TTL, EXTENDED_TTL);
+
         // Log the restoration event (emit via soroban event system)
         env.events().publish(
             (soroban_sdk::Symbol::short("restore"), snapshot_id),
             soroban_sdk::Symbol::short("restored"),
         );
+    }
 
-        // In a full implementation:
-        // 1. Iterate through all credentials and restore from backup storage
-        // 2. Restore slice definitions
-        // 3. Restore dispute records
-        // 4. Verify hashes match
-
-        // For now, just mark that restoration occurred
-        // (actual data restoration would happen incrementally or via batch operations)
+    /// Return the ID of the most recently restored snapshot, if any restore
+    /// has occurred since deployment.
+    ///
+    /// # Issue #912: State Snapshot and Restore
+    pub fn get_last_restored_snapshot(env: Env) -> Option<u64> {
+        env.storage().instance().get(&DataKey::LastRestoredSnapshot)
     }
 
     // ── Credential Holder Recovery (Issue #290) ──────────────────────────────
@@ -16180,6 +16425,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
         };
         crate::rbac::assign_role(&env, &admin, &target, rbac_role, expires_at);
@@ -16207,6 +16453,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => panic_with_error!(&env, ContractError::InvalidEnumValue),
         };
         crate::rbac::delegate_role(&env, &delegator, &delegatee, rbac_role, expires_at);
@@ -16226,6 +16473,7 @@ impl QuorumProofContract {
             2 => rbac::Role::Issuer,
             3 => rbac::Role::Verifier,
             4 => rbac::Role::RevocationAgent,
+            5 => rbac::Role::Auditor,
             _ => return false,
         };
         crate::rbac::has_role(&env, &address, rbac_role)
@@ -16244,6 +16492,49 @@ impl QuorumProofContract {
     /// Get the full RBAC audit log.
     pub fn get_role_audit_log(env: Env) -> Vec<rbac::RoleAuditEntry> {
         crate::rbac::get_audit_log(&env)
+    }
+
+    // ── BBS+ Key Escrow (#1295) ─────────────────────────────────────────
+
+    /// Deposits a threshold (`threshold`-of-`guardians.len()`) Shamir-split
+    /// backup of the issuer's BBS+ signing key. Splitting happens off-chain
+    /// (see `bbs_plus_v1::escrow`); this only stores each guardian's opaque
+    /// share so it can be recovered on threshold-approved request.
+    /// Issuer-only.
+    pub fn deposit_key_escrow(
+        env: Env,
+        issuer: Address,
+        guardians: Vec<Address>,
+        shares: Vec<BytesN<32>>,
+        threshold: u32,
+    ) -> key_escrow::KeyEscrow {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::require_role(&env, &issuer, rbac::Role::Issuer);
+        crate::key_escrow::deposit_key_escrow(&env, &issuer, guardians, shares, threshold)
+    }
+
+    /// A guardian confirms it holds its share and consents to a recovery
+    /// for `issuer`'s escrow. Returns the number of guardians who have
+    /// submitted so far.
+    pub fn submit_recovery_share(env: Env, guardian: Address, issuer: Address) -> u32 {
+        guardian.require_auth();
+        Self::require_not_paused(&env);
+        crate::key_escrow::submit_recovery_share(&env, &guardian, &issuer)
+    }
+
+    /// Once `threshold` guardians have submitted, the issuer (or contract
+    /// admin) retrieves the stored share blobs for off-chain Shamir
+    /// reconstruction.
+    pub fn recover_key(env: Env, caller: Address, issuer: Address) -> Vec<key_escrow::GuardianShare> {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        crate::key_escrow::recover_key(&env, &caller, &issuer)
+    }
+
+    /// Gets the escrow configuration/status for an issuer, if any.
+    pub fn get_key_escrow(env: Env, issuer: Address) -> Option<key_escrow::KeyEscrow> {
+        crate::key_escrow::get_key_escrow(&env, &issuer)
     }
 
     // ── Attestation Queue Management (#843) ────────────────────────────
@@ -18200,361 +18491,200 @@ impl QuorumProofContract {
             .unwrap_or(AttestorType::Other)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Issue #1287 — BBS+ Revocation Registry Integration
-    // ─────────────────────────────────────────────────────────────────────────
+    // ===== Issue #1286: BBS+ Selective Disclosure =====
 
-    /// Add a credential to the BBS+ revocation accumulator.
+    /// Issue a credential that uses BBS+ signatures for selective disclosure.
     ///
-    /// Updates the on-chain accumulator state to epoch n+1 with the supplied
-    /// `accumulator_value` (serialized BLS12-381 G1 point produced off-chain
-    /// by the accumulator manager) and records `credential_id` as a member.
-    /// Admin or issuer authentication is required.
+    /// This extends the standard `issue_credential` flow by additionally:
+    /// 1. Storing each attribute individually under `DataKey11::BbsCredentialAttributes`.
+    /// 2. Recording the issuer's BBS+ public key commitment.
+    /// 3. Flagging the credential as BBS+-enabled.
     ///
-    /// # Parameters
-    /// - `caller`: The admin or issuer performing the update.
-    /// - `credential_id`: The credential being added to the accumulator.
-    /// - `accumulator_value`: Serialized updated accumulator point bytes.
-    pub fn add_to_revocation_accumulator(
+    /// The `attributes` vector contains one `Bytes` entry per credential field
+    /// (e.g., `[name_bytes, degree_bytes, grad_year_bytes]`). The holder can
+    /// later call `create_bbs_disclosure_proof` to reveal any subset.
+    ///
+    /// Returns the new credential ID (same as a standard `issue_credential` call).
+    pub fn issue_selective_disclosure_credential(
         env: Env,
-        caller: Address,
-        credential_id: u64,
-        accumulator_value: Bytes,
-    ) {
-        bbs_plus_features::add_to_revocation_accumulator(
-            &env,
-            caller,
-            credential_id,
-            accumulator_value,
+        issuer: Address,
+        subject: Address,
+        credential_type: u32,
+        metadata_hash: Bytes,
+        attributes: Vec<Bytes>,
+        issuer_bbs_pubkey_hash: soroban_sdk::BytesN<32>,
+        expires_at: Option<u64>,
+        nonce: u64,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(!attributes.is_empty(), "attributes cannot be empty");
+        assert!(
+            attributes.len() <= 255,
+            "too many attributes (max 255)"
         );
+
+        // Issue the base credential using the existing flow
+        let credential_id = Self::issue_credential(
+            env.clone(),
+            issuer.clone(),
+            subject.clone(),
+            credential_type,
+            metadata_hash,
+            expires_at,
+            nonce,
+        );
+
+        // Store BBS+ issuer key commitment
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsIssuerKeyCommitment(issuer.clone()), &issuer_bbs_pubkey_hash);
+
+        // Store the attribute set for later selective disclosure
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsCredentialAttributes(credential_id), &attributes);
+
+        // Record BBS+ credential metadata
+        let bbs_cred = BbsCredential {
+            credential_id,
+            subject,
+            issuer,
+            credential_type,
+            issuer_key_commitment: issuer_bbs_pubkey_hash,
+            num_attributes: attributes.len(),
+            issued_at_ledger: env.ledger().sequence(),
+        };
+        // Store alongside the flag
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsCredentialFlag(credential_id), &bbs_cred);
+
+        credential_id
     }
 
-    /// Retrieve the current BBS+ revocation accumulator state.
+    /// Retrieve the stored BBS+ attributes for a credential.
     ///
-    /// # Returns
-    /// `Some(BbsRevocationAccumulator)` if an accumulator has been
-    /// initialised, `None` otherwise.
-    pub fn get_revocation_accumulator(
+    /// Returns the attribute vector stored during `issue_selective_disclosure_credential`.
+    /// Panics if the credential was not issued with BBS+ support.
+    pub fn get_bbs_credential_attributes(
         env: Env,
-    ) -> Option<bbs_plus_features::BbsRevocationAccumulator> {
-        bbs_plus_features::get_revocation_accumulator(&env)
+        credential_id: u64,
+    ) -> Vec<Bytes> {
+        env.storage()
+            .instance()
+            .get(&DataKey11::BbsCredentialAttributes(credential_id))
+            .expect("credential was not issued with BBS+ selective disclosure")
     }
 
-    /// Store a BBS+ non-revocation proof for a credential.
+    /// Derive a holder key commitment for BBS+ signing.
     ///
-    /// Holders produce the `proof_bytes` off-chain using the `bbs_plus_v1`
-    /// library's `NonRevocationProof::create` and submit them here.
-    /// Verifiers later call `verify_non_revocation` to check the proof is
-    /// current.
-    ///
-    /// # Parameters
-    /// - `holder`: The credential holder (must be authenticated).
-    /// - `credential_id`: The credential the proof belongs to.
-    /// - `proof_bytes`: Serialized non-revocation proof.
-    pub fn create_non_revocation_proof(
+    /// The commitment is `SHA-256(holder_address_xdr || credential_id.to_le_bytes())`.
+    /// This provides a deterministic, credential-scoped key handle that the holder
+    /// uses off-chain to derive their BBS+ holder key without exposing it on-chain.
+    pub fn derive_holder_key_commitment(
         env: Env,
         holder: Address,
         credential_id: u64,
+    ) -> soroban_sdk::BytesN<32> {
+        let mut input = Bytes::new(&env);
+        // Use the holder address XDR encoding as the key material
+        let holder_xdr = holder.to_xdr(&env);
+        input.append(&holder_xdr);
+        input.extend_from_array(&credential_id.to_le_bytes());
+        env.crypto().sha256(&input).into()
+    }
+
+    /// Submit a BBS+ selective-disclosure proof for a credential on-chain.
+    ///
+    /// The proof is produced off-chain by the holder using the BBS+ library:
+    ///   `BbsPresentation::create_presentation(rng, credential, vk, messages, disclosed_indices, nonce)`
+    ///
+    /// On-chain we:
+    /// 1. Verify the credential exists and is BBS+-enabled.
+    /// 2. Validate that `disclosed_indices` are within bounds.
+    /// 3. Store the proof record for auditing.
+    ///
+    /// Returns the serialised proof bytes (echoed back so callers can confirm
+    /// what was stored).
+    ///
+    /// # Parameters
+    /// - `credential_id` — the credential to produce a disclosure for
+    /// - `disclosed_indices` — 0-based indices of attributes to reveal
+    /// - `proof_bytes` — the serialised BBS+ PresentationProof
+    /// - `nonce` — verifier nonce used when generating the proof
+    pub fn create_bbs_disclosure_proof(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+        disclosed_indices: Vec<u32>,
         proof_bytes: Bytes,
-    ) {
-        bbs_plus_features::create_non_revocation_proof(&env, holder, credential_id, proof_bytes);
-    }
+        nonce: Bytes,
+    ) -> Bytes {
+        holder.require_auth();
 
-    /// Verify a stored BBS+ non-revocation proof for a credential.
-    ///
-    /// Returns `true` only when a proof record exists for the credential
-    /// AND its epoch matches the current accumulator epoch.  A stale proof
-    /// (epoch behind the current accumulator epoch) is treated as invalid —
-    /// the holder must refresh their proof after a revocation event.
-    ///
-    /// # Parameters
-    /// - `credential_id`: The credential to check.
-    ///
-    /// # Returns
-    /// `true` if a valid, current-epoch proof is on file; `false` otherwise.
-    pub fn verify_non_revocation(env: Env, credential_id: u64) -> bool {
-        bbs_plus_features::verify_non_revocation(&env, credential_id)
-    }
+        // Verify credential exists and is BBS+-enabled
+        let bbs_cred: BbsCredential = env
+            .storage()
+            .instance()
+            .get(&DataKey11::BbsCredentialFlag(credential_id))
+            .expect("credential was not issued with BBS+ selective disclosure");
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Issue #1288 — BBS+ Performance Optimization
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Memoize a BBS+ signature verification result.
-    ///
-    /// Stores the `is_valid` result keyed by SHA-256(vk_bytes || msg_bytes ||
-    /// sig_bytes) so subsequent `get_cached_bbs_signature` calls with the
-    /// same inputs short-circuit the expensive pairing check.
-    ///
-    /// # Parameters
-    /// - `verifying_key_bytes`: Serialized BBS+ verifying key.
-    /// - `message_bytes`: Serialized message payload.
-    /// - `signature_bytes`: Serialized BBS+ signature.
-    /// - `is_valid`: The verification result to cache.
-    pub fn cache_bbs_signature(
-        env: Env,
-        verifying_key_bytes: Bytes,
-        message_bytes: Bytes,
-        signature_bytes: Bytes,
-        is_valid: bool,
-    ) {
-        bbs_plus_features::cache_bbs_signature(
-            &env,
-            verifying_key_bytes,
-            message_bytes,
-            signature_bytes,
-            is_valid,
+        assert_eq!(
+            bbs_cred.subject, holder,
+            "only the credential subject can create a disclosure proof"
         );
+        assert!(!disclosed_indices.is_empty(), "disclosed_indices cannot be empty");
+        assert!(!proof_bytes.is_empty(), "proof_bytes cannot be empty");
+        assert!(!nonce.is_empty(), "nonce cannot be empty");
+
+        // Validate indices are within attribute count bounds
+        let num_attrs = bbs_cred.num_attributes;
+        for i in 0..disclosed_indices.len() {
+            let idx = disclosed_indices.get(i).unwrap();
+            assert!(idx < num_attrs, "disclosed index out of bounds");
+        }
+
+        // Store the proof record on-chain
+        let record = BbsDisclosureProofRecord {
+            credential_id,
+            disclosed_indices,
+            proof_bytes: proof_bytes.clone(),
+            nonce,
+            submitted_at_ledger: env.ledger().sequence(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsDisclosureProof(credential_id), &record);
+
+        proof_bytes
     }
 
-    /// Look up a memoized BBS+ signature verification result.
-    ///
-    /// Returns `Some(BbsSignatureCache)` on a cache hit, `None` on a miss.
-    ///
-    /// # Parameters
-    /// - `verifying_key_bytes`: Serialized BBS+ verifying key.
-    /// - `message_bytes`: Serialized message payload.
-    /// - `signature_bytes`: Serialized BBS+ signature.
-    pub fn get_cached_bbs_signature(
+    /// Retrieve the stored BBS+ disclosure proof record for a credential.
+    pub fn get_bbs_disclosure_proof(
         env: Env,
-        verifying_key_bytes: Bytes,
-        message_bytes: Bytes,
-        signature_bytes: Bytes,
-    ) -> Option<bbs_plus_features::BbsSignatureCache> {
-        bbs_plus_features::get_cached_bbs_signature(
-            &env,
-            &verifying_key_bytes,
-            &message_bytes,
-            &signature_bytes,
-        )
+        credential_id: u64,
+    ) -> BbsDisclosureProofRecord {
+        env.storage()
+            .instance()
+            .get(&DataKey11::BbsDisclosureProof(credential_id))
+            .expect("no BBS+ disclosure proof found for this credential")
     }
 
-    /// Batch BBS+ signature verification using the memoization cache.
-    ///
-    /// For each item in `items` the cache is consulted; cache misses return
-    /// `is_valid: false` indicating the client must perform the pairing
-    /// check off-chain and populate the cache via `cache_bbs_signature`.
-    ///
-    /// # Parameters
-    /// - `items`: Vector of `BbsBatchVerifyItem` input records.
-    ///
-    /// # Returns
-    /// A vector of `BbsBatchVerifyResult` with one entry per input item,
-    /// in the same order.
-    pub fn batch_verify_bbs_signatures(
-        env: Env,
-        items: Vec<bbs_plus_features::BbsBatchVerifyItem>,
-    ) -> Vec<bbs_plus_features::BbsBatchVerifyResult> {
-        bbs_plus_features::batch_verify_bbs_signatures(&env, items)
+    /// Check whether a credential was issued with BBS+ selective disclosure.
+    pub fn is_bbs_credential(env: Env, credential_id: u64) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey11::BbsCredentialFlag(credential_id))
     }
 
-    /// Store (or refresh) precomputed BBS+ generator material for an issuer.
-    ///
-    /// Caches the serialized verifying key bytes so consumers retrieve
-    /// them without re-running the hash-to-curve generator derivation.
-    ///
-    /// # Parameters
-    /// - `issuer`: The issuer address (must be authenticated).
-    /// - `verifying_key_bytes`: Serialized verifying key (W||Q1||H₀||…||Hₙ).
-    pub fn store_bbs_precomputed_generators(
-        env: Env,
-        issuer: Address,
-        verifying_key_bytes: Bytes,
-    ) {
-        bbs_plus_features::store_bbs_precomputed_generators(&env, issuer, verifying_key_bytes);
-    }
-
-    /// Retrieve precomputed BBS+ generator material for an issuer.
-    ///
-    /// # Parameters
-    /// - `issuer`: The issuer address.
-    ///
-    /// # Returns
-    /// `Some(BbsPrecomputedGenerators)` if a precomputation is on file,
-    /// `None` otherwise.
-    pub fn get_bbs_precomputed_generators(
-        env: Env,
-        issuer: Address,
-    ) -> Option<bbs_plus_features::BbsPrecomputedGenerators> {
-        bbs_plus_features::get_bbs_precomputed_generators(&env, issuer)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Issue #1289 — BBS+ Key Rotation for Issuers
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Register or rotate a BBS+ issuer key — admin-only.
-    ///
-    /// On first call for an issuer this registers key version 1.
-    /// On subsequent calls it supersedes the current key and appends the
-    /// new one as the next version.  Old key records are preserved so
-    /// credentials signed under them continue to be verifiable during a
-    /// configurable grace window.
-    ///
-    /// # Parameters
-    /// - `admin`: The contract admin (must be authenticated).
-    /// - `issuer`: The issuer whose key is being rotated.
-    /// - `new_key`: Serialized new BBS+ verifying key bytes.
-    pub fn rotate_issuer_key(
-        env: Env,
-        admin: Address,
-        issuer: Address,
-        new_key: Bytes,
-    ) {
-        bbs_plus_features::rotate_issuer_key(&env, admin, issuer, new_key);
-    }
-
-    /// Get the full key-version history for an issuer.
-    ///
-    /// # Parameters
-    /// - `issuer`: The issuer address.
-    ///
-    /// # Returns
-    /// An ordered `Vec<BbsIssuerKeyRecord>` (oldest first).
-    pub fn get_bbs_issuer_key_history(
-        env: Env,
-        issuer: Address,
-    ) -> Vec<bbs_plus_features::BbsIssuerKeyRecord> {
-        bbs_plus_features::get_bbs_issuer_key_history(&env, issuer)
-    }
-
-    /// Get summary information about an issuer's BBS+ key versions.
-    ///
-    /// # Parameters
-    /// - `issuer`: The issuer address.
-    ///
-    /// # Returns
-    /// A `BbsIssuerKeyInfo` summary record.
-    pub fn get_bbs_issuer_key_info(
-        env: Env,
-        issuer: Address,
-    ) -> bbs_plus_features::BbsIssuerKeyInfo {
-        bbs_plus_features::get_bbs_issuer_key_info(&env, issuer)
-    }
-
-    /// Get the verifying key record for a specific version.
-    ///
-    /// # Parameters
-    /// - `issuer`: The issuer address.
-    /// - `version`: The key version number (1-based).
-    ///
-    /// # Returns
-    /// `Some(BbsIssuerKeyRecord)` if the version exists, `None` otherwise.
-    pub fn get_bbs_issuer_key_version(
-        env: Env,
-        issuer: Address,
-        version: u32,
-    ) -> Option<bbs_plus_features::BbsIssuerKeyRecord> {
-        bbs_plus_features::get_bbs_issuer_key_version(&env, issuer, version)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Issue #1290 — BBS+ Attribute Privacy Controls
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Set or update the privacy level for a credential attribute.
-    ///
-    /// Admin / credential-type issuer only.  The `sensitivity` governs
-    /// whether downstream selective-disclosure proofs may include this
-    /// attribute.
-    ///
-    /// Sensitivity levels:
-    /// - `1` = Public       — freely disclosable.
-    /// - `2` = Internal     — permissioned verifiers only.
-    /// - `3` = Confidential — requires explicit holder consent.
-    ///
-    /// # Parameters
-    /// - `caller`: Admin or issuer setting the policy (must be authenticated).
-    /// - `credential_type`: The credential type the policy applies to.
-    /// - `attribute_name`: The attribute identifier bytes (e.g. `b"salary"`).
-    /// - `sensitivity`: The `PrivacyLevel` value (1, 2, or 3).
-    pub fn set_attribute_privacy(
-        env: Env,
-        caller: Address,
-        credential_type: u32,
-        attribute_name: Bytes,
-        sensitivity: bbs_plus_features::PrivacyLevel,
-    ) {
-        bbs_plus_features::set_attribute_privacy(
-            &env,
-            caller,
-            credential_type,
-            attribute_name,
-            sensitivity,
-        );
-    }
-
-    /// Get the privacy policy for a (credential_type, attribute_name) pair.
-    ///
-    /// Returns a `Public` default policy when no explicit policy has been set.
-    ///
-    /// # Parameters
-    /// - `credential_type`: The credential type to query.
-    /// - `attribute_name`: The attribute identifier bytes.
-    ///
-    /// # Returns
-    /// An `AttributePrivacyPolicy` record.
-    pub fn get_attribute_privacy(
-        env: Env,
-        credential_type: u32,
-        attribute_name: Bytes,
-    ) -> bbs_plus_features::AttributePrivacyPolicy {
-        bbs_plus_features::get_attribute_privacy(&env, credential_type, attribute_name)
-    }
-
-    /// Check whether disclosure of a specific attribute is permitted.
-    ///
-    /// Business rules:
-    /// - `Public`       → always permitted.
-    /// - `Internal`     → permitted only when `verifier_is_permissioned = true`.
-    /// - `Confidential` → never permitted (requires separate consent-grant).
-    ///
-    /// # Parameters
-    /// - `credential_type`: The credential type to check.
-    /// - `attribute_name`: The attribute identifier bytes.
-    /// - `verifier_is_permissioned`: Whether the requesting verifier holds
-    ///   a permission grant.
-    ///
-    /// # Returns
-    /// A `DisclosureCheckResult` with `disclosure_permitted` set accordingly.
-    pub fn check_disclosure_permitted(
-        env: Env,
-        credential_type: u32,
-        attribute_name: Bytes,
-        verifier_is_permissioned: bool,
-    ) -> bbs_plus_features::DisclosureCheckResult {
-        bbs_plus_features::check_disclosure_permitted(
-            &env,
-            credential_type,
-            attribute_name,
-            verifier_is_permissioned,
-        )
-    }
-
-    /// Batch-check disclosure permissions for multiple attributes of the
-    /// same credential type.
-    ///
-    /// # Parameters
-    /// - `credential_type`: The credential type to check.
-    /// - `attribute_names`: The list of attribute identifier bytes to check.
-    /// - `verifier_is_permissioned`: Whether the requesting verifier holds
-    ///   a permission grant.
-    ///
-    /// # Returns
-    /// A `Map<Bytes, bool>` mapping each attribute name to its disclosure
-    /// permission.
-    pub fn batch_check_disclosure(
-        env: Env,
-        credential_type: u32,
-        attribute_names: Vec<Bytes>,
-        verifier_is_permissioned: bool,
-    ) -> Map<Bytes, bool> {
-        bbs_plus_features::batch_check_disclosure(
-            &env,
-            credential_type,
-            attribute_names,
-            verifier_is_permissioned,
-        )
+    /// Get the BBS+ credential metadata record.
+    pub fn get_bbs_credential(env: Env, credential_id: u64) -> BbsCredential {
+        env.storage()
+            .instance()
+            .get(&DataKey11::BbsCredentialFlag(credential_id))
+            .expect("credential was not issued with BBS+ selective disclosure")
     }
 }
 
@@ -22318,6 +22448,100 @@ mod feature_tests {
         let env2 = Env::from_snapshot_file(snap_path);
         assert_eq!(env.ledger().sequence(), env2.ledger().sequence());
         assert_eq!(env.ledger().timestamp(), env2.ledger().timestamp());
+    }
+
+    // ── State export/restore (Issue #912) ──────────────────────────────────────
+
+    /// `create_state_snapshot` captures the current counters and is
+    /// retrievable via `get_snapshot` and `list_snapshots`.
+    #[test]
+    fn test_create_state_snapshot_captures_counts() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmBackupHash0000000000000000000000");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "pre-upgrade backup"));
+        assert_eq!(snapshot_id, 1);
+        assert_eq!(client.list_snapshots(), Vec::from_array(&env, [1u64]));
+
+        let snapshot = client.get_snapshot(&snapshot_id).unwrap();
+        assert_eq!(snapshot.credential_count, 1);
+        assert_eq!(snapshot.slice_count, 0);
+    }
+
+    /// `restore_from_snapshot` resets the aggregate counters back to what
+    /// was recorded at snapshot time, even after further state changes.
+    #[test]
+    fn test_restore_from_snapshot_resets_counters() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmBackupHash0000000000000000000000");
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "checkpoint"));
+        assert_eq!(client.get_credential_count(), 1);
+
+        // Simulate further state changes after the snapshot was taken.
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+        assert_eq!(client.get_credential_count(), 3);
+
+        client.restore_from_snapshot(&admin, &snapshot_id);
+
+        assert_eq!(client.get_credential_count(), 1);
+        assert_eq!(client.get_last_restored_snapshot(), Some(snapshot_id));
+    }
+
+    /// Restoring a snapshot ID that was never created fails with `SnapshotNotFound`.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #85)")]
+    fn test_restore_from_snapshot_missing_id_fails() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        client.restore_from_snapshot(&admin, &999u64);
+    }
+
+    /// Restoring is rejected while the contract is paused, matching every
+    /// other admin-gated state mutation.
+    #[test]
+    #[should_panic]
+    fn test_restore_from_snapshot_fails_when_paused() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "checkpoint"));
+        client.pause(&admin);
+        client.restore_from_snapshot(&admin, &snapshot_id);
+    }
+
+    /// A snapshot record whose stored hash no longer matches its own
+    /// recorded counts (e.g. corrupted or tampered storage) is rejected
+    /// with `SnapshotCorrupted` rather than silently restoring bad data.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #86)")]
+    fn test_restore_from_snapshot_detects_corrupted_hash() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let snapshot_id = client.create_state_snapshot(&admin, &String::from_str(&env, "checkpoint"));
+
+        env.as_contract(&client.address, || {
+            let mut snapshot: StateSnapshot = env
+                .storage()
+                .instance()
+                .get(&DataKey::StateSnapshot(snapshot_id))
+                .unwrap();
+            // Tamper with the recorded count without updating its hash.
+            snapshot.credential_count = 42;
+            env.storage()
+                .instance()
+                .set(&DataKey::StateSnapshot(snapshot_id), &snapshot);
+        });
+
+        client.restore_from_snapshot(&admin, &snapshot_id);
     }
 
     // ── Property-based fuzz tests ─────────────────────────────────────────────
@@ -26961,3 +27185,5 @@ mod migration_tests;
 
 mod circuit_breaker;
 mod migration;
+mod state_metrics;
+mod upgrade_schedule;
