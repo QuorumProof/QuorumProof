@@ -17,12 +17,14 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
+import authRouter from './routes/auth.js';         // #1299 MFA / #1300 session management
 import { cacheControl } from './middleware/cacheControl.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
+import { requireMfa } from './middleware/auth.js';    // #1299 MFA gate for admin endpoints
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -82,6 +84,12 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
+// #1299 MFA auth endpoints / #1300 session management
+app.use('/api/auth', authRouter);
+// #1299 — Admin-only endpoints require a fully MFA-verified session in addition to RBAC.
+// The requireMfa middleware checks mfaVerified=true in the Bearer token so that
+// even a valid (non-MFA) session cannot access admin bridge operations.
+app.use('/api/bridge', requireMfa);
 
 app.get('/health', (_req, res) => {
   res.json({
