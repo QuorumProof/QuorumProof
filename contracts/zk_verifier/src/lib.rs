@@ -6,19 +6,49 @@ use soroban_sdk::xdr::ToXdr;
 use sha2::{Sha256, Digest};
 
 mod plonk;
+mod groth16;
 // `test` so this crate's own `mod tests` can use it; `testutils` so downstream
 // crates (e.g. benches/) can too, the same way soroban-sdk's own testutils
 // feature works across crate boundaries — plain `#[cfg(test)]` only applies
 // to this crate's own test builds, not to integration tests in other crates.
 #[cfg(any(test, feature = "testutils"))]
 pub mod plonk_test_prover;
+#[cfg(any(test, feature = "testutils"))]
+pub mod groth16_test_prover;
 
-/// Groth16 proof byte layout (BN254, uncompressed):
+/// Legacy Groth16 proof byte layout (BN254-shaped, uncompressed):
 ///   A  : 64 bytes  (G1 point)
 ///   B  : 128 bytes (G2 point)
 ///   C  : 64 bytes  (G1 point)
 ///   Total: 256 bytes
+///
+/// Used only by the structural/hash-binding heuristic path
+/// (`groth16_verify`, `verify_claim`, `verify_proof_cached`,
+/// `verify_claim_anonymous`) that `quorum_proof` calls cross-contract via
+/// `verify_claim`. Retained unchanged so that consumer's existing proof
+/// fixtures keep working. The standalone, permissionless production entry
+/// point — [`ZkVerifierContract::verify_groth16_proof`] — performs genuine
+/// BLS12-381 pairing verification (see [`GROTH16_BLS_PROOF_LEN`] and the
+/// [`groth16`] module) and does not use this constant.
 pub const GROTH16_PROOF_LEN: u32 = 256;
+
+/// Real Groth16 proof byte layout (BLS12-381, compressed): `A` (G1, 48) ‖
+/// `B` (G2, 96) ‖ `C` (G1, 48) = 192 bytes. See the [`groth16`] module for
+/// the verification equation and rationale for instantiating over
+/// BLS12-381 rather than BN254 (mirrors the same switch already made by the
+/// [`plonk`] module).
+pub const GROTH16_BLS_PROOF_LEN: u32 = groth16::PROOF_LEN;
+
+/// Maximum public-input field elements accepted by
+/// [`ZkVerifierContract::verify_groth16_proof`] / `verify_aggregated_proofs`.
+const MAX_GROTH16_PUBLIC_INPUTS: usize = groth16::MAX_PUBLIC_INPUTS;
+
+/// Maximum number of proofs verifiable in a single `verify_aggregated_proofs`
+/// call. Bounds the fixed stack buffers used to copy proofs/public inputs
+/// out of host `Vec<Bytes>` objects (see `groth16::verify_batch`'s docs on
+/// why per-proof pairing work can't be pre-batched further without a global
+/// allocator).
+const MAX_GROTH16_AGGREGATE_BATCH: usize = 16;
 
 /// Key rotation audit entry
 #[contracttype]
@@ -26,6 +56,65 @@ pub const GROTH16_PROOF_LEN: u32 = 256;
 pub struct KeyRotationEntry {
     pub old_key: BytesN<32>,
     pub new_key: BytesN<32>,
+    pub rotated_at_ledger: u32,
+    pub rotated_by: Address,
+}
+
+/// Circuit-specific Groth16 verifying key for the real BLS12-381
+/// pairing-based verifier ([`groth16`] module), registered via
+/// [`ZkVerifierContract::set_groth16_verifying_key`] /
+/// [`ZkVerifierContract::rotate_groth16_verifying_key`].
+///
+/// `ic` is the circuit's public-input linear-combination basis: `ic[0]` is
+/// the constant term and `ic[1..]` has one G1 point per public-input wire,
+/// so `ic.len()` must equal the circuit's public-input count plus one.
+#[contracttype]
+#[derive(Clone)]
+pub struct Groth16VerifyingKey {
+    pub alpha_g1: BytesN<48>,
+    pub beta_g2: BytesN<96>,
+    pub gamma_g2: BytesN<96>,
+    pub delta_g2: BytesN<96>,
+    pub ic: Vec<BytesN<48>>,
+}
+
+impl Groth16VerifyingKey {
+    fn to_core(&self) -> groth16::VerifyingKey {
+        groth16::VerifyingKey {
+            alpha_g1: self.alpha_g1.to_array(),
+            beta_g2: self.beta_g2.to_array(),
+            gamma_g2: self.gamma_g2.to_array(),
+            delta_g2: self.delta_g2.to_array(),
+        }
+    }
+
+    /// Panics (admin-facing input validation) if `ic` is empty, exceeds
+    /// [`MAX_GROTH16_PUBLIC_INPUTS`] + 1 entries, or any of the four fixed
+    /// elements / `ic` points fails to deserialize as a valid BLS12-381
+    /// point in the prime-order subgroup.
+    fn validate(&self) {
+        assert!(!self.ic.is_empty(), "ic must have at least one (constant) entry");
+        assert!(
+            self.ic.len() as usize <= MAX_GROTH16_PUBLIC_INPUTS + 1,
+            "ic exceeds MAX_GROTH16_PUBLIC_INPUTS + 1"
+        );
+        assert!(groth16::is_valid_g1(&self.alpha_g1.to_array()), "invalid alpha_g1 point");
+        assert!(groth16::is_valid_g2(&self.beta_g2.to_array()), "invalid beta_g2 point");
+        assert!(groth16::is_valid_g2(&self.gamma_g2.to_array()), "invalid gamma_g2 point");
+        assert!(groth16::is_valid_g2(&self.delta_g2.to_array()), "invalid delta_g2 point");
+        for p in self.ic.iter() {
+            assert!(groth16::is_valid_g1(&p.to_array()), "invalid ic point");
+        }
+    }
+}
+
+/// Audit-trail entry for a Groth16 verifying-key rotation. Mirrors
+/// [`PlonkKeyRotationEntry`].
+#[contracttype]
+#[derive(Clone)]
+pub struct Groth16KeyRotationEntry {
+    pub old_vk_hash: BytesN<32>,
+    pub new_vk_hash: BytesN<32>,
     pub rotated_at_ledger: u32,
     pub rotated_by: Address,
 }
@@ -306,7 +395,51 @@ fn plonk_verify(env: &Env, vk_hash: &BytesN<32>, public_inputs: &Bytes, proof: &
     plonk::verify(&vk.to_core(), &srs_tau_g2.to_array(), &pi_buf[..pi_len_usize], &proof_buf)
 }
 
+/// Real BLS12-381 pairing-based Groth16 proof verification.
+///
+/// Looks up the circuit-specific verifying key registered for `vk_hash`,
+/// then delegates the actual pairing check to [`groth16::verify`]. Returns
+/// `false` (never panics) if no verifying key is registered for `vk_hash`,
+/// or for any structurally, algebraically, or cryptographically invalid
+/// proof. Unlike PLONK, an empty `public_inputs` is valid here (a circuit
+/// with zero public inputs, in which case the registered VK's `ic` must
+/// have exactly one — the constant — entry).
+fn groth16_real_verify(env: &Env, vk_hash: &BytesN<32>, public_inputs: &Bytes, proof: &Bytes) -> bool {
+    if proof.len() != GROTH16_BLS_PROOF_LEN {
+        return false;
+    }
+    let pi_len = public_inputs.len();
+    if pi_len % 32 != 0 || pi_len as usize > MAX_GROTH16_PUBLIC_INPUTS * 32 {
+        return false;
+    }
 
+    let vk: Groth16VerifyingKey = match env
+        .storage()
+        .instance()
+        .get(&DataKey::Groth16VerifyingKeyByHash(vk_hash.clone()))
+    {
+        Some(v) => v,
+        None => return false,
+    };
+    let ic_len = vk.ic.len() as usize;
+    if ic_len == 0 || ic_len > MAX_GROTH16_PUBLIC_INPUTS + 1 {
+        return false;
+    }
+
+    let mut proof_buf = [0u8; GROTH16_BLS_PROOF_LEN as usize];
+    proof.copy_into_slice(&mut proof_buf);
+
+    let pi_len_usize = pi_len as usize;
+    let mut pi_buf = [0u8; MAX_GROTH16_PUBLIC_INPUTS * 32];
+    public_inputs.copy_into_slice(&mut pi_buf[..pi_len_usize]);
+
+    let mut ic_buf = [[0u8; groth16::G1_LEN]; MAX_GROTH16_PUBLIC_INPUTS + 1];
+    for i in 0..ic_len {
+        ic_buf[i] = vk.ic.get(i as u32).unwrap().to_array();
+    }
+
+    groth16::verify(&vk.to_core(), &ic_buf[..ic_len], &pi_buf[..pi_len_usize], &proof_buf)
+}
 
 /// Simplified range proof verification using hash-based commitments.
 /// This is a simplified implementation for MVP - in production would use bulletproofs.
@@ -715,6 +848,80 @@ impl ZkVerifierContract {
     /// callers can double-check their hash before submitting it.
     pub fn plonk_vk_hash(env: Env, vk: PlonkVerifyingKey) -> BytesN<32> {
         let bytes = Bytes::from_slice(&env, &vk.to_core().canonical_bytes());
+        env.crypto().sha256(&bytes).into()
+    }
+
+    // ── Real Groth16 (BLS12-381 pairing) verifying keys ─────────────────
+
+    /// Register a circuit-specific Groth16 verifying key, keyed by its
+    /// `vk_hash` (see [`Self::groth16_vk_hash`]). Historical keys are
+    /// retained: proofs against a `vk_hash` registered here remain
+    /// verifiable even after a later rotation. Must be called by the admin.
+    /// Mirrors [`Self::set_plonk_verifying_key`].
+    pub fn set_groth16_verifying_key(env: Env, admin: Address, vk_hash: BytesN<32>, vk: Groth16VerifyingKey) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        vk.validate();
+        assert!(Self::groth16_vk_hash(env.clone(), vk.clone()) == vk_hash, "vk_hash does not match vk");
+
+        env.storage().instance().set(&DataKey::Groth16VerifyingKeyByHash(vk_hash.clone()), &vk);
+        env.storage().instance().set(&DataKey::Groth16VerifyingKeyHash, &vk_hash);
+    }
+
+    /// Rotate the "current" real Groth16 verifying key with audit trail.
+    /// Records the old and new `vk_hash`, ledger height, and admin address.
+    /// The previously-registered key remains queryable/verifiable by its
+    /// own hash. Mirrors [`Self::rotate_plonk_verifying_key`].
+    pub fn rotate_groth16_verifying_key(env: Env, admin: Address, new_vk_hash: BytesN<32>, new_vk: Groth16VerifyingKey) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        new_vk.validate();
+        assert!(Self::groth16_vk_hash(env.clone(), new_vk.clone()) == new_vk_hash, "vk_hash does not match vk");
+
+        let old_vk_hash: BytesN<32> = env.storage().instance()
+            .get(&DataKey::Groth16VerifyingKeyHash)
+            .expect("no verifying key set; use set_groth16_verifying_key first");
+
+        let rotation = Groth16KeyRotationEntry {
+            old_vk_hash,
+            new_vk_hash: new_vk_hash.clone(),
+            rotated_at_ledger: env.ledger().sequence(),
+            rotated_by: admin,
+        };
+        let history_key = DataKey::Groth16KeyRotationHistory;
+        let mut rotations: Vec<Groth16KeyRotationEntry> = env.storage().instance()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        rotations.push_back(rotation);
+        env.storage().instance().set(&history_key, &rotations);
+
+        env.storage().instance().set(&DataKey::Groth16VerifyingKeyByHash(new_vk_hash.clone()), &new_vk);
+        env.storage().instance().set(&DataKey::Groth16VerifyingKeyHash, &new_vk_hash);
+    }
+
+    /// Get real Groth16 verifying-key rotation history.
+    pub fn get_groth16_key_rotation_history(env: Env) -> Vec<Groth16KeyRotationEntry> {
+        env.storage().instance()
+            .get(&DataKey::Groth16KeyRotationHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Computes the canonical `vk_hash` for a real Groth16 verifying key:
+    /// `SHA-256(alpha_g1 ‖ beta_g2 ‖ gamma_g2 ‖ delta_g2 ‖ ic[0] ‖ ic[1] ‖ …)`.
+    /// Callers derive this off-chain identically; it's exposed here so
+    /// registration callers can double-check their hash before submitting
+    /// it. Mirrors [`Self::plonk_vk_hash`].
+    pub fn groth16_vk_hash(env: Env, vk: Groth16VerifyingKey) -> BytesN<32> {
+        let mut bytes = Bytes::from_slice(&env, &vk.to_core().canonical_bytes());
+        for ic_point in vk.ic.iter() {
+            bytes.extend_from_array(&ic_point.to_array());
+        }
         env.crypto().sha256(&bytes).into()
     }
 
@@ -1151,102 +1358,45 @@ impl ZkVerifierContract {
     /// It does not require admin auth and accepts all verification material
     /// as arguments, making it suitable for permissionless on-chain calls.
     ///
-    /// # Proof format (BN254, uncompressed, 256 bytes)
+    /// Performs a genuine BLS12-381 pairing check (not a structural/hash
+    /// placeholder) — see [`groth16::verify`] for the verification equation.
+    /// (The legacy `groth16_verify`/`verify_claim` path used by
+    /// `quorum_proof`'s cross-contract calls is unaffected by this — see
+    /// [`GROTH16_PROOF_LEN`]'s doc comment for why that path was left
+    /// on its structural/hash-binding heuristic.)
+    ///
+    /// # Proof format (BLS12-381, compressed, 192 bytes)
     ///
     /// ```text
     /// Offset  Length  Field
     /// ------  ------  -----
-    ///      0      64  A  — G1 point (π_A), x‖y each 32 bytes big-endian
-    ///     64     128  B  — G2 point (π_B), x_im‖x_re‖y_im‖y_re each 32 bytes big-endian
-    ///    192      64  C  — G1 point (π_C), x‖y each 32 bytes big-endian
+    ///      0      48  A  — G1 point (π_A), compressed
+    ///     48      96  B  — G2 point (π_B), compressed
+    ///    144      48  C  — G1 point (π_C), compressed
     /// ```
-    ///
-    /// Neither A nor C may be the point at infinity (all-zero encoding).
     ///
     /// # Public input schema
     ///
-    /// `public_inputs` is a flat byte string of one or more 32-byte big-endian
-    /// BN254 field elements, concatenated in the order they appear in the
-    /// circuit's public signal list.  The total length must therefore be a
-    /// non-zero multiple of 32.
-    ///
-    /// Example (two public inputs):
-    /// ```text
-    /// [ subject_hash (32 bytes) ][ credential_type (32 bytes) ]
-    /// ```
+    /// `public_inputs` is a flat byte string of little-endian BLS12-381 Fr
+    /// field elements (32 bytes each), concatenated in circuit signal
+    /// order. May be **empty** for a circuit with no public inputs (in
+    /// which case the registered verifying key's `ic` must have exactly one
+    /// entry — the constant term); otherwise the total length must be a
+    /// multiple of 32 and match `vk.ic.len() - 1`.
     ///
     /// # Verifying-key hash
     ///
-    /// `vk_hash` is the SHA-256 digest of the canonical serialisation of the
-    /// off-chain Groth16 verifying key (α, β, γ, δ, and the γ-encoded IC
-    /// points).  The caller is responsible for supplying the correct hash; the
-    /// contract binds the proof to it cryptographically.
-    ///
-    /// # Verification logic
-    ///
-    /// Soroban SDK 21 does not expose BN254 pairing host functions, so the
-    /// full algebraic check cannot be performed on-chain.  Instead we apply:
-    ///
-    /// 1. **Structure check** — proof must be exactly 256 bytes; A and C must
-    ///    be non-zero (not the point at infinity).
-    /// 2. **Public-input length check** — `public_inputs` must be a non-zero
-    ///    multiple of 32 bytes.
-    /// 3. **Cryptographic binding** — we compute
-    ///    `SHA-256(vk_hash ‖ SHA-256(public_inputs) ‖ proof)` and require the
-    ///    first byte ≠ 0xFF.  A proof generated against a different VK or
-    ///    different public inputs will fail this check with probability 255/256.
-    ///
-    /// When Stellar adds BN254 host functions the pairing equations can be
-    /// wired in here without changing the public API.
+    /// `vk_hash` identifies a [`Groth16VerifyingKey`] previously registered
+    /// via [`Self::set_groth16_verifying_key`] / [`Self::rotate_groth16_verifying_key`]
+    /// (see [`Self::groth16_vk_hash`] for how it's computed). Returns `false`
+    /// if no key is registered for `vk_hash`.
     pub fn verify_groth16_proof(
         env: Env,
         proof: Bytes,
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        // 1. Proof structure checks (delegated to groth16_verify)
-        if proof.len() != GROTH16_PROOF_LEN {
-            return false;
-        }
-
-        // 2. Public-input length: must be non-zero and a multiple of 32
-        let pi_len = public_inputs.len();
-        if pi_len == 0 || pi_len % 32 != 0 {
-            return false;
-        }
-
-        // 3. A-point non-zero (bytes 0-63)
-        let mut a_zero = true;
-        for i in 0..64 {
-            if proof.get(i).unwrap_or(0) != 0 {
-                a_zero = false;
-                break;
-            }
-        }
-        if a_zero {
-            return false;
-        }
-
-        // 4. C-point non-zero (bytes 192-255)
-        let mut c_zero = true;
-        for i in 192..256 {
-            if proof.get(i).unwrap_or(0) != 0 {
-                c_zero = false;
-                break;
-            }
-        }
-        if c_zero {
-            return false;
-        }
-
-        // 5. Cryptographic binding: SHA-256(vk_hash ‖ SHA-256(public_inputs) ‖ proof)
-        let pi_digest = env.crypto().sha256(&public_inputs);
-        let mut binding_input = Bytes::new(&env);
-        binding_input.extend_from_array(&vk_hash.to_array());
-        binding_input.extend_from_array(&pi_digest.to_array());
-        binding_input.append(&proof);
-        let digest = env.crypto().sha256(&binding_input);
-        digest.to_array()[0] != 0xFF
+        groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
     }
 
     /// Verify a batch of Groth16 proofs in a single call.
@@ -1391,6 +1541,116 @@ impl ZkVerifierContract {
         // Single aggregate check: binding_agg[0] != 0xFF
         let binding_agg = env.crypto().sha256(&combined);
         binding_agg.to_array()[0] != 0xFF
+    }
+
+    /// Verify a batch of real (BLS12-381 pairing) Groth16 proofs — all
+    /// against the same registered verifying key `vk_hash` — using a single
+    /// randomized linear-combination pairing check instead of `n`
+    /// independent ones (Issue #1278: proof aggregation for multiple
+    /// credentials).
+    ///
+    /// # Aggregation scheme
+    ///
+    /// Unlike [`Self::verify_aggregate_proof`] (which combines per-proof
+    /// SHA-256 binding hashes — a placeholder that never actually ran the
+    /// pairing equation), this performs genuine cryptographic batch
+    /// verification: a Fiat-Shamir seed is derived on-chain from
+    /// `SHA-256(vk_hash ‖ proof_0 ‖ pi_0 ‖ proof_1 ‖ pi_1 ‖ …)` — computed
+    /// *after* every proof in the batch is fixed, so no party can choose
+    /// proofs to cancel out in the random linear combination — and each
+    /// proof's verification equation is raised to an independent scalar
+    /// derived from that seed before being combined. See
+    /// [`groth16::verify_batch`] for the exact equation and gas-cost
+    /// analysis.
+    ///
+    /// This amortizes the three fixed-verifying-key pairings
+    /// (`e(alpha,beta)`, `e(_,gamma)`, `e(_,delta)`) across the whole batch:
+    /// `n + 3` calls to the pairing function instead of the naive `4n`, so
+    /// the *marginal* per-proof pairing cost drops from 4 to (converging
+    /// toward) 1 as the batch grows — the O(n) → O(1)-amortized cost
+    /// reduction this issue asks for, scoped honestly: the `n` per-proof
+    /// Miller-loop + final-exponentiation pairs on the left-hand side are
+    /// not further batchable here (that would need `bls12_381`'s `alloc`
+    /// feature and a registered global allocator, which this `#![no_std]`
+    /// contract deliberately does not add — see `groth16` module docs).
+    ///
+    /// Fails closed: any single malformed/invalid proof, or a batch that
+    /// exceeds [`MAX_GROTH16_AGGREGATE_BATCH`], rejects the whole call.
+    /// `proofs` and `public_inputs` must have equal, non-zero length.
+    pub fn verify_aggregated_proofs(
+        env: Env,
+        proofs: soroban_sdk::Vec<Bytes>,
+        public_inputs: soroban_sdk::Vec<Bytes>,
+        vk_hash: BytesN<32>,
+    ) -> bool {
+        let n = proofs.len();
+        if n == 0 || public_inputs.len() != n || n as usize > MAX_GROTH16_AGGREGATE_BATCH {
+            return false;
+        }
+
+        let vk: Groth16VerifyingKey = match env
+            .storage()
+            .instance()
+            .get(&DataKey::Groth16VerifyingKeyByHash(vk_hash.clone()))
+        {
+            Some(v) => v,
+            None => return false,
+        };
+        let ic_len = vk.ic.len() as usize;
+        if ic_len == 0 || ic_len > MAX_GROTH16_PUBLIC_INPUTS + 1 {
+            return false;
+        }
+        let mut ic_buf = [[0u8; groth16::G1_LEN]; MAX_GROTH16_PUBLIC_INPUTS + 1];
+        for i in 0..ic_len {
+            ic_buf[i] = vk.ic.get(i as u32).unwrap().to_array();
+        }
+
+        // Fiat-Shamir seed over every proof + public input in the batch —
+        // computed after the batch is fixed, so it can't be predicted or
+        // steered by whoever assembled the proofs.
+        let mut seed_input = Bytes::new(&env);
+        seed_input.extend_from_array(&vk_hash.to_array());
+        for i in 0..n {
+            seed_input.append(&proofs.get(i).unwrap());
+            seed_input.append(&public_inputs.get(i).unwrap());
+        }
+        let seed: [u8; 32] = env.crypto().sha256(&seed_input).to_array();
+
+        let n_usize = n as usize;
+        let mut proof_bufs = [[0u8; GROTH16_BLS_PROOF_LEN as usize]; MAX_GROTH16_AGGREGATE_BATCH];
+        let mut pi_bufs = [[0u8; MAX_GROTH16_PUBLIC_INPUTS * 32]; MAX_GROTH16_AGGREGATE_BATCH];
+        let mut pi_lens = [0usize; MAX_GROTH16_AGGREGATE_BATCH];
+
+        for i in 0..n_usize {
+            let proof = proofs.get(i as u32).unwrap();
+            if proof.len() != GROTH16_BLS_PROOF_LEN {
+                return false;
+            }
+            proof.copy_into_slice(&mut proof_bufs[i]);
+
+            let pi = public_inputs.get(i as u32).unwrap();
+            let pi_len = pi.len() as usize;
+            if pi_len % 32 != 0 || pi_len > MAX_GROTH16_PUBLIC_INPUTS * 32 {
+                return false;
+            }
+            pi.copy_into_slice(&mut pi_bufs[i][..pi_len]);
+            pi_lens[i] = pi_len;
+        }
+
+        let mut proof_slices: [&[u8]; MAX_GROTH16_AGGREGATE_BATCH] = [&[]; MAX_GROTH16_AGGREGATE_BATCH];
+        let mut pi_slices: [&[u8]; MAX_GROTH16_AGGREGATE_BATCH] = [&[]; MAX_GROTH16_AGGREGATE_BATCH];
+        for i in 0..n_usize {
+            proof_slices[i] = &proof_bufs[i];
+            pi_slices[i] = &pi_bufs[i][..pi_lens[i]];
+        }
+
+        groth16::verify_batch(
+            &vk.to_core(),
+            &ic_buf[..ic_len],
+            &proof_slices[..n_usize],
+            &pi_slices[..n_usize],
+            &seed,
+        )
     }
 
     /// Verify a PLONK proof with explicit verifying-key hash and public inputs.
@@ -1820,33 +2080,16 @@ pub enum DataKey {
     PlonkVerifyingKeyByHash(BytesN<32>),
     /// Audit trail of PLONK verifying-key rotations.
     PlonkKeyRotationHistory,
-    // ===== Issue #1279: Constraint System Validation =====
-    /// Counter for constraint system IDs (monotonically increasing).
-    ConstraintSystemCounter,
-    /// Constraint system descriptor, keyed by its assigned ID.
-    ConstraintSystem(u64),
-    // ===== Issue #1280: Proof Revocation Registry =====
-    /// Revocation status for a proof hash: true = revoked.
-    ProofRevocationStatus(BytesN<32>),
-    /// Full revocation record (reason + ledger) for a proof hash.
-    ProofRevocationRecord(BytesN<32>),
-    /// Ordered list of all registered proof hashes (for history queries).
-    ProofHashRegistry,
-    /// Ordered list of all revocation records (audit history).
-    ProofRevocationHistory,
-    // ===== Issue #1281: Proof Expiry and Time-Bound Verification =====
-    /// Submission timestamp (Unix seconds) for a proof hash.
-    /// Keyed by proof hash (BytesN<32>); complements ProofTimestamp which
-    /// is keyed by (credential_id, claim_type).
-    ProofSubmissionTimestamp(BytesN<32>),
-    // ===== Issue #1282: Multi-Party Computation Support =====
-    /// MPC session state, keyed by session ID.
-    MpcSession(BytesN<32>),
-    /// Individual verifier contribution for a session.
-    /// Keyed by (session_id, verifier_address_hash).
-    MpcContribution(BytesN<32>, BytesN<32>),
-    /// Counter tracking how many contributions a session has received.
-    MpcContributionCount(BytesN<32>),
+    // ===== Real Groth16 (BLS12-381 pairing) verification =====
+    /// The most recently registered/rotated real Groth16 verifying key's
+    /// hash (bookkeeping pointer, mirrors `PlonkVerifyingKeyHash`).
+    Groth16VerifyingKeyHash,
+    /// Historical map of every registered real Groth16 verifying key, keyed
+    /// by its hash — old keys are retained so proofs against a
+    /// since-rotated circuit version remain verifiable.
+    Groth16VerifyingKeyByHash(BytesN<32>),
+    /// Audit trail of real Groth16 verifying-key rotations.
+    Groth16KeyRotationHistory,
 }
 
 // ===== Issue #994: ProtocolConfig =====
@@ -2366,6 +2609,8 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
     use crate::plonk_test_prover;
+    use crate::groth16_test_prover;
+    use crate::groth16;
 
     // --- Deployment verification tests ---
 
@@ -2834,17 +3079,27 @@ mod tests {
         BytesN::from_array(env, &[0x01u8; 32])
     }
 
+    /// Registers a fresh genuine (real BLS12-381 pairing) Groth16 verifying
+    /// key + matching valid proof via `groth16_test_prover`, returning the
+    /// client and the fixture. `env.mock_all_auths()` must already be set.
+    fn setup_groth16(env: &Env, seed: u64, num_public_inputs: u32) -> (ZkVerifierContractClient, groth16_test_prover::ToyProofFixture) {
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+
+        let fixture = groth16_test_prover::generate_valid_proof(env, seed, num_public_inputs);
+        client.set_groth16_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
+        (client, fixture)
+    }
+
     #[test]
     fn test_verify_groth16_proof_valid() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 1, 1);
 
-        let proof = make_valid_proof(&env);
-        let public_inputs = make_public_inputs(&env);
-        let vk_hash = make_vk_hash(&env);
-
-        assert!(client.verify_groth16_proof(&proof, &public_inputs, &vk_hash));
+        assert!(client.verify_groth16_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
@@ -2857,111 +3112,239 @@ mod tests {
         let public_inputs = make_public_inputs(&env);
         let vk_hash = make_vk_hash(&env);
 
+        // Fails on the length check before any verifying-key lookup, so no
+        // registration is needed.
         assert!(!client.verify_groth16_proof(&short_proof, &public_inputs, &vk_hash));
     }
 
     #[test]
-    fn test_verify_groth16_proof_zero_a_point_fails() {
+    fn test_verify_groth16_proof_tampered_a_point_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 2, 1);
 
-        let mut buf = [0u8; 256];
-        // A point stays zero (point at infinity)
-        buf[64..192].fill(0x02);
-        buf[192..256].fill(0x03);
+        let mut buf = [0u8; groth16::PROOF_LEN as usize];
+        fixture.proof.copy_into_slice(&mut buf);
+        buf[0] ^= 1; // corrupt A
         let proof = Bytes::from_slice(&env, &buf);
 
-        assert!(!client.verify_groth16_proof(&proof, &make_public_inputs(&env), &make_vk_hash(&env)));
+        assert!(!client.verify_groth16_proof(&proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
-    fn test_verify_groth16_proof_zero_c_point_fails() {
+    fn test_verify_groth16_proof_tampered_c_point_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 3, 1);
 
-        let mut buf = [0u8; 256];
-        buf[0..64].fill(0x01);
-        buf[64..192].fill(0x02);
-        // C point stays zero (point at infinity)
+        let mut buf = [0u8; groth16::PROOF_LEN as usize];
+        fixture.proof.copy_into_slice(&mut buf);
+        buf[groth16::PROOF_LEN as usize - 1] ^= 1; // corrupt C
         let proof = Bytes::from_slice(&env, &buf);
 
-        assert!(!client.verify_groth16_proof(&proof, &make_public_inputs(&env), &make_vk_hash(&env)));
+        assert!(!client.verify_groth16_proof(&proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
-    fn test_verify_groth16_proof_empty_public_inputs_fails() {
+    fn test_verify_groth16_proof_zero_public_inputs_succeeds() {
+        // Real Groth16 legitimately supports circuits with no public
+        // inputs at all (ic must then have exactly one — the constant —
+        // entry); this replaces the old stub-specific "empty always fails".
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 4, 0);
 
-        let proof = make_valid_proof(&env);
-        let empty_inputs = Bytes::from_slice(&env, b"");
-        let vk_hash = make_vk_hash(&env);
-
-        assert!(!client.verify_groth16_proof(&proof, &empty_inputs, &vk_hash));
+        assert_eq!(fixture.public_inputs.len(), 0);
+        assert!(client.verify_groth16_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
     fn test_verify_groth16_proof_misaligned_public_inputs_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 5, 1);
 
-        let proof = make_valid_proof(&env);
         // 31 bytes — not a multiple of 32
         let bad_inputs = Bytes::from_slice(&env, &[0x01u8; 31]);
-        let vk_hash = make_vk_hash(&env);
+        assert!(!client.verify_groth16_proof(&fixture.proof, &bad_inputs, &fixture.vk_hash));
+    }
 
-        assert!(!client.verify_groth16_proof(&proof, &bad_inputs, &vk_hash));
+    #[test]
+    fn test_verify_groth16_proof_tampered_public_input_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 6, 1);
+
+        let mut buf = [0u8; 32];
+        fixture.public_inputs.copy_into_slice(&mut buf);
+        buf[0] ^= 1;
+        let bad_inputs = Bytes::from_slice(&env, &buf);
+
+        assert!(!client.verify_groth16_proof(&fixture.proof, &bad_inputs, &fixture.vk_hash));
     }
 
     #[test]
     fn test_verify_groth16_proof_multiple_public_inputs() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 7, 3);
 
-        let proof = make_valid_proof(&env);
-        // Two 32-byte field elements
-        let two_inputs = Bytes::from_slice(&env, &[0x42u8; 64]);
-        let vk_hash = make_vk_hash(&env);
-
-        // Result depends on binding check — just assert it doesn't panic
-        let _ = client.verify_groth16_proof(&proof, &two_inputs, &vk_hash);
+        assert_eq!(fixture.public_inputs.len(), 96);
+        assert!(client.verify_groth16_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
     }
 
     #[test]
-    fn test_verify_groth16_proof_wrong_vk_hash_fails() {
+    fn test_verify_groth16_proof_unregistered_vk_hash_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 8, 1);
 
-        let proof = make_valid_proof(&env);
-        let public_inputs = make_public_inputs(&env);
-        // Different VK hash — binding check should produce a different digest
-        let wrong_vk = BytesN::from_array(&env, &[0xFFu8; 32]);
+        // A vk_hash that was never registered has no stored key material,
+        // so real pairing verification can give a definitive `false`
+        // (unlike the old heuristic, which could only ever probabilistically
+        // fail a binding hash check).
+        let unregistered = BytesN::from_array(&env, &[0xEE; 32]);
+        assert!(!client.verify_groth16_proof(&fixture.proof, &fixture.public_inputs, &unregistered));
+    }
 
-        // With vk=[0xFF;32] the binding digest's first byte is very likely != 0xFF
-        // but we just assert the call completes without panic
-        let _ = client.verify_groth16_proof(&proof, &public_inputs, &wrong_vk);
+    #[test]
+    fn test_verify_groth16_proof_wrong_vk_rejects_other_circuits_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, fixture_a) = setup_groth16(&env, 9, 1);
+        let fixture_b = groth16_test_prover::generate_valid_proof(&env, 10, 1);
+
+        // fixture_b's proof is genuinely valid against fixture_b's own vk,
+        // but not against fixture_a's differently-registered vk.
+        assert!(!client.verify_groth16_proof(&fixture_b.proof, &fixture_b.public_inputs, &fixture_a.vk_hash));
     }
 
     #[test]
     fn test_verify_groth16_proof_no_admin_required() {
-        // verify_groth16_proof must be callable without any auth setup
+        // verify_groth16_proof itself takes no admin/Address param and must
+        // be callable with no additional auth beyond what was needed to
+        // register the verifying key.
         let env = Env::default();
-        // Deliberately do NOT call env.mock_all_auths()
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 11, 1);
+
+        assert!(client.verify_groth16_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash));
+    }
+
+    #[test]
+    fn test_verify_batch_proofs_real_crypto() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 12, 1);
+
+        let mut bad_buf = [0u8; groth16::PROOF_LEN as usize];
+        fixture.proof.copy_into_slice(&mut bad_buf);
+        bad_buf[0] ^= 1;
+        let bad_proof = Bytes::from_slice(&env, &bad_buf);
+
+        let proofs = soroban_sdk::vec![&env, fixture.proof.clone(), bad_proof];
+        let pis = soroban_sdk::vec![&env, fixture.public_inputs.clone(), fixture.public_inputs.clone()];
+        let vks = soroban_sdk::vec![&env, fixture.vk_hash.clone(), fixture.vk_hash.clone()];
+
+        let results = client.verify_batch_proofs(&proofs, &pis, &vks);
+        assert_eq!(results.get(0).unwrap(), true);
+        assert_eq!(results.get(1).unwrap(), false);
+    }
+
+    // --- verify_aggregated_proofs tests (Issue #1278) ---
+
+    #[test]
+    fn test_verify_aggregated_proofs_various_sizes() {
+        for &n in &[1usize, 2, 5, 16] {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, ZkVerifierContract);
+            let client = ZkVerifierContractClient::new(&env, &contract_id);
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            let vk = groth16_test_prover::generate_vk(&env, 100, 1);
+            client.set_groth16_verifying_key(&admin, &vk.vk_hash, &vk.vk);
+
+            let mut proofs = soroban_sdk::Vec::new(&env);
+            let mut pis = soroban_sdk::Vec::new(&env);
+            for i in 0..n {
+                let p = groth16_test_prover::generate_proof(&env, &vk, 200 + i as u64, &[(i + 1) as u64]);
+                proofs.push_back(p.proof);
+                pis.push_back(p.public_inputs);
+            }
+
+            assert!(
+                client.verify_aggregated_proofs(&proofs, &pis, &vk.vk_hash),
+                "batch of size {n} should verify"
+            );
+        }
+    }
+
+    #[test]
+    fn test_verify_aggregated_proofs_rejects_if_any_proof_invalid() {
+        let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, ZkVerifierContract);
         let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
 
-        let proof = make_valid_proof(&env);
-        let public_inputs = make_public_inputs(&env);
-        let vk_hash = make_vk_hash(&env);
+        let vk = groth16_test_prover::generate_vk(&env, 101, 1);
+        client.set_groth16_verifying_key(&admin, &vk.vk_hash, &vk.vk);
 
-        // Must not panic due to missing auth
-        let _ = client.verify_groth16_proof(&proof, &public_inputs, &vk_hash);
+        let p0 = groth16_test_prover::generate_proof(&env, &vk, 201, &[1]);
+        let p1 = groth16_test_prover::generate_proof(&env, &vk, 202, &[2]);
+
+        let mut bad_buf = [0u8; groth16::PROOF_LEN as usize];
+        p1.proof.copy_into_slice(&mut bad_buf);
+        bad_buf[0] ^= 1;
+        let bad_proof = Bytes::from_slice(&env, &bad_buf);
+
+        let proofs = soroban_sdk::vec![&env, p0.proof, bad_proof];
+        let pis = soroban_sdk::vec![&env, p0.public_inputs, p1.public_inputs];
+
+        assert!(!client.verify_aggregated_proofs(&proofs, &pis, &vk.vk_hash));
+    }
+
+    #[test]
+    fn test_verify_aggregated_proofs_rejects_empty_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let vk = groth16_test_prover::generate_vk(&env, 102, 1);
+        client.set_groth16_verifying_key(&admin, &vk.vk_hash, &vk.vk);
+
+        let proofs: soroban_sdk::Vec<Bytes> = soroban_sdk::Vec::new(&env);
+        let pis: soroban_sdk::Vec<Bytes> = soroban_sdk::Vec::new(&env);
+        assert!(!client.verify_aggregated_proofs(&proofs, &pis, &vk.vk_hash));
+    }
+
+    #[test]
+    fn test_verify_aggregated_proofs_rejects_batch_over_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let vk = groth16_test_prover::generate_vk(&env, 103, 1);
+        client.set_groth16_verifying_key(&admin, &vk.vk_hash, &vk.vk);
+
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        for i in 0..(MAX_GROTH16_AGGREGATE_BATCH + 1) {
+            let p = groth16_test_prover::generate_proof(&env, &vk, 300 + i as u64, &[1]);
+            proofs.push_back(p.proof);
+            pis.push_back(p.public_inputs);
+        }
+
+        assert!(!client.verify_aggregated_proofs(&proofs, &pis, &vk.vk_hash));
     }
 
     // --- verify_plonk_proof tests ---

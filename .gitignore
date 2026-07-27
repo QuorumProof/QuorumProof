@@ -23,14 +23,16 @@ api-server/coverage/
 .nyc_output/
 lcov.info
 
-# Test snapshots
+# Test snapshots and fixtures generated at runtime
 **/test_snapshots/
-**/*.snap
 **/__snapshots__/
+**/*.snap
+**/proptest-regressions/
 
 # Backup files
 *.bak
 *.bak.*
+**/*.rs.bak
 
 # IDE / OS
 .DS_Store
@@ -55,7 +57,6 @@ api-server/artifacts/
 
 # Rust / Cargo
 Cargo.lock.bak
-**/*.rs.bak
 
 # Fuzz artifacts
 fuzz/corpus/
@@ -65,32 +66,17 @@ fuzz/artifacts/
 mutants.out/
 mutants.out.old/
 
-# Proptest regression files (auto-generated, not needed in repo)
-**/proptest-regressions/
-
-# Benchmark history (generated output, not source)
-benches/history/
-
-# Profiling and flamegraphs
-perf.data
-perf.data.old
-flamegraph.svg
-*.profdata
+# Profiling and benchmark history output
+benches/history/*.json
 *.profraw
+*.profdata
 
-# Soroban contract binaries
-*.optimized.wasm
-
-# Editor backup / swap files
-*~
-.#*
-
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Temporary files
-*.tmp
-*.temp
+# Temporary / generated docs
+plan.md
+plan2.md
+task.md
+CHANGELOG_ISSUES_*.md
+FILES_CHANGED.txt
+TASK_IMPLEMENTATIONS.md
+IMPLEMENTATION_SUMMARY.md
+VERIFICATION_CHECKLIST.md
