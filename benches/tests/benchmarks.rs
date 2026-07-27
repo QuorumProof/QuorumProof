@@ -50,6 +50,19 @@ const THRESHOLD_VERIFY_CLAIM_CPU: u64        = 1_500_000;
 // PLONK with real BLS12-381 pairing check is significantly more expensive than Groth16's hash-binding.
 // Estimated ~5-10x heavier, set conservatively for real field arithmetic.
 const THRESHOLD_VERIFY_PLONK_PROOF_CPU: u64  = 20_000_000;
+// Issue #1276: real BLS12-381 Groth16 verification needs 3 pairings (vs
+// PLONK's 2 + heavier linearisation arithmetic) plus a small vk_x MSM.
+// Estimated in the same order of magnitude as PLONK's threshold above;
+// not yet measured against a live run — tighten once a real CI run
+// records an actual baseline (see the file header's baseline-recording
+// convention).
+const THRESHOLD_VERIFY_GROTH16_PROOF_REAL_CPU: u64 = 20_000_000;
+// Issue #1278: `verify_aggregated_proofs` at its max batch size (16) does
+// n+3 = 19 pairing() calls instead of the naive 4n = 64, i.e. ~30% of the
+// naive pairing count. Estimated from THRESHOLD_VERIFY_GROTH16_PROOF_REAL_CPU
+// (3 pairings/proof) scaled to 19 pairings, with generous headroom since
+// this hasn't been measured against a live run yet.
+const THRESHOLD_VERIFY_AGGREGATED_PROOFS_16_CPU: u64 = 180_000_000;
 // Cross-contract operations carry inherently higher cost.
 const THRESHOLD_VERIFY_ENGINEER_CPU: u64     = 8_000_000;
 const THRESHOLD_BATCH_ISSUE_5_CPU: u64       = 12_000_000;
@@ -329,6 +342,98 @@ fn bench_verify_plonk_proof() {
     println!("[bench_verify_plonk_proof] cpu={} mem={}", m.cpu, m.mem);
     assert!(m.cpu <= THRESHOLD_VERIFY_PLONK_PROOF_CPU,
         "verify_plonk_proof CPU regression: {} > {}", m.cpu, THRESHOLD_VERIFY_PLONK_PROOF_CPU);
+}
+
+// ── Issue #1276: real BLS12-381 pairing-based Groth16 verification ─────────
+
+#[test]
+fn bench_verify_groth16_proof_real() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_zk(&env);
+
+    use zk_verifier::groth16_test_prover;
+    let fixture = groth16_test_prover::generate_valid_proof(&env, 0, 1);
+    client.set_groth16_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
+
+    // Cost of a single genuine Groth16 pairing check: 3 pairings
+    // (e(A,B), e(alpha,beta), e(vk_x,gamma)·e(C,delta) combined) plus the
+    // vk_x multi-scalar-multiplication.
+    let m = measure(&env, || {
+        client.verify_groth16_proof(&fixture.proof, &fixture.public_inputs, &fixture.vk_hash);
+    });
+
+    println!("[bench_verify_groth16_proof_real] cpu={} mem={}", m.cpu, m.mem);
+    assert!(m.cpu <= THRESHOLD_VERIFY_GROTH16_PROOF_REAL_CPU,
+        "verify_groth16_proof CPU regression: {} > {}", m.cpu, THRESHOLD_VERIFY_GROTH16_PROOF_REAL_CPU);
+}
+
+/// Issue #1276: "Performance benchmark against 100+ proofs" — measures the
+/// naive O(n) real-pairing path (`verify_batch_proofs`, n independent
+/// `verify_groth16_proof` calls) at n=100, establishing the baseline that
+/// `verify_aggregated_proofs`'s randomized-linear-combination batching
+/// (Issue #1278) amortizes against.
+#[test]
+fn bench_verify_batch_proofs_100_real() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_zk(&env);
+
+    use zk_verifier::groth16_test_prover;
+    let vk = groth16_test_prover::generate_vk(&env, 1, 1);
+    client.set_groth16_verifying_key(&admin, &vk.vk_hash, &vk.vk);
+
+    let mut proofs = Vec::new(&env);
+    let mut pis = Vec::new(&env);
+    let mut vks = Vec::new(&env);
+    for i in 0..100u64 {
+        let p = groth16_test_prover::generate_proof(&env, &vk, 1000 + i, &[1]);
+        proofs.push_back(p.proof);
+        pis.push_back(p.public_inputs);
+        vks.push_back(vk.vk_hash.clone());
+    }
+
+    let m = measure_unlimited(&env, || {
+        client.verify_batch_proofs(&proofs, &pis, &vks);
+    });
+
+    println!("[bench_verify_batch_proofs_100_real] cpu={} mem={}", m.cpu, m.mem);
+    scaling::record_point("verify_batch_proofs_real", 100, m.cpu, m.mem);
+}
+
+/// Issue #1278: measures `verify_aggregated_proofs`'s randomized
+/// linear-combination batch verification at its maximum supported batch
+/// size (`MAX_GROTH16_AGGREGATE_BATCH` = 16, bounded by the fixed stack
+/// buffers a `#![no_std]`/no-alloc contract must use — see
+/// `zk_verifier::groth16` module docs). Compare against
+/// `bench_verify_groth16_proof_real`'s single-proof cost × 16 to see the
+/// amortized savings from collapsing the three fixed-verifying-key
+/// pairings into one call each, shared across the batch.
+#[test]
+fn bench_verify_aggregated_proofs_batch16() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_zk(&env);
+
+    use zk_verifier::groth16_test_prover;
+    let vk = groth16_test_prover::generate_vk(&env, 2, 1);
+    client.set_groth16_verifying_key(&admin, &vk.vk_hash, &vk.vk);
+
+    let mut proofs = Vec::new(&env);
+    let mut pis = Vec::new(&env);
+    for i in 0..16u64 {
+        let p = groth16_test_prover::generate_proof(&env, &vk, 2000 + i, &[1]);
+        proofs.push_back(p.proof);
+        pis.push_back(p.public_inputs);
+    }
+
+    let m = measure(&env, || {
+        client.verify_aggregated_proofs(&proofs, &pis, &vk.vk_hash);
+    });
+
+    println!("[bench_verify_aggregated_proofs_batch16] cpu={} mem={}", m.cpu, m.mem);
+    assert!(m.cpu <= THRESHOLD_VERIFY_AGGREGATED_PROOFS_16_CPU,
+        "verify_aggregated_proofs(16) CPU regression: {} > {}", m.cpu, THRESHOLD_VERIFY_AGGREGATED_PROOFS_16_CPU);
 }
 
 // ── Scaling benchmarks (regression detection for N-item operations) ───────────

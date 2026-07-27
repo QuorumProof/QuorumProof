@@ -1,0 +1,86 @@
+# .github/workflows/backup.yml — Issue #912: Periodic contract state backup.
+#
+# Runs the daily backup documented in docs/backup-system.md: exports
+# testnet and mainnet contract state via scripts/backup.sh, encrypts it,
+# uploads it to S3, verifies the resulting artifact with
+# scripts/verify_backup.sh, and retains a copy as a GitHub Actions
+# artifact for 90 days. Can also be triggered manually for an on-demand
+# backup ahead of a risky operation (e.g. a contract upgrade).
+
+name: Backup
+
+on:
+  schedule:
+    # Daily at 2 AM UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      network:
+        description: "Network to back up (leave blank to back up both testnet and mainnet)"
+        required: false
+        type: choice
+        default: "both"
+        options:
+          - both
+          - testnet
+          - mainnet
+
+jobs:
+  backup:
+    name: Backup ${{ matrix.network }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        network: [testnet, mainnet]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install soroban CLI
+        run: cargo install --locked soroban-cli --version ^21 || true
+
+      - name: Skip network if not selected
+        id: gate
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" \
+                && "${{ github.event.inputs.network }}" != "both" \
+                && "${{ github.event.inputs.network }}" != "${{ matrix.network }}" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run backup
+        if: steps.gate.outputs.run == 'true'
+        env:
+          STELLAR_NETWORK: ${{ matrix.network }}
+          CONTRACT_QUORUM_PROOF: ${{ matrix.network == 'testnet' && secrets.CONTRACT_QUORUM_PROOF_TESTNET || secrets.CONTRACT_QUORUM_PROOF_MAINNET }}
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+        run: |
+          ./scripts/backup.sh \
+            --network "$STELLAR_NETWORK" \
+            --encrypt \
+            --upload "${{ secrets.BACKUP_S3_BUCKET }}"
+
+      - name: Verify backup integrity
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          latest="$(ls -t backups/daily/*.json 2>/dev/null | head -n1)"
+          if [[ -n "$latest" ]]; then
+            ./scripts/verify_backup.sh "$latest" --dry-run-restore
+          fi
+
+      - name: Upload backup artifact
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-${{ matrix.network }}-${{ github.run_id }}
+          path: backups/daily/
+          retention-days: 90
+
+      - name: Notify on failure
+        if: failure() && steps.gate.outputs.run == 'true'
+        run: |
+          echo "::error::Backup failed for network ${{ matrix.network }}. See docs/backup-system.md and docs/disaster-recovery.md for the manual recovery procedure."

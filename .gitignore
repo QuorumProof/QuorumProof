@@ -22,19 +22,18 @@ api-server/coverage/
 *.lcov
 .nyc_output/
 lcov.info
+.c8/
 
-# Test snapshots
+# Test snapshots and fixtures generated at runtime
 **/test_snapshots/
-**/*.snap
 **/__snapshots__/
-**/snapshots/
-**/*.snap.bak
-**/__vitest_snapshots__/
-**/snap_tests/
+**/*.snap
+**/proptest-regressions/
 
 # Backup files
 *.bak
 *.bak.*
+**/*.rs.bak
 
 # Proptest regression files
 **/proptest-regressions/
@@ -74,12 +73,15 @@ api-server/.data/
 *.swo
 .vscode/settings.json
 .idea/
+*.iml
+Thumbs.db
 
 # Misc
 .env
 dist/
 dashboard/dist/
 frontend/dist/
+api-server/dist/
 
 # Durable runtime state (GDPR request store, crypto-shredding vault)
 .data/
@@ -91,7 +93,6 @@ api-server/artifacts/
 
 # Rust / Cargo
 Cargo.lock.bak
-**/*.rs.bak
 
 # Fuzz artifacts
 fuzz/corpus/
@@ -100,3 +101,18 @@ fuzz/artifacts/
 # Mutation testing
 mutants.out/
 mutants.out.old/
+
+# Profiling and benchmark history output
+benches/history/*.json
+*.profraw
+*.profdata
+
+# Temporary / generated docs
+plan.md
+plan2.md
+task.md
+CHANGELOG_ISSUES_*.md
+FILES_CHANGED.txt
+TASK_IMPLEMENTATIONS.md
+IMPLEMENTATION_SUMMARY.md
+VERIFICATION_CHECKLIST.md
