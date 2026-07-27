@@ -17565,6 +17565,248 @@ impl QuorumProofContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #910: Attestation Veto by Trusted Third Party
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Initialize veto authorities (called once during setup)
+    pub fn init_veto_authorities(env: Env, admin: Address, authorities: Vec<Address>) {
+        admin.require_auth();
+        attestation_veto::init_veto_authorities(&env, authorities);
+    }
+
+    /// Request a veto for an attestation
+    pub fn request_veto(
+        env: Env,
+        veto_authority: Address,
+        credential_id: u64,
+        slice_id: u64,
+        attestor: Address,
+        reason: Option<Bytes>,
+        evidence_hash: Option<Bytes>,
+    ) -> u64 {
+        veto_authority.require_auth();
+        attestation_veto::request_veto(
+            &env,
+            veto_authority,
+            credential_id,
+            slice_id,
+            attestor,
+            reason,
+            evidence_hash,
+        )
+    }
+
+    /// Get a veto request by ID
+    pub fn get_veto_request(env: Env, veto_id: u64) -> Option<attestation_veto::VetoRequest> {
+        attestation_veto::get_veto_request(&env, veto_id)
+    }
+
+    /// Get all veto requests for a credential
+    pub fn get_credential_veto_requests(env: Env, credential_id: u64) -> Vec<u64> {
+        attestation_veto::get_credential_veto_requests(&env, credential_id)
+    }
+
+    /// Cancel a veto request
+    pub fn cancel_veto(env: Env, canceller: Address, veto_id: u64) {
+        canceller.require_auth();
+        attestation_veto::cancel_veto(&env, &canceller, veto_id);
+    }
+
+    /// Execute a veto after time-lock expires
+    pub fn execute_veto(env: Env, executor: Address, veto_id: u64) -> bool {
+        executor.require_auth();
+        attestation_veto::execute_veto(&env, &executor, veto_id)
+    }
+
+    /// Get veto execution audit log
+    pub fn get_veto_audit_log(env: Env) -> Vec<(u64, u64, Address)> {
+        attestation_veto::get_veto_audit_log(&env)
+    }
+
+    /// Get current veto time-lock duration
+    pub fn get_veto_timelock(env: Env) -> u64 {
+        attestation_veto::get_veto_timelock(&env)
+    }
+
+    /// Set veto time-lock duration (admin only)
+    pub fn set_veto_timelock(env: Env, admin: Address, seconds: u64) {
+        admin.require_auth();
+        attestation_veto::set_veto_timelock(&env, seconds);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #913: Cross-Contract Atomic Operations
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Initialize atomic operation infrastructure
+    pub fn init_atomic_operations(env: Env, admin: Address) {
+        admin.require_auth();
+        atomic_operations::init_atomicity(&env);
+    }
+
+    /// Begin a new atomic transaction
+    pub fn begin_atomic_transaction(
+        env: Env,
+        initiator: Address,
+        operation_type: u32,
+        operation_data: Bytes,
+        timeout_seconds: u64,
+    ) -> u64 {
+        initiator.require_auth();
+        atomic_operations::begin_transaction(
+            &env,
+            initiator,
+            operation_type,
+            operation_data,
+            timeout_seconds,
+        )
+    }
+
+    /// Get an atomic transaction by ID
+    pub fn get_atomic_transaction(env: Env, txn_id: u64) -> Option<atomic_operations::AtomicTransaction> {
+        atomic_operations::get_transaction(&env, txn_id)
+    }
+
+    /// Advance to next phase in an atomic transaction
+    pub fn advance_atomic_phase(
+        env: Env,
+        admin: Address,
+        txn_id: u64,
+        next_phase: u32,
+        savepoint_data: Option<Bytes>,
+    ) {
+        admin.require_auth();
+        // Decode phase enum
+        let phase = match next_phase {
+            1 => atomic_operations::TxnPhase::Phase1_QuorumProof,
+            2 => atomic_operations::TxnPhase::Phase2_SbtRegistry,
+            3 => atomic_operations::TxnPhase::Phase3_ZkVerifier,
+            4 => atomic_operations::TxnPhase::Committed,
+            _ => panic!("invalid phase"),
+        };
+        atomic_operations::advance_phase(&env, txn_id, phase, savepoint_data);
+    }
+
+    /// Record the result of a phase
+    pub fn record_atomic_phase_result(
+        env: Env,
+        admin: Address,
+        txn_id: u64,
+        phase: u32,
+        succeeded: bool,
+        error_code: Option<u32>,
+        result_data: Option<Bytes>,
+    ) {
+        admin.require_auth();
+        let phase_enum = match phase {
+            1 => atomic_operations::TxnPhase::Phase1_QuorumProof,
+            2 => atomic_operations::TxnPhase::Phase2_SbtRegistry,
+            3 => atomic_operations::TxnPhase::Phase3_ZkVerifier,
+            _ => panic!("invalid phase"),
+        };
+        atomic_operations::record_phase_result(&env, txn_id, phase_enum, succeeded, error_code, result_data);
+    }
+
+    /// Get result of a specific phase
+    pub fn get_atomic_phase_result(env: Env, txn_id: u64, phase: u32) -> Option<atomic_operations::PhaseResult> {
+        let phase_enum = match phase {
+            1 => atomic_operations::TxnPhase::Phase1_QuorumProof,
+            2 => atomic_operations::TxnPhase::Phase2_SbtRegistry,
+            3 => atomic_operations::TxnPhase::Phase3_ZkVerifier,
+            _ => return None,
+        };
+        atomic_operations::get_phase_result(&env, txn_id, phase_enum)
+    }
+
+    /// Commit an atomic transaction
+    pub fn commit_atomic_transaction(env: Env, admin: Address, txn_id: u64) {
+        admin.require_auth();
+        atomic_operations::commit_transaction(&env, txn_id);
+    }
+
+    /// Initiate rollback for an atomic transaction
+    pub fn initiate_atomic_rollback(env: Env, admin: Address, txn_id: u64, reason: Option<Bytes>) {
+        admin.require_auth();
+        atomic_operations::initiate_rollback(&env, txn_id, reason);
+    }
+
+    /// Complete rollback of an atomic transaction
+    pub fn complete_atomic_rollback(env: Env, admin: Address, txn_id: u64) {
+        admin.require_auth();
+        atomic_operations::complete_rollback(&env, txn_id);
+    }
+
+    /// Check if an atomic transaction is active
+    pub fn is_atomic_transaction_active(env: Env, txn_id: u64) -> bool {
+        atomic_operations::is_transaction_active(&env, txn_id)
+    }
+
+    /// Check if an atomic transaction has expired
+    pub fn is_atomic_transaction_expired(env: Env, txn_id: u64) -> bool {
+        atomic_operations::is_transaction_expired(&env, txn_id)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #915: Contract Version Migration Path
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Initialize migration infrastructure
+    pub fn init_migration_v2(env: Env, admin: Address) {
+        admin.require_auth();
+        migration_v2::init_migration_v2(&env);
+    }
+
+    /// Get current schema version
+    pub fn get_schema_version(env: Env) -> u32 {
+        let version = migration_v2::get_schema_version(&env);
+        version.as_u32()
+    }
+
+    /// Start V1→V2 migration
+    pub fn start_migration_v1_to_v2(env: Env, admin: Address) -> u32 {
+        admin.require_auth();
+        migration_v2::start_migration_v1_to_v2(&env, &admin)
+    }
+
+    /// Migrate one chunk of credentials
+    pub fn migrate_chunk_v1_to_v2(
+        env: Env,
+        admin: Address,
+        chunk_size: u32,
+    ) -> migration_v2::MigrationCheckpoint {
+        admin.require_auth();
+        migration_v2::migrate_chunk_v1_to_v2(&env, &admin, chunk_size)
+    }
+
+    /// Get migration status
+    pub fn get_migration_status(env: Env) -> Option<migration_v2::MigrationCheckpoint> {
+        migration_v2::get_migration_status(&env)
+    }
+
+    /// Validate migration integrity
+    pub fn validate_migration_integrity(env: Env) -> bool {
+        migration_v2::validate_migration_integrity(&env)
+    }
+
+    /// Pause ongoing migration
+    pub fn pause_migration(env: Env, admin: Address) {
+        admin.require_auth();
+        migration_v2::pause_migration(&env, &admin);
+    }
+
+    /// Resume paused migration
+    pub fn resume_migration(env: Env, admin: Address) {
+        admin.require_auth();
+        migration_v2::resume_migration(&env, &admin);
+    }
+
+    /// Rollback migration
+    pub fn rollback_migration(env: Env, admin: Address) {
+        admin.require_auth();
+        migration_v2::rollback_migration(&env, &admin);
+    }
+
     /// Health check for contract status and integrity.
     /// Verifies: storage integrity, invariant validity, and admin config consistency.
     /// Returns HealthStatus with detailed health information.
