@@ -17,8 +17,15 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
+// #1301: Auth audit event routes
+import authAuditRouter from './routes/authAudit.js';
+// #1302: Passwordless authentication routes
+import passwordlessAuthRouter from './routes/passwordlessAuth.js';
 import { cacheControl } from './middleware/cacheControl.js';
-import { createRateLimiter } from './middleware/rateLimiter.js';
+// #1303: CORS middleware
+import { createCorsFromEnv } from './middleware/cors.js';
+// #1304: Adaptive rate limiter
+import { createAdaptiveRateLimiter } from './middleware/adaptiveRateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
@@ -29,6 +36,11 @@ import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
+
+// #1303: Apply CORS before all other middleware so preflight requests are handled
+// without requiring auth. Origins are configured via CORS_ALLOWED_ORIGINS env var.
+const cors = createCorsFromEnv();
+app.use(cors);
 
 const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
@@ -45,12 +57,21 @@ const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10);
 const RATE_LIMIT_BACKOFF = parseInt(process.env.RATE_LIMIT_BACKOFF ?? '2', 10);
 const RATE_LIMIT_MAX_VIOLATIONS = parseInt(process.env.RATE_LIMIT_MAX_VIOLATIONS ?? '5', 10);
 
-const apiRateLimiter = createRateLimiter({
+// #1304: Use adaptive rate limiter with anomaly detection.
+// Falls back gracefully — the base createRateLimiter is kept for
+// targeted use cases; the adaptive one covers the /api/* prefix.
+const apiRateLimiter = createAdaptiveRateLimiter({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: RATE_LIMIT_MAX,
   name: 'api',
   backoffMultiplier: RATE_LIMIT_BACKOFF,
   maxViolations: RATE_LIMIT_MAX_VIOLATIONS,
+  anomalyThreshold: parseFloat(process.env.RATE_LIMIT_ANOMALY_THRESHOLD ?? '3'),
+  blacklistDurationMs: parseInt(process.env.RATE_LIMIT_BLACKLIST_MS ?? String(60 * 60 * 1000), 10),
+  // Auth endpoints get a tighter limit to limit brute-force.
+  pathOverrides: {
+    '/auth': parseInt(process.env.RATE_LIMIT_AUTH_MAX ?? '20', 10),
+  },
 });
 
 app.use('/api', apiRateLimiter);
@@ -82,6 +103,11 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
+// #1301: Auth audit events (admin-only)
+app.use('/api/audit/auth-events', authAuditRouter);
+// #1302: Passwordless authentication (magic links + WebAuthn)
+app.use('/api/auth/passwordless', passwordlessAuthRouter);
+app.use('/api/auth/webauthn', passwordlessAuthRouter);
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -102,6 +128,11 @@ app.get('/ws/metrics', (_req, res) => {
 app.get('/metrics/ws', (_req, res) => {
   res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(getWsMetricsPrometheus());
+});
+
+// #1304: Throttling effectiveness metrics
+app.get('/metrics/throttling', (_req, res) => {
+  res.json(apiRateLimiter.getMetrics());
 });
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
