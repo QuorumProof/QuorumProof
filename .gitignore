@@ -26,10 +26,47 @@ lcov.info
 # Test snapshots
 **/test_snapshots/
 **/*.snap
+**/__snapshots__/
+**/snapshots/
+**/*.snap.bak
+**/__vitest_snapshots__/
+**/snap_tests/
 
 # Backup files
 *.bak
 *.bak.*
+
+# Proptest regression files
+**/proptest-regressions/
+
+# Benchmark history / artifacts
+benches/history/*.json
+benches/history/*.csv
+
+# Profiling artifacts
+*.profdata
+*.profraw
+perf.data
+perf.data.old
+
+# Editor temp / generated
+*.orig
+*.tmp
+.direnv/
+.envrc
+
+# Python bytecode (scripts)
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Log files
+*.log
+logs/
+
+# Runtime / local data stores
+api-server/.data/
+.data/
 
 # IDE / OS
 .DS_Store

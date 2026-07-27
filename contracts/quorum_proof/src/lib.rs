@@ -11,12 +11,16 @@ use soroban_sdk::xdr::ToXdr;
 
 mod rbac;
 mod slice_enhancements;
+pub mod bbs_plus_features;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
 mod economic_security_tests;
 #[cfg(test)]
 mod tests_new_issues;
+#[cfg(test)]
+#[path = "bbs_plus_tests.rs"]
+mod bbs_plus_tests;
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
@@ -18194,6 +18198,363 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey11::AttestorType(attestor))
             .unwrap_or(AttestorType::Other)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1287 — BBS+ Revocation Registry Integration
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Add a credential to the BBS+ revocation accumulator.
+    ///
+    /// Updates the on-chain accumulator state to epoch n+1 with the supplied
+    /// `accumulator_value` (serialized BLS12-381 G1 point produced off-chain
+    /// by the accumulator manager) and records `credential_id` as a member.
+    /// Admin or issuer authentication is required.
+    ///
+    /// # Parameters
+    /// - `caller`: The admin or issuer performing the update.
+    /// - `credential_id`: The credential being added to the accumulator.
+    /// - `accumulator_value`: Serialized updated accumulator point bytes.
+    pub fn add_to_revocation_accumulator(
+        env: Env,
+        caller: Address,
+        credential_id: u64,
+        accumulator_value: Bytes,
+    ) {
+        bbs_plus_features::add_to_revocation_accumulator(
+            &env,
+            caller,
+            credential_id,
+            accumulator_value,
+        );
+    }
+
+    /// Retrieve the current BBS+ revocation accumulator state.
+    ///
+    /// # Returns
+    /// `Some(BbsRevocationAccumulator)` if an accumulator has been
+    /// initialised, `None` otherwise.
+    pub fn get_revocation_accumulator(
+        env: Env,
+    ) -> Option<bbs_plus_features::BbsRevocationAccumulator> {
+        bbs_plus_features::get_revocation_accumulator(&env)
+    }
+
+    /// Store a BBS+ non-revocation proof for a credential.
+    ///
+    /// Holders produce the `proof_bytes` off-chain using the `bbs_plus_v1`
+    /// library's `NonRevocationProof::create` and submit them here.
+    /// Verifiers later call `verify_non_revocation` to check the proof is
+    /// current.
+    ///
+    /// # Parameters
+    /// - `holder`: The credential holder (must be authenticated).
+    /// - `credential_id`: The credential the proof belongs to.
+    /// - `proof_bytes`: Serialized non-revocation proof.
+    pub fn create_non_revocation_proof(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+        proof_bytes: Bytes,
+    ) {
+        bbs_plus_features::create_non_revocation_proof(&env, holder, credential_id, proof_bytes);
+    }
+
+    /// Verify a stored BBS+ non-revocation proof for a credential.
+    ///
+    /// Returns `true` only when a proof record exists for the credential
+    /// AND its epoch matches the current accumulator epoch.  A stale proof
+    /// (epoch behind the current accumulator epoch) is treated as invalid —
+    /// the holder must refresh their proof after a revocation event.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential to check.
+    ///
+    /// # Returns
+    /// `true` if a valid, current-epoch proof is on file; `false` otherwise.
+    pub fn verify_non_revocation(env: Env, credential_id: u64) -> bool {
+        bbs_plus_features::verify_non_revocation(&env, credential_id)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1288 — BBS+ Performance Optimization
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Memoize a BBS+ signature verification result.
+    ///
+    /// Stores the `is_valid` result keyed by SHA-256(vk_bytes || msg_bytes ||
+    /// sig_bytes) so subsequent `get_cached_bbs_signature` calls with the
+    /// same inputs short-circuit the expensive pairing check.
+    ///
+    /// # Parameters
+    /// - `verifying_key_bytes`: Serialized BBS+ verifying key.
+    /// - `message_bytes`: Serialized message payload.
+    /// - `signature_bytes`: Serialized BBS+ signature.
+    /// - `is_valid`: The verification result to cache.
+    pub fn cache_bbs_signature(
+        env: Env,
+        verifying_key_bytes: Bytes,
+        message_bytes: Bytes,
+        signature_bytes: Bytes,
+        is_valid: bool,
+    ) {
+        bbs_plus_features::cache_bbs_signature(
+            &env,
+            verifying_key_bytes,
+            message_bytes,
+            signature_bytes,
+            is_valid,
+        );
+    }
+
+    /// Look up a memoized BBS+ signature verification result.
+    ///
+    /// Returns `Some(BbsSignatureCache)` on a cache hit, `None` on a miss.
+    ///
+    /// # Parameters
+    /// - `verifying_key_bytes`: Serialized BBS+ verifying key.
+    /// - `message_bytes`: Serialized message payload.
+    /// - `signature_bytes`: Serialized BBS+ signature.
+    pub fn get_cached_bbs_signature(
+        env: Env,
+        verifying_key_bytes: Bytes,
+        message_bytes: Bytes,
+        signature_bytes: Bytes,
+    ) -> Option<bbs_plus_features::BbsSignatureCache> {
+        bbs_plus_features::get_cached_bbs_signature(
+            &env,
+            &verifying_key_bytes,
+            &message_bytes,
+            &signature_bytes,
+        )
+    }
+
+    /// Batch BBS+ signature verification using the memoization cache.
+    ///
+    /// For each item in `items` the cache is consulted; cache misses return
+    /// `is_valid: false` indicating the client must perform the pairing
+    /// check off-chain and populate the cache via `cache_bbs_signature`.
+    ///
+    /// # Parameters
+    /// - `items`: Vector of `BbsBatchVerifyItem` input records.
+    ///
+    /// # Returns
+    /// A vector of `BbsBatchVerifyResult` with one entry per input item,
+    /// in the same order.
+    pub fn batch_verify_bbs_signatures(
+        env: Env,
+        items: Vec<bbs_plus_features::BbsBatchVerifyItem>,
+    ) -> Vec<bbs_plus_features::BbsBatchVerifyResult> {
+        bbs_plus_features::batch_verify_bbs_signatures(&env, items)
+    }
+
+    /// Store (or refresh) precomputed BBS+ generator material for an issuer.
+    ///
+    /// Caches the serialized verifying key bytes so consumers retrieve
+    /// them without re-running the hash-to-curve generator derivation.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address (must be authenticated).
+    /// - `verifying_key_bytes`: Serialized verifying key (W||Q1||H₀||…||Hₙ).
+    pub fn store_bbs_precomputed_generators(
+        env: Env,
+        issuer: Address,
+        verifying_key_bytes: Bytes,
+    ) {
+        bbs_plus_features::store_bbs_precomputed_generators(&env, issuer, verifying_key_bytes);
+    }
+
+    /// Retrieve precomputed BBS+ generator material for an issuer.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address.
+    ///
+    /// # Returns
+    /// `Some(BbsPrecomputedGenerators)` if a precomputation is on file,
+    /// `None` otherwise.
+    pub fn get_bbs_precomputed_generators(
+        env: Env,
+        issuer: Address,
+    ) -> Option<bbs_plus_features::BbsPrecomputedGenerators> {
+        bbs_plus_features::get_bbs_precomputed_generators(&env, issuer)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1289 — BBS+ Key Rotation for Issuers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Register or rotate a BBS+ issuer key — admin-only.
+    ///
+    /// On first call for an issuer this registers key version 1.
+    /// On subsequent calls it supersedes the current key and appends the
+    /// new one as the next version.  Old key records are preserved so
+    /// credentials signed under them continue to be verifiable during a
+    /// configurable grace window.
+    ///
+    /// # Parameters
+    /// - `admin`: The contract admin (must be authenticated).
+    /// - `issuer`: The issuer whose key is being rotated.
+    /// - `new_key`: Serialized new BBS+ verifying key bytes.
+    pub fn rotate_issuer_key(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        new_key: Bytes,
+    ) {
+        bbs_plus_features::rotate_issuer_key(&env, admin, issuer, new_key);
+    }
+
+    /// Get the full key-version history for an issuer.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address.
+    ///
+    /// # Returns
+    /// An ordered `Vec<BbsIssuerKeyRecord>` (oldest first).
+    pub fn get_bbs_issuer_key_history(
+        env: Env,
+        issuer: Address,
+    ) -> Vec<bbs_plus_features::BbsIssuerKeyRecord> {
+        bbs_plus_features::get_bbs_issuer_key_history(&env, issuer)
+    }
+
+    /// Get summary information about an issuer's BBS+ key versions.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address.
+    ///
+    /// # Returns
+    /// A `BbsIssuerKeyInfo` summary record.
+    pub fn get_bbs_issuer_key_info(
+        env: Env,
+        issuer: Address,
+    ) -> bbs_plus_features::BbsIssuerKeyInfo {
+        bbs_plus_features::get_bbs_issuer_key_info(&env, issuer)
+    }
+
+    /// Get the verifying key record for a specific version.
+    ///
+    /// # Parameters
+    /// - `issuer`: The issuer address.
+    /// - `version`: The key version number (1-based).
+    ///
+    /// # Returns
+    /// `Some(BbsIssuerKeyRecord)` if the version exists, `None` otherwise.
+    pub fn get_bbs_issuer_key_version(
+        env: Env,
+        issuer: Address,
+        version: u32,
+    ) -> Option<bbs_plus_features::BbsIssuerKeyRecord> {
+        bbs_plus_features::get_bbs_issuer_key_version(&env, issuer, version)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1290 — BBS+ Attribute Privacy Controls
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Set or update the privacy level for a credential attribute.
+    ///
+    /// Admin / credential-type issuer only.  The `sensitivity` governs
+    /// whether downstream selective-disclosure proofs may include this
+    /// attribute.
+    ///
+    /// Sensitivity levels:
+    /// - `1` = Public       — freely disclosable.
+    /// - `2` = Internal     — permissioned verifiers only.
+    /// - `3` = Confidential — requires explicit holder consent.
+    ///
+    /// # Parameters
+    /// - `caller`: Admin or issuer setting the policy (must be authenticated).
+    /// - `credential_type`: The credential type the policy applies to.
+    /// - `attribute_name`: The attribute identifier bytes (e.g. `b"salary"`).
+    /// - `sensitivity`: The `PrivacyLevel` value (1, 2, or 3).
+    pub fn set_attribute_privacy(
+        env: Env,
+        caller: Address,
+        credential_type: u32,
+        attribute_name: Bytes,
+        sensitivity: bbs_plus_features::PrivacyLevel,
+    ) {
+        bbs_plus_features::set_attribute_privacy(
+            &env,
+            caller,
+            credential_type,
+            attribute_name,
+            sensitivity,
+        );
+    }
+
+    /// Get the privacy policy for a (credential_type, attribute_name) pair.
+    ///
+    /// Returns a `Public` default policy when no explicit policy has been set.
+    ///
+    /// # Parameters
+    /// - `credential_type`: The credential type to query.
+    /// - `attribute_name`: The attribute identifier bytes.
+    ///
+    /// # Returns
+    /// An `AttributePrivacyPolicy` record.
+    pub fn get_attribute_privacy(
+        env: Env,
+        credential_type: u32,
+        attribute_name: Bytes,
+    ) -> bbs_plus_features::AttributePrivacyPolicy {
+        bbs_plus_features::get_attribute_privacy(&env, credential_type, attribute_name)
+    }
+
+    /// Check whether disclosure of a specific attribute is permitted.
+    ///
+    /// Business rules:
+    /// - `Public`       → always permitted.
+    /// - `Internal`     → permitted only when `verifier_is_permissioned = true`.
+    /// - `Confidential` → never permitted (requires separate consent-grant).
+    ///
+    /// # Parameters
+    /// - `credential_type`: The credential type to check.
+    /// - `attribute_name`: The attribute identifier bytes.
+    /// - `verifier_is_permissioned`: Whether the requesting verifier holds
+    ///   a permission grant.
+    ///
+    /// # Returns
+    /// A `DisclosureCheckResult` with `disclosure_permitted` set accordingly.
+    pub fn check_disclosure_permitted(
+        env: Env,
+        credential_type: u32,
+        attribute_name: Bytes,
+        verifier_is_permissioned: bool,
+    ) -> bbs_plus_features::DisclosureCheckResult {
+        bbs_plus_features::check_disclosure_permitted(
+            &env,
+            credential_type,
+            attribute_name,
+            verifier_is_permissioned,
+        )
+    }
+
+    /// Batch-check disclosure permissions for multiple attributes of the
+    /// same credential type.
+    ///
+    /// # Parameters
+    /// - `credential_type`: The credential type to check.
+    /// - `attribute_names`: The list of attribute identifier bytes to check.
+    /// - `verifier_is_permissioned`: Whether the requesting verifier holds
+    ///   a permission grant.
+    ///
+    /// # Returns
+    /// A `Map<Bytes, bool>` mapping each attribute name to its disclosure
+    /// permission.
+    pub fn batch_check_disclosure(
+        env: Env,
+        credential_type: u32,
+        attribute_names: Vec<Bytes>,
+        verifier_is_permissioned: bool,
+    ) -> Map<Bytes, bool> {
+        bbs_plus_features::batch_check_disclosure(
+            &env,
+            credential_type,
+            attribute_names,
+            verifier_is_permissioned,
+        )
     }
 }
 
