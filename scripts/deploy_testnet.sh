@@ -1,27 +1,62 @@
 #!/bin/bash
+# scripts/deploy_testnet.sh — Deploy all contracts to testnet.
+#
+# In CI (see .github/workflows/testnet-deploy.yml) this is followed by
+# scripts/testnet_smoke_test.sh; on smoke-test failure
+# scripts/testnet_rollback.sh restores the previous manifest so downstream
+# services keep pointing at the last known-good deployment.
 set -e
 
-source .env
+if [ -f .env ]; then
+  source .env
+fi
+
+WASM_DIR="${WASM_DIR:-target/wasm32-unknown-unknown/release}"
+MANIFEST_PATH="${MANIFEST_PATH:-testnet-deployment.json}"
 
 echo "Deploying to testnet..."
 
 stellar keys generate deployer --network testnet 2>/dev/null || true
+DEPLOYER_ADDRESS=$(stellar keys address deployer)
 
 CONTRACT_QUORUM_PROOF=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/quorum_proof.wasm \
+  --wasm "$WASM_DIR/quorum_proof.wasm" \
   --source deployer \
   --network testnet)
 
 CONTRACT_SBT_REGISTRY=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/sbt_registry.wasm \
+  --wasm "$WASM_DIR/sbt_registry.wasm" \
   --source deployer \
   --network testnet)
 
 CONTRACT_ZK_VERIFIER=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/zk_verifier.wasm \
+  --wasm "$WASM_DIR/zk_verifier.wasm" \
   --source deployer \
   --network testnet)
 
 echo "CONTRACT_QUORUM_PROOF=$CONTRACT_QUORUM_PROOF"
 echo "CONTRACT_SBT_REGISTRY=$CONTRACT_SBT_REGISTRY"
 echo "CONTRACT_ZK_VERIFIER=$CONTRACT_ZK_VERIFIER"
+
+# Preserve the previous manifest (if any) so a failed smoke test can restore
+# it via testnet_rollback.sh — this is a fresh deployment, not an in-place
+# upgrade, so "rollback" means "point everyone back at the last known-good
+# contract IDs," not reverting on-chain state.
+if [ -f "$MANIFEST_PATH" ]; then
+  cp "$MANIFEST_PATH" "${MANIFEST_PATH}.previous"
+fi
+
+cat > "$MANIFEST_PATH" <<EOF
+{
+  "network": "testnet",
+  "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "deployer": "$DEPLOYER_ADDRESS",
+  "contracts": {
+    "quorum_proof": "$CONTRACT_QUORUM_PROOF",
+    "sbt_registry": "$CONTRACT_SBT_REGISTRY",
+    "zk_verifier": "$CONTRACT_ZK_VERIFIER"
+  }
+}
+EOF
+
+echo "Wrote deployment manifest to $MANIFEST_PATH"

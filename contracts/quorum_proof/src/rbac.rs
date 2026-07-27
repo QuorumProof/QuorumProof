@@ -9,6 +9,7 @@ pub enum Role {
     Issuer = 2,
     Verifier = 3,
     RevocationAgent = 4,
+    Auditor = 5,
 }
 
 #[contracttype]
@@ -49,7 +50,21 @@ pub enum RoleAction {
     Expired = 5,
 }
 
+/// Checks whether `address` holds `role`, either directly or through role
+/// inheritance: the Admin role sits at the top of the hierarchy and
+/// implicitly holds every other role's permissions, so an address with an
+/// unexpired Admin assignment/delegation satisfies `has_role` for any role.
 pub fn has_role(env: &Env, address: &Address, role: Role) -> bool {
+    if has_exact_role(env, address, role) {
+        return true;
+    }
+    if role != Role::Admin && has_exact_role(env, address, Role::Admin) {
+        return true;
+    }
+    false
+}
+
+fn has_exact_role(env: &Env, address: &Address, role: Role) -> bool {
     if let Some(assignment) = env
         .storage()
         .instance()

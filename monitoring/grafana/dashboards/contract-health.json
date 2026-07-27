@@ -288,6 +288,77 @@
         "w": 24,
         "h": 8
       }
+    },
+    {
+      "id": 11,
+      "title": "Active Credentials",
+      "type": "stat",
+      "description": "credentials_issued_total - credentials_revoked_total, from get_state_metrics().",
+      "targets": [
+        {
+          "expr": "quorumproof_credentials_active_total",
+          "legendFormat": "active"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 6,
+        "h": 5
+      }
+    },
+    {
+      "id": 12,
+      "title": "Revoked Credentials",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "quorumproof_credentials_revoked_snapshot_total",
+          "legendFormat": "revoked"
+        }
+      ],
+      "gridPos": {
+        "x": 6,
+        "y": 36,
+        "w": 6,
+        "h": 5
+      }
+    },
+    {
+      "id": 13,
+      "title": "Storage Usage Estimate",
+      "type": "timeseries",
+      "description": "Coarse proxy for on-chain storage growth (sum of credential/slice/DID counters). Track the slope, not the absolute value — see docs/operator-health-metrics.md.",
+      "targets": [
+        {
+          "expr": "quorumproof_storage_entries_estimate",
+          "legendFormat": "storage entries"
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 5
+      }
+    },
+    {
+      "id": 14,
+      "title": "Contract State Version",
+      "type": "stat",
+      "description": "Should be a single flat value across all exporter instances; a step change marks an upgrade/migration boundary.",
+      "targets": [
+        {
+          "expr": "quorumproof_state_version",
+          "legendFormat": "version"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 6,
+        "h": 5
+      }
     }
   ]
 }
