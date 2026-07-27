@@ -28,6 +28,8 @@ import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
+import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
+import { getDefaultCriticalEventListener } from './services/criticalEventListener.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
@@ -111,6 +113,39 @@ app.get('/ws/metrics', (_req, res) => {
 app.get('/metrics/ws', (_req, res) => {
   res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(getWsMetricsPrometheus());
+});
+
+// Circuit breaker state for outbound Soroban RPC calls (issue #2). See
+// api-server/src/services/rpcCircuitBreaker.ts and docs/resilience.md.
+app.get('/metrics/rpc', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
+});
+
+app.get('/rpc/circuit-breaker', (_req, res) => {
+  res.json(getDefaultRpcCircuitBreaker().getMetrics());
+});
+
+// Critical contract event monitoring & alerting (issue #3). See
+// api-server/src/services/criticalEventListener.ts and
+// docs/critical-event-alerting.md. Polling only starts when a contract id
+// is configured; harmless (and inert) otherwise, so this is safe to load
+// in any environment including tests.
+const criticalEventListener = getDefaultCriticalEventListener();
+if (process.env.CONTRACT_QUORUM_PROOF && process.env.CRITICAL_EVENT_MONITORING !== 'disabled') {
+  criticalEventListener.start();
+}
+
+app.get('/metrics/events', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(criticalEventListener.getMetricsPrometheus());
+});
+
+app.get('/events/critical/recent', (_req, res) => {
+  res.json({
+    metrics: criticalEventListener.getMetrics(),
+    events: criticalEventListener.getRecentEvents(),
+  });
 });
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
