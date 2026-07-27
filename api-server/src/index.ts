@@ -34,6 +34,7 @@ import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
 import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
 import { getDefaultCriticalEventListener } from './services/criticalEventListener.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
+import * as Soroban from './soroban.js';
 
 const app = express();
 
@@ -110,6 +111,15 @@ app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
 app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation (spec-mandated path)
 app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
+
+// #997 Credential Holder Dashboard API
+const sorobanClient = {
+  simulateCall: Soroban.simulateCall,
+  u64Val: Soroban.u64Val,
+  u32Val: Soroban.u32Val,
+  addressVal: Soroban.addressVal,
+};
+app.use('/api/me', createDashboardRouter(sorobanClient));
 
 app.get('/health', (_req, res) => {
   res.json({
