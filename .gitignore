@@ -22,10 +22,14 @@ api-server/coverage/
 *.lcov
 .nyc_output/
 lcov.info
+.c8/
 
-# Test snapshots
+# Test snapshots & fixtures generated at test time
 **/test_snapshots/
 **/*.snap
+**/__snapshots__/
+**/snapshots/
+**/*.insta.yaml
 
 # Backup files
 *.bak
@@ -37,12 +41,15 @@ lcov.info
 *.swo
 .vscode/settings.json
 .idea/
+*.iml
+Thumbs.db
 
 # Misc
 .env
 dist/
 dashboard/dist/
 frontend/dist/
+api-server/dist/
 
 # Durable runtime state (GDPR request store, crypto-shredding vault)
 .data/
@@ -55,6 +62,8 @@ api-server/artifacts/
 # Rust / Cargo
 Cargo.lock.bak
 **/*.rs.bak
+# proptest regression files are auto-generated from test runs; not source
+contracts/quorum_proof/proptest-regressions/
 
 # Fuzz artifacts
 fuzz/corpus/
@@ -63,3 +72,33 @@ fuzz/artifacts/
 # Mutation testing
 mutants.out/
 mutants.out.old/
+
+# Profiling / performance
+perf.data
+perf.data.old
+*.prof
+*.heaptrack
+
+# Temporary / scratch files
+*.tmp
+*.temp
+/tmp/
+scratch/
+
+# Log files
+*.log
+logs/
+
+# Python bytecode (monitoring exporter)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Docker compose volumes / override files
+docker-compose.override.yml
+.docker/
+
+# Benchmark history that should not be committed
+benches/history/*.json

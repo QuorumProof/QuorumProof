@@ -10,12 +10,29 @@ pub mod signature;
 pub mod presentation;
 pub mod accumulator;
 
+// ── Issue #1291: BBS+ Proof Template Cache ────────────────────────────────
+pub mod proof_cache;
+// ── Issue #1292: BBS+ Disclosure Audit Trail ─────────────────────────────
+pub mod audit_trail;
+// ── Issue #1293: BBS+ Proof Size Optimization ────────────────────────────
+pub mod proof_compression;
+// ── Issue #1294: BBS+ Linkability Control ────────────────────────────────
+pub mod linkability;
+
 pub use errors::{BbsError, BbsResult};
 pub use primitives::{Fr, G1, G2, Gt, pairing, linear_combination_g1, msm_g1};
 pub use transcript::Transcript;
 pub use signature::{SigningKey, VerifyingKey, Signature, BbsSignature};
 pub use presentation::{PresentationProof, BbsPresentation};
 pub use accumulator::{AccumulatorKey, AccumulatorEpoch, Witness, NonRevocationProof};
+
+// Re-export new feature APIs at the crate root for convenient access.
+pub use proof_cache::{ProofTemplate, ProofTemplateRegistry, CacheStats, vk_fingerprint};
+pub use audit_trail::{AuditTrail, DisclosureRecord, AuditQuery};
+pub use proof_compression::{compress_bbs_proof, decompress_bbs_proof, benchmark_size_reduction, CompressionStats};
+pub use linkability::{generate_nonce_with_rng, create_unlinkable_disclosure, verify_unlinkable_disclosure, UnlinkableDisclosure, NonceRegistry};
+#[cfg(feature = "std")]
+pub use linkability::generate_nonce;
 
 /// Library version information
 pub const VERSION: &str = "0.1.0";
