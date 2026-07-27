@@ -125,6 +125,42 @@ router.delete('/:id', (req: Request, res: Response) => {
   }
 });
 
+// POST /api/api-keys/:id/rotate — Rotate a key; old key keeps working for a grace period
+router.post('/:id/rotate', (req: Request, res: Response) => {
+  const issuer = getIssuerFromRequest(req);
+  if (!issuer) {
+    res.status(401).json({ error: 'Missing or invalid authorization' });
+    return;
+  }
+
+  try {
+    const manager = getDefaultApiKeyManager();
+    const key = manager.getKey(req.params.id as string);
+
+    if (!key || key.issuer !== issuer) {
+      res.status(404).json({ error: 'API key not found' });
+      return;
+    }
+
+    const { gracePeriodMs } = req.body as { gracePeriodMs?: unknown };
+    const grace = typeof gracePeriodMs === 'number' && gracePeriodMs > 0 ? gracePeriodMs : undefined;
+
+    const newSecret = manager.rotateKey(req.params.id as string, grace);
+    if (!newSecret) {
+      res.status(409).json({ error: 'Key is already inactive and cannot be rotated' });
+      return;
+    }
+
+    res.status(201).json({
+      ...newSecret,
+      rotatedFrom: req.params.id,
+      warning: 'Store this key securely. It will not be shown again. The old key remains valid until its grace period expires.',
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to rotate key' });
+  }
+});
+
 // GET /api/api-keys/:id/usage — Get usage history for a key
 router.get('/:id/usage', (req: Request, res: Response) => {
   const issuer = getIssuerFromRequest(req);

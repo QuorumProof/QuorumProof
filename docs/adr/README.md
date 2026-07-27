@@ -15,6 +15,11 @@ An ADR is a short document that captures *why* a decision was made, not just *wh
 | [003](./adr-003-zk-verification.md) | Zero-Knowledge Verification Approach | Accepted | 2024-02-01 |
 | [004](./adr-004-soroban-platform.md) | Soroban Platform Choice | Accepted | 2026-06-26 |
 | [005](./adr-005-registry-attestation-proof.md) | Registry Attestation Proof for Licensing Body Integrations | Accepted | 2026-07-20 |
+| [006](./adr-006-economic-security-model.md) | Economic Security Model | Accepted | 2026-07-21 |
+| [006](./adr-006-quorum-intersection-verification.md) | Quorum Intersection Verification | Accepted | 2026-07-21 |
+| [007](./adr-007-bbs-plus-selective-disclosure.md) | BBS+ Signatures for Selective Disclosure | Accepted | 2026-07-26 |
+
+> Note: two ADRs were numbered `006` independently before this index was reconciled. Both are kept under their original filenames for stable links; do not reuse `006` or `007` for new ADRs — the next available number is `008`.
 
 ## How to Add a New ADR
 
