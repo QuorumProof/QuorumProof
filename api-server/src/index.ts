@@ -17,10 +17,7 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
-// #1301: Auth audit event routes
-import authAuditRouter from './routes/authAudit.js';
-// #1302: Passwordless authentication routes
-import passwordlessAuthRouter from './routes/passwordlessAuth.js';
+import oauth2Router from './routes/oauth2.js';
 import { cacheControl } from './middleware/cacheControl.js';
 // #1303: CORS middleware
 import { createCorsFromEnv } from './middleware/cors.js';
@@ -30,9 +27,12 @@ import { createRequestDeduplication } from './middleware/requestDeduplication.js
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
+import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
+import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
+import { getDefaultCriticalEventListener } from './services/criticalEventListener.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
@@ -46,6 +46,11 @@ const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
+
+// #1297 per-API-key rate limiting: applies whenever a caller presents
+// x-api-key, independently of the general IP-based limiter below, and
+// no-ops for requests that don't authenticate this way.
+app.use(apiKeyRateLimiter);
 
 const requestSigning = createRequestSigning();
 const requestDeduplication = createRequestDeduplication({ ttlMs: 100, enabled: true });
@@ -103,11 +108,8 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
-// #1301: Auth audit events (admin-only)
-app.use('/api/audit/auth-events', authAuditRouter);
-// #1302: Passwordless authentication (magic links + WebAuthn)
-app.use('/api/auth/passwordless', passwordlessAuthRouter);
-app.use('/api/auth/webauthn', passwordlessAuthRouter);
+app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation (spec-mandated path)
+app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -130,16 +132,80 @@ app.get('/metrics/ws', (_req, res) => {
   res.send(getWsMetricsPrometheus());
 });
 
-// #1304: Throttling effectiveness metrics
-app.get('/metrics/throttling', (_req, res) => {
-  res.json(apiRateLimiter.getMetrics());
+// Circuit breaker state for outbound Soroban RPC calls (issue #2). See
+// api-server/src/services/rpcCircuitBreaker.ts and docs/resilience.md.
+app.get('/metrics/rpc', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
+});
+
+app.get('/rpc/circuit-breaker', (_req, res) => {
+  res.json(getDefaultRpcCircuitBreaker().getMetrics());
+});
+
+// Critical contract event monitoring & alerting (issue #3). See
+// api-server/src/services/criticalEventListener.ts and
+// docs/critical-event-alerting.md. Polling only starts when a contract id
+// is configured; harmless (and inert) otherwise, so this is safe to load
+// in any environment including tests.
+const criticalEventListener = getDefaultCriticalEventListener();
+if (process.env.CONTRACT_QUORUM_PROOF && process.env.CRITICAL_EVENT_MONITORING !== 'disabled') {
+  criticalEventListener.start();
+}
+
+app.get('/metrics/events', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(criticalEventListener.getMetricsPrometheus());
+});
+
+app.get('/events/critical/recent', (_req, res) => {
+  res.json({
+    metrics: criticalEventListener.getMetrics(),
+    events: criticalEventListener.getRecentEvents(),
+  });
 });
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
 const httpServer = createServer(app);
 createWsServer(httpServer, '/ws');
 
-httpServer.listen(PORT, () => console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`));
+/**
+ * Apply any pending database migrations before accepting traffic. Manual
+ * migrations were error-prone (an operator forgets to run them, environments
+ * drift). Skipped entirely when DATABASE_URL isn't set so this stays a no-op
+ * for the file/DurableLog-backed stores the API server also supports.
+ *
+ * A failed migration is treated as fatal for startup — see
+ * docs/database-migrations.md for the rollback procedure.
+ */
+async function runStartupMigrations(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+
+  const { Pool } = await import('pg');
+  const { runMigrations } = await import('./migrations/runner.js');
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    const applied = await runMigrations(pool);
+    if (applied.length > 0) {
+      console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+(async () => {
+  try {
+    await runStartupMigrations();
+  } catch (err) {
+    console.error('Startup migration failed, refusing to start:', err);
+    process.exit(1);
+    return;
+  }
+  httpServer.listen(PORT, () =>
+    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
+  );
+})();
 
 export { broadcastEvent };
 

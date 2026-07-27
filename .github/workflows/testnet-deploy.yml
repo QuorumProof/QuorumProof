@@ -1,0 +1,93 @@
+# .github/workflows/testnet-deploy.yml — Automated testnet deployment.
+#
+# Testnet deployment was previously a manual, error-prone process (run
+# scripts/deploy_testnet.sh locally, copy contract IDs by hand). This job
+# builds the contracts, deploys them to testnet, runs post-deployment smoke
+# tests, and automatically rolls back the deployment manifest if the smoke
+# tests fail. See docs/ci-testnet-deployment.md for the full process.
+
+name: Testnet Deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - "scripts/deploy_testnet.sh"
+      - "scripts/testnet_smoke_test.sh"
+      - ".github/workflows/testnet-deploy.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: testnet-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Testnet
+    runs-on: ubuntu-latest
+    environment: testnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build contract WASM
+        run: |
+          cargo build --release --target wasm32-unknown-unknown -p quorum_proof
+          cargo build --release --target wasm32-unknown-unknown -p sbt_registry
+          cargo build --release --target wasm32-unknown-unknown -p zk_verifier
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-installer.sh \
+            | bash -s -- --target ~/.local/bin
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore previous deployment manifest
+        uses: actions/cache@v4
+        with:
+          path: testnet-deployment.json
+          key: testnet-deployment-manifest
+
+      - name: Deploy to testnet
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_DEPLOY_SECRET_KEY }}
+        run: |
+          chmod +x scripts/deploy_testnet.sh
+          ./scripts/deploy_testnet.sh
+
+      - name: Run post-deployment smoke tests
+        id: smoke
+        run: |
+          chmod +x scripts/testnet_smoke_test.sh
+          ./scripts/testnet_smoke_test.sh
+
+      - name: Roll back on smoke test failure
+        if: failure() && steps.smoke.outcome == 'failure'
+        env:
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+        run: |
+          chmod +x scripts/testnet_rollback.sh
+          ./scripts/testnet_rollback.sh
+
+      - name: Save deployment manifest for next run
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: testnet-deployment.json
+          key: testnet-deployment-manifest
+
+      - name: Upload deployment manifest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-deployment-manifest
+          path: testnet-deployment.json*
+          retention-days: 30
