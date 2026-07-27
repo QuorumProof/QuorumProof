@@ -1,5 +1,9 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
+// Rationale for choosing BBS+ over Merkle-redaction or generic zk-SNARK-wrapped
+// signatures for selective disclosure is recorded in
+// docs/adr/adr-007-bbs-plus-selective-disclosure.md. See also
+// docs/bbs-plus-tutorial.md for a developer-facing usage guide.
 
 extern crate alloc;
 
@@ -9,6 +13,7 @@ pub mod transcript;
 pub mod signature;
 pub mod presentation;
 pub mod accumulator;
+pub mod escrow;
 
 pub use errors::{BbsError, BbsResult};
 pub use primitives::{Fr, G1, G2, Gt, pairing, linear_combination_g1, msm_g1};
@@ -16,6 +21,7 @@ pub use transcript::Transcript;
 pub use signature::{SigningKey, VerifyingKey, Signature, BbsSignature};
 pub use presentation::{PresentationProof, BbsPresentation};
 pub use accumulator::{AccumulatorKey, AccumulatorEpoch, Witness, NonRevocationProof};
+pub use escrow::{KeyShare, split_secret, reconstruct_secret};
 
 /// Library version information
 pub const VERSION: &str = "0.1.0";
