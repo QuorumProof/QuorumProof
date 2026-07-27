@@ -26,6 +26,7 @@ lcov.info
 # Test snapshots
 **/test_snapshots/
 **/*.snap
+**/__snapshots__/
 
 # Backup files
 *.bak
@@ -63,3 +64,33 @@ fuzz/artifacts/
 # Mutation testing
 mutants.out/
 mutants.out.old/
+
+# Proptest regression files (auto-generated, not needed in repo)
+**/proptest-regressions/
+
+# Benchmark history (generated output, not source)
+benches/history/
+
+# Profiling and flamegraphs
+perf.data
+perf.data.old
+flamegraph.svg
+*.profdata
+*.profraw
+
+# Soroban contract binaries
+*.optimized.wasm
+
+# Editor backup / swap files
+*~
+.#*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Temporary files
+*.tmp
+*.temp
