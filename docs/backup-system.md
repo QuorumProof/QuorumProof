@@ -288,6 +288,77 @@ soroban contract invoke \
 
 ---
 
+## On-Chain State Snapshots
+
+In addition to the off-chain S3 backup pipeline above, the `quorum_proof`
+contract itself supports lightweight on-chain snapshots of its aggregate
+counters (credential, slice, and dispute counts). These act as a fast
+integrity checkpoint and a way to recover the aggregate counters without
+waiting for an off-chain restore, and they are what `create_state_snapshot`
+records get read from by tooling that wants to cross-check an off-chain
+backup against on-chain state at the time it was taken.
+
+### Creating a snapshot
+
+```bash
+soroban contract invoke \
+  --id CAAAAAAA... \
+  --network testnet \
+  -- create_state_snapshot \
+  --admin <ADMIN> \
+  --description "pre-upgrade checkpoint"
+# returns the new snapshot_id, e.g. 7
+```
+
+### Inspecting snapshots
+
+```bash
+# List all snapshot IDs
+soroban contract invoke --id CAAAAAAA... --network testnet -- list_snapshots
+
+# Fetch a specific snapshot's recorded counts and hashes
+soroban contract invoke --id CAAAAAAA... --network testnet \
+  -- get_snapshot --snapshot_id 7
+```
+
+### Restoring from a snapshot
+
+```bash
+soroban contract invoke \
+  --id CAAAAAAA... \
+  --network testnet \
+  -- restore_from_snapshot \
+  --admin <ADMIN> \
+  --snapshot_id 7
+```
+
+Before restoring, the contract:
+
+1. Confirms the snapshot exists (`SnapshotNotFound` if not).
+2. Confirms the snapshot's `state_version` matches the contract's current
+   schema version, refusing to restore snapshots taken under an
+   incompatible schema.
+3. Recomputes the snapshot's hashes from its own recorded counts and
+   compares them against the hashes stored at snapshot time
+   (`SnapshotCorrupted` if they don't match) — this catches a snapshot
+   record that was corrupted or tampered with after creation.
+
+On success, the contract resets `CredentialCount`, `SliceCount`, and
+`DisputeCount` to the values captured in the snapshot, and records the
+restored snapshot ID (queryable via `get_last_restored_snapshot`) for audit
+purposes.
+
+**Scope note:** restoring only resets the aggregate counters, not every
+individual credential/slice/dispute record — rewriting the full data set
+in a single on-chain transaction would exceed Soroban's per-transaction
+resource limits for any registry of meaningful size. Full record-level
+recovery goes through the off-chain [Restore Procedure](#restore-procedure)
+above, which replays individual records from the S3/local JSON backup.
+Use the on-chain snapshot to confirm the counters an off-chain restore
+should converge to.
+
+---
+
 ## Automated Workflow
 
 ### Daily Backup Schedule
