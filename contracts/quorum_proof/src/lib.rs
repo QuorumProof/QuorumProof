@@ -1230,6 +1230,81 @@ pub enum DataKeySliceEnhancements {
     ConsensusMetricsHistory(u64),
 }
 
+// ===== Issue #1286: BBS+ Selective Disclosure + DataKey11 (Task #1227/#1228) =====
+
+/// Storage keys for holder/metadata indexes and BBS+ selective disclosure.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey11 {
+    // Task #1227: Holder credential index
+    HolderCredentialIndex(Address),
+    // Task #1228: Credential metadata index (issuer, subject, type → Vec<u64>)
+    CredentialMetadataIndex(Address, Address, u32),
+    // Slice reweighting audit log
+    SliceReweightingAuditLog(u64),
+    // Composition rule per credential type
+    SliceCompositionRule(u32),
+    // Attestor type registry
+    AttestorType(Address),
+    // ===== Issue #1286 =====
+    /// BBS+ signing key commitment for a credential issuer
+    /// (issuer → SHA-256 of issuer's BBS+ public key bytes)
+    BbsIssuerKeyCommitment(Address),
+    /// BBS+ selective disclosure credential attributes
+    /// (credential_id → Vec<Bytes> of attribute values)
+    BbsCredentialAttributes(u64),
+    /// BBS+ disclosure proof for a credential
+    /// (credential_id → Bytes proof)
+    BbsDisclosureProof(u64),
+    /// Flag indicating a credential was issued with BBS+ selective disclosure
+    BbsCredentialFlag(u64),
+}
+
+/// A BBS+ selective-disclosure credential record.
+///
+/// When a credential is issued with BBS+ signatures, its attributes are stored
+/// individually so the holder can later produce a proof that reveals only
+/// a chosen subset without exposing the rest.
+#[contracttype]
+#[derive(Clone)]
+pub struct BbsCredential {
+    /// The underlying credential ID (matches a regular Credential record)
+    pub credential_id: u64,
+    /// Subject address
+    pub subject: Address,
+    /// Issuer address
+    pub issuer: Address,
+    /// Credential type
+    pub credential_type: u32,
+    /// SHA-256 commitment to the issuer's BBS+ public key
+    /// (derived off-chain; stored on-chain for verification binding)
+    pub issuer_key_commitment: soroban_sdk::BytesN<32>,
+    /// Number of attributes in this credential
+    pub num_attributes: u32,
+    /// Ledger at which this was issued
+    pub issued_at_ledger: u32,
+}
+
+/// An on-chain BBS+ selective-disclosure proof.
+///
+/// The holder creates this off-chain using the BBS+ library and submits it
+/// for verification. It proves knowledge of a valid BBS+ signature over the
+/// full attribute set while only revealing the disclosed subset.
+#[contracttype]
+#[derive(Clone)]
+pub struct BbsDisclosureProofRecord {
+    /// Credential this proof is for
+    pub credential_id: u64,
+    /// Indices of disclosed attributes (0-based)
+    pub disclosed_indices: Vec<u32>,
+    /// The serialised BBS+ presentation proof bytes
+    pub proof_bytes: Bytes,
+    /// Verifier nonce used when creating the proof (replay protection)
+    pub nonce: Bytes,
+    /// Ledger at which this proof was submitted
+    pub submitted_at_ledger: u32,
+}
+
 /// Detailed attestor reputation score tracking speed, pass rate, and dispute ratio.
 #[contracttype]
 #[derive(Clone)]
@@ -18410,6 +18485,202 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey11::AttestorType(attestor))
             .unwrap_or(AttestorType::Other)
+    }
+
+    // ===== Issue #1286: BBS+ Selective Disclosure =====
+
+    /// Issue a credential that uses BBS+ signatures for selective disclosure.
+    ///
+    /// This extends the standard `issue_credential` flow by additionally:
+    /// 1. Storing each attribute individually under `DataKey11::BbsCredentialAttributes`.
+    /// 2. Recording the issuer's BBS+ public key commitment.
+    /// 3. Flagging the credential as BBS+-enabled.
+    ///
+    /// The `attributes` vector contains one `Bytes` entry per credential field
+    /// (e.g., `[name_bytes, degree_bytes, grad_year_bytes]`). The holder can
+    /// later call `create_bbs_disclosure_proof` to reveal any subset.
+    ///
+    /// Returns the new credential ID (same as a standard `issue_credential` call).
+    pub fn issue_selective_disclosure_credential(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        credential_type: u32,
+        metadata_hash: Bytes,
+        attributes: Vec<Bytes>,
+        issuer_bbs_pubkey_hash: soroban_sdk::BytesN<32>,
+        expires_at: Option<u64>,
+        nonce: u64,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(!attributes.is_empty(), "attributes cannot be empty");
+        assert!(
+            attributes.len() <= 255,
+            "too many attributes (max 255)"
+        );
+
+        // Issue the base credential using the existing flow
+        let credential_id = Self::issue_credential(
+            env.clone(),
+            issuer.clone(),
+            subject.clone(),
+            credential_type,
+            metadata_hash,
+            expires_at,
+            nonce,
+        );
+
+        // Store BBS+ issuer key commitment
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsIssuerKeyCommitment(issuer.clone()), &issuer_bbs_pubkey_hash);
+
+        // Store the attribute set for later selective disclosure
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsCredentialAttributes(credential_id), &attributes);
+
+        // Record BBS+ credential metadata
+        let bbs_cred = BbsCredential {
+            credential_id,
+            subject,
+            issuer,
+            credential_type,
+            issuer_key_commitment: issuer_bbs_pubkey_hash,
+            num_attributes: attributes.len(),
+            issued_at_ledger: env.ledger().sequence(),
+        };
+        // Store alongside the flag
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsCredentialFlag(credential_id), &bbs_cred);
+
+        credential_id
+    }
+
+    /// Retrieve the stored BBS+ attributes for a credential.
+    ///
+    /// Returns the attribute vector stored during `issue_selective_disclosure_credential`.
+    /// Panics if the credential was not issued with BBS+ support.
+    pub fn get_bbs_credential_attributes(
+        env: Env,
+        credential_id: u64,
+    ) -> Vec<Bytes> {
+        env.storage()
+            .instance()
+            .get(&DataKey11::BbsCredentialAttributes(credential_id))
+            .expect("credential was not issued with BBS+ selective disclosure")
+    }
+
+    /// Derive a holder key commitment for BBS+ signing.
+    ///
+    /// The commitment is `SHA-256(holder_address_xdr || credential_id.to_le_bytes())`.
+    /// This provides a deterministic, credential-scoped key handle that the holder
+    /// uses off-chain to derive their BBS+ holder key without exposing it on-chain.
+    pub fn derive_holder_key_commitment(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+    ) -> soroban_sdk::BytesN<32> {
+        let mut input = Bytes::new(&env);
+        // Use the holder address XDR encoding as the key material
+        let holder_xdr = holder.to_xdr(&env);
+        input.append(&holder_xdr);
+        input.extend_from_array(&credential_id.to_le_bytes());
+        env.crypto().sha256(&input).into()
+    }
+
+    /// Submit a BBS+ selective-disclosure proof for a credential on-chain.
+    ///
+    /// The proof is produced off-chain by the holder using the BBS+ library:
+    ///   `BbsPresentation::create_presentation(rng, credential, vk, messages, disclosed_indices, nonce)`
+    ///
+    /// On-chain we:
+    /// 1. Verify the credential exists and is BBS+-enabled.
+    /// 2. Validate that `disclosed_indices` are within bounds.
+    /// 3. Store the proof record for auditing.
+    ///
+    /// Returns the serialised proof bytes (echoed back so callers can confirm
+    /// what was stored).
+    ///
+    /// # Parameters
+    /// - `credential_id` — the credential to produce a disclosure for
+    /// - `disclosed_indices` — 0-based indices of attributes to reveal
+    /// - `proof_bytes` — the serialised BBS+ PresentationProof
+    /// - `nonce` — verifier nonce used when generating the proof
+    pub fn create_bbs_disclosure_proof(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+        disclosed_indices: Vec<u32>,
+        proof_bytes: Bytes,
+        nonce: Bytes,
+    ) -> Bytes {
+        holder.require_auth();
+
+        // Verify credential exists and is BBS+-enabled
+        let bbs_cred: BbsCredential = env
+            .storage()
+            .instance()
+            .get(&DataKey11::BbsCredentialFlag(credential_id))
+            .expect("credential was not issued with BBS+ selective disclosure");
+
+        assert_eq!(
+            bbs_cred.subject, holder,
+            "only the credential subject can create a disclosure proof"
+        );
+        assert!(!disclosed_indices.is_empty(), "disclosed_indices cannot be empty");
+        assert!(!proof_bytes.is_empty(), "proof_bytes cannot be empty");
+        assert!(!nonce.is_empty(), "nonce cannot be empty");
+
+        // Validate indices are within attribute count bounds
+        let num_attrs = bbs_cred.num_attributes;
+        for i in 0..disclosed_indices.len() {
+            let idx = disclosed_indices.get(i).unwrap();
+            assert!(idx < num_attrs, "disclosed index out of bounds");
+        }
+
+        // Store the proof record on-chain
+        let record = BbsDisclosureProofRecord {
+            credential_id,
+            disclosed_indices,
+            proof_bytes: proof_bytes.clone(),
+            nonce,
+            submitted_at_ledger: env.ledger().sequence(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey11::BbsDisclosureProof(credential_id), &record);
+
+        proof_bytes
+    }
+
+    /// Retrieve the stored BBS+ disclosure proof record for a credential.
+    pub fn get_bbs_disclosure_proof(
+        env: Env,
+        credential_id: u64,
+    ) -> BbsDisclosureProofRecord {
+        env.storage()
+            .instance()
+            .get(&DataKey11::BbsDisclosureProof(credential_id))
+            .expect("no BBS+ disclosure proof found for this credential")
+    }
+
+    /// Check whether a credential was issued with BBS+ selective disclosure.
+    pub fn is_bbs_credential(env: Env, credential_id: u64) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey11::BbsCredentialFlag(credential_id))
+    }
+
+    /// Get the BBS+ credential metadata record.
+    pub fn get_bbs_credential(env: Env, credential_id: u64) -> BbsCredential {
+        env.storage()
+            .instance()
+            .get(&DataKey11::BbsCredentialFlag(credential_id))
+            .expect("credential was not issued with BBS+ selective disclosure")
     }
 }
 
