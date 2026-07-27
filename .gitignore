@@ -22,14 +22,13 @@ api-server/coverage/
 *.lcov
 .nyc_output/
 lcov.info
+.c8/
 
-# Test snapshots
+# Test snapshots and fixtures generated at runtime
 **/test_snapshots/
-**/*.snap
 **/__snapshots__/
-**/snapshots/
-**/*.snapshot
-api-server/tests/fixtures/snapshots/
+**/*.snap
+**/proptest-regressions/
 
 # Backup files
 *.bak
@@ -42,12 +41,15 @@ api-server/tests/fixtures/snapshots/
 *.swo
 .vscode/settings.json
 .idea/
+*.iml
+Thumbs.db
 
 # Misc
 .env
 dist/
 dashboard/dist/
 frontend/dist/
+api-server/dist/
 
 # Durable runtime state (GDPR request store, crypto-shredding vault)
 .data/
@@ -68,21 +70,17 @@ fuzz/artifacts/
 mutants.out/
 mutants.out.old/
 
-# Benchmark history (generated; not source)
+# Profiling and benchmark history output
 benches/history/*.json
-benches/history/*.csv
-
-# Proptest regressions (auto-generated; keep only if intentionally committed)
-**/proptest-regressions/
+*.profraw
+*.profdata
 
 # Temporary / generated docs
-docs/generated/
-
-# OS temp files
-Thumbs.db
-*.tmp
-*.temp
-
-# Editor backup files
-*~
-\#*\#
+plan.md
+plan2.md
+task.md
+CHANGELOG_ISSUES_*.md
+FILES_CHANGED.txt
+TASK_IMPLEMENTATIONS.md
+IMPLEMENTATION_SUMMARY.md
+VERIFICATION_CHECKLIST.md
