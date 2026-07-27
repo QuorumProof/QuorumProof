@@ -17,25 +17,40 @@ import consentRouter from './routes/consent.js';
 import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
-import authRouter from './routes/auth.js';         // #1299 MFA / #1300 session management
+import oauth2Router from './routes/oauth2.js';
 import { cacheControl } from './middleware/cacheControl.js';
-import { createRateLimiter } from './middleware/rateLimiter.js';
+// #1303: CORS middleware
+import { createCorsFromEnv } from './middleware/cors.js';
+// #1304: Adaptive rate limiter
+import { createAdaptiveRateLimiter } from './middleware/adaptiveRateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
-import { requireMfa } from './middleware/auth.js';    // #1299 MFA gate for admin endpoints
+import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
+import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
+import { getDefaultCriticalEventListener } from './services/criticalEventListener.js';
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
+
+// #1303: Apply CORS before all other middleware so preflight requests are handled
+// without requiring auth. Origins are configured via CORS_ALLOWED_ORIGINS env var.
+const cors = createCorsFromEnv();
+app.use(cors);
 
 const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
+
+// #1297 per-API-key rate limiting: applies whenever a caller presents
+// x-api-key, independently of the general IP-based limiter below, and
+// no-ops for requests that don't authenticate this way.
+app.use(apiKeyRateLimiter);
 
 const requestSigning = createRequestSigning();
 const requestDeduplication = createRequestDeduplication({ ttlMs: 100, enabled: true });
@@ -47,12 +62,21 @@ const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10);
 const RATE_LIMIT_BACKOFF = parseInt(process.env.RATE_LIMIT_BACKOFF ?? '2', 10);
 const RATE_LIMIT_MAX_VIOLATIONS = parseInt(process.env.RATE_LIMIT_MAX_VIOLATIONS ?? '5', 10);
 
-const apiRateLimiter = createRateLimiter({
+// #1304: Use adaptive rate limiter with anomaly detection.
+// Falls back gracefully — the base createRateLimiter is kept for
+// targeted use cases; the adaptive one covers the /api/* prefix.
+const apiRateLimiter = createAdaptiveRateLimiter({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: RATE_LIMIT_MAX,
   name: 'api',
   backoffMultiplier: RATE_LIMIT_BACKOFF,
   maxViolations: RATE_LIMIT_MAX_VIOLATIONS,
+  anomalyThreshold: parseFloat(process.env.RATE_LIMIT_ANOMALY_THRESHOLD ?? '3'),
+  blacklistDurationMs: parseInt(process.env.RATE_LIMIT_BLACKLIST_MS ?? String(60 * 60 * 1000), 10),
+  // Auth endpoints get a tighter limit to limit brute-force.
+  pathOverrides: {
+    '/auth': parseInt(process.env.RATE_LIMIT_AUTH_MAX ?? '20', 10),
+  },
 });
 
 app.use('/api', apiRateLimiter);
@@ -84,12 +108,8 @@ app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
 app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
-// #1299 MFA auth endpoints / #1300 session management
-app.use('/api/auth', authRouter);
-// #1299 — Admin-only endpoints require a fully MFA-verified session in addition to RBAC.
-// The requireMfa middleware checks mfaVerified=true in the Bearer token so that
-// even a valid (non-MFA) session cannot access admin bridge operations.
-app.use('/api/bridge', requireMfa);
+app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation (spec-mandated path)
+app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -112,11 +132,80 @@ app.get('/metrics/ws', (_req, res) => {
   res.send(getWsMetricsPrometheus());
 });
 
+// Circuit breaker state for outbound Soroban RPC calls (issue #2). See
+// api-server/src/services/rpcCircuitBreaker.ts and docs/resilience.md.
+app.get('/metrics/rpc', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
+});
+
+app.get('/rpc/circuit-breaker', (_req, res) => {
+  res.json(getDefaultRpcCircuitBreaker().getMetrics());
+});
+
+// Critical contract event monitoring & alerting (issue #3). See
+// api-server/src/services/criticalEventListener.ts and
+// docs/critical-event-alerting.md. Polling only starts when a contract id
+// is configured; harmless (and inert) otherwise, so this is safe to load
+// in any environment including tests.
+const criticalEventListener = getDefaultCriticalEventListener();
+if (process.env.CONTRACT_QUORUM_PROOF && process.env.CRITICAL_EVENT_MONITORING !== 'disabled') {
+  criticalEventListener.start();
+}
+
+app.get('/metrics/events', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(criticalEventListener.getMetricsPrometheus());
+});
+
+app.get('/events/critical/recent', (_req, res) => {
+  res.json({
+    metrics: criticalEventListener.getMetrics(),
+    events: criticalEventListener.getRecentEvents(),
+  });
+});
+
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
 const httpServer = createServer(app);
 createWsServer(httpServer, '/ws');
 
-httpServer.listen(PORT, () => console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`));
+/**
+ * Apply any pending database migrations before accepting traffic. Manual
+ * migrations were error-prone (an operator forgets to run them, environments
+ * drift). Skipped entirely when DATABASE_URL isn't set so this stays a no-op
+ * for the file/DurableLog-backed stores the API server also supports.
+ *
+ * A failed migration is treated as fatal for startup — see
+ * docs/database-migrations.md for the rollback procedure.
+ */
+async function runStartupMigrations(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+
+  const { Pool } = await import('pg');
+  const { runMigrations } = await import('./migrations/runner.js');
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    const applied = await runMigrations(pool);
+    if (applied.length > 0) {
+      console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+(async () => {
+  try {
+    await runStartupMigrations();
+  } catch (err) {
+    console.error('Startup migration failed, refusing to start:', err);
+    process.exit(1);
+    return;
+  }
+  httpServer.listen(PORT, () =>
+    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
+  );
+})();
 
 export { broadcastEvent };
 
