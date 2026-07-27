@@ -19,7 +19,10 @@ import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
 import oauth2Router from './routes/oauth2.js';
 import { cacheControl } from './middleware/cacheControl.js';
-import { createRateLimiter } from './middleware/rateLimiter.js';
+// #1303: CORS middleware
+import { createCorsFromEnv } from './middleware/cors.js';
+// #1304: Adaptive rate limiter
+import { createAdaptiveRateLimiter } from './middleware/adaptiveRateLimiter.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
@@ -33,6 +36,11 @@ import { getDefaultCriticalEventListener } from './services/criticalEventListene
 import { broadcastEvent, getConnectionCount } from './ws/server.js';
 
 const app = express();
+
+// #1303: Apply CORS before all other middleware so preflight requests are handled
+// without requiring auth. Origins are configured via CORS_ALLOWED_ORIGINS env var.
+const cors = createCorsFromEnv();
+app.use(cors);
 
 const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
@@ -54,12 +62,21 @@ const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10);
 const RATE_LIMIT_BACKOFF = parseInt(process.env.RATE_LIMIT_BACKOFF ?? '2', 10);
 const RATE_LIMIT_MAX_VIOLATIONS = parseInt(process.env.RATE_LIMIT_MAX_VIOLATIONS ?? '5', 10);
 
-const apiRateLimiter = createRateLimiter({
+// #1304: Use adaptive rate limiter with anomaly detection.
+// Falls back gracefully — the base createRateLimiter is kept for
+// targeted use cases; the adaptive one covers the /api/* prefix.
+const apiRateLimiter = createAdaptiveRateLimiter({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: RATE_LIMIT_MAX,
   name: 'api',
   backoffMultiplier: RATE_LIMIT_BACKOFF,
   maxViolations: RATE_LIMIT_MAX_VIOLATIONS,
+  anomalyThreshold: parseFloat(process.env.RATE_LIMIT_ANOMALY_THRESHOLD ?? '3'),
+  blacklistDurationMs: parseInt(process.env.RATE_LIMIT_BLACKLIST_MS ?? String(60 * 60 * 1000), 10),
+  // Auth endpoints get a tighter limit to limit brute-force.
+  pathOverrides: {
+    '/auth': parseInt(process.env.RATE_LIMIT_AUTH_MAX ?? '20', 10),
+  },
 });
 
 app.use('/api', apiRateLimiter);
