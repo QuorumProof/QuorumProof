@@ -16,6 +16,15 @@ export interface ApiKey {
   lastUsedAt?: string;
   name: string;
   active: boolean;
+  /** Set when this key has been rotated: the id of the key that replaces it. */
+  rotatedTo?: string;
+  /**
+   * Set when this key has been rotated: the key keeps verifying until this
+   * timestamp, after which it is rejected even though `active` stays true.
+   * This is what gives callers a grace window to switch to the new key
+   * instead of every in-flight client breaking the instant rotation happens.
+   */
+  graceExpiresAt?: string;
 }
 
 export interface ApiKeySecret {
@@ -34,6 +43,9 @@ export interface ApiKeyUsageRecord {
 }
 
 const KEY_ID_PATTERN = /^key_([a-zA-Z0-9]{32})$/;
+
+/** Default rotation grace window: 24 hours for the old key to keep working. */
+const DEFAULT_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000;
 
 export interface ApiKeyManagerOptions {
   dataDir?: string;
@@ -114,7 +126,7 @@ export class ApiKeyManager {
   }
 
   /**
-   * Revoke a key by ID.
+   * Revoke a key by ID immediately (no grace period).
    */
   revokeKey(id: string): boolean {
     const key = this.keys.get(id);
@@ -126,32 +138,58 @@ export class ApiKeyManager {
   }
 
   /**
+   * Rotate a key: generates a brand-new key/hash for the same issuer+name,
+   * and lets the old key keep verifying for `gracePeriodMs` longer so
+   * in-flight clients have time to switch over, instead of breaking the
+   * instant rotation happens. Returns the new key's one-time secret, or
+   * undefined if `id` doesn't exist or is already inactive.
+   */
+  rotateKey(id: string, gracePeriodMs: number = DEFAULT_GRACE_PERIOD_MS): ApiKeySecret | undefined {
+    const oldKey = this.keys.get(id);
+    if (!oldKey || !oldKey.active) return undefined;
+
+    const newSecret = this.generateKey(oldKey.issuer, oldKey.name);
+
+    oldKey.rotatedTo = newSecret.id;
+    oldKey.graceExpiresAt = new Date(Date.now() + gracePeriodMs).toISOString();
+    this.keys.set(oldKey.id, oldKey);
+
+    return newSecret;
+  }
+
+  /**
    * Verify an API key and return the key info if valid.
-   * Updates the lastUsedAt timestamp.
+   * Updates the lastUsedAt timestamp. A rotated key still verifies until
+   * its grace period elapses, after which it is rejected even though
+   * `active` remains true.
    */
   verifyKey(rawKey: string): ApiKey | undefined {
     const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
 
     for (const key of this.keys.values()) {
-      if (key.active && key.keyHash === keyHash) {
-        // Update last used timestamp
-        key.lastUsedAt = new Date().toISOString();
-        this.keys.set(key.id, key);
+      if (!key.active || key.keyHash !== keyHash) continue;
 
-        // Log usage with unique key
-        const uniqueId = `${key.id}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-        this.usage.set(
-          uniqueId,
-          {
-            keyId: key.id,
-            issuer: key.issuer,
-            usedAt: key.lastUsedAt,
-            endpoint: 'unspecified',
-          }
-        );
-
-        return key;
+      if (key.graceExpiresAt && Date.now() > new Date(key.graceExpiresAt).getTime()) {
+        continue; // grace period elapsed; this key no longer verifies
       }
+
+      // Update last used timestamp
+      key.lastUsedAt = new Date().toISOString();
+      this.keys.set(key.id, key);
+
+      // Log usage with unique key
+      const uniqueId = `${key.id}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      this.usage.set(
+        uniqueId,
+        {
+          keyId: key.id,
+          issuer: key.issuer,
+          usedAt: key.lastUsedAt,
+          endpoint: 'unspecified',
+        }
+      );
+
+      return key;
     }
 
     return undefined;
