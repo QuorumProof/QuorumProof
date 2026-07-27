@@ -17,12 +17,16 @@ use soroban_sdk::xdr::ToXdr;
 mod rbac;
 mod key_escrow;
 mod slice_enhancements;
+pub mod bbs_plus_features;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
 mod economic_security_tests;
 #[cfg(test)]
 mod tests_new_issues;
+#[cfg(test)]
+#[path = "bbs_plus_tests.rs"]
+mod bbs_plus_tests;
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
