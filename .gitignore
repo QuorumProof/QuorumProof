@@ -24,16 +24,16 @@ api-server/coverage/
 lcov.info
 .c8/
 
-# Test snapshots & fixtures generated at test time
+# Test snapshots and fixtures generated at runtime
 **/test_snapshots/
-**/*.snap
 **/__snapshots__/
-**/snapshots/
-**/*.insta.yaml
+**/*.snap
+**/proptest-regressions/
 
 # Backup files
 *.bak
 *.bak.*
+**/*.rs.bak
 
 # IDE / OS
 .DS_Store
@@ -61,9 +61,6 @@ api-server/artifacts/
 
 # Rust / Cargo
 Cargo.lock.bak
-**/*.rs.bak
-# proptest regression files are auto-generated from test runs; not source
-contracts/quorum_proof/proptest-regressions/
 
 # Fuzz artifacts
 fuzz/corpus/
@@ -73,32 +70,17 @@ fuzz/artifacts/
 mutants.out/
 mutants.out.old/
 
-# Profiling / performance
-perf.data
-perf.data.old
-*.prof
-*.heaptrack
-
-# Temporary / scratch files
-*.tmp
-*.temp
-/tmp/
-scratch/
-
-# Log files
-*.log
-logs/
-
-# Python bytecode (monitoring exporter)
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-
-# Docker compose volumes / override files
-docker-compose.override.yml
-.docker/
-
-# Benchmark history that should not be committed
+# Profiling and benchmark history output
 benches/history/*.json
+*.profraw
+*.profdata
+
+# Temporary / generated docs
+plan.md
+plan2.md
+task.md
+CHANGELOG_ISSUES_*.md
+FILES_CHANGED.txt
+TASK_IMPLEMENTATIONS.md
+IMPLEMENTATION_SUMMARY.md
+VERIFICATION_CHECKLIST.md
