@@ -16,6 +16,7 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { respondNegotiated } from '../middleware/contentNegotiation.js';
 
 export interface Attestor {
   id: string;
@@ -189,9 +190,9 @@ export function createAttestorsRouter(): Router {
       );
     }
 
-    res.json({
-      total: results.length,
-      attestors: results,
+    respondNegotiated(req, res, { total: results.length, attestors: results }, {
+      rootElement: 'attestors',
+      itemElement: 'attestor',
     });
   });
 
