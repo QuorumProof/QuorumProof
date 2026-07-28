@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { createServer } from 'http';
-import compression from 'compression';
-import zlib from 'zlib';
+// #1313: Compression is configured via the dedicated middleware module.
+import { createCompressionFromEnv } from './middleware/compression.js';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
 import credentialExportRouter from './routes/credentialExport.js';
@@ -42,6 +42,11 @@ const app = express();
 // without requiring auth. Origins are configured via CORS_ALLOWED_ORIGINS env var.
 const cors = createCorsFromEnv();
 app.use(cors);
+
+// #1313: Apply gzip compression early so all subsequent responses are eligible.
+// Only responses >= 1 KB threshold are compressed. Configure via env vars:
+//   COMPRESSION_ENABLED, COMPRESSION_LEVEL, COMPRESSION_THRESHOLD.
+app.use(createCompressionFromEnv());
 
 const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
