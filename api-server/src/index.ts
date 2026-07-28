@@ -33,10 +33,21 @@ import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
 import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
 import { getDefaultCriticalEventListener } from './services/criticalEventListener.js';
-import { broadcastEvent, getConnectionCount } from './ws/server.js';
+import { broadcastEvent, getConnectionCount, closeWsServer } from './ws/server.js';
+import { createGracefulShutdown } from './services/gracefulShutdown.js';
 import * as Soroban from './soroban.js';
 
 const app = express();
+
+// #1311: Create the HTTP server early so the graceful shutdown service can
+// reference it before httpServer.listen() is called.
+const httpServer = createServer(app);
+
+// #1311: Graceful shutdown — drains in-flight requests before exiting.
+// The drain timeout defaults to 30 s and is overridable via env var so
+// operators can tune it without a code change.
+const DRAIN_TIMEOUT_MS = parseInt(process.env.DRAIN_TIMEOUT_MS ?? '30000', 10);
+const gracefulShutdown = createGracefulShutdown(httpServer, { drainTimeoutMs: DRAIN_TIMEOUT_MS });
 
 // #1303: Apply CORS before all other middleware so preflight requests are handled
 // without requiring auth. Origins are configured via CORS_ALLOWED_ORIGINS env var.
@@ -47,6 +58,11 @@ const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
 
 app.use(express.json({ limit: '100kb' }));
+
+// #1311: Track in-flight HTTP requests. Must come after body parsers so
+// the counter includes the full request lifetime, and early enough that
+// every /api route is covered.
+app.use(gracefulShutdown.requestCountMiddleware());
 
 // #1297 per-API-key rate limiting: applies whenever a caller presents
 // x-api-key, independently of the general IP-based limiter below, and
@@ -122,6 +138,16 @@ const sorobanClient = {
 app.use('/api/me', createDashboardRouter(sorobanClient));
 
 app.get('/health', (_req, res) => {
+  // #1311: Return 503 during graceful shutdown so load-balancers stop
+  // routing new traffic to this instance while it finishes draining.
+  if (gracefulShutdown.isDraining()) {
+    res.status(503).json({
+      status: 'draining',
+      ts: new Date().toISOString(),
+      inFlightRequests: gracefulShutdown.inFlightCount(),
+    });
+    return;
+  }
   res.json({
     status: 'ok',
     ts: new Date().toISOString(),
@@ -176,8 +202,21 @@ app.get('/events/critical/recent', (_req, res) => {
 });
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
-const httpServer = createServer(app);
 createWsServer(httpServer, '/ws');
+
+// #1311: Register cleanup tasks that run after the HTTP server stops
+// accepting connections — the WS server and critical event listener
+// hold their own resources that should be released cleanly.
+gracefulShutdown.addCleanupTask(() => {
+  criticalEventListener.stop();
+});
+gracefulShutdown.addCleanupTask(() => {
+  closeWsServer();
+});
+
+// #1311: Attach SIGTERM / SIGINT handlers. This is idempotent; the
+// handlers are registered with process.once so they fire at most once.
+gracefulShutdown.registerSignalHandlers();
 
 /**
  * Apply any pending database migrations before accepting traffic. Manual
