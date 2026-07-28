@@ -23,6 +23,11 @@ import { cacheControl } from './middleware/cacheControl.js';
 import { createCorsFromEnv } from './middleware/cors.js';
 // #1304: Adaptive rate limiter
 import { createAdaptiveRateLimiter } from './middleware/adaptiveRateLimiter.js';
+// #1310: API versioning
+import { createApiVersionMiddleware } from './middleware/apiVersion.js';
+import { v1Compat } from './middleware/v1Compat.js';
+import v1Router from './routes/v1/index.js';
+import v2Router from './routes/v2/index.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
@@ -93,6 +98,34 @@ app.use((req, _res, next) => {
   }));
   next();
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1310: Versioned API routes
+//
+// Version middleware runs first on all /api/* requests.  It parses the
+// version segment from the URL and attaches it to req.apiVersion.  Unknown
+// version strings receive 404 immediately.
+//
+// Route layout:
+//   /api/v1/**  — v1 (stable) with backward-compat response envelope
+//   /api/v2/**  — v2 (development) — raw responses, no envelope
+//   /api/**     — unversioned legacy paths (kept for backward compat)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const apiVersionMiddleware = createApiVersionMiddleware();
+app.use(apiVersionMiddleware);
+
+// v1: apply compat layer (envelope wrapping) before the routes run
+app.use('/api/v1', v1Compat, v1Router);
+
+// v2: no compat layer — raw handlers, ready for breaking changes
+app.use('/api/v2', v2Router);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unversioned /api/* legacy routes
+// Kept for backward compatibility.  Clients should migrate to /api/v1 or
+// /api/v2.  These will be sunset together with v1 on 2027-03-01.
+// ─────────────────────────────────────────────────────────────────────────────
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
