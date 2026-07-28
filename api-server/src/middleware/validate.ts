@@ -12,20 +12,29 @@ type ValidationSchemas = {
   params?: Record<string, unknown>;
 };
 
+interface AjvValidator {
+  (data: unknown): boolean;
+  errors?: Array<{ schemaPath: string; keyword: string; message: string; data: unknown }>;
+}
+
 export function validate(schemas: ValidationSchemas) {
-  const validators: { check: (data: unknown) => boolean; location: string }[] = [];
+  const validators: {
+    check: (data: unknown) => boolean;
+    location: string;
+    validator: AjvValidator;
+  }[] = [];
 
   if (schemas.body) {
-    const validateBody = ajv.compile(schemas.body);
-    validators.push({ check: (d) => validateBody(d), location: 'body' });
+    const validateBody = ajv.compile(schemas.body) as AjvValidator;
+    validators.push({ check: (d) => validateBody(d), location: 'body', validator: validateBody });
   }
   if (schemas.query) {
-    const validateQuery = ajv.compile(schemas.query);
-    validators.push({ check: (d) => validateQuery(d), location: 'query' });
+    const validateQuery = ajv.compile(schemas.query) as AjvValidator;
+    validators.push({ check: (d) => validateQuery(d), location: 'query', validator: validateQuery });
   }
   if (schemas.params) {
-    const validateParams = ajv.compile(schemas.params);
-    validators.push({ check: (d) => validateParams(d), location: 'params' });
+    const validateParams = ajv.compile(schemas.params) as AjvValidator;
+    validators.push({ check: (d) => validateParams(d), location: 'params', validator: validateParams });
   }
 
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -36,9 +45,17 @@ export function validate(schemas: ValidationSchemas) {
       else if (v.location === 'params') data = req.params;
 
       if (!v.check(data)) {
+        // Issue #1312: Include detailed error information for debugging.
+        const errors = v.validator.errors ?? [];
         res.status(400).json({
           error: 'Validation failed',
           location: v.location,
+          details: errors.map((err) => ({
+            path: err.schemaPath,
+            keyword: err.keyword,
+            message: err.message,
+            instance: err.data,
+          })),
         });
         return;
       }

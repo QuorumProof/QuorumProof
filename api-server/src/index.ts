@@ -29,6 +29,12 @@ import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
+// Issue #1306: Structured logging
+import { logger, requestLogger, createLogger } from './logger.js';
+// Issue #1308: Health checks
+import { handleLive, handleReady, handleHealth } from './health.js';
+// Issue #1311: Graceful shutdown
+import { setupGracefulShutdown, isDraining } from './shutdown.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -84,16 +90,8 @@ const apiRateLimiter = createAdaptiveRateLimiter({
 app.use('/api', apiRateLimiter);
 app.use(cacheControl);
 
-app.use((req, _res, next) => {
-  console.log(JSON.stringify({
-    ts: new Date().toISOString(),
-    level: 'info',
-    service: 'quorumproof-api',
-    method: req.method,
-    path: req.path,
-  }));
-  next();
-});
+// Issue #1306: Replace console.log with structured logging middleware.
+app.use(requestLogger());
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
@@ -123,14 +121,10 @@ const sorobanClient = {
 };
 app.use('/api/me', createDashboardRouter(sorobanClient));
 
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    ts: new Date().toISOString(),
-    ws_connections: getConnectionCount(),
-    ws_subscribers: getSubscriberCount(),
-  });
-});
+// Issue #1308: Full health check endpoints
+app.get('/health/live', handleLive);
+app.get('/health/ready', handleReady);
+app.get('/health', handleHealth);
 
 app.get('/ws/metrics', (_req, res) => {
   res.json(getWsMetrics());
@@ -216,28 +210,18 @@ async function runStartupMigrations(): Promise<void> {
   try {
     await runStartupMigrations();
   } catch (err) {
-    console.error('Startup migration failed, refusing to start:', err);
+    logger.error('Startup migration failed, refusing to start', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     process.exit(1);
     return;
   }
   httpServer.listen(PORT, () =>
-    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
+    logger.info('Server listening', { port: PORT, ws: '/ws' })
   );
 
-  // Issue #870: Graceful shutdown — drain the connection pool so in-flight
-  // queries finish cleanly before the process exits.
-  async function shutdown(signal: string): Promise<void> {
-    console.log(`Received ${signal}, shutting down gracefully…`);
-    httpServer.close(async () => {
-      try {
-        const { closePool } = await import('./db.js');
-        await closePool();
-      } catch {
-        // Best-effort; if db.ts was never imported (no DATABASE_URL) this is a no-op.
-      }
-      process.exit(0);
-    });
-  }
+  // Issue #1311: Graceful shutdown with request draining and timeout protection.
+  const shutdown = setupGracefulShutdown(httpServer);
   process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
   process.once('SIGINT', () => { void shutdown('SIGINT'); });
 })();
