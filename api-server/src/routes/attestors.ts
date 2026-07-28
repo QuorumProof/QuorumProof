@@ -1,18 +1,22 @@
 /**
  * Issue #996 — Attestor Discovery API
+ * Issue #875 — Attestor Availability Status
  *
  * Provides a registry of known attestors (universities, licensing bodies,
  * employers) that credential holders can discover when building their quorum
  * slice.
  *
  * Endpoints:
- *   GET  /api/attestors              — list all attestors (filterable by type / region)
- *   GET  /api/attestors/:id          — get a single attestor with its credential stats
+ *   GET  /api/attestors                   — list all attestors (filterable by type / region)
+ *   GET  /api/attestors/:id               — get a single attestor with its credential stats
+ *   GET  /api/attestors/:id/status        — get live availability metrics for an attestor
+ *   POST /api/attestors/:id/status/ping   — record a ping result (uptime heartbeat)
  *
  * Query parameters for the list endpoint:
  *   type    — filter by attestor type (e.g. "university", "licensing_body", "employer")
  *   region  — filter by region / country code (e.g. "BR", "DE", "US")
  *   q       — free-text search over name and region fields (case-insensitive)
+ *   active  — "true" / "false" to filter by active status
  */
 
 import { Router, Request, Response } from 'express';
@@ -32,6 +36,109 @@ export interface Attestor {
   credentials_issued: number;
   /** Whether the attestor is currently accepting new attestation requests */
   active: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #875 — Availability tracking
+// ---------------------------------------------------------------------------
+
+/** A single ping result stored for uptime calculation. */
+interface PingRecord {
+  ts: number;     // Unix ms
+  ok: boolean;    // true = reachable, false = timeout/error
+  responseMs: number;
+}
+
+/** Rolling window: keep at most PING_WINDOW pings per attestor. */
+const PING_WINDOW = 100;
+/** Consider pings older than 24 h stale; exclude from uptime calc. */
+const PING_RETENTION_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * In-memory availability store.  In production this would be backed by
+ * the shared database pool (see issue #870 / db.ts), but for the scope of
+ * this issue a process-local store correctly captures the live heartbeat
+ * data without adding a DB dependency.
+ */
+const _pingStore = new Map<string, PingRecord[]>();
+
+/** Add a ping record, capping to PING_WINDOW entries and pruning stale ones. */
+function recordPing(attestorId: string, ok: boolean, responseMs: number): void {
+  const now = Date.now();
+  let records = _pingStore.get(attestorId) ?? [];
+  // Prune records older than the retention window
+  const cutoff = now - PING_RETENTION_MS;
+  records = records.filter((r) => r.ts >= cutoff);
+  records.push({ ts: now, ok, responseMs });
+  // Keep only the most recent PING_WINDOW entries
+  if (records.length > PING_WINDOW) {
+    records = records.slice(records.length - PING_WINDOW);
+  }
+  _pingStore.set(attestorId, records);
+}
+
+export interface AttestorStatus {
+  attestor_id: string;
+  /** Fraction of successful pings in the last 24 h, 0–1.  null if no data. */
+  uptime_ratio: number | null;
+  /** Average response time of successful pings (ms).  null if no data. */
+  avg_response_ms: number | null;
+  /** Number of active credentials currently co-signed by this attestor. */
+  active_credential_count: number;
+  /** ISO-8601 timestamp of the last recorded ping. */
+  last_seen: string | null;
+  /** Human-readable availability tier derived from uptime_ratio. */
+  availability: 'excellent' | 'good' | 'degraded' | 'offline' | 'unknown';
+}
+
+function computeStatus(attestorId: string, credentialsIssued: number): AttestorStatus {
+  const now = Date.now();
+  const cutoff = now - PING_RETENTION_MS;
+  const records = (_pingStore.get(attestorId) ?? []).filter((r) => r.ts >= cutoff);
+
+  if (records.length === 0) {
+    return {
+      attestor_id: attestorId,
+      uptime_ratio: null,
+      avg_response_ms: null,
+      active_credential_count: credentialsIssued,
+      last_seen: null,
+      availability: 'unknown',
+    };
+  }
+
+  const successful = records.filter((r) => r.ok);
+  const uptime_ratio = successful.length / records.length;
+  const avg_response_ms =
+    successful.length > 0
+      ? Math.round(successful.reduce((sum, r) => sum + r.responseMs, 0) / successful.length)
+      : null;
+  const last_seen = new Date(Math.max(...records.map((r) => r.ts))).toISOString();
+
+  let availability: AttestorStatus['availability'];
+  if (uptime_ratio >= 0.99) {
+    availability = 'excellent';
+  } else if (uptime_ratio >= 0.95) {
+    availability = 'good';
+  } else if (uptime_ratio >= 0.7) {
+    availability = 'degraded';
+  } else {
+    availability = 'offline';
+  }
+
+  return {
+    attestor_id: attestorId,
+    uptime_ratio,
+    avg_response_ms,
+    active_credential_count: credentialsIssued,
+    last_seen,
+    availability,
+  };
+}
+
+/** Exported for tests. */
+export function _resetAvailabilityStoreForTest(): void {
+  _pingStore.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -151,12 +258,12 @@ export function createAttestorsRouter(): Router {
   /**
    * GET /api/attestors
    *
-   * Returns a paginated, filterable list of registered attestors.
+   * Returns a filterable list of registered attestors.
    *
    * Query params:
    *   type    — exact match on attestor type
    *   region  — exact match on region (case-insensitive)
-   *   q       — substring search across name and region
+   *   q       — substring search across name, region, and description
    *   active  — "true" / "false" to filter by active status
    */
   router.get('/', (req: Request, res: Response) => {
@@ -211,6 +318,67 @@ export function createAttestorsRouter(): Router {
     }
 
     res.json(attestor);
+  });
+
+  /**
+   * GET /api/attestors/:id/status
+   *
+   * Issue #875 — Returns live availability metrics for a single attestor:
+   *   - uptime_ratio      fraction of successful pings in the last 24 h (0–1, null if no data)
+   *   - avg_response_ms   average latency of successful pings (ms, null if no data)
+   *   - active_credential_count  number of credentials the attestor has co-signed
+   *   - last_seen         ISO-8601 timestamp of the most recent recorded ping
+   *   - availability      human-readable tier: excellent | good | degraded | offline | unknown
+   *
+   * Responds with 404 if the attestor id is unknown.
+   */
+  router.get('/:id/status', (req: Request, res: Response) => {
+    const { id } = req.params;
+    const attestor = ATTESTOR_REGISTRY.find((a) => a.id === id);
+
+    if (!attestor) {
+      res.status(404).json({ error: `Attestor '${id}' not found` });
+      return;
+    }
+
+    res.json(computeStatus(id, attestor.credentials_issued));
+  });
+
+  /**
+   * POST /api/attestors/:id/status/ping
+   *
+   * Issue #875 — Record a heartbeat ping result for the attestor.  Called by
+   * the monitoring agent (or the attestor node itself) after each health-check
+   * probe.  The body is validated but intentionally kept minimal so the monitor
+   * can fire-and-forget.
+   *
+   * Request body (JSON):
+   *   { "ok": boolean, "response_ms": number }
+   *
+   * Responds with 204 No Content on success, 400 on bad input, 404 on unknown id.
+   */
+  router.post('/:id/status/ping', (req: Request, res: Response) => {
+    const { id } = req.params;
+    const attestor = ATTESTOR_REGISTRY.find((a) => a.id === id);
+
+    if (!attestor) {
+      res.status(404).json({ error: `Attestor '${id}' not found` });
+      return;
+    }
+
+    const { ok, response_ms } = req.body as { ok?: unknown; response_ms?: unknown };
+
+    if (typeof ok !== 'boolean') {
+      res.status(400).json({ error: '"ok" must be a boolean' });
+      return;
+    }
+    if (typeof response_ms !== 'number' || response_ms < 0 || !isFinite(response_ms)) {
+      res.status(400).json({ error: '"response_ms" must be a non-negative finite number' });
+      return;
+    }
+
+    recordPing(id, ok, response_ms);
+    res.status(204).end();
   });
 
   return router;

@@ -10,6 +10,7 @@ import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import issuerAnalyticsRouter from './routes/issuerAnalytics.js';
 import attestorRouter from './routes/attestor.js';
+import { createAttestorsRouter } from './routes/attestors.js';
 import issuerRouter from './routes/issuer.js';
 import recoveryRouter from './routes/recovery.js';
 import shareLinksRouter from './routes/shareLinks.js';
@@ -104,6 +105,7 @@ app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
 app.use('/api/attestor', attestorRouter);
+app.use('/api/attestors', createAttestorsRouter()); // #875 attestor availability status
 app.use('/api/issuer', issuerRouter);
 app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
@@ -185,23 +187,29 @@ createWsServer(httpServer, '/ws');
  * drift). Skipped entirely when DATABASE_URL isn't set so this stays a no-op
  * for the file/DurableLog-backed stores the API server also supports.
  *
+ * Issue #870: uses the shared connection pool (initPool / getPool) instead of
+ * opening a dedicated one-shot Pool here.  The pool is kept alive for the
+ * lifetime of the server so subsequent route handlers that need Postgres can
+ * call getPool() instead of each opening their own connection.
+ *
  * A failed migration is treated as fatal for startup — see
  * docs/database-migrations.md for the rollback procedure.
  */
 async function runStartupMigrations(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
 
-  const { Pool } = await import('pg');
+  const { initPool } = await import('./db.js');
   const { runMigrations } = await import('./migrations/runner.js');
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-  try {
-    const applied = await runMigrations(pool);
-    if (applied.length > 0) {
-      console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
-    }
-  } finally {
-    await pool.end();
+
+  // initPool is idempotent — safe to call here and again if any route
+  // handler calls it independently.
+  const pool = await initPool(process.env.DATABASE_URL);
+  const applied = await runMigrations(pool);
+  if (applied.length > 0) {
+    console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
   }
+  // Note: do NOT call pool.end() here — the pool lives for the full server
+  // lifetime.  closePool() is called on graceful shutdown below.
 }
 
 (async () => {
@@ -215,6 +223,23 @@ async function runStartupMigrations(): Promise<void> {
   httpServer.listen(PORT, () =>
     console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
   );
+
+  // Issue #870: Graceful shutdown — drain the connection pool so in-flight
+  // queries finish cleanly before the process exits.
+  async function shutdown(signal: string): Promise<void> {
+    console.log(`Received ${signal}, shutting down gracefully…`);
+    httpServer.close(async () => {
+      try {
+        const { closePool } = await import('./db.js');
+        await closePool();
+      } catch {
+        // Best-effort; if db.ts was never imported (no DATABASE_URL) this is a no-op.
+      }
+      process.exit(0);
+    });
+  }
+  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.once('SIGINT', () => { void shutdown('SIGINT'); });
 })();
 
 export { broadcastEvent };
