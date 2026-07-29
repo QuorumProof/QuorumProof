@@ -83,6 +83,11 @@ dashboard/dist/
 frontend/dist/
 api-server/dist/
 
+# Generated TypeScript API client (issue #1309) — regenerate with
+# `npm --prefix api-server run generate:client`. The OpenAPI spec it's
+# generated from (api-server/openapi/openapi.json) IS committed.
+api-server/generated/
+
 # Durable runtime state (GDPR request store, crypto-shredding vault)
 .data/
 api-server/.data/
