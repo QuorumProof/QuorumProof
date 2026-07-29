@@ -19,6 +19,10 @@ import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
 import oauth2Router from './routes/oauth2.js';
+import healthRouter from './routes/health.js';
+import privilegeEscalationRouter from './routes/privilegeEscalation.js';
+import tracingRouter from './routes/tracing.js';
+import { createDashboardRouter } from './routes/dashboard.js';
 import { cacheControl } from './middleware/cacheControl.js';
 // #1303: CORS middleware
 import { createCorsFromEnv } from './middleware/cors.js';
@@ -29,6 +33,10 @@ import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
+// #1306: Structured logging
+import { structuredLoggingMiddleware } from './middleware/structuredLogging.js';
+// #1307: Distributed tracing
+import { distributedTracingMiddleware } from './middleware/distributedTracingMiddleware.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -51,6 +59,12 @@ app.use(createCompressionFromEnv());
 
 const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
+
+// #1306: Structured logging middleware
+app.use(structuredLoggingMiddleware);
+
+// #1307: Distributed tracing middleware
+app.use(distributedTracingMiddleware);
 
 app.use(express.json({ limit: '100kb' }));
 
@@ -89,17 +103,6 @@ const apiRateLimiter = createAdaptiveRateLimiter({
 app.use('/api', apiRateLimiter);
 app.use(cacheControl);
 
-app.use((req, _res, next) => {
-  console.log(JSON.stringify({
-    ts: new Date().toISOString(),
-    level: 'info',
-    service: 'quorumproof-api',
-    method: req.method,
-    path: req.path,
-  }));
-  next();
-});
-
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
 app.use('/api/credentials', credentialExportRouter); // #1000 credential export (json/pdf/qrcode)
@@ -128,14 +131,14 @@ const sorobanClient = {
 };
 app.use('/api/me', createDashboardRouter(sorobanClient));
 
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    ts: new Date().toISOString(),
-    ws_connections: getConnectionCount(),
-    ws_subscribers: getSubscriberCount(),
-  });
-});
+// #1308: Health check endpoints
+app.use('/health', healthRouter);
+
+// #1305: Privilege escalation prevention
+app.use('/api/admin/privilege-escalation', privilegeEscalationRouter);
+
+// #1307: Distributed tracing
+app.use('/api/tracing', tracingRouter);
 
 app.get('/ws/metrics', (_req, res) => {
   res.json(getWsMetrics());
