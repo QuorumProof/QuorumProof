@@ -84,8 +84,11 @@ describe('GET /api/analytics/issuer/:address', () => {
   });
 
   it('builds reputation_trend grouped by day', async () => {
-    const day1 = '2026-06-27T10:00:00.000Z';
-    const day2 = '2026-06-28T10:00:00.000Z';
+    const day1 = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const day2 = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    const date1 = day1.slice(0, 10);
+    const date2 = day2.slice(0, 10);
+
     metricsStore.recordEvent({ type: 'issued', credential_id: 'c1', timestamp: day1, issuer: ISSUER });
     metricsStore.recordEvent({ type: 'issued', credential_id: 'c2', timestamp: day1, issuer: ISSUER });
     metricsStore.recordEvent({ type: 'disputed', credential_id: 'c1', timestamp: day1, issuer: ISSUER });
@@ -95,11 +98,12 @@ describe('GET /api/analytics/issuer/:address', () => {
     expect(res.status).toBe(200);
 
     const trend: { date: string; issued: number; disputed: number }[] = res.body.reputation_trend;
-    const d1 = trend.find((t) => t.date === '2026-06-27');
-    const d2 = trend.find((t) => t.date === '2026-06-28');
+    const d1 = trend.find((t) => t.date === date1);
+    const d2 = trend.find((t) => t.date === date2);
     expect(d1).toBeDefined();
     expect(d1!.issued).toBe(2);
     expect(d1!.disputed).toBe(1);
+    expect(d2).toBeDefined();
     expect(d2!.issued).toBe(1);
     expect(d2!.disputed).toBe(0);
   });
