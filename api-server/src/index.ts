@@ -28,6 +28,11 @@ import { cacheControl } from './middleware/cacheControl.js';
 import { createCorsFromEnv } from './middleware/cors.js';
 // #1304: Adaptive rate limiter
 import { createAdaptiveRateLimiter } from './middleware/adaptiveRateLimiter.js';
+// #1310: API versioning
+import { createApiVersionMiddleware } from './middleware/apiVersion.js';
+import { v1Compat } from './middleware/v1Compat.js';
+import v1Router from './routes/v1/index.js';
+import v2Router from './routes/v2/index.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
