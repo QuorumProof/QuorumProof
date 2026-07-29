@@ -250,6 +250,12 @@ describe("API Contract Tests", () => {
 function setupMockRoutes(app: any) {
   // Mock credentials endpoints
   app.post("/credentials", (req: any, res: any) => {
+    if (req.body.subject === "invalid") {
+      return res.status(400).json({
+        error: { code: "INVALID_ADDRESS", message: "Invalid Stellar address" },
+      });
+    }
+
     res.status(201).json({
       id: "123",
       subject: req.body.subject,
@@ -351,11 +357,4 @@ function setupMockRoutes(app: any) {
     }
   });
 
-  app.post("/credentials", (req: any, res: any) => {
-    if (req.body.subject === "invalid") {
-      return res.status(400).json({
-        error: { code: "INVALID_ADDRESS", message: "Invalid Stellar address" },
-      });
-    }
-  });
 }
