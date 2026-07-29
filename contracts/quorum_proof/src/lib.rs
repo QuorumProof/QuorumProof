@@ -29,6 +29,10 @@ mod tests_new_issues;
 #[cfg(test)]
 #[path = "bbs_plus_tests.rs"]
 mod bbs_plus_tests;
+#[cfg(test)]
+mod upgrade_safety_tests;
+#[cfg(test)]
+mod formal_verification_invariants;
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
