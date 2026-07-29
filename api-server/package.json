@@ -11,7 +11,9 @@
     "test": "vitest --run",
     "loadtest:ws": "tsx loadtest/wsLoadTest.ts",
     "migrate": "tsx src/migrations/cli.ts up",
-    "migrate:rollback": "tsx src/migrations/cli.ts down"
+    "migrate:rollback": "tsx src/migrations/cli.ts down",
+    "openapi:generate": "tsx scripts/generate-openapi-spec.ts",
+    "generate:client": "npm run openapi:generate && openapi-ts"
   },
   "dependencies": {
     "@ethereumjs/block": "^10.1.2",
@@ -30,9 +32,11 @@
     "pdfkit": "^0.19.1",
     "pg": "^8.13.1",
     "qrcode": "^1.5.4",
+    "swagger-ui-express": "^5.0.1",
     "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@hey-api/openapi-ts": "^0.99.0",
     "@types/compression": "^1.8.1",
     "@types/express": "^5.0.3",
     "@types/node": "^24.12.0",
@@ -40,8 +44,10 @@
     "@types/pg": "^8.11.10",
     "@types/qrcode": "^1.5.6",
     "@types/supertest": "^7.2.0",
+    "@types/swagger-ui-express": "^4.1.8",
     "@types/ws": "^8.18.1",
     "hardhat": "^3.10.0",
+    "openapi3-ts": "^4.6.1",
     "solc": "^0.8.36",
     "supertest": "^7.2.2",
     "tsx": "^4.19.4",

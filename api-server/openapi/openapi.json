@@ -1,0 +1,7170 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "QuorumProof API",
+    "version": "1.0.0",
+    "description": "REST API for the QuorumProof credential issuance, attestation and verification platform, backed by Soroban smart contracts on Stellar.\n\nThis document is generated from typed operation definitions in `api-server/src/openapi/paths/*` — see `docs/API_DOCUMENTATION.md` for how to regenerate it and the TypeScript client after changing a route.",
+    "contact": {
+      "name": "QuorumProof",
+      "url": "https://github.com/QuorumProof/QuorumProof"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Configured server (PUBLIC_APP_BASE_URL)"
+    },
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Liveness / readiness probes and service status."
+    },
+    {
+      "name": "Verification",
+      "description": "Credential and batch claim verification."
+    },
+    {
+      "name": "Credentials",
+      "description": "Credential search, metadata, revocation list, sharded storage stats."
+    },
+    {
+      "name": "Slices",
+      "description": "Credential slice (batch) lookups."
+    },
+    {
+      "name": "Attestors",
+      "description": "Attestor directory, availability and reputation."
+    },
+    {
+      "name": "Issuer",
+      "description": "Per-issuer metrics and analytics."
+    },
+    {
+      "name": "Analytics",
+      "description": "Platform-wide event ingestion and derived metrics."
+    },
+    {
+      "name": "Dashboard",
+      "description": "Credential-holder dashboard (my credentials, disputes, access log)."
+    },
+    {
+      "name": "Notifications",
+      "description": "Notification preferences and delivery."
+    },
+    {
+      "name": "Webhooks",
+      "description": "Outbound event webhook subscriptions and delivery logs."
+    },
+    {
+      "name": "GDPR",
+      "description": "Data subject access / erasure requests, consent records."
+    },
+    {
+      "name": "Consent",
+      "description": "Per-credential verifier consent grants."
+    },
+    {
+      "name": "Share Links",
+      "description": "Time-limited shareable credential links."
+    },
+    {
+      "name": "API Keys",
+      "description": "API key issuance, rotation and usage."
+    },
+    {
+      "name": "OAuth2",
+      "description": "OAuth2 / OIDC identity provider linking."
+    },
+    {
+      "name": "Auth",
+      "description": "Session login, MFA, and passwordless / WebAuthn auth."
+    },
+    {
+      "name": "Recovery",
+      "description": "Account recovery via OTP."
+    },
+    {
+      "name": "Privilege Escalation",
+      "description": "Step-up MFA approval workflow for privileged actions."
+    },
+    {
+      "name": "Audit",
+      "description": "Immutable audit log entries and batch notarization."
+    },
+    {
+      "name": "Reports",
+      "description": "Compliance, cost, usage and expiry-forecast reports."
+    },
+    {
+      "name": "Costs",
+      "description": "Infrastructure cost reporting and optimization suggestions."
+    },
+    {
+      "name": "Bridge",
+      "description": "Cross-chain credential anchoring and light-client sync."
+    },
+    {
+      "name": "Tracing",
+      "description": "Distributed trace lookup."
+    },
+    {
+      "name": "GraphQL",
+      "description": "GraphQL endpoint (alternative to the REST surface)."
+    },
+    {
+      "name": "Metrics",
+      "description": "Prometheus-format and JSON operational metrics."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Overall health status",
+        "description": "200 when healthy or degraded, 503 when unhealthy.",
+        "responses": {
+          "200": {
+            "description": "Healthy or degraded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unhealthy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness probe",
+        "description": "Returns 503 while dependencies (DB, RPC, etc.) are not yet ready to serve traffic.",
+        "responses": {
+          "200": {
+            "description": "Ready."
+          },
+          "503": {
+            "description": "Not ready."
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness probe",
+        "description": "Always 200 while the process is running; used by orchestrators to detect a hung process.",
+        "responses": {
+          "200": {
+            "description": "Alive."
+          }
+        }
+      }
+    },
+    "/api/verify/batch": {
+      "post": {
+        "tags": [
+          "Verification"
+        ],
+        "summary": "Batch-verify credential/claim pairs",
+        "description": "Verifies many `(credential_id, claim_type)` pairs in one round trip. Duplicate pairs are deduplicated and resolved once; results are fanned back out in input order.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyBatchClaimsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-item verification results plus a summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchVerificationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/verify/{id}": {
+      "get": {
+        "tags": [
+          "Verification"
+        ],
+        "summary": "Look up the current verification status of a single credential",
+        "description": "Canonical verification endpoint that a credential-export QR code links to. When `claim_type` is supplied, also returns a verification proof for that claim.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "claim_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "When present, also returns a signed verification proof for this claim."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current credential status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "credential_id": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "verified",
+                        "failed",
+                        "not_found",
+                        "revoked",
+                        "expired",
+                        "error"
+                      ]
+                    },
+                    "checked_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "claim_type": {
+                      "type": "string"
+                    },
+                    "proof": {
+                      "$ref": "#/components/schemas/BatchVerificationResult/properties/proof"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid credential id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/slices": {
+      "get": {
+        "tags": [
+          "Slices"
+        ],
+        "summary": "List quorum slices (cursor-paginated)",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque base64 cursor from a previous response."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of slices.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Slice"
+                      }
+                    },
+                    "pagination": {
+                      "$ref": "#/components/schemas/Pagination"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/slices/{id}": {
+      "get": {
+        "tags": [
+          "Slices"
+        ],
+        "summary": "Get a quorum slice by id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The slice.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Slice"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Slice not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/api-keys": {
+      "post": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Generate a new API key",
+        "description": "The full secret is returned exactly once, in this response. Callers must persist it — it cannot be retrieved again (only rotated).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authorization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "List the caller's active API keys",
+        "responses": {
+          "200": {
+            "description": "Keys (secrets never included).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "lastUsedAt": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "date-time"
+                          },
+                          "active": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authorization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/api-keys/{id}": {
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Get a single API key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "lastUsedAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "active": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Revoke an API key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked."
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/api-keys/{id}/rotate": {
+      "post": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Rotate an API key",
+        "description": "Issues a new secret; the old key keeps working until `gracePeriodMs` elapses.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "gracePeriodMs": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New key issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyCreateResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Key already inactive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/api-keys/{id}/usage": {
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Get usage history for a key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/api-keys/stats/overview": {
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Get the caller's key statistics",
+        "responses": {
+          "200": {
+            "description": "Aggregate stats.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authorization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/api-keys": {
+      "post": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Generate a new API key",
+        "description": "The full secret is returned exactly once, in this response. Callers must persist it — it cannot be retrieved again (only rotated).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authorization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "List the caller's active API keys",
+        "responses": {
+          "200": {
+            "description": "Keys (secrets never included).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "lastUsedAt": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "date-time"
+                          },
+                          "active": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authorization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/api-keys/{id}": {
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Get a single API key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "lastUsedAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "active": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Revoke an API key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked."
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/api-keys/{id}/rotate": {
+      "post": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Rotate an API key",
+        "description": "Issues a new secret; the old key keeps working until `gracePeriodMs` elapses.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "gracePeriodMs": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New key issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyCreateResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Key already inactive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/api-keys/{id}/usage": {
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Get usage history for a key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/api-keys/stats/overview": {
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Get the caller's key statistics",
+        "responses": {
+          "200": {
+            "description": "Aggregate stats.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authorization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Register a webhook",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "credential_issued",
+                        "credential_attested",
+                        "credential_revoked"
+                      ]
+                    },
+                    "minItems": 1
+                  },
+                  "secret": {
+                    "type": "string",
+                    "description": "Used to HMAC-sign delivered payloads."
+                  }
+                },
+                "required": [
+                  "url",
+                  "events"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid url or events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List registered webhooks",
+        "responses": {
+          "200": {
+            "description": "Webhooks.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Webhook"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks/deliveries/log": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Get the webhook delivery log",
+        "responses": {
+          "200": {
+            "description": "Delivery attempts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks/dead-letters": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List deliveries that exhausted retries",
+        "responses": {
+          "200": {
+            "description": "Dead-lettered deliveries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks/dead-letters/{id}/replay": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Re-queue a dead-lettered delivery",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Re-queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks/{id}": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Get a webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The webhook.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Remove a webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed."
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gdpr/personal-data": {
+      "post": {
+        "tags": [
+          "GDPR"
+        ],
+        "summary": "Store a credential's personal data (encrypted, off-chain)",
+        "description": "Encrypts `personalData` with a per-credential key and returns a sha256 commitment the issuer should anchor on-chain. See docs/crypto-shredding-architecture.md.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "credentialId": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "subject": {
+                    "type": "string",
+                    "description": "Stellar address; must match the on-chain credential subject."
+                  },
+                  "personalData": {}
+                },
+                "required": [
+                  "credentialId",
+                  "subject",
+                  "personalData"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or subject mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Key already destroyed (erased).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gdpr/personal-data/{credentialId}/status": {
+      "get": {
+        "tags": [
+          "GDPR"
+        ],
+        "summary": "Get vault status for a credential (no decryption)",
+        "parameters": [
+          {
+            "name": "credentialId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid credentialId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gdpr/personal-data/{credentialId}": {
+      "get": {
+        "tags": [
+          "GDPR"
+        ],
+        "summary": "Retrieve (decrypted) personal data for a credential",
+        "parameters": [
+          {
+            "name": "credentialId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Decrypted record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid credentialId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No personal data stored for this credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The decryption key has been erased (right-to-erasure completed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gdpr/request": {
+      "post": {
+        "tags": [
+          "GDPR"
+        ],
+        "summary": "Submit a right-to-erasure request",
+        "description": "Completes immediately (key destroyed) if the credential has no current attestors; otherwise waits for every current attestor to POST /api/gdpr/consent.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "credentialId": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "credentialId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Request created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdprRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid credentialId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gdpr/request/{requestId}": {
+      "get": {
+        "tags": [
+          "GDPR"
+        ],
+        "summary": "Get a GDPR request by id",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdprRequest"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gdpr/consent": {
+      "post": {
+        "tags": [
+          "GDPR"
+        ],
+        "summary": "Attestor consent to a pending erasure request",
+        "description": "The signer must be a current on-chain attestor for the credential and submit an ed25519 signature over the canonical consent message. When the last required consent lands, the credential's decryption key is destroyed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "attestorAddress": {
+                    "type": "string"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "description": "Hex-encoded ed25519 signature."
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "attestorAddress",
+                  "signature"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Consent recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdprRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, or request not pending.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid attestor signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "attestorAddress is not a current attestor for this credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/oauth2/{provider}/authorize": {
+      "get": {
+        "tags": [
+          "OAuth2"
+        ],
+        "summary": "Build the provider's consent-screen URL",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "google",
+                "microsoft",
+                "github"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorization URL and state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unsupported provider.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/oauth2/callback": {
+      "post": {
+        "tags": [
+          "OAuth2"
+        ],
+        "summary": "Exchange an auth code and link the identity to a Stellar address",
+        "description": "`signature` must be an ed25519 signature (by `stellarAddress`) over the canonical link message, proving control of the address before it is linked to the OAuth2 identity.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "google",
+                      "microsoft",
+                      "github"
+                    ]
+                  },
+                  "code": {
+                    "type": "string"
+                  },
+                  "stellarAddress": {
+                    "type": "string"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "description": "Hex-encoded 64-byte ed25519 signature."
+                  }
+                },
+                "required": [
+                  "provider",
+                  "code",
+                  "stellarAddress",
+                  "signature"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Identity linked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "OAuth2 exchange failed, or signature invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/oauth2/identities/{stellarAddress}": {
+      "get": {
+        "tags": [
+          "OAuth2"
+        ],
+        "summary": "List OAuth2 identities linked to a Stellar address",
+        "parameters": [
+          {
+            "name": "stellarAddress",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Linked identities.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attestors": {
+      "get": {
+        "tags": [
+          "Attestors"
+        ],
+        "summary": "List / filter the attestor directory",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact match on attestor type."
+          },
+          {
+            "name": "region",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Case-insensitive exact match."
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Substring search across name, region, description."
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching attestors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "attestors": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AttestorStatus"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attestors/{id}": {
+      "get": {
+        "tags": [
+          "Attestors"
+        ],
+        "summary": "Get a single attestor record with credential stats",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attestor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttestorStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown attestor id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attestors/{id}/status": {
+      "get": {
+        "tags": [
+          "Attestors"
+        ],
+        "summary": "Get live availability metrics for an attestor",
+        "description": "uptime_ratio and avg_response_ms are derived from the last 24h of recorded pings.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Availability status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "uptime_ratio": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "avg_response_ms": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "active_credential_count": {
+                      "type": "integer"
+                    },
+                    "last_seen": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "availability": {
+                      "type": "string",
+                      "enum": [
+                        "excellent",
+                        "good",
+                        "degraded",
+                        "offline",
+                        "unknown"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown attestor id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attestors/{id}/status/ping": {
+      "post": {
+        "tags": [
+          "Attestors"
+        ],
+        "summary": "Record a heartbeat ping result for an attestor",
+        "description": "Called by the monitoring agent or the attestor node itself after each health-check probe.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "response_ms": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "ok",
+                  "response_ms"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Recorded."
+          },
+          "400": {
+            "description": "Invalid body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown attestor id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attestor/pending": {
+      "get": {
+        "tags": [
+          "Attestors"
+        ],
+        "summary": "Get the pending attestation queue for an address",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {}
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing address.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attestor/reputation/{address}": {
+      "get": {
+        "tags": [
+          "Attestors"
+        ],
+        "summary": "Get on-chain + derived reputation stats for an attestor address",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reputation snapshot (30-day window).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "attestation_count_score": {
+                      "type": "number"
+                    },
+                    "reputation": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "additionalProperties": true
+                    },
+                    "attestation_count": {
+                      "type": "integer"
+                    },
+                    "total_activity": {
+                      "type": "integer"
+                    },
+                    "success_rate": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "period_days": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attestor/batch-attest": {
+      "post": {
+        "tags": [
+          "Attestors"
+        ],
+        "summary": "Attest a batch of credentials against a slice",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "attestor": {
+                    "type": "string"
+                  },
+                  "credential_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "maxItems": 50
+                  },
+                  "slice_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "attestor",
+                  "credential_ids",
+                  "slice_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-credential attestation results.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "succeeded": {
+                      "type": "integer"
+                    },
+                    "failed": {
+                      "type": "integer"
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "credential_id": {
+                            "type": "string"
+                          },
+                          "success": {
+                            "type": "boolean"
+                          },
+                          "error": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid fields, or batch too large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications/preferences": {
+      "put": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Set notification preferences for an address",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationPreferencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "email/phone required for the enabled channel, or invalid body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications/preferences/{address}": {
+      "get": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Get notification preferences for an address",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preferences.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No preferences found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications/history": {
+      "get": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Get notification delivery history",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notifications/send": {
+      "post": {
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Send (dispatch) a notification and broadcast over WebSocket",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationSendRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dispatched.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "ws_recipients": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issuer/{address}/metrics": {
+      "get": {
+        "tags": [
+          "Issuer"
+        ],
+        "summary": "Get issuance metrics for an issuer over a period",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "period_days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 365,
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metrics.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid period_days.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/events": {
+      "post": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Record a credential lifecycle event",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyticsEventRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "event_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Query the raw analytics event log",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "issued",
+                "attested",
+                "revoked",
+                "suspended",
+                "verified"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/metrics": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Get daily issued/attested/revoked metrics for a date range",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Daily metrics and totals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid date range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/anomalies": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Detect anomalous issuance days in a date range",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "threshold",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Anomalous dates.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/issuer/{address}": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Get issuer-scoped metrics",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "period_days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 365,
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Issuer metrics.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid period_days.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/summary": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Get a platform-wide analytics summary",
+        "responses": {
+          "200": {
+            "description": "Summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/health": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Analytics subsystem health check",
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/credentials": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Get per-issuer credential issuance breakdown",
+        "parameters": [
+          {
+            "name": "issuer",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d"
+              ],
+              "default": "30d"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Issuance totals, breakdown by type, expiry distribution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing issuer or invalid range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/verifications": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Get verification counts by claim type and verifier",
+        "parameters": [
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d"
+              ],
+              "default": "30d"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verification distribution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics/disputes": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Get dispute rate and resolution stats",
+        "parameters": [
+          {
+            "name": "issuer",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d"
+              ],
+              "default": "30d"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dispute stats.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/credentials": {
+      "get": {
+        "tags": [
+          "Dashboard"
+        ],
+        "summary": "List the authenticated user's credentials",
+        "responses": {
+          "200": {
+            "description": "Credential summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "credentials": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "active_count": {
+                      "type": "integer"
+                    },
+                    "revoked_count": {
+                      "type": "integer"
+                    },
+                    "suspended_count": {
+                      "type": "integer"
+                    },
+                    "expiring_soon": {
+                      "type": "integer",
+                      "description": "Active, non-revoked credentials expiring within 30 days."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No authenticated user address on the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/credentials/{id}": {
+      "get": {
+        "tags": [
+          "Dashboard"
+        ],
+        "summary": "Get full detail for one of the authenticated user’s credentials",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_history",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "include_disputes",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential detail with attestations, and optionally amendment/dispute history.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No authenticated user address on the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Credential does not belong to the authenticated user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/disputes": {
+      "get": {
+        "tags": [
+          "Dashboard"
+        ],
+        "summary": "List disputes against the user's credentials",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "resolved",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "created_at",
+                "status"
+              ],
+              "default": "created_at"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Disputes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "disputes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "pending_count": {
+                      "type": "integer"
+                    },
+                    "resolved_count": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No authenticated user address on the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Dashboard"
+        ],
+        "summary": "Create a dispute against a credential",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "credential_id": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "evidence_hash": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "credential_id",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing credential_id or reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No authenticated user address on the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/access-log": {
+      "get": {
+        "tags": [
+          "Dashboard"
+        ],
+        "summary": "Get the access/audit log for the user's credentials",
+        "parameters": [
+          {
+            "name": "credential_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Access log entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_logs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No authenticated user address on the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Dashboard"
+        ],
+        "summary": "Log a credential access event",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "credential_id": {
+                    "type": "string"
+                  },
+                  "accessed_by": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "duration_seconds": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "credential_id",
+                  "accessed_by",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Logged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/summary": {
+      "get": {
+        "tags": [
+          "Dashboard"
+        ],
+        "summary": "Get a quick dashboard summary",
+        "responses": {
+          "200": {
+            "description": "Summary counts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total_credentials": {
+                      "type": "integer"
+                    },
+                    "active_credentials": {
+                      "type": "integer"
+                    },
+                    "pending_disputes": {
+                      "type": "integer"
+                    },
+                    "credentials_expiring_30_days": {
+                      "type": "integer"
+                    },
+                    "last_access_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No authenticated user address on the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/search": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Advanced credential search",
+        "description": "Full-text search, faceting, ranking, deduplication and cursor-based pagination. Also supports per-field operators (`attestation_count[gte]=2`, `issuer[regex]=BANK.*`) and nested boolean combinations via `filter[and]`/`filter[or]`/`filter[not]`.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Full-text search query."
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Credential type; repeatable."
+          },
+          {
+            "name": "issuer",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "issuer_type",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "subject",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "revoked",
+                "suspended"
+              ]
+            }
+          },
+          {
+            "name": "jurisdiction",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "ISO 3166 or supranational code; hierarchical (US matches US-CA, EU matches EU members)."
+          },
+          {
+            "name": "attestation_count_min",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "attestation_count_max",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "created_after",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "created_before",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "expires_after",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "expires_before",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "deduplicate",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Collapse same subject+issuer credentials to the highest version."
+          },
+          {
+            "name": "include_versions",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "include_score",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated: id|type|relevance|created_at|updated_at|recency|reputation."
+          },
+          {
+            "name": "sort_order",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "name": "facets",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated facet names."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results with facets and pagination.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Credential"
+                      }
+                    },
+                    "facets": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "pagination": {
+                      "$ref": "#/components/schemas/Pagination"
+                    },
+                    "query_info": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "index_version": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit, sort_by, or sort_order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/search/rebuild-index-async": {
+      "post": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Kick off a background full re-index from chain",
+        "description": "The current index stays live and queryable for the whole rebuild; swapped in atomically on completion.",
+        "responses": {
+          "202": {
+            "description": "Rebuild started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rebuild_id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "estimated_duration_ms": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rebuild is already in progress.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/search/rebuild-status/{id}": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Get the status of a background re-index job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/search/rebuild-history": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "List past re-index jobs",
+        "responses": {
+          "200": {
+            "description": "Rebuild history.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rebuilds": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/verify-batch": {
+      "post": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Batch-check attestation status against a slice",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "credential_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "minItems": 1,
+                    "maxItems": 50
+                  },
+                  "slice_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "credential_ids",
+                  "slice_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-credential attestation results.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "credential_id": {
+                            "type": "integer"
+                          },
+                          "attested": {
+                            "type": "boolean"
+                          },
+                          "error": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid credential_ids or slice_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/search/refresh-index": {
+      "post": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Force a synchronous refresh of the search index from chain",
+        "responses": {
+          "200": {
+            "description": "Refreshed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "index_size": {
+                      "type": "integer"
+                    },
+                    "cache_size": {
+                      "type": "integer"
+                    },
+                    "last_indexed": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/search/index-stats": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Get search index and metadata-hash cache statistics",
+        "responses": {
+          "200": {
+            "description": "Stats.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/crl": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Export the revocation list (CRL)",
+        "description": "X.509-compatible JSON structure; `format=pem` wraps it as base64 in a PEM envelope.",
+        "parameters": [
+          {
+            "name": "issuer",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "QuorumProof"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "pem"
+              ],
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The CRL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "integer"
+                    },
+                    "issuer": {
+                      "type": "string"
+                    },
+                    "thisUpdate": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "nextUpdate": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "revokedCertificates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "totalRevoked": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "description": "PEM-encoded CRL when format=pem."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid format.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/shards/stats": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Get sharded-storage distribution statistics",
+        "responses": {
+          "200": {
+            "description": "Shard stats.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "shard_count": {
+                      "type": "integer"
+                    },
+                    "total_credentials": {
+                      "type": "integer"
+                    },
+                    "shards": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/shards/by-subject": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Fetch a subject's credentials directly from its shard",
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credentials in the subject shard.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "subject": {
+                      "type": "string"
+                    },
+                    "shard_index": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "credentials": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Credential"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing subject.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/metadata-hash": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Get the metadata hash for a credential (cached)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata hash.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "credential_id": {
+                      "type": "integer"
+                    },
+                    "metadata_hash": {
+                      "type": "string"
+                    },
+                    "cached": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid credential id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/export": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Export a credential as JSON, PDF, or a verification QR code",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "pdf",
+                "qrcode"
+              ],
+              "default": "json"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The export. Content-Type depends on `format`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "credential": {
+                      "$ref": "#/components/schemas/Credential"
+                    },
+                    "verification_url": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "exported_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              },
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid credential id or format.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/consent/verifiers": {
+      "get": {
+        "tags": [
+          "Consent"
+        ],
+        "summary": "List verifiers who have accessed a credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "holder",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stellar address of the credential holder."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verifiers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "credential_id": {
+                      "type": "integer"
+                    },
+                    "verifiers": {
+                      "type": "array",
+                      "items": {}
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or missing holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not the credential holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/consent/access-log": {
+      "get": {
+        "tags": [
+          "Consent"
+        ],
+        "summary": "Get the full verifier access log for a credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "holder",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "verifier",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "access_type",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                1,
+                2,
+                3
+              ]
+            },
+            "description": "1=share_link, 2=delegation, 3=proof_request."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Access log entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "credential_id": {
+                      "type": "integer"
+                    },
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or missing holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not the credential holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/consent/grants": {
+      "post": {
+        "tags": [
+          "Consent"
+        ],
+        "summary": "Grant a verifier consent to access a credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "holder": {
+                    "type": "string"
+                  },
+                  "verifier": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "integer",
+                    "description": "Unix timestamp; 0 = no expiry.",
+                    "default": 0
+                  }
+                },
+                "required": [
+                  "holder",
+                  "verifier"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Granted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing fields or invalid expires_at.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not the credential holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/consent/grants/{verifier}": {
+      "get": {
+        "tags": [
+          "Consent"
+        ],
+        "summary": "Get a specific consent grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "verifier",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The grant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No consent grant found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Consent"
+        ],
+        "summary": "Revoke a verifier consent grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "verifier",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "holder": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "holder"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not the credential holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/consent/grants/{verifier}/status": {
+      "get": {
+        "tags": [
+          "Consent"
+        ],
+        "summary": "Check whether a consent grant is currently active",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "verifier",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "credential_id": {
+                      "type": "integer"
+                    },
+                    "verifier": {
+                      "type": "string"
+                    },
+                    "consent_active": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/consent/access": {
+      "post": {
+        "tags": [
+          "Consent"
+        ],
+        "summary": "Record a verifier access event",
+        "description": "Used by internal services / the bridge relay to log access.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "holder": {
+                    "type": "string"
+                  },
+                  "verifier": {
+                    "type": "string"
+                  },
+                  "access_type": {
+                    "type": "integer",
+                    "enum": [
+                      1,
+                      2,
+                      3
+                    ]
+                  }
+                },
+                "required": [
+                  "holder",
+                  "verifier",
+                  "access_type"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not the credential holder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/{id}/share": {
+      "post": {
+        "tags": [
+          "Share Links"
+        ],
+        "summary": "Create a time-limited share link for a credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "description": "Stellar address of the credential holder."
+                  },
+                  "expiry_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8760
+                  },
+                  "permission": {
+                    "type": "string",
+                    "enum": [
+                      "view_only",
+                      "download"
+                    ]
+                  },
+                  "password": {
+                    "type": "string",
+                    "description": "Optional; omit for a public link."
+                  }
+                },
+                "required": [
+                  "subject",
+                  "expiry_hours",
+                  "permission"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "token": {
+                      "type": "string"
+                    },
+                    "expires_at": {
+                      "type": "integer"
+                    },
+                    "permission": {
+                      "type": "string"
+                    },
+                    "password_protected": {
+                      "type": "boolean"
+                    },
+                    "credential_id": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only the credential holder can create share links.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/share/validate": {
+      "post": {
+        "tags": [
+          "Share Links"
+        ],
+        "summary": "Validate / redeem a share token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "description": "32-char hex."
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "token"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Link metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid or missing password.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Link expired, revoked, or invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/credentials/share/{token}": {
+      "get": {
+        "tags": [
+          "Share Links"
+        ],
+        "summary": "Inspect share-link metadata (no access enforcement)",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Link metadata (password hash redacted).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Share Links"
+        ],
+        "summary": "Revoke a share link early",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "subject"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing subject or malformed token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only the link creator can revoke it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recovery/request": {
+      "post": {
+        "tags": [
+          "Recovery"
+        ],
+        "summary": "Start a wallet-recovery request",
+        "description": "Sends an OTP to the contact channel; the request then awaits identity verification and attestor approval.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "credentialId": {
+                    "type": "string"
+                  },
+                  "lostWallet": {
+                    "type": "string",
+                    "pattern": "^G[A-Z2-7]{55}$"
+                  },
+                  "newWallet": {
+                    "type": "string",
+                    "pattern": "^G[A-Z2-7]{55}$"
+                  },
+                  "contactType": {
+                    "type": "string",
+                    "enum": [
+                      "email",
+                      "phone"
+                    ]
+                  },
+                  "contactValue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "credentialId",
+                  "lostWallet",
+                  "newWallet",
+                  "contactType",
+                  "contactValue"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Request created; OTP sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recovery/verify-otp": {
+      "post": {
+        "tags": [
+          "Recovery"
+        ],
+        "summary": "Verify the OTP for a recovery request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "code"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified; now pending attestor approval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid code.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Recovery request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request is not awaiting verification.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Code expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recovery/resend-otp": {
+      "post": {
+        "tags": [
+          "Recovery"
+        ],
+        "summary": "Resend the OTP for a pending recovery request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requestId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Recovery request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request is not awaiting verification.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recovery/status/{requestId}": {
+      "get": {
+        "tags": [
+          "Recovery"
+        ],
+        "summary": "Get the status of a recovery request",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request status (contact value redacted).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Recovery request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recovery/pending": {
+      "get": {
+        "tags": [
+          "Recovery"
+        ],
+        "summary": "List recovery requests pending attestor approval",
+        "parameters": [
+          {
+            "name": "attestor",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "attestor": {
+                      "type": "string"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recovery/approve": {
+      "post": {
+        "tags": [
+          "Recovery"
+        ],
+        "summary": "Approve a pending recovery request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "attestor": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "attestor"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approved; re-issuance initiated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Recovery request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request is not in pending_approval status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/recovery/reject": {
+      "post": {
+        "tags": [
+          "Recovery"
+        ],
+        "summary": "Reject a pending recovery request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "attestor": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "attestor"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Recovery request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request is not in pending_approval status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/privilege-escalation/mfa-challenge": {
+      "post": {
+        "tags": [
+          "Privilege Escalation"
+        ],
+        "summary": "Request an MFA challenge for a privileged action",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "userId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Challenge issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": {
+                      "type": "string"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/privilege-escalation/verify-mfa": {
+      "post": {
+        "tags": [
+          "Privilege Escalation"
+        ],
+        "summary": "Verify an MFA code for a pending escalation challenge",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "userId",
+                  "code"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "verified": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId or code.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired MFA code.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/privilege-escalation/request": {
+      "post": {
+        "tags": [
+          "Privilege Escalation"
+        ],
+        "summary": "Submit a privilege change request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "newRole": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "approvers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "userId",
+                  "newRole"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Submitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId or newRole.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/privilege-escalation/approve": {
+      "post": {
+        "tags": [
+          "Privilege Escalation"
+        ],
+        "summary": "Approve a pending privilege change request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "approverId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "approverId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "approved": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing requestId or approverId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/privilege-escalation/reject": {
+      "post": {
+        "tags": [
+          "Privilege Escalation"
+        ],
+        "summary": "Reject a pending privilege change request",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "approverId": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "approverId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rejected": {
+                      "type": "boolean"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing requestId or approverId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/privilege-escalation/audit-log": {
+      "get": {
+        "tags": [
+          "Privilege Escalation"
+        ],
+        "summary": "Get the privilege-escalation audit log",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Log entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "logs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/privilege-escalation/pending": {
+      "get": {
+        "tags": [
+          "Privilege Escalation"
+        ],
+        "summary": "List pending privilege change approvals",
+        "responses": {
+          "200": {
+            "description": "Pending requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "requests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tracing/trace/{traceId}": {
+      "get": {
+        "tags": [
+          "Tracing"
+        ],
+        "summary": "Get all spans for a trace",
+        "parameters": [
+          {
+            "name": "traceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Spans.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "traceId": {
+                      "type": "string"
+                    },
+                    "spanCount": {
+                      "type": "integer"
+                    },
+                    "spans": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Trace not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tracing/span/{traceId}/{spanId}": {
+      "get": {
+        "tags": [
+          "Tracing"
+        ],
+        "summary": "Get a specific span",
+        "parameters": [
+          {
+            "name": "traceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "spanId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The span.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Span not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tracing/jaeger/{traceId}": {
+      "get": {
+        "tags": [
+          "Tracing"
+        ],
+        "summary": "Export a trace in Jaeger format",
+        "parameters": [
+          {
+            "name": "traceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Jaeger-formatted trace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Trace not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tracing/metrics": {
+      "get": {
+        "tags": [
+          "Tracing"
+        ],
+        "summary": "Get distributed-tracing metrics",
+        "responses": {
+          "200": {
+            "description": "Metrics.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ws/metrics": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Get WebSocket connection/subscription metrics (JSON)",
+        "responses": {
+          "200": {
+            "description": "Metrics.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/ws": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "WebSocket metrics in Prometheus format",
+        "description": "Tagged with this instance id; scrape every replica and aggregate for cluster-wide totals.",
+        "responses": {
+          "200": {
+            "description": "Prometheus text-exposition format (version 0.0.4).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/rpc": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Soroban RPC circuit-breaker metrics in Prometheus format",
+        "responses": {
+          "200": {
+            "description": "Prometheus text-exposition format (version 0.0.4).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rpc/circuit-breaker": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Soroban RPC circuit-breaker state (JSON)",
+        "responses": {
+          "200": {
+            "description": "Circuit breaker state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/events": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Critical on-chain event monitoring metrics in Prometheus format",
+        "responses": {
+          "200": {
+            "description": "Prometheus text-exposition format (version 0.0.4).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/critical/recent": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Recent critical on-chain events and their metrics (JSON)",
+        "responses": {
+          "200": {
+            "description": "Recent events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "metrics": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Session access token issued by /auth/login or /auth/passwordless/verify. Sent as `Authorization: Bearer <token>`. Required for account/session/MFA endpoints."
+      },
+      "apiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "Long-lived API key issued via /api/api-keys. Subject to per-key rate limiting independent of the general IP-based limiter."
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Short, machine-oriented error code or summary."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable explanation."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "ValidationErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "example": "Validation failed"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "keyword": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Pagination": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "VerifyBatchRequest": {
+        "type": "object",
+        "properties": {
+          "credential_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "minItems": 1,
+            "maxItems": 50
+          },
+          "slice_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "credential_ids",
+          "slice_id"
+        ],
+        "additionalProperties": false
+      },
+      "VerifyBatchClaimsRequest": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "credential_id": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "claim_type": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "credential_id",
+                "claim_type"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "additionalProperties": false
+      },
+      "NotificationPreferencesRequest": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "minLength": 1
+          },
+          "email": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "email",
+                "sms"
+              ]
+            },
+            "minItems": 1
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "credential_issued",
+                "credential_revoked",
+                "credential_suspended",
+                "credential_attested",
+                "credential_expiring"
+              ]
+            },
+            "minItems": 1
+          },
+          "credential_type_filters": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "address",
+          "channels",
+          "events"
+        ],
+        "additionalProperties": false
+      },
+      "NotificationSendRequest": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "credential_issued",
+              "credential_revoked",
+              "credential_suspended",
+              "credential_attested",
+              "credential_expiring"
+            ]
+          },
+          "credential_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "credential_type": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "holder": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "event",
+          "credential_id"
+        ],
+        "additionalProperties": false
+      },
+      "AnalyticsEventRequest": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "issued",
+              "attested",
+              "revoked",
+              "suspended",
+              "verified"
+            ]
+          },
+          "credential_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "minLength": 1
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "attestor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "credential_id",
+          "timestamp"
+        ],
+        "additionalProperties": false
+      },
+      "AuditVerifyRequest": {
+        "type": "object",
+        "properties": {
+          "batch_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "batch_id"
+        ],
+        "additionalProperties": false
+      },
+      "HealthStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ]
+          },
+          "checks": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "BatchVerificationResult": {
+        "type": "object",
+        "properties": {
+          "credential_id": {
+            "type": "integer"
+          },
+          "claim_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "failed",
+              "not_found",
+              "revoked",
+              "expired",
+              "error"
+            ]
+          },
+          "proof": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "verified_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "credential_status": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "revoked",
+                  "suspended",
+                  "expired"
+                ]
+              },
+              "digest": {
+                "type": "string",
+                "description": "16-hex-char stable digest."
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "credential_id",
+          "claim_type",
+          "status"
+        ]
+      },
+      "BatchVerificationResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchVerificationResult"
+            }
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "verified": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "not_found": {
+                "type": "integer"
+              },
+              "errors": {
+                "type": "integer"
+              },
+              "duplicates_deduplicated": {
+                "type": "integer"
+              },
+              "execution_time_ms": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "Credential": {
+        "type": "object",
+        "description": "A credential as returned by the search index / dashboard endpoints.",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "claim_type": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string",
+            "description": "Stellar address of the issuer."
+          },
+          "holder": {
+            "type": "string",
+            "description": "Stellar address of the holder."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "revoked",
+              "suspended",
+              "expired"
+            ]
+          },
+          "metadata_hash": {
+            "type": "string"
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "claim_type",
+          "issuer",
+          "holder",
+          "status"
+        ]
+      },
+      "Slice": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "credential_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "ApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "Non-secret prefix used to identify the key in listings."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "revoked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "prefix"
+        ]
+      },
+      "ApiKeyCreateResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ApiKey"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "secret": {
+                "type": "string",
+                "description": "Full secret key — returned exactly once, at creation time. Not recoverable afterward."
+              }
+            },
+            "required": [
+              "secret"
+            ]
+          }
+        ]
+      },
+      "Webhook": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "events"
+        ]
+      },
+      "AttestorStatus": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "reputation": {
+            "type": "number"
+          },
+          "online": {
+            "type": "boolean"
+          },
+          "last_seen": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "address"
+        ]
+      },
+      "GdprRequest": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "erasure",
+              "access",
+              "rectification"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "rejected"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "request_id",
+          "type",
+          "status"
+        ]
+      }
+    }
+  }
+}

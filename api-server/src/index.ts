@@ -22,6 +22,8 @@ import oauth2Router from './routes/oauth2.js';
 import healthRouter from './routes/health.js';
 import privilegeEscalationRouter from './routes/privilegeEscalation.js';
 import tracingRouter from './routes/tracing.js';
+// #1309: Auto-generated OpenAPI docs (Swagger UI / ReDoc)
+import docsRouter from './routes/docs.js';
 import { createDashboardRouter } from './routes/dashboard.js';
 import { cacheControl } from './middleware/cacheControl.js';
 // #1303: CORS middleware
@@ -154,6 +156,9 @@ app.use('/api/me', createDashboardRouter(sorobanClient));
 
 // #1308: Health check endpoints
 app.use('/health', healthRouter);
+
+// #1309: Auto-generated OpenAPI 3.1 docs — JSON spec, Swagger UI, ReDoc.
+app.use('/api-docs', docsRouter);
 
 // #1305: Privilege escalation prevention
 app.use('/api/admin/privilege-escalation', privilegeEscalationRouter);
