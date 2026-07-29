@@ -111,6 +111,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 - [Troubleshooting Guide](docs/troubleshooting-guide.md)
 - [Backup System](docs/backup-system.md)
 - [Roadmap](docs/roadmap.md)
+- [REST API Documentation Auto-Generation](api-server/docs/API_DOCUMENTATION.md) — OpenAPI 3.1, Swagger UI, ReDoc, TypeScript client
 
 ## 🎓 Smart Contract API
 
