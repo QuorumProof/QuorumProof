@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
+import { respondNegotiated } from '../middleware/contentNegotiation.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -84,7 +85,7 @@ export function createSlicesRouter(soroban: SorobanClient) {
         ? Buffer.from(String(end)).toString('base64')
         : null;
 
-      res.json({
+      const payload = {
         data: slices,
         pagination: {
           cursor: cursorQ ?? null,
@@ -93,7 +94,8 @@ export function createSlicesRouter(soroban: SorobanClient) {
           total,
           has_more: hasMore,
         },
-      });
+      };
+      respondNegotiated(req, res, payload, { rootElement: 'slices', itemElement: 'slice' });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });

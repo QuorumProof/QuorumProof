@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { createServer } from 'http';
-import compression from 'compression';
-import zlib from 'zlib';
+// #1313: Compression is configured via the dedicated middleware module.
+import { createCompressionFromEnv } from './middleware/compression.js';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
 import credentialExportRouter from './routes/credentialExport.js';
@@ -10,6 +10,7 @@ import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
 import issuerAnalyticsRouter from './routes/issuerAnalytics.js';
 import attestorRouter from './routes/attestor.js';
+import { createAttestorsRouter } from './routes/attestors.js';
 import issuerRouter from './routes/issuer.js';
 import recoveryRouter from './routes/recovery.js';
 import shareLinksRouter from './routes/shareLinks.js';
@@ -18,16 +19,29 @@ import webhooksRouter from './routes/webhooks.js';
 import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
 import oauth2Router from './routes/oauth2.js';
+import healthRouter from './routes/health.js';
+import privilegeEscalationRouter from './routes/privilegeEscalation.js';
+import tracingRouter from './routes/tracing.js';
+import { createDashboardRouter } from './routes/dashboard.js';
 import { cacheControl } from './middleware/cacheControl.js';
 // #1303: CORS middleware
 import { createCorsFromEnv } from './middleware/cors.js';
 // #1304: Adaptive rate limiter
 import { createAdaptiveRateLimiter } from './middleware/adaptiveRateLimiter.js';
+// #1310: API versioning
+import { createApiVersionMiddleware } from './middleware/apiVersion.js';
+import { v1Compat } from './middleware/v1Compat.js';
+import v1Router from './routes/v1/index.js';
+import v2Router from './routes/v2/index.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
+// #1306: Structured logging
+import { structuredLoggingMiddleware } from './middleware/structuredLogging.js';
+// #1307: Distributed tracing
+import { distributedTracingMiddleware } from './middleware/distributedTracingMiddleware.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -54,8 +68,19 @@ const gracefulShutdown = createGracefulShutdown(httpServer, { drainTimeoutMs: DR
 const cors = createCorsFromEnv();
 app.use(cors);
 
+// #1313: Apply gzip compression early so all subsequent responses are eligible.
+// Only responses >= 1 KB threshold are compressed. Configure via env vars:
+//   COMPRESSION_ENABLED, COMPRESSION_LEVEL, COMPRESSION_THRESHOLD.
+app.use(createCompressionFromEnv());
+
 const ddosProtection = createDDoSProtection();
 app.use(ddosProtection);
+
+// #1306: Structured logging middleware
+app.use(structuredLoggingMiddleware);
+
+// #1307: Distributed tracing middleware
+app.use(distributedTracingMiddleware);
 
 app.use(express.json({ limit: '100kb' }));
 
@@ -99,17 +124,6 @@ const apiRateLimiter = createAdaptiveRateLimiter({
 app.use('/api', apiRateLimiter);
 app.use(cacheControl);
 
-app.use((req, _res, next) => {
-  console.log(JSON.stringify({
-    ts: new Date().toISOString(),
-    level: 'info',
-    service: 'quorumproof-api',
-    method: req.method,
-    path: req.path,
-  }));
-  next();
-});
-
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
 app.use('/api/credentials', credentialExportRouter); // #1000 credential export (json/pdf/qrcode)
@@ -120,6 +134,7 @@ app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
 app.use('/api/attestor', attestorRouter);
+app.use('/api/attestors', createAttestorsRouter()); // #875 attestor availability status
 app.use('/api/issuer', issuerRouter);
 app.use('/api/recovery', recoveryRouter);
 app.use('/api/webhooks', webhooksRouter); // #926 event webhooks
@@ -137,24 +152,14 @@ const sorobanClient = {
 };
 app.use('/api/me', createDashboardRouter(sorobanClient));
 
-app.get('/health', (_req, res) => {
-  // #1311: Return 503 during graceful shutdown so load-balancers stop
-  // routing new traffic to this instance while it finishes draining.
-  if (gracefulShutdown.isDraining()) {
-    res.status(503).json({
-      status: 'draining',
-      ts: new Date().toISOString(),
-      inFlightRequests: gracefulShutdown.inFlightCount(),
-    });
-    return;
-  }
-  res.json({
-    status: 'ok',
-    ts: new Date().toISOString(),
-    ws_connections: getConnectionCount(),
-    ws_subscribers: getSubscriberCount(),
-  });
-});
+// #1308: Health check endpoints
+app.use('/health', healthRouter);
+
+// #1305: Privilege escalation prevention
+app.use('/api/admin/privilege-escalation', privilegeEscalationRouter);
+
+// #1307: Distributed tracing
+app.use('/api/tracing', tracingRouter);
 
 app.get('/ws/metrics', (_req, res) => {
   res.json(getWsMetrics());
@@ -224,23 +229,29 @@ gracefulShutdown.registerSignalHandlers();
  * drift). Skipped entirely when DATABASE_URL isn't set so this stays a no-op
  * for the file/DurableLog-backed stores the API server also supports.
  *
+ * Issue #870: uses the shared connection pool (initPool / getPool) instead of
+ * opening a dedicated one-shot Pool here.  The pool is kept alive for the
+ * lifetime of the server so subsequent route handlers that need Postgres can
+ * call getPool() instead of each opening their own connection.
+ *
  * A failed migration is treated as fatal for startup — see
  * docs/database-migrations.md for the rollback procedure.
  */
 async function runStartupMigrations(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
 
-  const { Pool } = await import('pg');
+  const { initPool } = await import('./db.js');
   const { runMigrations } = await import('./migrations/runner.js');
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-  try {
-    const applied = await runMigrations(pool);
-    if (applied.length > 0) {
-      console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
-    }
-  } finally {
-    await pool.end();
+
+  // initPool is idempotent — safe to call here and again if any route
+  // handler calls it independently.
+  const pool = await initPool(process.env.DATABASE_URL);
+  const applied = await runMigrations(pool);
+  if (applied.length > 0) {
+    console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
   }
+  // Note: do NOT call pool.end() here — the pool lives for the full server
+  // lifetime.  closePool() is called on graceful shutdown below.
 }
 
 (async () => {
@@ -254,6 +265,23 @@ async function runStartupMigrations(): Promise<void> {
   httpServer.listen(PORT, () =>
     console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
   );
+
+  // Issue #870: Graceful shutdown — drain the connection pool so in-flight
+  // queries finish cleanly before the process exits.
+  async function shutdown(signal: string): Promise<void> {
+    console.log(`Received ${signal}, shutting down gracefully…`);
+    httpServer.close(async () => {
+      try {
+        const { closePool } = await import('./db.js');
+        await closePool();
+      } catch {
+        // Best-effort; if db.ts was never imported (no DATABASE_URL) this is a no-op.
+      }
+      process.exit(0);
+    });
+  }
+  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.once('SIGINT', () => { void shutdown('SIGINT'); });
 })();
 
 export { broadcastEvent };

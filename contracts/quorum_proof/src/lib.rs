@@ -18,6 +18,8 @@ mod rbac;
 mod key_escrow;
 mod slice_enhancements;
 pub mod bbs_plus_features;
+pub mod time_lock_attestation;
+pub mod upgrade_history;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -38,6 +40,8 @@ const TOPIC_SBT_TRANSFER: &str = "SbtTransferred";
 const TOPIC_PROOF_REQUEST: &str = "ProofRequested";
 const TOPIC_RECOVERY_INITIATED: &str = "RecoveryInitiated";
 const TOPIC_METADATA_SCHEMA_UPGRADE: &str = "MetadataSchemaUpgraded";
+const TOPIC_TIME_LOCK_SET: &str = "AttestationTimeLockSet";
+const TOPIC_TIME_LOCK_CLEARED: &str = "AttestationTimeLockCleared";
 const TOPIC_RECOVERY_APPROVED: &str = "RecoveryApproved";
 const TOPIC_RECOVERY_EXECUTED: &str = "RecoveryExecuted";
 const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
@@ -10509,6 +10513,11 @@ impl QuorumProofContract {
         if credential.suspended {
             return false;
         }
+        // Issue #872: Time-locked attestation — attestation is not yet active
+        // while the fraud-detection window is still open.
+        if time_lock_attestation::is_time_locked(&env, credential_id) {
+            return false;
+        }
         if let Some(expires_at) = credential.expires_at {
             if env.ledger().timestamp() >= expires_at {
                 return false;
@@ -12035,6 +12044,13 @@ impl QuorumProofContract {
             .expect("not initialized");
         assert!(stored == admin, "unauthorized");
         Self::validate_upgrade(env.clone(), new_wasm_hash.clone());
+        // Issue #874: record the upgrade in the audit log before applying it.
+        upgrade_history::record_upgrade(
+            &env,
+            new_wasm_hash.clone(),
+            Bytes::from_slice(&env, b""),
+            false,
+        );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
@@ -12153,6 +12169,13 @@ impl QuorumProofContract {
         Self::require_not_paused(&env);
         let applied = upgrade_schedule::execute_scheduled_upgrade(&env);
         if let Some(ref hash) = applied {
+            // Issue #874: record the scheduled upgrade in the audit log.
+            upgrade_history::record_upgrade(
+                &env,
+                hash.clone(),
+                Bytes::from_slice(&env, b""),
+                true,
+            );
             let topic = soroban_sdk::String::from_str(&env, "ScheduledUpgradeExecuted");
             let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
             topics.push_back(topic);
@@ -12179,6 +12202,112 @@ impl QuorumProofContract {
             }
         }
         fired
+    }
+
+    // ── Issue #874: Contract Upgrade History ─────────────────────────────────
+
+    /// Return the full upgrade history log, oldest entry first.
+    ///
+    /// Each [`upgrade_history::UpgradeRecord`] stores the new WASM hash,
+    /// the ledger timestamp, a free-text change summary, and whether the
+    /// upgrade was triggered via the scheduled path.  Up to 64 entries are
+    /// kept; older ones are evicted in FIFO order.
+    ///
+    /// Unauthenticated — available to any caller for governance auditing.
+    pub fn get_upgrade_history(env: Env) -> Vec<upgrade_history::UpgradeRecord> {
+        upgrade_history::get_upgrade_history(&env)
+    }
+
+    /// Return the total number of upgrades ever applied (monotonically
+    /// increasing; does not reset when the ring buffer wraps).
+    pub fn get_upgrade_history_count(env: Env) -> u32 {
+        upgrade_history::get_upgrade_count(&env)
+    }
+
+    // ── Issue #872: Time-Locked Credential Approval ───────────────────────────
+
+    /// Issuer-only: set a time-lock on `credential_id` so that attestations
+    /// are withheld from `is_attested` until `release_at` (Unix seconds).
+    ///
+    /// Useful for a fraud-detection window: once the lock expires naturally
+    /// (or is cleared via `clear_attestation_time_lock`) the credential
+    /// becomes verifiable as normal.
+    ///
+    /// # Parameters
+    /// - `issuer`        — the credential issuer; must authorize this call.
+    /// - `credential_id` — credential to lock.
+    /// - `release_at`    — ledger timestamp (seconds) at which the lock lifts;
+    ///                     must be strictly in the future.
+    /// - `changes`       — optional human-readable reason (max 128 bytes).
+    ///
+    /// # Panics
+    /// - `issuer` is not the credential's recorded issuer.
+    /// - `release_at` is not in the future.
+    /// - `changes` exceeds 128 bytes.
+    pub fn set_attestation_time_lock(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        release_at: u64,
+        changes: Bytes,
+    ) -> time_lock_attestation::AttestationTimeLock {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "unauthorized: caller is not the credential issuer");
+
+        let lock = time_lock_attestation::set_time_lock(&env, credential_id, release_at, changes);
+
+        // Emit event so monitoring can detect when locks are applied.
+        let topic = String::from_str(&env, TOPIC_TIME_LOCK_SET);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, (credential_id, release_at));
+
+        lock
+    }
+
+    /// Read the current time-lock on `credential_id`, if any. Unauthenticated.
+    pub fn get_attestation_time_lock(
+        env: Env,
+        credential_id: u64,
+    ) -> Option<time_lock_attestation::AttestationTimeLock> {
+        time_lock_attestation::get_time_lock(&env, credential_id)
+    }
+
+    /// Returns `true` if a time-lock is set and has not yet expired.
+    /// Unauthenticated convenience query.
+    pub fn is_attestation_time_locked(env: Env, credential_id: u64) -> bool {
+        time_lock_attestation::is_time_locked(&env, credential_id)
+    }
+
+    /// Issuer-only: remove the time-lock on `credential_id` before it expires
+    /// naturally (e.g. after the fraud investigation clears the credential).
+    ///
+    /// # Panics
+    /// - `issuer` is not the credential's recorded issuer.
+    pub fn clear_attestation_time_lock(env: Env, issuer: Address, credential_id: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        assert!(credential.issuer == issuer, "unauthorized: caller is not the credential issuer");
+
+        time_lock_attestation::clear_time_lock(&env, credential_id);
+
+        let topic = String::from_str(&env, TOPIC_TIME_LOCK_CLEARED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, credential_id);
     }
 
     // ── Reputation Recovery (Issue #298) ─────────────────────────────────────
