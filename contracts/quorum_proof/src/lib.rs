@@ -13716,6 +13716,9 @@ impl QuorumProofContract {
             env.storage()
                 .instance()
                 .set(&DataKey::Attestors(challenge.credential_id), &retained);
+            // The accused's attestation was just removed; a cached is_attested
+            // result computed before this no longer reflects reality.
+            Self::invalidate_verification_caches_for_credential(&env, challenge.credential_id);
             env.storage().instance().remove(&DataKey::ActiveChallenge(
                 challenge.credential_id,
                 challenge.accused.clone(),
@@ -15318,6 +15321,10 @@ impl QuorumProofContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::Attestors(challenge.credential_id), &retained);
+                // The accused's attestation was just removed; a cached
+                // is_attested result computed before this no longer reflects
+                // reality.
+                Self::invalidate_verification_caches_for_credential(&env, challenge.credential_id);
 
                 challenge.status = ChallengeStatus::Upheld;
             } else {
