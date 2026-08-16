@@ -55,8 +55,8 @@ impl StellarE2EClient {
             .json(&json!({
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "getLedger",
-                "params": []
+                "method": "getLatestLedger",
+                "params": {}
             }))
             .send()
             .await?;
@@ -76,7 +76,7 @@ impl StellarE2EClient {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getNetwork",
-                "params": []
+                "params": {}
             }))
             .send()
             .await?;
