@@ -39,14 +39,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install soroban CLI
-        run: cargo install --locked soroban-cli --version ^21 || true
+        run: cargo install soroban-cli --version ^21
 
-      - name: Skip network if not selected
+      - name: Skip network if not selected or secrets missing
         id: gate
+        env:
+          CONTRACT_QUORUM_PROOF: ${{ matrix.network == 'testnet' && secrets.CONTRACT_QUORUM_PROOF_TESTNET || secrets.CONTRACT_QUORUM_PROOF_MAINNET }}
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" \
                 && "${{ github.event.inputs.network }}" != "both" \
                 && "${{ github.event.inputs.network }}" != "${{ matrix.network }}" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          elif [[ -z "$CONTRACT_QUORUM_PROOF" ]]; then
+            echo "::warning::Skipping backup for ${{ matrix.network }}: CONTRACT_QUORUM_PROOF_${{ matrix.network == 'testnet' && 'TESTNET' || 'MAINNET' }} secret is not configured."
             echo "run=false" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"

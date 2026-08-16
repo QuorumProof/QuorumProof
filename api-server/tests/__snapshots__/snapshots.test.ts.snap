@@ -1,0 +1,185 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`API Snapshot Tests > Attestation Endpoints > GET /credentials/:id/attestation-status snapshot > attestation-status 1`] = `
+{
+  "attestation_count": 2,
+  "credential_id": "456",
+  "is_attested": true,
+  "threshold_met": true,
+}
+`;
+
+exports[`API Snapshot Tests > Attestation Endpoints > GET /credentials/:id/attestors snapshot > attestors-list 1`] = `
+{
+  "items": [
+    {
+      "address": "GBXYZABC123DEF456GHI789JKL012MNO345PQR678STU901VWX234YZ",
+      "attested_at": 1703100000,
+    },
+    {
+      "address": "GCABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRST",
+      "attested_at": 1703200000,
+    },
+  ],
+}
+`;
+
+exports[`API Snapshot Tests > Attestation Endpoints > POST /slices/:id/attest snapshot > attestation-response 1`] = `
+{
+  "attested": true,
+  "attestor": "GBXYZABC123DEF456GHI789JKL012MNO345PQR678STU901VWX234YZ",
+  "credential_id": "456",
+  "slice_id": "789",
+  "timestamp": 1703000000,
+}
+`;
+
+exports[`API Snapshot Tests > Credential Endpoints > GET /credentials list snapshot > credentials-list 1`] = `
+{
+  "items": [
+    {
+      "created_at": 1703000000,
+      "credential_type": "DEGREE",
+      "id": "123",
+      "subject": "GDQJYQZ7BXSFZ74JQSBFQJ5JMIWQNX4CMHVAVDLXVXYQPJQRXHQY45KC",
+    },
+    {
+      "created_at": 1703100000,
+      "credential_type": "LICENSE",
+      "id": "124",
+      "subject": "GBXYZABC123DEF456GHI789JKL012MNO345PQR678STU901VWX234YZ",
+    },
+  ],
+  "pagination": {
+    "limit": 10,
+    "page": 1,
+    "pages": 10,
+    "total": 100,
+  },
+}
+`;
+
+exports[`API Snapshot Tests > Credential Endpoints > GET /credentials/:id snapshot > credential-detail 1`] = `
+{
+  "created_at": 1703000000,
+  "credential_type": "DEGREE",
+  "id": "123",
+  "metadata_hash": "QmA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8S9T0U",
+  "revoked": false,
+  "subject": "GDQJYQZ7BXSFZ74JQSBFQJ5JMIWQNX4CMHVAVDLXVXYQPJQRXHQY45KC",
+}
+`;
+
+exports[`API Snapshot Tests > Credential Endpoints > POST /credentials snapshot > credential-created 1`] = `
+{
+  "created_at": 1703000000,
+  "credential_type": "DEGREE",
+  "expires_at": 1735689600,
+  "id": "123",
+  "metadata_hash": "QmA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8S9T0U",
+  "revoked": false,
+  "subject": "GDQJYQZ7BXSFZ74JQSBFQJ5JMIWQNX4CMHVAVDLXVXYQPJQRXHQY45KC",
+}
+`;
+
+exports[`API Snapshot Tests > Error Response Snapshots > 400 Bad Request snapshot > error-400-bad-request 1`] = `
+{
+  "error": {
+    "code": "INVALID_ADDRESS",
+    "message": "Invalid Stellar address format",
+  },
+}
+`;
+
+exports[`API Snapshot Tests > Error Response Snapshots > 404 Not Found snapshot > error-404-not-found 1`] = `
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Credential not found",
+  },
+}
+`;
+
+exports[`API Snapshot Tests > Error Response Snapshots > 500 Server Error snapshot > error-500-server-error 1`] = `
+{
+  "error": {
+    "code": "SERVER_ERROR",
+    "message": "Internal server error",
+  },
+}
+`;
+
+exports[`API Snapshot Tests > Pagination Snapshots > First page snapshot > pagination-page-1 1`] = `
+{
+  "items": [
+    {
+      "created_at": 1703000000,
+      "credential_type": "DEGREE",
+      "id": "123",
+      "subject": "GDQJYQZ7BXSFZ74JQSBFQJ5JMIWQNX4CMHVAVDLXVXYQPJQRXHQY45KC",
+    },
+    {
+      "created_at": 1703100000,
+      "credential_type": "LICENSE",
+      "id": "124",
+      "subject": "GBXYZABC123DEF456GHI789JKL012MNO345PQR678STU901VWX234YZ",
+    },
+  ],
+  "pagination": {
+    "limit": 10,
+    "page": 1,
+    "pages": 10,
+    "total": 100,
+  },
+}
+`;
+
+exports[`API Snapshot Tests > Pagination Snapshots > Large limit snapshot > pagination-capped-limit 1`] = `
+{
+  "items": [
+    {
+      "created_at": 1703000000,
+      "credential_type": "DEGREE",
+      "id": "123",
+      "subject": "GDQJYQZ7BXSFZ74JQSBFQJ5JMIWQNX4CMHVAVDLXVXYQPJQRXHQY45KC",
+    },
+    {
+      "created_at": 1703100000,
+      "credential_type": "LICENSE",
+      "id": "124",
+      "subject": "GBXYZABC123DEF456GHI789JKL012MNO345PQR678STU901VWX234YZ",
+    },
+  ],
+  "pagination": {
+    "limit": 1000,
+    "page": 1,
+    "pages": 1,
+    "total": 100,
+  },
+}
+`;
+
+exports[`API Snapshot Tests > Response Headers Snapshots > Credential endpoint headers snapshot > credential-headers 1`] = `
+{
+  "api-version": "1.0.0",
+  "content-type": "application/json; charset=utf-8",
+}
+`;
+
+exports[`API Snapshot Tests > Verification Endpoints > GET /credentials/:id/verification snapshot > credential-verification 1`] = `
+{
+  "claim_type": "HAS_DEGREE",
+  "credential_id": "123",
+  "timestamp": 1703000000,
+  "verified": true,
+}
+`;
+
+exports[`API Snapshot Tests > Verification Endpoints > POST /verify snapshot > verification-response 1`] = `
+{
+  "claim_type": "HAS_DEGREE",
+  "credential_id": "123",
+  "timestamp": 1703000000,
+  "verified": true,
+}
+`;

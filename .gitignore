@@ -30,6 +30,11 @@ lcov.info
 **/*.snap
 **/proptest-regressions/
 
+# API contract snapshots are committed as a regression baseline (see
+# api-server/tests/snapshots.test.ts)
+!api-server/tests/__snapshots__/
+!api-server/tests/__snapshots__/*.snap
+
 # Backup files
 *.bak
 *.bak.*

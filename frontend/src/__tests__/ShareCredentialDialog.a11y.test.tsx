@@ -7,9 +7,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { ShareCredentialDialog } from '../components/ShareCredentialDialog'
-import { checkA11y, hasAccessibleName, hasAssociatedLabel } from './utils/accessibility.test.utils'
+import { checkA11y, hasAccessibleName } from './utils/accessibility.test.utils'
 
-const VALID_ADDRESS = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWNN'
 const CRED_ID = '42'
 
 function renderDialog(onClose = vi.fn()) {
@@ -39,7 +38,7 @@ describe('ShareCredentialDialog Accessibility', () => {
     const onClose = vi.fn()
     renderDialog(onClose)
 
-    const closeButton = screen.getByRole('button', { name: /close/i })
+    const closeButton = screen.getByRole('button', { name: 'Close share dialog' })
     expect(closeButton).toBeInTheDocument()
     expect(closeButton).toHaveAttribute('aria-label')
   })
@@ -65,13 +64,8 @@ describe('ShareCredentialDialog Accessibility', () => {
   })
 
   it('should announce error messages accessibly', async () => {
-    const { rerender } = renderDialog()
+    renderDialog()
 
-    // Trigger validation error by using invalid address
-    const input = screen.getByPlaceholderText('G…')
-    const addButton = screen.getByRole('button', { name: /add/i })
-
-    // In a real implementation, this would show an error message
     // Check that errors are announced to screen readers
     const errorRegion = screen.queryByRole('alert')
     if (errorRegion) {

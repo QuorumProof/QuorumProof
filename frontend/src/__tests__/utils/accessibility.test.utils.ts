@@ -70,7 +70,7 @@ export function isKeyboardAccessible(element: HTMLElement) {
  * Verify color contrast ratio meets WCAG standards
  * Note: This is a simplified check; use axe for comprehensive contrast checking
  */
-export function hasMinimumContrast(element: HTMLElement, minRatio = 4.5) {
+export function hasMinimumContrast(element: HTMLElement) {
   const style = window.getComputedStyle(element)
   const bgColor = style.backgroundColor
   const fgColor = style.color
