@@ -138,7 +138,7 @@ pub struct BbsIssuerKeyInfo {
 /// Sensitivity level for a credential attribute.
 /// Determines which parties are permitted to request selective disclosure.
 #[contracttype]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum PrivacyLevel {
     /// Freely disclosable — may appear in any presentation.

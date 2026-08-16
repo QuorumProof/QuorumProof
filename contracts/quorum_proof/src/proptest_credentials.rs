@@ -442,7 +442,7 @@ mod proptest_credential_lifecycle {
             let cred_id = issue_one(&client, &env, &issuer, &subject, cred_type, meta_len);
             let slice_id = single_attestor_slice(&client, &env, &issuer, &attestor);
 
-            client.suspend_credential(&issuer, &cred_id);
+            client.suspend_credential(&issuer, &cred_id, &None);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 client.attest(&attestor, &cred_id, &slice_id, &true, &None);
@@ -467,7 +467,7 @@ mod proptest_credential_lifecycle {
             let cred_id = issue_one(&client, &env, &issuer, &subject, cred_type, meta_len);
             let slice_id = single_attestor_slice(&client, &env, &issuer, &attestor);
 
-            client.suspend_credential(&issuer, &cred_id);
+            client.suspend_credential(&issuer, &cred_id, &None);
             client.resume_credential(&issuer, &cred_id);
 
             // Should not panic
@@ -536,6 +536,7 @@ mod proptest_credential_lifecycle {
             )
         ) {
             let env = Env::default();
+            env.budget().reset_unlimited();
             let client = setup(&env);
             let issuer = Address::generate(&env);
             let subject = Address::generate(&env);

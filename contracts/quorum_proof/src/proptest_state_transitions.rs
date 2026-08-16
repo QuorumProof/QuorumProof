@@ -98,7 +98,7 @@ mod proptest_state_transitions {
             }
             // Suspend an active credential
             (CredState::Active, Op::Suspend) => {
-                client.suspend_credential(issuer, &cred_id);
+                client.suspend_credential(issuer, &cred_id, &None);
                 CredState::Suspended
             }
             // Resume a suspended credential
@@ -109,7 +109,7 @@ mod proptest_state_transitions {
             // Suspend a suspended credential — should be a no-op or fail
             (CredState::Suspended, Op::Suspend) => {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    client.suspend_credential(issuer, &cred_id);
+                    client.suspend_credential(issuer, &cred_id, &None);
                 }));
                 CredState::Suspended
             }
@@ -226,7 +226,7 @@ mod proptest_state_transitions {
             for op in &ops_after {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match op {
-                        Op::Suspend => client.suspend_credential(&issuer, &cred_id),
+                        Op::Suspend => client.suspend_credential(&issuer, &cred_id, &None),
                         Op::Resume  => client.resume_credential(&issuer, &cred_id),
                         Op::Revoke  => { client.revoke_credential(&issuer, &cred_id, &None); }
                         Op::Attest  => { client.attest(&attestor, &cred_id, &slice_id, &true, &None); }
@@ -301,7 +301,7 @@ mod proptest_state_transitions {
             let cred_id = issue(&client, &env, &issuer, &subject);
 
             for _ in 0..cycles {
-                client.suspend_credential(&issuer, &cred_id);
+                client.suspend_credential(&issuer, &cred_id, &None);
                 let mid = client.get_credential(&cred_id);
                 prop_assert!(mid.suspended, "credential not suspended after suspend()");
                 prop_assert!(!mid.revoked,  "revoked flag set during suspension");
@@ -328,7 +328,7 @@ mod proptest_state_transitions {
             let slice_id = make_slice(&client, &env, &issuer, &attestor);
 
             match state_op {
-                Op::Suspend => client.suspend_credential(&issuer, &cred_id),
+                Op::Suspend => client.suspend_credential(&issuer, &cred_id, &None),
                 Op::Revoke  => { client.revoke_credential(&issuer, &cred_id, &None); }
                 _ => unreachable!(),
             }

@@ -145,10 +145,11 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::Ledger, Bytes, BytesN, Env};
 
-    fn env_at(ts: u64) -> Env {
+    fn env_at(ts: u64) -> (Env, soroban_sdk::Address) {
         let env = Env::default();
         env.ledger().with_mut(|l| l.timestamp = ts);
-        env
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        (env, contract_id)
     }
 
     fn dummy_hash(env: &Env, byte: u8) -> BytesN<32> {
@@ -159,88 +160,101 @@ mod tests {
 
     #[test]
     fn record_first_upgrade_sets_version_1() {
-        let env = env_at(1_000);
-        let hash = dummy_hash(&env, 1);
-        let changes = Bytes::from_slice(&env, b"initial release");
-        let rec = record_upgrade(&env, hash.clone(), changes.clone(), false);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let hash = dummy_hash(&env, 1);
+            let changes = Bytes::from_slice(&env, b"initial release");
+            let rec = record_upgrade(&env, hash.clone(), changes.clone(), false);
 
-        assert_eq!(rec.version, 1);
-        assert_eq!(rec.new_wasm_hash, hash);
-        assert_eq!(rec.upgraded_at, 1_000);
-        assert_eq!(rec.changes, changes);
-        assert!(!rec.was_scheduled);
+            assert_eq!(rec.version, 1);
+            assert_eq!(rec.new_wasm_hash, hash);
+            assert_eq!(rec.upgraded_at, 1_000);
+            assert_eq!(rec.changes, changes);
+            assert!(!rec.was_scheduled);
+        });
     }
 
     #[test]
     fn multiple_upgrades_increment_version() {
-        let env = env_at(1_000);
-        for i in 1u8..=5 {
-            let hash = dummy_hash(&env, i);
-            let changes = Bytes::from_slice(&env, b"");
-            let rec = record_upgrade(&env, hash, changes, false);
-            assert_eq!(rec.version, i as u32);
-        }
-        assert_eq!(get_upgrade_count(&env), 5);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            for i in 1u8..=5 {
+                let hash = dummy_hash(&env, i);
+                let changes = Bytes::from_slice(&env, b"");
+                let rec = record_upgrade(&env, hash, changes, false);
+                assert_eq!(rec.version, i as u32);
+            }
+            assert_eq!(get_upgrade_count(&env), 5);
+        });
     }
 
     #[test]
     fn get_upgrade_history_returns_all_entries_oldest_first() {
-        let env = env_at(1_000);
-        record_upgrade(&env, dummy_hash(&env, 1), Bytes::from_slice(&env, b"v1"), false);
-        record_upgrade(&env, dummy_hash(&env, 2), Bytes::from_slice(&env, b"v2"), true);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            record_upgrade(&env, dummy_hash(&env, 1), Bytes::from_slice(&env, b"v1"), false);
+            record_upgrade(&env, dummy_hash(&env, 2), Bytes::from_slice(&env, b"v2"), true);
 
-        let history = get_upgrade_history(&env);
-        assert_eq!(history.len(), 2);
-        assert_eq!(history.get(0).unwrap().version, 1);
-        assert_eq!(history.get(1).unwrap().version, 2);
-        assert!(history.get(1).unwrap().was_scheduled);
+            let history = get_upgrade_history(&env);
+            assert_eq!(history.len(), 2);
+            assert_eq!(history.get(0).unwrap().version, 1);
+            assert_eq!(history.get(1).unwrap().version, 2);
+            assert!(history.get(1).unwrap().was_scheduled);
+        });
     }
 
     #[test]
     fn empty_changes_are_allowed() {
-        let env = env_at(1_000);
-        let rec = record_upgrade(&env, dummy_hash(&env, 1), Bytes::from_slice(&env, b""), false);
-        assert_eq!(rec.changes.len(), 0);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let rec = record_upgrade(&env, dummy_hash(&env, 1), Bytes::from_slice(&env, b""), false);
+            assert_eq!(rec.changes.len(), 0);
+        });
     }
 
     #[test]
     #[should_panic(expected = "changes must be at most 256 bytes")]
     fn changes_too_long_panics() {
-        let env = env_at(1_000);
-        let changes = Bytes::from_slice(&env, &[b'x'; 257]);
-        record_upgrade(&env, dummy_hash(&env, 1), changes, false);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let changes = Bytes::from_slice(&env, &[b'x'; 257]);
+            record_upgrade(&env, dummy_hash(&env, 1), changes, false);
+        });
     }
 
     #[test]
     fn history_capped_at_max_evicts_oldest() {
-        let env = env_at(1_000);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            // Fill to max
+            for i in 0..MAX_HISTORY_ENTRIES {
+                let hash = dummy_hash(&env, (i % 256) as u8);
+                record_upgrade(&env, hash, Bytes::from_slice(&env, b""), false);
+            }
 
-        // Fill to max
-        for i in 0..MAX_HISTORY_ENTRIES {
-            let hash = dummy_hash(&env, (i % 256) as u8);
-            record_upgrade(&env, hash, Bytes::from_slice(&env, b""), false);
-        }
+            // Add one more — should evict version 1
+            let new_hash = dummy_hash(&env, 99);
+            let rec = record_upgrade(&env, new_hash, Bytes::from_slice(&env, b"overflow"), false);
 
-        // Add one more — should evict version 1
-        let new_hash = dummy_hash(&env, 99);
-        let rec = record_upgrade(&env, new_hash, Bytes::from_slice(&env, b"overflow"), false);
+            let history = get_upgrade_history(&env);
+            assert_eq!(history.len(), MAX_HISTORY_ENTRIES);
 
-        let history = get_upgrade_history(&env);
-        assert_eq!(history.len(), MAX_HISTORY_ENTRIES);
+            // Oldest entry in ring buffer is now version 2
+            assert_eq!(history.get(0).unwrap().version, 2);
+            // Newest is the one we just inserted
+            assert_eq!(history.get(MAX_HISTORY_ENTRIES - 1).unwrap().version, rec.version);
 
-        // Oldest entry in ring buffer is now version 2
-        assert_eq!(history.get(0).unwrap().version, 2);
-        // Newest is the one we just inserted
-        assert_eq!(history.get(MAX_HISTORY_ENTRIES - 1).unwrap().version, rec.version);
-
-        // Lifetime counter keeps increasing past MAX_HISTORY_ENTRIES
-        assert_eq!(get_upgrade_count(&env), MAX_HISTORY_ENTRIES + 1);
+            // Lifetime counter keeps increasing past MAX_HISTORY_ENTRIES
+            assert_eq!(get_upgrade_count(&env), MAX_HISTORY_ENTRIES + 1);
+        });
     }
 
     #[test]
     fn get_upgrade_history_empty_before_any_upgrade() {
-        let env = env_at(1_000);
-        assert_eq!(get_upgrade_history(&env).len(), 0);
-        assert_eq!(get_upgrade_count(&env), 0);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            assert_eq!(get_upgrade_history(&env).len(), 0);
+            assert_eq!(get_upgrade_count(&env), 0);
+        });
     }
 }

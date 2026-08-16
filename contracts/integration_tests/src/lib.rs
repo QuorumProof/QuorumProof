@@ -486,7 +486,7 @@ mod integration {
         weights.push_back(1u32);
         let slice_id = c.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        c.qp.suspend_credential(&issuer, &cred_id);
+        c.qp.suspend_credential(&issuer, &cred_id, &None);
         // Must panic — credential is suspended
         c.qp.attest(&attestor, &cred_id, &slice_id, &true, &None);
     }
@@ -508,7 +508,7 @@ mod integration {
         weights.push_back(1u32);
         let slice_id = c.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        c.qp.suspend_credential(&issuer, &cred_id);
+        c.qp.suspend_credential(&issuer, &cred_id, &None);
         c.qp.resume_credential(&issuer, &cred_id);
 
         // Should succeed after resume

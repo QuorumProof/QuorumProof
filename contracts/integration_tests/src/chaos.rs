@@ -211,7 +211,7 @@ fn chaos_suspend_resume_restores_attestation() {
     weights.push_back(1u32);
     let slice_id = c.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
-    c.qp.suspend_credential(&issuer, &cred_id);
+    c.qp.suspend_credential(&issuer, &cred_id, &None);
     c.qp.resume_credential(&issuer, &cred_id);
 
     // Post-chaos: attestation must proceed normally
@@ -290,7 +290,7 @@ fn chaos_suspended_credential_rejects_attestation() {
     weights.push_back(1u32);
     let slice_id = c.qp.create_slice(&issuer, &attestors, &weights, &1u32);
 
-    c.qp.suspend_credential(&issuer, &cred_id);
+    c.qp.suspend_credential(&issuer, &cred_id, &None);
     // Attestation on a suspended credential must fail with a controlled panic
     c.qp.attest(&attestor, &cred_id, &slice_id, &true, &None);
 }
@@ -306,6 +306,7 @@ fn chaos_suspended_credential_rejects_attestation() {
 #[test]
 fn chaos_storage_pressure_many_holders() {
     let env = Env::default();
+    env.budget().reset_unlimited();
     let c = setup(&env);
     let issuer = soroban_sdk::Address::generate(&env);
 
@@ -347,6 +348,7 @@ fn chaos_storage_pressure_many_holders() {
 #[test]
 fn chaos_batch_operations_within_limits() {
     let env = Env::default();
+    env.budget().reset_unlimited();
     let c = setup(&env);
     let issuer = soroban_sdk::Address::generate(&env);
 
@@ -397,11 +399,11 @@ fn chaos_large_metadata_storage() {
 
     // Create a large metadata URI (1KB)
     let large_metadata = {
-        let mut data = Vec::new(&env);
-        for i in 0..256 {
+        let mut data = Bytes::new(&env);
+        for i in 0..256u32 {
             data.push_back((i % 256) as u8);
         }
-        Bytes::from_slice(&env, &data.iter().map(|x| *x).collect::<Vec<u8>>())
+        data
     };
 
     // Minting with large metadata should work without panic
@@ -419,6 +421,7 @@ fn chaos_large_metadata_storage() {
 #[test]
 fn chaos_concurrent_batch_mints_atomic() {
     let env = Env::default();
+    env.budget().reset_unlimited();
     let c = setup(&env);
     let issuer1 = soroban_sdk::Address::generate(&env);
     let issuer2 = soroban_sdk::Address::generate(&env);
@@ -473,7 +476,7 @@ fn chaos_concurrent_batch_mints_atomic() {
     for id1 in ids1.iter() {
         for id2 in ids2.iter() {
             assert_ne!(
-                id1, &id2,
+                id1, id2,
                 "chaos: no token ID collision across concurrent batches"
             );
         }

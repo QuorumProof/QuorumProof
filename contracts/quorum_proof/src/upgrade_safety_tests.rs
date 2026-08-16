@@ -80,6 +80,26 @@ mod upgrade_safety_tests {
     // and must be manually re-blessed if the data model intentionally
     // changes (in which case a storage migration must accompany the change).
 
+    /// `#[contracttype]` enums with data-carrying variants (like `DataKey`)
+    /// encode as an XDR `Vec![Symbol(variant_name), ...fields]` — the
+    /// variant's *name*, not its ordinal position, is what's persisted as
+    /// the on-chain discriminant. So reordering or inserting variants is
+    /// safe; only *renaming* a variant shifts existing storage out from
+    /// under itself. Assert the variant name appears verbatim in the
+    /// encoded bytes to guard against that.
+    fn assert_xdr_contains_variant_name(encoded: &Bytes, name: &str) {
+        let bytes: std::vec::Vec<u8> = encoded.iter().collect();
+        let needle = name.as_bytes();
+        let found = bytes
+            .windows(needle.len())
+            .any(|window| window == needle);
+        assert!(
+            found,
+            "storage layout: variant name {:?} not found in encoded XDR {:?}",
+            name, bytes
+        );
+    }
+
     /// Credential storage key discriminant must remain stable.
     #[test]
     fn storage_layout_credential_key_discriminant_stable() {
@@ -89,28 +109,18 @@ mod upgrade_safety_tests {
         // DataKey::Credential(1) — the first real credential id.
         let key = DataKey::Credential(1u64);
         let encoded = key.to_xdr(&env);
-        // Byte length must be stable between versions (a reordering would
-        // produce a different length or different leading tag byte).
         assert!(
             encoded.len() > 0,
             "storage layout: DataKey::Credential XDR must not be empty"
         );
-        // The XDR discriminant for the first variant of a contracttype enum
-        // is always 0 (big-endian u32). Credential is the first variant of
-        // DataKey, so the first 4 bytes must be 0x00000000.
-        let first_byte = encoded.get(0).unwrap();
-        assert_eq!(
-            first_byte, 0u32,
-            "storage layout: DataKey::Credential discriminant must be 0 (first variant)"
-        );
+        assert_xdr_contains_variant_name(&encoded, "Credential");
     }
 
     /// Slice storage key discriminant must remain stable.
     ///
-    /// `DataKey::Slice` is the third variant (index 2) in the DataKey enum
-    /// (after Credential=0, CredentialCount=1, Slice=2). If the enum is
-    /// reordered, the XDR discriminant shifts and all stored slices become
-    /// unreachable.
+    /// `DataKey::Slice` is persisted keyed by its variant name ("Slice"), so
+    /// renaming the variant (not reordering it) is what would make all
+    /// stored slices unreachable.
     #[test]
     fn storage_layout_slice_key_discriminant_stable() {
         use crate::DataKey;
@@ -122,13 +132,7 @@ mod upgrade_safety_tests {
             encoded.len() > 0,
             "storage layout: DataKey::Slice XDR must not be empty"
         );
-        // Slice is the 3rd variant (0-indexed: 2). Its XDR discriminant must
-        // be 2. This will fail if Slice is moved earlier or later in the enum.
-        let discriminant = encoded.get(0).unwrap();
-        assert_eq!(
-            discriminant, 2u32,
-            "storage layout: DataKey::Slice discriminant must be 2 (third variant, 0-indexed)"
-        );
+        assert_xdr_contains_variant_name(&encoded, "Slice");
     }
 
     /// Admin storage key must remain addressable so that admin-gated operations

@@ -62,10 +62,10 @@ impl StellarE2EClient {
             .await?;
 
         let body = response.json::<Value>().await?;
-        body["result"]
-            .get("sequence")
-            .ok_or_else(|| anyhow!("Failed to get ledger sequence"))
-            .map(|_| body)
+        if body["result"].get("sequence").is_none() {
+            return Err(anyhow!("Failed to get ledger sequence"));
+        }
+        Ok(body)
     }
 
     pub async fn get_network(&self) -> Result<String> {

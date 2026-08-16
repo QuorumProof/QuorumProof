@@ -1,7 +1,8 @@
 /// Tests for Issue #983 (Credential Attributes), #989 (SBT Metadata URI), and #992 (SBT Upgrade Path)
 #[cfg(test)]
 mod tests_new_issues {
-    use super::*;
+    use crate::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Address, Env, Vec, Bytes};
 
     // Helper setup function
@@ -39,8 +40,8 @@ mod tests_new_issues {
         // Retrieve it
         let value = client.get_credential_attribute(&cred_id, &soroban_sdk::String::from_slice(&env, "specialization"));
         assert_eq!(
-            value.unwrap().to_string(),
-            "Mechanical Engineering"
+            value.unwrap(),
+            soroban_sdk::String::from_str(&env, "Mechanical Engineering")
         );
     }
 
@@ -136,7 +137,8 @@ mod tests_new_issues {
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
 
         // Create a large string (close to 5 KB limit)
-        let large_value = soroban_sdk::String::from_slice(&env, &vec![b'a'; 4000]);
+        let large_value_std = "a".repeat(4000);
+        let large_value = soroban_sdk::String::from_str(&env, &large_value_std);
 
         client.set_credential_attribute(
             &issuer,
@@ -202,6 +204,11 @@ mod tests_new_issues {
 
         // Create initial credential (version 1)
         let cred_id_v1 = client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+
+        // The contract only allows one active credential per (subject, issuer,
+        // type) triple, so the v1 credential must be revoked before its
+        // replacement can be issued.
+        client.revoke_credential(&issuer, &cred_id_v1, &None);
 
         // Create upgraded credential (version 2)
         let meta_v2 = Bytes::from_slice(&env, b"upgraded_metadata");

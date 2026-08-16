@@ -20,6 +20,9 @@ mod slice_enhancements;
 pub mod bbs_plus_features;
 pub mod time_lock_attestation;
 pub mod upgrade_history;
+pub mod atomic_operations;
+pub mod attestation_veto;
+pub mod migration_v2;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -52,6 +55,8 @@ const TOPIC_BLACKLIST_ADDED: &str = "HolderBlacklisted";
 const TOPIC_BLACKLIST_REMOVED: &str = "HolderUnblacklisted";
 const TOPIC_FORK_DETECTED: &str = "ForkDetected";
 const TOPIC_FORK_RESOLVED: &str = "ForkResolved";
+const TOPIC_AMENDMENT: &str = "CredentialAmended";
+const TOPIC_SUSPENSION: &str = "CredentialSuspended";
 const TOPIC_HOLDER_NOTIFIED: &str = "HolderNotified";
 const TOPIC_DELEGATION: &str = "DelegationGranted";
 const TOPIC_THRESHOLD_CHANGE: &str = "ThresholdChanged";
@@ -446,6 +451,9 @@ pub struct SoulboundToken {
     /// Issue #992: If set, this SBT has been upgraded to another SBT ID.
     /// Old SBT cannot be verified independently when upgraded.
     pub upgraded_to: Option<u64>,
+    /// Issue #1275: Optional co-owner (e.g. an organization) for credentials
+    /// issued jointly to an individual and an organization.
+    pub co_owner: Option<Address>,
 }
 
 /// A pending multi-sig attestation request.
@@ -819,6 +827,20 @@ pub enum ContractError {
     SnapshotNotFound = 85,
     /// Issue #912: Snapshot integrity hash does not match its recorded counts
     SnapshotCorrupted = 86,
+    /// Issue #1295: Key escrow guardian/threshold configuration is invalid
+    InvalidEscrowConfig = 87,
+    /// Issue #1295: A key escrow already exists for this issuer
+    EscrowAlreadyExists = 88,
+    /// Issue #1295: No key escrow exists for this issuer
+    EscrowNotFound = 89,
+    /// Issue #1295: Key escrow has already been recovered
+    EscrowAlreadyRecovered = 90,
+    /// Issue #1295: Guardian has already submitted a recovery share
+    DuplicateShareSubmission = 91,
+    /// Issue #1295: Not enough guardian shares submitted to meet the threshold
+    InsufficientShares = 92,
+    /// Referenced slice schema version is not registered
+    SchemaNotFound = 93,
 }
 
 #[contracttype]
@@ -877,6 +899,16 @@ pub enum DataKey {
     AllSnapshots,
     /// Issue #912: ID of the most recently restored snapshot, for audit purposes
     LastRestoredSnapshot,
+    /// Count of credentials that have been revoked.
+    RevokedCredentialCount,
+    /// Global counter for credential metadata amendments.
+    AmendmentCount,
+    /// Amendment log for a credential (credential_id -> Vec<AmendmentEntry>).
+    AmendmentHistory(u64),
+    /// Reason recorded when a credential was suspended (credential_id -> String).
+    SuspensionReason(u64),
+    /// Number of migrations still pending, surfaced by the health check.
+    PendingMigrationCount,
 }
 
 #[contracttype]
@@ -951,6 +983,8 @@ pub enum DataKey2 {
     AttestorReputationConfig,
     /// Extended challenge state
     ChallengeExtended(u64),
+    /// Task #1225: Holder key rotation log (credential_id -> Vec<KeyRotationRecord>).
+    KeyRotationHistory(u64),
 }
 
 /// Storage keys for features added in later iterations.
@@ -1823,6 +1857,118 @@ pub struct Delegation {
     pub expiry: u64,
     /// Ledger sequence number when this delegation was granted.
     pub granted_at: u64,
+}
+
+/// Feature #1231: A reusable quorum-slice configuration that can be applied
+/// across multiple credentials.
+#[contracttype]
+#[derive(Clone)]
+pub struct SliceTemplate {
+    /// Unique template identifier.
+    pub id: u64,
+    /// Address that created the template; the only one allowed to update it.
+    pub creator: Address,
+    /// Human-readable template name.
+    pub name: String,
+    /// Longer description of the template's intended use.
+    pub description: String,
+    /// Opaque, caller-defined configuration blob.
+    pub config: Bytes,
+    /// Attestors that make up the slice.
+    pub attestors: Vec<Address>,
+    /// Per-attestor voting weights, parallel to `attestors`.
+    pub weights: Vec<u32>,
+    /// Minimum total weight required to reach quorum.
+    pub threshold: u32,
+    /// Ledger timestamp when the template was created.
+    pub created_at: u64,
+    /// Monotonically increasing version, bumped on each update.
+    pub version: u32,
+}
+
+/// Feature #1231: One entry in a slice template's version history.
+#[contracttype]
+#[derive(Clone)]
+pub struct TemplateVersionRecord {
+    /// Template this record belongs to.
+    pub template_id: u64,
+    /// Template version this record describes.
+    pub version: u32,
+    /// Address that made the change.
+    pub updated_by: Address,
+    /// Ledger timestamp of the change.
+    pub updated_at: u64,
+    /// Caller-supplied summary of what changed.
+    pub change_description: String,
+}
+
+/// Feature #1232: A single attestor suggested by the slice advisor, ranked by
+/// reputation score.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorRecommendation {
+    /// The recommended attestor.
+    pub attestor: Address,
+    /// Reputation score used for ranking; higher ranks first.
+    pub score: u64,
+    /// Credential type this recommendation was computed for.
+    pub credential_type: u32,
+    /// Jurisdiction this recommendation was computed for.
+    pub jurisdiction: Bytes,
+}
+
+/// Feature #1232: Cached result of [`recommend_attestors`], valid for one hour.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecommendationCacheEntry {
+    /// Credential type this cache entry keys on.
+    pub credential_type: u32,
+    /// Jurisdiction this cache entry keys on.
+    pub jurisdiction: Bytes,
+    /// The cached, ranked recommendations.
+    pub recommendations: Vec<AttestorRecommendation>,
+    /// Ledger timestamp the entry was cached at; used for TTL checks.
+    pub cached_at: u64,
+}
+
+/// Feature #1234: One entry in a slice's attestor replacement history.
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorReplacementRecord {
+    /// Slice whose membership changed.
+    pub slice_id: u64,
+    /// Ledger timestamp of the replacement.
+    pub replaced_at: u64,
+    /// Attestor that was removed.
+    pub old_attestor: Address,
+    /// Attestor that took their place.
+    pub new_attestor: Address,
+    /// Address that performed the replacement (the slice creator).
+    pub replaced_by: Address,
+    /// Caller-supplied justification for the replacement.
+    pub reason: String,
+}
+
+/// Result of [`check_health`]: a point-in-time contract health summary.
+#[contracttype]
+#[derive(Clone)]
+pub struct HealthStatus {
+    /// True when all individual health checks passed.
+    pub healthy: bool,
+    /// Ledger timestamp the check ran at.
+    pub timestamp: u64,
+    /// Whether stored counters are self-consistent.
+    pub storage_integrity: bool,
+    /// Whether contract invariants currently hold.
+    pub invariants_valid: bool,
+    /// Whether admin configuration is present and consistent.
+    pub admin_config_consistent: bool,
+    /// Total credentials recorded.
+    pub credential_count: u64,
+    /// Total slices recorded.
+    pub slice_count: u64,
+    /// Migrations recorded as still pending.
+    pub pending_migrations: u64,
 }
 
 /// Audit log entry for delegation grants.
@@ -5143,6 +5289,13 @@ impl QuorumProofContract {
         }
         // Issue #510: Remove from SubjectCredentialIndex
         Self::subject_index_remove(env, credential.subject.clone(), credential_id);
+        // A revoked credential no longer occupies its (subject, issuer, type) slot,
+        // so the same issuer can re-issue that credential type to the same subject.
+        env.storage().instance().remove(&DataKey::SubjectIssuerType(
+            credential.subject.clone(),
+            credential.issuer.clone(),
+            credential.credential_type,
+        ));
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -5967,7 +6120,6 @@ impl QuorumProofContract {
             renewal_status: RenewalStatus::Active,
             required_attestations: 0,
             metadata_schema_version: 0, // Default to 0 for backward compatibility
-            metadata_schema_version: 0, // Default to 0 for backward compatibility
         };
         env.storage()
             .instance()
@@ -6186,7 +6338,6 @@ impl QuorumProofContract {
             version: 1,
             renewal_status: RenewalStatus::Active,
             required_attestations: 0,
-            metadata_schema_version: 0, // Default to 0 for backward compatibility
             metadata_schema_version: 0, // Default to 0 for backward compatibility
         };
         env.storage()
@@ -6918,7 +7069,7 @@ impl QuorumProofContract {
         let event_data = AmendmentEventData {
             credential_id,
             issuer: issuer.clone(),
-            new_metadata_hash,
+            new_metadata_hash: new_metadata_hash.clone(),
             amended_at: timestamp,
         };
         let topic = String::from_str(&env, TOPIC_AMENDMENT);
@@ -8076,20 +8227,20 @@ impl QuorumProofContract {
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
         // Check total size: estimate 5 KB limit
-        let key_bytes = key.to_xdr(&env).as_bytes().len();
-        let value_bytes = value.to_xdr(&env).as_bytes().len();
-        let new_entry_size = key_bytes + value_bytes;
+        let key_bytes = key.clone().to_xdr(&env).len();
+        let value_bytes = value.clone().to_xdr(&env).len();
+        let new_entry_size = key_bytes.saturating_add(value_bytes);
 
         // Calculate current size
         let mut current_size = 0u32;
-        let keys: Vec<soroban_sdk::String> = attributes.keys().collect();
+        let keys: Vec<soroban_sdk::String> = attributes.keys();
         for k in keys {
             let v = attributes.get(k.clone()).unwrap();
-            current_size = current_size.saturating_add(k.to_xdr(&env).as_bytes().len() as u32);
-            current_size = current_size.saturating_add(v.to_xdr(&env).as_bytes().len() as u32);
+            current_size = current_size.saturating_add(k.to_xdr(&env).len());
+            current_size = current_size.saturating_add(v.to_xdr(&env).len());
         }
 
-        if current_size.saturating_add(new_entry_size as u32) > 5120 {
+        if current_size.saturating_add(new_entry_size) > 5120 {
             panic!("credential attributes exceed 5 KB limit");
         }
 
@@ -12669,7 +12820,11 @@ impl QuorumProofContract {
     /// # Returns
     /// A vector of delegation audit entries, empty if none exist.
     pub fn get_delegation_audit(env: Env, credential_id: u64) -> Vec<DelegationAuditEntry> {
-
+        env.storage()
+            .instance()
+            .get(&DataKey2::DelegationAuditLog(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
 
     // ── Privacy Masking (Task #1224) ────────────────────────────────────────────
 
@@ -12729,7 +12884,7 @@ impl QuorumProofContract {
         proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &timestamp_bytes));
         
         // Return hash as "proof"
-        env.crypto().sha256(&proof_data)
+        env.crypto().sha256(&proof_data).into()
     }
 
     /// Verify a disclosure proof (Task #1224)
@@ -12777,9 +12932,6 @@ impl QuorumProofContract {
             - Verifiers can confirm field values without seeing the full credential\n\
             - Protects sensitive information while enabling necessary verification")
     }
-        env.storage()
-            .instance()
-
 
     // ── Key Rotation (Task #1225) ───────────────────────────────────────────────
 
@@ -12861,140 +13013,73 @@ impl QuorumProofContract {
         env.events().publish(topics, rotation_record);
     }
 
+    // ── Metadata Versioning Completion (Task #1226) ─────────────────────────────
+
+    /// Update credential metadata schema version (Task #1226)
+    ///
+    /// Updates the metadata schema version for an existing credential.
+    /// Only the credential issuer can call this.
+    ///
+    /// # Parameters
+    /// - `issuer`: The credential issuer; must authorize this call.
+    /// - `credential_id`: The credential ID.
+    /// - `new_schema_version`: The new metadata schema version.
+    ///
+    /// # Panics
+    /// Panics if contract is paused or credential doesn't exist.
+    /// Panics if caller is not the issuer.
+    pub fn update_metadata_schema_version(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        new_schema_version: u32,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.issuer == issuer,
+            "only the credential issuer can update metadata schema version"
+        );
+
+        credential.metadata_schema_version = new_schema_version;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+
+        // Emit schema version update event
+        let topic = String::from_str(&env, "MetadataSchemaVersionUpdated");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, (credential_id, issuer, new_schema_version));
+    }
+
+    /// Get metadata schema version for a credential (Task #1226)
+    ///
+    /// Returns the metadata schema version of a credential.
+    ///
+    /// # Parameters
+    /// - `credential_id`: The credential ID.
+    ///
+    /// # Returns
+    /// The metadata schema version, or 0 if credential doesn't exist.
+    pub fn get_metadata_schema_version(env: Env, credential_id: u64) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, Credential>(&DataKey::Credential(credential_id))
+            .map(|cred| cred.metadata_schema_version)
+            .unwrap_or(0)
+    }
     /// Get key rotation history for a credential (Task #1225)
     ///
     /// Returns all key rotations performed on a credential.
     ///
-
-
-    // ── Metadata Versioning Completion (Task #1226) ─────────────────────────────
-
-    /// Update credential metadata schema version (Task #1226)
-    ///
-    /// Updates the metadata schema version for an existing credential.
-    /// Only the credential issuer can call this.
-    ///
-    /// # Parameters
-    /// - `issuer`: The credential issuer; must authorize this call.
-    /// - `credential_id`: The credential ID.
-    /// - `new_schema_version`: The new metadata schema version.
-    ///
-    /// # Panics
-    /// Panics if contract is paused or credential doesn't exist.
-    /// Panics if caller is not the issuer.
-    pub fn update_metadata_schema_version(
-        env: Env,
-        issuer: Address,
-        credential_id: u64,
-        new_schema_version: u32,
-    ) {
-        issuer.require_auth();
-        Self::require_not_paused(&env);
-
-        let mut credential: Credential = env
-            .storage()
-            .instance()
-            .get(&DataKey::Credential(credential_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-
-        assert!(
-            credential.issuer == issuer,
-            "only the credential issuer can update metadata schema version"
-        );
-
-        credential.metadata_schema_version = new_schema_version;
-        env.storage()
-            .instance()
-            .set(&DataKey::Credential(credential_id), &credential);
-
-        // Emit schema version update event
-        let topic = String::from_str(&env, "MetadataSchemaVersionUpdated");
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, (credential_id, issuer, new_schema_version));
-    }
-
-    /// Get metadata schema version for a credential (Task #1226)
-    ///
-    /// Returns the metadata schema version of a credential.
-    ///
-    /// # Parameters
-    /// - `credential_id`: The credential ID.
-    ///
-    /// # Returns
-    /// The metadata schema version, or 0 if credential doesn't exist.
-    pub fn get_metadata_schema_version(env: Env, credential_id: u64) -> u32 {
-        env.storage()
-            .instance()
-            .get::<DataKey, Credential>(&DataKey::Credential(credential_id))
-            .map(|cred| cred.metadata_schema_version)
-            .unwrap_or(0)
-    }
-
-
-    // ── Metadata Versioning Completion (Task #1226) ─────────────────────────────
-
-    /// Update credential metadata schema version (Task #1226)
-    ///
-    /// Updates the metadata schema version for an existing credential.
-    /// Only the credential issuer can call this.
-    ///
-    /// # Parameters
-    /// - `issuer`: The credential issuer; must authorize this call.
-    /// - `credential_id`: The credential ID.
-    /// - `new_schema_version`: The new metadata schema version.
-    ///
-    /// # Panics
-    /// Panics if contract is paused or credential doesn't exist.
-    /// Panics if caller is not the issuer.
-    pub fn update_metadata_schema_version(
-        env: Env,
-        issuer: Address,
-        credential_id: u64,
-        new_schema_version: u32,
-    ) {
-        issuer.require_auth();
-        Self::require_not_paused(&env);
-
-        let mut credential: Credential = env
-            .storage()
-            .instance()
-            .get(&DataKey::Credential(credential_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-
-        assert!(
-            credential.issuer == issuer,
-            "only the credential issuer can update metadata schema version"
-        );
-
-        credential.metadata_schema_version = new_schema_version;
-        env.storage()
-            .instance()
-            .set(&DataKey::Credential(credential_id), &credential);
-
-        // Emit schema version update event
-        let topic = String::from_str(&env, "MetadataSchemaVersionUpdated");
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, (credential_id, issuer, new_schema_version));
-    }
-
-    /// Get metadata schema version for a credential (Task #1226)
-    ///
-    /// Returns the metadata schema version of a credential.
-    ///
-    /// # Parameters
-    /// - `credential_id`: The credential ID.
-    ///
-    /// # Returns
-    /// The metadata schema version, or 0 if credential doesn't exist.
-    pub fn get_metadata_schema_version(env: Env, credential_id: u64) -> u32 {
-        env.storage()
-            .instance()
-            .get::<DataKey, Credential>(&DataKey::Credential(credential_id))
-            .map(|cred| cred.metadata_schema_version)
-            .unwrap_or(0)
-    }
     /// # Parameters
     /// - `credential_id`: The credential ID.
     ///
@@ -13006,11 +13091,10 @@ impl QuorumProofContract {
             .get(&DataKey2::KeyRotationHistory(credential_id))
             .unwrap_or(Vec::new(&env))
     }
-            .get(&DataKey2::DelegationAuditLog(credential_id))
-            .unwrap_or(Vec::new(&env))
-    }
 
-    // ── Proof Request History (Issue #38) ────────────────────────────────────    /// Record a new proof request for a credential and return its unique request ID.
+    // ── Proof Request History (Issue #38) ────────────────────────────────────
+
+    /// Record a new proof request for a credential and return its unique request ID.
     ///
     /// Verifiers call this to create an auditable trail every time they request
     /// proof of a credential. The request is appended to the per-credential history
@@ -16593,7 +16677,10 @@ impl QuorumProofContract {
     }
 
     /// Revoke a role delegation.
-    pub fn revoke_delegation(env: Env, caller: Address, delegatee: Address) {
+    ///
+    /// Distinct from [`revoke_delegation`], which revokes delegated access to a
+    /// single credential; this revokes an RBAC role delegation.
+    pub fn revoke_role_delegation(env: Env, caller: Address, delegatee: Address) {
         caller.require_auth();
         Self::require_not_paused(&env);
         crate::rbac::revoke_delegation(&env, &caller, &delegatee);
@@ -17316,7 +17403,7 @@ impl QuorumProofContract {
         assert_eq!(attestors.len(), weights.len(), "attestors and weights must have equal length");
 
         // Validate threshold
-        let total_weight: u32 = weights.iter().fold(0u32, |sum, &w| sum.saturating_add(w));
+        let total_weight: u32 = weights.iter().fold(0u32, |sum, w| sum.saturating_add(w));
         assert!(threshold <= total_weight, "threshold cannot exceed total weight");
         assert!(threshold > 0, "threshold must be positive");
 
@@ -17426,7 +17513,7 @@ impl QuorumProofContract {
         assert!(!new_attestors.is_empty(), "attestors cannot be empty");
         assert_eq!(new_attestors.len(), new_weights.len(), "attestors and weights must have equal length");
 
-        let total_weight: u32 = new_weights.iter().fold(0u32, |sum, &w| sum.saturating_add(w));
+        let total_weight: u32 = new_weights.iter().fold(0u32, |sum, w| sum.saturating_add(w));
         assert!(new_threshold <= total_weight, "threshold cannot exceed total weight");
         assert!(new_threshold > 0, "threshold must be positive");
 
@@ -17576,7 +17663,7 @@ impl QuorumProofContract {
         let mut slice: QuorumSlice = env
             .storage()
             .instance()
-            .get(&DataKey::Slices(slice_id))
+            .get(&DataKey::Slice(slice_id))
             .expect("slice not found");
 
         // Only slice creator (owner) can replace attestors
@@ -17589,7 +17676,7 @@ impl QuorumProofContract {
         let attestor_idx = slice
             .attestors
             .iter()
-            .position(|a| a == &old_attestor)
+            .position(|a| a == old_attestor)
             .expect("old attestor not in slice");
 
         // Get the weight of the old attestor
@@ -17615,7 +17702,7 @@ impl QuorumProofContract {
         // Store updated slice
         env.storage()
             .instance()
-            .set(&DataKey::Slices(slice_id), &slice);
+            .set(&DataKey::Slice(slice_id), &slice);
 
         // Record replacement in history
         let mut replacement_history: Vec<AttestorReplacementRecord> = env
@@ -18320,7 +18407,7 @@ impl QuorumProofContract {
             to_version: new_schema_version,
             migrated_at: now,
             migrated_by: admin.clone(),
-            migration_hash,
+            migration_hash: migration_hash.into(),
             success: true,
         };
 
@@ -18540,12 +18627,12 @@ impl QuorumProofContract {
     /// Only returns valid (non-expired, non-revoked) credentials.
     pub fn get_credentials_batch(env: Env, credential_ids: Vec<u64>) -> Vec<Credential> {
         Self::precondition(&env, !credential_ids.is_empty());
-        Self::precondition(&env, credential_ids.len() <= MAX_BATCH_SIZE as usize);
+        Self::precondition(&env, credential_ids.len() <= MAX_BATCH_SIZE);
 
         let mut result = Vec::new(&env);
         for i in 0..credential_ids.len() {
             if let Some(cred_id) = credential_ids.get(i) {
-                if let Ok(credential) = env
+                if let Some(credential) = env
                     .storage()
                     .instance()
                     .get::<_, Credential>(&DataKey::Credential(cred_id))
@@ -18619,7 +18706,11 @@ impl QuorumProofContract {
     ///
     /// # Returns
     /// A paginated vector of credential IDs matching the search criteria.
-    pub fn search_credentials(
+    ///
+    /// Distinct from [`search_credentials`], which scans all credentials with
+    /// optional filters; this variant requires all three fields and serves them
+    /// from the precomputed `CredentialMetadataIndex`.
+    pub fn search_credentials_by_index(
         env: Env,
         issuer: Address,
         holder: Address,
@@ -18880,7 +18971,7 @@ impl QuorumProofContract {
     /// later call `create_bbs_disclosure_proof` to reveal any subset.
     ///
     /// Returns the new credential ID (same as a standard `issue_credential` call).
-    pub fn issue_selective_disclosure_credential(
+    pub fn issue_bbs_credential(
         env: Env,
         issuer: Address,
         subject: Address,
@@ -18941,7 +19032,7 @@ impl QuorumProofContract {
 
     /// Retrieve the stored BBS+ attributes for a credential.
     ///
-    /// Returns the attribute vector stored during `issue_selective_disclosure_credential`.
+    /// Returns the attribute vector stored during `issue_bbs_credential`.
     /// Panics if the credential was not issued with BBS+ support.
     pub fn get_bbs_credential_attributes(
         env: Env,
@@ -19828,7 +19919,7 @@ mod tests {
 
         assert!(!client.is_suspended(&id));
 
-        client.suspend_credential(&issuer, &id);
+        client.suspend_credential(&issuer, &id, &None);
         assert!(client.is_suspended(&id));
         assert!(client.get_credential(&id).suspended);
 
@@ -19855,7 +19946,7 @@ mod tests {
         weights.push_back(1u32);
         let slice_id = client.create_slice(&issuer, &attestors, &weights, &1u32);
 
-        client.suspend_credential(&issuer, &cred_id);
+        client.suspend_credential(&issuer, &cred_id, &None);
         client.attest(&attestor, &cred_id, &slice_id, &true, &None);
     }
 
@@ -25323,7 +25414,7 @@ mod feature_tests {
         let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
         // Suspend credential
-        client.suspend_credential(&issuer, &cred_id);
+        client.suspend_credential(&issuer, &cred_id, &None);
 
         // After suspension, is_attested should return false
         let attestor = Address::generate(&env);

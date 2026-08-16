@@ -2090,6 +2090,29 @@ pub enum DataKey {
     Groth16VerifyingKeyByHash(BytesN<32>),
     /// Audit trail of real Groth16 verifying-key rotations.
     Groth16KeyRotationHistory,
+    // ===== Registered constraint systems =====
+    /// Monotonic counter handing out `ConstraintSystem` ids.
+    ConstraintSystemCounter,
+    /// A registered constraint system, keyed by its id.
+    ConstraintSystem(u64),
+    // ===== Proof-hash registry and revocation =====
+    /// Every registered proof hash, in registration order.
+    ProofHashRegistry,
+    /// Whether a given proof hash has been revoked.
+    ProofRevocationStatus(BytesN<32>),
+    /// The revocation record for a revoked proof hash.
+    ProofRevocationRecord(BytesN<32>),
+    /// Audit trail of every proof revocation.
+    ProofRevocationHistory,
+    /// Unix timestamp a proof hash was first submitted.
+    ProofSubmissionTimestamp(BytesN<32>),
+    // ===== Multi-party trusted-setup ceremonies =====
+    /// An MPC ceremony session, keyed by session id.
+    MpcSession(BytesN<32>),
+    /// A single verifier's contribution, keyed by (session id, verifier hash).
+    MpcContribution(BytesN<32>, BytesN<32>),
+    /// Number of contributions received for a session.
+    MpcContributionCount(BytesN<32>),
 }
 
 // ===== Issue #994: ProtocolConfig =====
@@ -2163,7 +2186,7 @@ pub struct TimeBoundProof {
 
 /// Status of an MPC threshold verification session.
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum MpcSessionStatus {
     /// Collecting contributions; threshold not yet reached.
     Pending,
@@ -2404,7 +2427,7 @@ impl ZkVerifierContract {
     pub fn submit_time_bound_proof(env: Env, proof: Bytes, submitted_at: u64) -> TimeBoundProof {
         assert!(!proof.is_empty(), "proof cannot be empty");
 
-        let proof_hash: BytesN<32> = env.crypto().sha256(&proof);
+        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
 
         // Store the submission timestamp keyed by proof hash
         env.storage().instance()
@@ -2441,7 +2464,7 @@ impl ZkVerifierContract {
             return false;
         }
 
-        let proof_hash: BytesN<32> = env.crypto().sha256(&proof);
+        let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
 
         // Look up the stored submission timestamp
         let submitted_at: u64 = match env.storage().instance()
@@ -2528,7 +2551,7 @@ impl ZkVerifierContract {
         let mut verifier_key_input = Bytes::new(&env);
         verifier_key_input.extend_from_array(&session_id.to_array());
         verifier_key_input.append(&verifier_xdr);
-        let verifier_hash: BytesN<32> = env.crypto().sha256(&verifier_key_input);
+        let verifier_hash: BytesN<32> = env.crypto().sha256(&verifier_key_input).into();
         let contrib_key = DataKey::MpcContribution(session_id.clone(), verifier_hash);
 
         // Prevent double-voting
@@ -2556,7 +2579,7 @@ impl ZkVerifierContract {
             let mut k = Bytes::new(&env);
             k.extend_from_array(&session_id.to_array());
             k.push_back(0xFFu8);
-            let slot: BytesN<32> = env.crypto().sha256(&k);
+            let slot: BytesN<32> = env.crypto().sha256(&k).into();
             let tally_key = DataKey::MpcContribution(session_id.clone(), slot);
             let old_approvals: u32 = env.storage().instance()
                 .get::<_, u32>(&tally_key)
@@ -3673,22 +3696,18 @@ mod tests {
     #[test]
     fn test_verify_batch_proofs_all_valid() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-
-        let proof = make_valid_proof(&env);
-        let pi = make_public_inputs(&env);
-        let vk = make_vk_hash(&env);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 21, 1);
 
         let mut proofs = soroban_sdk::Vec::new(&env);
         let mut pis = soroban_sdk::Vec::new(&env);
         let mut vks = soroban_sdk::Vec::new(&env);
-        proofs.push_back(proof.clone());
-        proofs.push_back(proof.clone());
-        pis.push_back(pi.clone());
-        pis.push_back(pi.clone());
-        vks.push_back(vk.clone());
-        vks.push_back(vk.clone());
+        proofs.push_back(fixture.proof.clone());
+        proofs.push_back(fixture.proof.clone());
+        pis.push_back(fixture.public_inputs.clone());
+        pis.push_back(fixture.public_inputs.clone());
+        vks.push_back(fixture.vk_hash.clone());
+        vks.push_back(fixture.vk_hash.clone());
 
         let results = client.verify_batch_proofs(&proofs, &pis, &vks);
         assert_eq!(results.len(), 2);
@@ -3699,23 +3718,19 @@ mod tests {
     #[test]
     fn test_verify_batch_proofs_mixed_results() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-
-        let valid_proof = make_valid_proof(&env);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 22, 1);
         let invalid_proof = Bytes::from_slice(&env, b"too-short");
-        let pi = make_public_inputs(&env);
-        let vk = make_vk_hash(&env);
 
         let mut proofs = soroban_sdk::Vec::new(&env);
         let mut pis = soroban_sdk::Vec::new(&env);
         let mut vks = soroban_sdk::Vec::new(&env);
-        proofs.push_back(valid_proof);
+        proofs.push_back(fixture.proof.clone());
         proofs.push_back(invalid_proof);
-        pis.push_back(pi.clone());
-        pis.push_back(pi.clone());
-        vks.push_back(vk.clone());
-        vks.push_back(vk.clone());
+        pis.push_back(fixture.public_inputs.clone());
+        pis.push_back(fixture.public_inputs.clone());
+        vks.push_back(fixture.vk_hash.clone());
+        vks.push_back(fixture.vk_hash.clone());
 
         let results = client.verify_batch_proofs(&proofs, &pis, &vks);
         assert_eq!(results.len(), 2);
@@ -3740,22 +3755,18 @@ mod tests {
     #[test]
     fn test_verify_batch_proofs_preserves_order() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-
-        let valid = make_valid_proof(&env);
+        env.mock_all_auths();
+        let (client, fixture) = setup_groth16(&env, 23, 1);
         let invalid = Bytes::from_slice(&env, b"bad");
-        let pi = make_public_inputs(&env);
-        let vk = make_vk_hash(&env);
 
         // Order: invalid, valid, invalid
         let mut proofs = soroban_sdk::Vec::new(&env);
         let mut pis = soroban_sdk::Vec::new(&env);
         let mut vks = soroban_sdk::Vec::new(&env);
-        for p in [invalid.clone(), valid.clone(), invalid.clone()] {
+        for p in [invalid.clone(), fixture.proof.clone(), invalid.clone()] {
             proofs.push_back(p);
-            pis.push_back(pi.clone());
-            vks.push_back(vk.clone());
+            pis.push_back(fixture.public_inputs.clone());
+            vks.push_back(fixture.vk_hash.clone());
         }
 
         let results = client.verify_batch_proofs(&proofs, &pis, &vks);

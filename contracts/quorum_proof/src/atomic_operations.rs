@@ -76,22 +76,24 @@ pub enum DataKeyAtomicity {
     PhaseResult(u64, u32),
     /// Rollback log for recovery
     RollbackLog(u64),
+    /// Caller-supplied reason recorded when a rollback is initiated
+    RollbackReason(u64),
 }
 
 /// Initialize atomic operation infrastructure
 pub fn init_atomicity(env: &Env) {
-    let key = Symbol::new(env, "atomic_txn_count");
+    let key = DataKeyAtomicity::TxnCount;
     env.storage().instance().set(&key, &0u64);
     env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 }
 
 /// Generate next transaction ID
 fn next_txn_id(env: &Env) -> u64 {
-    let key = Symbol::new(env, "atomic_txn_count");
+    let key = DataKeyAtomicity::TxnCount;
     let count = env
         .storage()
         .instance()
-        .get::<Symbol, u64>(&key)
+        .get::<DataKeyAtomicity, u64>(&key)
         .unwrap_or(0);
 
     let next = count.saturating_add(1);
@@ -123,7 +125,7 @@ pub fn begin_transaction(
         savepoint: None,
     };
 
-    let key = Symbol::new(env, &format!("atomic_txn_{}", txn_id));
+    let key = DataKeyAtomicity::Transaction(txn_id);
     env.storage().instance().set(&key, &txn);
     env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
@@ -132,10 +134,10 @@ pub fn begin_transaction(
 
 /// Get a transaction by ID
 pub fn get_transaction(env: &Env, txn_id: u64) -> Option<AtomicTransaction> {
-    let key = Symbol::new(env, &format!("atomic_txn_{}", txn_id));
+    let key = DataKeyAtomicity::Transaction(txn_id);
     env.storage()
         .instance()
-        .get::<Symbol, AtomicTransaction>(&key)
+        .get::<DataKeyAtomicity, AtomicTransaction>(&key)
 }
 
 /// Advance to next phase and record savepoint
@@ -145,11 +147,11 @@ pub fn advance_phase(
     next_phase: TxnPhase,
     savepoint_data: Option<Bytes>,
 ) {
-    let key = Symbol::new(env, &format!("atomic_txn_{}", txn_id));
+    let key = DataKeyAtomicity::Transaction(txn_id);
     if let Some(mut txn) = env
         .storage()
         .instance()
-        .get::<Symbol, AtomicTransaction>(&key)
+        .get::<DataKeyAtomicity, AtomicTransaction>(&key)
     {
         let now = env.ledger().timestamp();
         if now > txn.expires_at {
@@ -192,17 +194,17 @@ pub fn record_phase_result(
         completed_at: env.ledger().timestamp(),
     };
 
-    let key = Symbol::new(env, &format!("atomic_phase_{}_{}", txn_id, phase_num));
+    let key = DataKeyAtomicity::PhaseResult(txn_id, phase_num);
     env.storage().instance().set(&key, &result);
     env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
     // If phase failed, log for rollback
     if !succeeded {
-        let rollback_key = Symbol::new(env, &format!("rollback_log_{}", txn_id));
+        let rollback_key = DataKeyAtomicity::RollbackLog(txn_id);
         let mut log = env
             .storage()
             .instance()
-            .get::<Symbol, Vec<(u32, Option<u32>)>>(&rollback_key)
+            .get::<DataKeyAtomicity, Vec<(u32, Option<u32>)>>(&rollback_key)
             .unwrap_or_else(|| Vec::new(env));
         log.push_back((phase_num, error_code));
         env.storage().instance().set(&rollback_key, &log);
@@ -219,17 +221,17 @@ pub fn get_phase_result(env: &Env, txn_id: u64, phase: TxnPhase) -> Option<Phase
         _ => return None,
     };
 
-    let key = Symbol::new(env, &format!("atomic_phase_{}_{}", txn_id, phase_num));
-    env.storage().instance().get::<Symbol, PhaseResult>(&key)
+    let key = DataKeyAtomicity::PhaseResult(txn_id, phase_num);
+    env.storage().instance().get::<DataKeyAtomicity, PhaseResult>(&key)
 }
 
 /// Commit transaction (all phases succeeded)
 pub fn commit_transaction(env: &Env, txn_id: u64) {
-    let key = Symbol::new(env, &format!("atomic_txn_{}", txn_id));
+    let key = DataKeyAtomicity::Transaction(txn_id);
     if let Some(mut txn) = env
         .storage()
         .instance()
-        .get::<Symbol, AtomicTransaction>(&key)
+        .get::<DataKeyAtomicity, AtomicTransaction>(&key)
     {
         if txn.phase != TxnPhase::Phase3_ZkVerifier {
             panic!("cannot commit transaction not in final phase");
@@ -247,11 +249,11 @@ pub fn commit_transaction(env: &Env, txn_id: u64) {
 
 /// Initiate rollback for a transaction
 pub fn initiate_rollback(env: &Env, txn_id: u64, reason: Option<Bytes>) {
-    let key = Symbol::new(env, &format!("atomic_txn_{}", txn_id));
+    let key = DataKeyAtomicity::Transaction(txn_id);
     if let Some(mut txn) = env
         .storage()
         .instance()
-        .get::<Symbol, AtomicTransaction>(&key)
+        .get::<DataKeyAtomicity, AtomicTransaction>(&key)
     {
         if txn.phase == TxnPhase::Committed
             || txn.phase == TxnPhase::RolledBack
@@ -268,7 +270,7 @@ pub fn initiate_rollback(env: &Env, txn_id: u64, reason: Option<Bytes>) {
 
         // Log rollback reason
         if let Some(reason_bytes) = reason {
-            let reason_key = Symbol::new(env, &format!("rollback_reason_{}", txn_id));
+            let reason_key = DataKeyAtomicity::RollbackReason(txn_id);
             env.storage().instance().set(&reason_key, &reason_bytes);
             env.storage()
                 .instance()
@@ -281,11 +283,11 @@ pub fn initiate_rollback(env: &Env, txn_id: u64, reason: Option<Bytes>) {
 
 /// Complete rollback (restore state from savepoint)
 pub fn complete_rollback(env: &Env, txn_id: u64) {
-    let key = Symbol::new(env, &format!("atomic_txn_{}", txn_id));
+    let key = DataKeyAtomicity::Transaction(txn_id);
     if let Some(mut txn) = env
         .storage()
         .instance()
-        .get::<Symbol, AtomicTransaction>(&key)
+        .get::<DataKeyAtomicity, AtomicTransaction>(&key)
     {
         if txn.phase != TxnPhase::RollingBack {
             panic!("transaction not in rollback state");
@@ -328,75 +330,82 @@ pub fn is_transaction_expired(env: &Env, txn_id: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
 
     #[test]
     fn test_transaction_lifecycle() {
         let env = Env::default();
-        init_atomicity(&env);
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        env.as_contract(&contract_id, || {
+            init_atomicity(&env);
 
-        let initiator = Address::generate(&env);
-        let op_data = Bytes::new(&env);
+            let initiator = Address::generate(&env);
+            let op_data = Bytes::new(&env);
 
-        let txn_id = begin_transaction(&env, initiator.clone(), 1, op_data, 3600);
+            let txn_id = begin_transaction(&env, initiator.clone(), 1, op_data, 3600);
 
-        let txn = get_transaction(&env, txn_id).unwrap();
-        assert_eq!(txn.txn_id, txn_id);
-        assert_eq!(txn.phase, TxnPhase::Initialized);
-        assert_eq!(txn.initiator, initiator);
+            let txn = get_transaction(&env, txn_id).unwrap();
+            assert_eq!(txn.txn_id, txn_id);
+            assert_eq!(txn.phase, TxnPhase::Initialized);
+            assert_eq!(txn.initiator, initiator);
 
-        // Advance to phase 1
-        advance_phase(&env, txn_id, TxnPhase::Phase1_QuorumProof, None);
-        let txn = get_transaction(&env, txn_id).unwrap();
-        assert_eq!(txn.phase, TxnPhase::Phase1_QuorumProof);
+            // Advance to phase 1
+            advance_phase(&env, txn_id, TxnPhase::Phase1_QuorumProof, None);
+            let txn = get_transaction(&env, txn_id).unwrap();
+            assert_eq!(txn.phase, TxnPhase::Phase1_QuorumProof);
 
-        // Record success for phase 1
-        record_phase_result(&env, txn_id, TxnPhase::Phase1_QuorumProof, true, None, None);
-        let result = get_phase_result(&env, txn_id, TxnPhase::Phase1_QuorumProof).unwrap();
-        assert!(result.succeeded);
+            // Record success for phase 1
+            record_phase_result(&env, txn_id, TxnPhase::Phase1_QuorumProof, true, None, None);
+            let result = get_phase_result(&env, txn_id, TxnPhase::Phase1_QuorumProof).unwrap();
+            assert!(result.succeeded);
 
-        // Advance to phase 2
-        advance_phase(&env, txn_id, TxnPhase::Phase2_SbtRegistry, None);
-        record_phase_result(&env, txn_id, TxnPhase::Phase2_SbtRegistry, true, None, None);
+            // Advance to phase 2
+            advance_phase(&env, txn_id, TxnPhase::Phase2_SbtRegistry, None);
+            record_phase_result(&env, txn_id, TxnPhase::Phase2_SbtRegistry, true, None, None);
 
-        // Advance to phase 3
-        advance_phase(&env, txn_id, TxnPhase::Phase3_ZkVerifier, None);
-        record_phase_result(&env, txn_id, TxnPhase::Phase3_ZkVerifier, true, None, None);
+            // Advance to phase 3
+            advance_phase(&env, txn_id, TxnPhase::Phase3_ZkVerifier, None);
+            record_phase_result(&env, txn_id, TxnPhase::Phase3_ZkVerifier, true, None, None);
 
-        // Commit
-        commit_transaction(&env, txn_id);
-        let txn = get_transaction(&env, txn_id).unwrap();
-        assert_eq!(txn.phase, TxnPhase::Committed);
+            // Commit
+            commit_transaction(&env, txn_id);
+            let txn = get_transaction(&env, txn_id).unwrap();
+            assert_eq!(txn.phase, TxnPhase::Committed);
+        });
     }
 
     #[test]
     fn test_transaction_rollback() {
         let env = Env::default();
-        init_atomicity(&env);
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        env.as_contract(&contract_id, || {
+            init_atomicity(&env);
 
-        let initiator = Address::generate(&env);
-        let txn_id = begin_transaction(&env, initiator, 1, Bytes::new(&env), 3600);
+            let initiator = Address::generate(&env);
+            let txn_id = begin_transaction(&env, initiator, 1, Bytes::new(&env), 3600);
 
-        // Advance to phase 1
-        advance_phase(&env, txn_id, TxnPhase::Phase1_QuorumProof, None);
+            // Advance to phase 1
+            advance_phase(&env, txn_id, TxnPhase::Phase1_QuorumProof, None);
 
-        // Phase 1 fails
-        record_phase_result(
-            &env,
-            txn_id,
-            TxnPhase::Phase1_QuorumProof,
-            false,
-            Some(100),
-            None,
-        );
+            // Phase 1 fails
+            record_phase_result(
+                &env,
+                txn_id,
+                TxnPhase::Phase1_QuorumProof,
+                false,
+                Some(100),
+                None,
+            );
 
-        // Initiate rollback
-        initiate_rollback(&env, txn_id, None);
-        let txn = get_transaction(&env, txn_id).unwrap();
-        assert_eq!(txn.phase, TxnPhase::RollingBack);
+            // Initiate rollback
+            initiate_rollback(&env, txn_id, None);
+            let txn = get_transaction(&env, txn_id).unwrap();
+            assert_eq!(txn.phase, TxnPhase::RollingBack);
 
-        // Complete rollback
-        complete_rollback(&env, txn_id);
-        let txn = get_transaction(&env, txn_id).unwrap();
-        assert_eq!(txn.phase, TxnPhase::RolledBack);
+            // Complete rollback
+            complete_rollback(&env, txn_id);
+            let txn = get_transaction(&env, txn_id).unwrap();
+            assert_eq!(txn.phase, TxnPhase::RolledBack);
+        });
     }
 }

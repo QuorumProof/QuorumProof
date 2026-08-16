@@ -7,6 +7,7 @@
 #[cfg(test)]
 extern crate std;
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Bytes, Env, IntoVal, Symbol, Vec,
@@ -15,6 +16,20 @@ use soroban_sdk::{
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_BATCH_SIZE: u32 = 1000;
+/// Issue #989: maximum accepted length of an SBT metadata URI, in bytes.
+const MAX_METADATA_URI_LEN: usize = 256;
+
+/// ASCII-case-insensitive prefix test.
+///
+/// `soroban_sdk::String` exposes no `to_lowercase`/`starts_with`, and the
+/// contract is `no_std`, so scheme validation operates on the raw bytes.
+fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && haystack[..needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|(h, n)| h.to_ascii_lowercase() == *n)
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -57,6 +72,16 @@ pub enum ContractError {
     CommitmentNotFound = 21,
     /// The supplied proof does not hash to the stored commitment.
     InvalidCommitmentProof = 22,
+    /// The proposed co-owner is not a valid co-owner for this SBT.
+    InvalidCoOwner = 23,
+    /// The SBT has no co-owner set.
+    CoOwnerNotSet = 24,
+    /// Issue #1243: A clawback is already pending for this SBT.
+    ClawbackAlreadyExists = 25,
+    /// Issue #1243: No clawback request exists with the given id.
+    ClawbackNotFound = 26,
+    /// Issue #1243: Caller is not the issuer who initiated this clawback.
+    UnauthorizedClawback = 27,
 }
 
 #[contracttype]
@@ -124,6 +149,17 @@ pub enum DataKey {
     PossessionCommitment(Bytes),
     /// Per-SBT counter used to derive a fresh nonce for each new commitment.
     CommitmentNonce(u64),
+    /// Ownership/co-ownership change log for an SBT, oldest first.
+    OwnershipHistory(u64),
+    /// Issue #989: wallet-facing metadata URI for an SBT.
+    SbtMetadataUri(u64),
+    /// Issue #1243: A time-locked clawback request, keyed by its id.
+    ClawbackRequest(u64),
+    /// Monotonic counter handing out `ClawbackRequest` ids.
+    ClawbackRequestCount,
+    /// The pending clawback id for an SBT, if any (sbt_id -> clawback_id).
+    /// Enforces that only one clawback may be pending per SBT at a time.
+    PendingClawbackBySbt(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -2333,16 +2369,21 @@ impl SbtRegistryContract {
     pub fn set_sbt_metadata_uri(env: Env, issuer: Address, sbt_id: u64, metadata_uri: soroban_sdk::String) {
         issuer.require_auth();
 
-        // Validate URI format and length
-        let uri_bytes = metadata_uri.to_xdr(&env).as_bytes();
-        if uri_bytes.len() > 256 {
+        // Validate URI length. `String::len` is the byte length of the URI
+        // itself; the XDR envelope adds framing that must not count here.
+        let uri_len = metadata_uri.len() as usize;
+        if uri_len > MAX_METADATA_URI_LEN {
             panic!("metadata_uri exceeds 256 characters");
         }
 
+        // Copy into a fixed buffer so the scheme can be inspected without alloc.
+        let mut uri_buf = [0u8; MAX_METADATA_URI_LEN];
+        let uri_bytes = &mut uri_buf[..uri_len];
+        metadata_uri.copy_into_slice(uri_bytes);
+
         // Check for HTTPS or IPFS scheme (case-insensitive)
-        let uri_str_val = metadata_uri.to_string();
-        let uri_lower = uri_str_val.to_lowercase();
-        let valid_scheme = uri_lower.starts_with("https://") || uri_lower.starts_with("ipfs://");
+        let valid_scheme = starts_with_ignore_ascii_case(uri_bytes, b"https://")
+            || starts_with_ignore_ascii_case(uri_bytes, b"ipfs://");
         if !valid_scheme {
             panic!("metadata_uri must be HTTPS or IPFS");
         }
@@ -2371,6 +2412,7 @@ impl SbtRegistryContract {
 
         // Store metadata URI (convert String to Bytes for storage)
         let uri_bytes_val = soroban_sdk::Bytes::from_slice(&env, uri_bytes);
+
         env.storage()
             .persistent()
             .set(&DataKey::SbtMetadataUri(sbt_id), &uri_bytes_val);
@@ -2396,8 +2438,14 @@ impl SbtRegistryContract {
             .get(&DataKey::SbtMetadataUri(sbt_id));
 
         match uri_bytes {
-            Some(bytes) => soroban_sdk::String::from_slice(&env, bytes.as_slice()),
-            None => soroban_sdk::String::from_slice(&env, b""),
+            Some(bytes) => {
+                // Stored URIs are length-validated on write, so they always fit.
+                let len = (bytes.len() as usize).min(MAX_METADATA_URI_LEN);
+                let mut buf = [0u8; MAX_METADATA_URI_LEN];
+                bytes.slice(0..len as u32).copy_into_slice(&mut buf[..len]);
+                soroban_sdk::String::from_bytes(&env, &buf[..len])
+            }
+            None => soroban_sdk::String::from_str(&env, ""),
         }
     }
 
@@ -2672,7 +2720,7 @@ impl SbtRegistryContract {
 
         let revocation_record = RevocationRecord {
             sbt_id,
-            reason,
+            reason: reason.clone(),
             revoked_by: admin.clone(),
             revoked_at: env.ledger().timestamp(),
         };
@@ -2692,6 +2740,120 @@ impl SbtRegistryContract {
         topics.push_back(symbol_short!("revoke").into_val(&env));
         topics.push_back(sbt_id.into_val(&env));
         env.events().publish(topics, (admin, reason));
+    }
+
+    // ── Issue #1243: Time-Locked SBT Clawback ─────────────────────────────────
+
+    /// Initiate a time-locked clawback of an SBT. The clawback does not take
+    /// effect immediately: `expires_at` (now + `timelock_seconds`) is the
+    /// earliest point at which it may be executed, giving the holder a
+    /// window to contest it. Only one clawback may be pending per SBT at a
+    /// time.
+    pub fn initiate_sbt_clawback(
+        env: Env,
+        issuer: Address,
+        sbt_id: u64,
+        reason: Bytes,
+        timelock_seconds: u64,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let _sbt: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(sbt_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::TokenNotFound));
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingClawbackBySbt(sbt_id))
+        {
+            panic_with_error!(&env, ContractError::ClawbackAlreadyExists);
+        }
+
+        let clawback_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClawbackRequestCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        let now = env.ledger().timestamp();
+        let request = ClawbackRequest {
+            id: clawback_id,
+            sbt_id,
+            issuer: issuer.clone(),
+            reason,
+            initiated_at: now,
+            expires_at: now.saturating_add(timelock_seconds),
+            status: symbol_short!("pending"),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ClawbackRequest(clawback_id), &request);
+        env.storage().persistent().extend_ttl(
+            &DataKey::ClawbackRequest(clawback_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::ClawbackRequestCount, &clawback_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingClawbackBySbt(sbt_id), &clawback_id);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PendingClawbackBySbt(sbt_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("clawback").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (issuer, clawback_id));
+
+        clawback_id
+    }
+
+    /// Cancel a pending clawback before its timelock expires. Only the
+    /// issuer who initiated it may cancel it. Frees up the SBT so a new
+    /// clawback can be initiated against it.
+    pub fn cancel_sbt_clawback(env: Env, issuer: Address, clawback_id: u64) {
+        issuer.require_auth();
+
+        let mut request: ClawbackRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ClawbackRequest(clawback_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ClawbackNotFound));
+
+        if request.issuer != issuer {
+            panic_with_error!(&env, ContractError::UnauthorizedClawback);
+        }
+
+        request.status = symbol_short!("cancelled");
+        env.storage()
+            .persistent()
+            .set(&DataKey::ClawbackRequest(clawback_id), &request);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingClawbackBySbt(request.sbt_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("clw_cncl").into_val(&env));
+        topics.push_back(clawback_id.into_val(&env));
+        env.events().publish(topics, issuer);
+    }
+
+    /// Look up a clawback request by id.
+    pub fn get_clawback_request(env: Env, clawback_id: u64) -> ClawbackRequest {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ClawbackRequest(clawback_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ClawbackNotFound))
     }
 
     // ── Issue #1241: SBT Proof of Possession ─────────────────────────
@@ -2722,8 +2884,8 @@ impl SbtRegistryContract {
 
         // Generate proof (simplified: hash of token_id and holder address)
         let mut proof_data = Bytes::new(&env);
-        proof_data.append(&sbt_id.to_le_bytes()[..].into());
-        proof_data.append(&holder.to_string().as_bytes().into());
+        proof_data.append(&Bytes::from_array(&env, &sbt_id.to_le_bytes()));
+        proof_data.append(&holder.clone().to_xdr(&env));
 
         let proof = PossessionProof {
             sbt_id,
@@ -2860,7 +3022,7 @@ impl SbtRegistryContract {
     ///
     /// # Panics
     /// Panics if the SBT does not exist or caller is not authorized.
-    pub fn delegate_sbt_transfer_to_attestor(
+    pub fn delegate_sbt_transfer(
         env: Env,
         caller: Address,
         sbt_id: u64,
@@ -3004,7 +3166,7 @@ impl SbtRegistryContract {
         topics.push_back(symbol_short!("xfer_att").into_val(&env));
         topics.push_back(sbt_id.into_val(&env));
         env.events()
-            .publish(topics, (attestor, old_owner.clone(), new_holder));
+            .publish(topics, (attestor.clone(), old_owner.clone(), new_holder.clone()));
 
         Self::record_notification(&env, new_holder.clone(), sbt_id, symbol_short!("transfer"));
         Self::log_sbt_activity(&env, sbt_id, symbol_short!("transfer"), attestor);
@@ -5501,7 +5663,7 @@ mod tests {
     // ── Issue #1239: SBT Transfer via Attestor Delegation ────────────────────────
 
     #[test]
-    fn test_delegate_sbt_transfer_to_attestor_success() {
+    fn test_delegate_sbt_transfer_success() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
@@ -5517,7 +5679,7 @@ mod tests {
         let new_holder = Address::generate(&env);
         let reason = Bytes::from_slice(&env, b"employment_termination");
 
-        client.delegate_sbt_transfer_to_attestor(
+        client.delegate_sbt_transfer(
             &owner, &token_id, &attestor, &new_holder, &reason,
         );
 
@@ -5545,7 +5707,7 @@ mod tests {
         let new_holder = Address::generate(&env);
         let reason = Bytes::from_slice(&env, b"employment_termination");
 
-        client.delegate_sbt_transfer_to_attestor(
+        client.delegate_sbt_transfer(
             &owner, &token_id, &attestor, &new_holder, &reason,
         );
 
@@ -5575,7 +5737,7 @@ mod tests {
         let new_holder = Address::generate(&env);
         let reason = Bytes::from_slice(&env, b"employment_termination");
 
-        client.delegate_sbt_transfer_to_attestor(
+        client.delegate_sbt_transfer(
             &owner, &token_id, &attestor, &new_holder, &reason,
         );
 
@@ -5609,7 +5771,7 @@ mod tests {
         let new_holder = Address::generate(&env);
         let reason = Bytes::from_slice(&env, b"employment_termination");
 
-        client.delegate_sbt_transfer_to_attestor(
+        client.delegate_sbt_transfer(
             &owner, &token_id, &attestor, &new_holder, &reason,
         );
 

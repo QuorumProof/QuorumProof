@@ -76,23 +76,23 @@ pub enum DataKeyVeto {
 
 /// Initialize veto authorities on contract initialization
 pub fn init_veto_authorities(env: &Env, authorities: Vec<Address>) {
-    let key = Symbol::new(env, "veto_authorities");
+    let key = DataKeyVeto::VetoAuthorities;
     env.storage().instance().set(&key, &authorities);
     env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
     // Set default time-lock to 48 hours (172800 seconds)
-    let timelock_key = Symbol::new(env, "veto_timelock");
+    let timelock_key = DataKeyVeto::VetoTimeLock;
     env.storage().instance().set(&timelock_key, &172_800u64);
     env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 }
 
 /// Check if an address is authorized to create veto requests
 pub fn is_veto_authority(env: &Env, address: &Address) -> bool {
-    let key = Symbol::new(env, "veto_authorities");
+    let key = DataKeyVeto::VetoAuthorities;
     if let Some(authorities) = env
         .storage()
         .instance()
-        .get::<Symbol, Vec<Address>>(&key)
+        .get::<DataKeyVeto, Vec<Address>>(&key)
     {
         for auth in authorities.iter() {
             if auth == *address {
@@ -105,11 +105,11 @@ pub fn is_veto_authority(env: &Env, address: &Address) -> bool {
 
 /// Add a veto authority
 pub fn add_veto_authority(env: &Env, authority: Address) {
-    let key = Symbol::new(env, "veto_authorities");
+    let key = DataKeyVeto::VetoAuthorities;
     let mut authorities = env
         .storage()
         .instance()
-        .get::<Symbol, Vec<Address>>(&key)
+        .get::<DataKeyVeto, Vec<Address>>(&key)
         .unwrap_or_else(|| Vec::new(env));
     
     // Check if already added
@@ -126,11 +126,11 @@ pub fn add_veto_authority(env: &Env, authority: Address) {
 
 /// Remove a veto authority
 pub fn remove_veto_authority(env: &Env, authority: &Address) {
-    let key = Symbol::new(env, "veto_authorities");
+    let key = DataKeyVeto::VetoAuthorities;
     if let Some(authorities) = env
         .storage()
         .instance()
-        .get::<Symbol, Vec<Address>>(&key)
+        .get::<DataKeyVeto, Vec<Address>>(&key)
     {
         let mut new_authorities = Vec::new(env);
         for auth in authorities.iter() {
@@ -145,27 +145,27 @@ pub fn remove_veto_authority(env: &Env, authority: &Address) {
 
 /// Get current veto time-lock duration (seconds)
 pub fn get_veto_timelock(env: &Env) -> u64 {
-    let key = Symbol::new(env, "veto_timelock");
+    let key = DataKeyVeto::VetoTimeLock;
     env.storage()
         .instance()
-        .get::<Symbol, u64>(&key)
+        .get::<DataKeyVeto, u64>(&key)
         .unwrap_or(172_800) // 48 hours default
 }
 
 /// Set veto time-lock duration
 pub fn set_veto_timelock(env: &Env, seconds: u64) {
-    let key = Symbol::new(env, "veto_timelock");
+    let key = DataKeyVeto::VetoTimeLock;
     env.storage().instance().set(&key, &seconds);
     env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 }
 
 /// Generate next veto ID (monotonic counter)
 fn next_veto_id(env: &Env) -> u64 {
-    let key = Symbol::new(env, "veto_count");
+    let key = DataKeyVeto::VetoCount;
     let count = env
         .storage()
         .instance()
-        .get::<Symbol, u64>(&key)
+        .get::<DataKeyVeto, u64>(&key)
         .unwrap_or(0);
     
     let next = count.saturating_add(1);
@@ -207,16 +207,16 @@ pub fn request_veto(
     };
 
     // Store the veto request
-    let key = Symbol::new(env, &format!("veto_req_{}", veto_id));
+    let key = DataKeyVeto::VetoRequest(veto_id);
     env.storage().instance().set(&key, &veto);
     env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
     // Add to credential's veto list
-    let list_key = Symbol::new(env, &format!("veto_list_{}", credential_id));
+    let list_key = DataKeyVeto::VetoList(credential_id);
     let mut veto_list = env
         .storage()
         .instance()
-        .get::<Symbol, Vec<u64>>(&list_key)
+        .get::<DataKeyVeto, Vec<u64>>(&list_key)
         .unwrap_or_else(|| Vec::new(env));
     veto_list.push_back(veto_id);
     env.storage().instance().set(&list_key, &veto_list);
@@ -227,26 +227,26 @@ pub fn request_veto(
 
 /// Get a veto request by ID
 pub fn get_veto_request(env: &Env, veto_id: u64) -> Option<VetoRequest> {
-    let key = Symbol::new(env, &format!("veto_req_{}", veto_id));
-    env.storage().instance().get::<Symbol, VetoRequest>(&key)
+    let key = DataKeyVeto::VetoRequest(veto_id);
+    env.storage().instance().get::<DataKeyVeto, VetoRequest>(&key)
 }
 
 /// Get all veto requests for a credential
 pub fn get_credential_veto_requests(env: &Env, credential_id: u64) -> Vec<u64> {
-    let list_key = Symbol::new(env, &format!("veto_list_{}", credential_id));
+    let list_key = DataKeyVeto::VetoList(credential_id);
     env.storage()
         .instance()
-        .get::<Symbol, Vec<u64>>(&list_key)
+        .get::<DataKeyVeto, Vec<u64>>(&list_key)
         .unwrap_or_else(|| Vec::new(env))
 }
 
 /// Cancel a veto request (only by the authority who created it or admin)
 pub fn cancel_veto(env: &Env, canceller: &Address, veto_id: u64) {
-    let key = Symbol::new(env, &format!("veto_req_{}", veto_id));
+    let key = DataKeyVeto::VetoRequest(veto_id);
     if let Some(mut veto) = env
         .storage()
         .instance()
-        .get::<Symbol, VetoRequest>(&key)
+        .get::<DataKeyVeto, VetoRequest>(&key)
     {
         // Only the authority who created it can cancel
         if veto.veto_authority != *canceller {
@@ -268,11 +268,11 @@ pub fn cancel_veto(env: &Env, canceller: &Address, veto_id: u64) {
 /// Execute a veto (after time-lock has expired)
 /// Returns true if veto was executed, false if not yet ready
 pub fn execute_veto(env: &Env, executor: &Address, veto_id: u64) -> bool {
-    let key = Symbol::new(env, &format!("veto_req_{}", veto_id));
+    let key = DataKeyVeto::VetoRequest(veto_id);
     if let Some(mut veto) = env
         .storage()
         .instance()
-        .get::<Symbol, VetoRequest>(&key)
+        .get::<DataKeyVeto, VetoRequest>(&key)
     {
         // Only admin or veto authority can execute
         if veto.veto_authority != *executor {
@@ -308,11 +308,11 @@ pub fn execute_veto(env: &Env, executor: &Address, veto_id: u64) -> bool {
 
 /// Log veto execution in audit trail
 fn log_veto_execution(env: &Env, veto: &VetoRequest) {
-    let log_key = Symbol::new(env, "veto_exec_log");
+    let log_key = DataKeyVeto::VetoExecutionLog;
     let mut log = env
         .storage()
         .instance()
-        .get::<Symbol, Vec<(u64, u64, Address)>>(&log_key)
+        .get::<DataKeyVeto, Vec<(u64, u64, Address)>>(&log_key)
         .unwrap_or_else(|| Vec::new(env));
     
     log.push_back((veto.veto_id, veto.credential_id, veto.veto_authority.clone()));
@@ -322,16 +322,17 @@ fn log_veto_execution(env: &Env, veto: &VetoRequest) {
 
 /// Get veto execution audit log
 pub fn get_veto_audit_log(env: &Env) -> Vec<(u64, u64, Address)> {
-    let log_key = Symbol::new(env, "veto_exec_log");
+    let log_key = DataKeyVeto::VetoExecutionLog;
     env.storage()
         .instance()
-        .get::<Symbol, Vec<(u64, u64, Address)>>(&log_key)
+        .get::<DataKeyVeto, Vec<(u64, u64, Address)>>(&log_key)
         .unwrap_or_else(|| Vec::new(env))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
 
     fn setup(env: &Env) -> Vec<Address> {
         let mut authorities = Vec::new(env);
@@ -344,55 +345,64 @@ mod tests {
     #[test]
     fn test_veto_authority_management() {
         let env = Env::default();
-        let authorities = setup(&env);
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        env.as_contract(&contract_id, || {
+            let authorities = setup(&env);
 
-        assert!(is_veto_authority(&env, &authorities.get(0).unwrap()));
-        assert!(is_veto_authority(&env, &authorities.get(1).unwrap()));
-        assert!(!is_veto_authority(&env, &Address::generate(&env)));
+            assert!(is_veto_authority(&env, &authorities.get(0).unwrap()));
+            assert!(is_veto_authority(&env, &authorities.get(1).unwrap()));
+            assert!(!is_veto_authority(&env, &Address::generate(&env)));
 
-        let new_auth = Address::generate(&env);
-        add_veto_authority(&env, new_auth.clone());
-        assert!(is_veto_authority(&env, &new_auth));
+            let new_auth = Address::generate(&env);
+            add_veto_authority(&env, new_auth.clone());
+            assert!(is_veto_authority(&env, &new_auth));
 
-        remove_veto_authority(&env, &new_auth);
-        assert!(!is_veto_authority(&env, &new_auth));
+            remove_veto_authority(&env, &new_auth);
+            assert!(!is_veto_authority(&env, &new_auth));
+        });
     }
 
     #[test]
     fn test_veto_request_lifecycle() {
         let env = Env::default();
-        let authorities = setup(&env);
-        let veto_auth = authorities.get(0).unwrap();
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        env.as_contract(&contract_id, || {
+            let authorities = setup(&env);
+            let veto_auth = authorities.get(0).unwrap();
 
-        let veto_id = request_veto(
-            &env,
-            veto_auth.clone(),
-            1,      // credential_id
-            100,    // slice_id
-            Address::generate(&env),
-            Some(Bytes::new(&env)),
-            None,
-        );
+            let veto_id = request_veto(
+                &env,
+                veto_auth.clone(),
+                1,      // credential_id
+                100,    // slice_id
+                Address::generate(&env),
+                Some(Bytes::new(&env)),
+                None,
+            );
 
-        let veto = get_veto_request(&env, veto_id).unwrap();
-        assert_eq!(veto.veto_id, veto_id);
-        assert_eq!(veto.credential_id, 1);
-        assert_eq!(veto.status, VetoStatus::Pending);
+            let veto = get_veto_request(&env, veto_id).unwrap();
+            assert_eq!(veto.veto_id, veto_id);
+            assert_eq!(veto.credential_id, 1);
+            assert_eq!(veto.status, VetoStatus::Pending);
 
-        // Check it's in the credential's list
-        let requests = get_credential_veto_requests(&env, 1);
-        assert_eq!(requests.len(), 1);
+            // Check it's in the credential's list
+            let requests = get_credential_veto_requests(&env, 1);
+            assert_eq!(requests.len(), 1);
+        });
     }
 
     #[test]
     fn test_veto_timelock() {
         let env = Env::default();
-        let _authorities = setup(&env);
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        env.as_contract(&contract_id, || {
+            let _authorities = setup(&env);
 
-        let default = get_veto_timelock(&env);
-        assert_eq!(default, 172_800); // 48 hours
+            let default = get_veto_timelock(&env);
+            assert_eq!(default, 172_800); // 48 hours
 
-        set_veto_timelock(&env, 86_400); // 1 day
-        assert_eq!(get_veto_timelock(&env), 86_400);
+            set_veto_timelock(&env, 86_400); // 1 day
+            assert_eq!(get_veto_timelock(&env), 86_400);
+        });
     }
 }

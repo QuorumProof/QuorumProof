@@ -69,23 +69,23 @@ pub enum DataKeyMigrationV2 {
     MigrationCheckpoint,
     /// Transformation rules (versioned)
     TransformationRules,
-    /// Validation errors during migration
-    ValidationErrors(u64),
+    /// Validation errors during migration, keyed by `MigrationJob::id`
+    ValidationErrors(u32),
 }
 
 /// Get current schema version
 pub fn get_schema_version(env: &Env) -> SchemaVersion {
-    let key = Symbol::new(env, "schema_version");
+    let key = DataKeyMigrationV2::SchemaVersion;
     env.storage()
         .persistent()
-        .get::<Symbol, u32>(&key)
+        .get::<DataKeyMigrationV2, u32>(&key)
         .and_then(SchemaVersion::from_u32)
         .unwrap_or(SchemaVersion::V1)
 }
 
 /// Set schema version
 fn set_schema_version(env: &Env, version: SchemaVersion) {
-    let key = Symbol::new(env, "schema_version");
+    let key = DataKeyMigrationV2::SchemaVersion;
     env.storage()
         .persistent()
         .set(&key, &version.as_u32());
@@ -131,7 +131,7 @@ pub fn start_migration_v1_to_v2(env: &Env, admin: &Address) -> u32 {
         status: MigrationStatus::InProgress,
     };
 
-    let key = Symbol::new(env, "migration_checkpoint");
+    let key = DataKeyMigrationV2::MigrationCheckpoint;
     env.storage().persistent().set(&key, &checkpoint);
 
     job.id
@@ -157,11 +157,11 @@ pub fn migrate_chunk_v1_to_v2(env: &Env, admin: &Address, chunk_size: u32) -> Mi
     }
 
     // Get checkpoint
-    let key = Symbol::new(env, "migration_checkpoint");
+    let key = DataKeyMigrationV2::MigrationCheckpoint;
     let mut checkpoint = env
         .storage()
         .persistent()
-        .get::<Symbol, MigrationCheckpoint>(&key)
+        .get::<DataKeyMigrationV2, MigrationCheckpoint>(&key)
         .unwrap_or_else(|| {
             panic!("migration checkpoint not found");
         });
@@ -231,7 +231,7 @@ pub fn migrate_chunk_v1_to_v2(env: &Env, admin: &Address, chunk_size: u32) -> Mi
 
     // Log any validation errors
     if !errors.is_empty() {
-        let error_key = Symbol::new(env, &format!("migration_errors_{}", updated_job.id));
+        let error_key = DataKeyMigrationV2::ValidationErrors(updated_job.id);
         env.storage().persistent().set(&error_key, &errors);
     }
 
@@ -273,11 +273,11 @@ pub fn validate_migration_integrity(env: &Env) -> bool {
         return false;
     }
 
-    let key = Symbol::new(env, "migration_checkpoint");
+    let key = DataKeyMigrationV2::MigrationCheckpoint;
     if let Some(checkpoint) = env
         .storage()
         .persistent()
-        .get::<Symbol, MigrationCheckpoint>(&key)
+        .get::<DataKeyMigrationV2, MigrationCheckpoint>(&key)
     {
         checkpoint.status == MigrationStatus::Completed && checkpoint.failed_items == 0
     } else {
@@ -287,21 +287,21 @@ pub fn validate_migration_integrity(env: &Env) -> bool {
 
 /// Get migration status
 pub fn get_migration_status(env: &Env) -> Option<MigrationCheckpoint> {
-    let key = Symbol::new(env, "migration_checkpoint");
+    let key = DataKeyMigrationV2::MigrationCheckpoint;
     env.storage()
         .persistent()
-        .get::<Symbol, MigrationCheckpoint>(&key)
+        .get::<DataKeyMigrationV2, MigrationCheckpoint>(&key)
 }
 
 /// Pause ongoing migration
 pub fn pause_migration(env: &Env, admin: &Address) {
     admin.require_auth();
 
-    let key = Symbol::new(env, "migration_checkpoint");
+    let key = DataKeyMigrationV2::MigrationCheckpoint;
     if let Some(mut checkpoint) = env
         .storage()
         .persistent()
-        .get::<Symbol, MigrationCheckpoint>(&key)
+        .get::<DataKeyMigrationV2, MigrationCheckpoint>(&key)
     {
         if checkpoint.status == MigrationStatus::InProgress {
             checkpoint.status = MigrationStatus::Paused;
@@ -315,11 +315,11 @@ pub fn pause_migration(env: &Env, admin: &Address) {
 pub fn resume_migration(env: &Env, admin: &Address) {
     admin.require_auth();
 
-    let key = Symbol::new(env, "migration_checkpoint");
+    let key = DataKeyMigrationV2::MigrationCheckpoint;
     if let Some(mut checkpoint) = env
         .storage()
         .persistent()
-        .get::<Symbol, MigrationCheckpoint>(&key)
+        .get::<DataKeyMigrationV2, MigrationCheckpoint>(&key)
     {
         if checkpoint.status == MigrationStatus::Paused {
             checkpoint.status = MigrationStatus::InProgress;
@@ -333,11 +333,11 @@ pub fn resume_migration(env: &Env, admin: &Address) {
 pub fn rollback_migration(env: &Env, admin: &Address) {
     admin.require_auth();
 
-    let key = Symbol::new(env, "migration_checkpoint");
+    let key = DataKeyMigrationV2::MigrationCheckpoint;
     if let Some(checkpoint) = env
         .storage()
         .persistent()
-        .get::<Symbol, MigrationCheckpoint>(&key)
+        .get::<DataKeyMigrationV2, MigrationCheckpoint>(&key)
     {
         if checkpoint.status == MigrationStatus::InProgress
             || checkpoint.status == MigrationStatus::Paused
@@ -359,14 +359,17 @@ mod tests {
     #[test]
     fn test_schema_version_management() {
         let env = Env::default();
-        init_migration_v2(&env);
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        env.as_contract(&contract_id, || {
+            init_migration_v2(&env);
 
-        let version = get_schema_version(&env);
-        assert_eq!(version, SchemaVersion::V1);
+            let version = get_schema_version(&env);
+            assert_eq!(version, SchemaVersion::V1);
 
-        set_schema_version(&env, SchemaVersion::V2);
-        let version = get_schema_version(&env);
-        assert_eq!(version, SchemaVersion::V2);
+            set_schema_version(&env, SchemaVersion::V2);
+            let version = get_schema_version(&env);
+            assert_eq!(version, SchemaVersion::V2);
+        });
     }
 
     #[test]

@@ -114,106 +114,127 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::Ledger, Bytes, Env};
 
-    fn env_at(ts: u64) -> Env {
+    fn env_at(ts: u64) -> (Env, soroban_sdk::Address) {
         let env = Env::default();
         env.ledger().with_mut(|l| l.timestamp = ts);
-        env
+        let contract_id = env.register_contract(None, crate::QuorumProofContract);
+        (env, contract_id)
     }
 
     #[test]
     fn set_and_get_time_lock_round_trips() {
-        let env = env_at(1_000);
-        let reason = Bytes::from_slice(&env, b"fraud detection window");
-        let lock = set_time_lock(&env, 42, 2_000, reason.clone());
-        assert_eq!(lock.release_at, 2_000);
-        assert_eq!(lock.locked_at, 1_000);
-        assert_eq!(lock.reason, reason);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let reason = Bytes::from_slice(&env, b"fraud detection window");
+            let lock = set_time_lock(&env, 42, 2_000, reason.clone());
+            assert_eq!(lock.release_at, 2_000);
+            assert_eq!(lock.locked_at, 1_000);
+            assert_eq!(lock.reason, reason);
 
-        let stored = get_time_lock(&env, 42).expect("lock should be stored");
-        assert_eq!(stored.release_at, 2_000);
+            let stored = get_time_lock(&env, 42).expect("lock should be stored");
+            assert_eq!(stored.release_at, 2_000);
+        });
     }
 
     #[test]
     #[should_panic(expected = "release_at must be strictly in the future")]
     fn set_time_lock_in_past_panics() {
-        let env = env_at(5_000);
-        let reason = Bytes::from_slice(&env, b"");
-        set_time_lock(&env, 1, 4_999, reason);
+        let (env, contract_id) = env_at(5_000);
+        env.as_contract(&contract_id, || {
+            let reason = Bytes::from_slice(&env, b"");
+            set_time_lock(&env, 1, 4_999, reason);
+        });
     }
 
     #[test]
     #[should_panic(expected = "release_at must be strictly in the future")]
     fn set_time_lock_at_current_time_panics() {
-        let env = env_at(5_000);
-        let reason = Bytes::from_slice(&env, b"");
-        set_time_lock(&env, 1, 5_000, reason); // not strictly in the future
+        let (env, contract_id) = env_at(5_000);
+        env.as_contract(&contract_id, || {
+            let reason = Bytes::from_slice(&env, b"");
+            set_time_lock(&env, 1, 5_000, reason); // not strictly in the future
+        });
     }
 
     #[test]
     #[should_panic(expected = "reason must be at most 128 bytes")]
     fn set_time_lock_reason_too_long_panics() {
-        let env = env_at(1_000);
-        let reason = Bytes::from_slice(&env, &[b'x'; 129]);
-        set_time_lock(&env, 1, 2_000, reason);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let reason = Bytes::from_slice(&env, &[b'x'; 129]);
+            set_time_lock(&env, 1, 2_000, reason);
+        });
     }
 
     #[test]
     fn is_time_locked_true_before_release() {
-        let env = env_at(1_000);
-        let reason = Bytes::from_slice(&env, b"");
-        set_time_lock(&env, 7, 3_000, reason);
-        assert!(is_time_locked(&env, 7));
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let reason = Bytes::from_slice(&env, b"");
+            set_time_lock(&env, 7, 3_000, reason);
+            assert!(is_time_locked(&env, 7));
+        });
     }
 
     #[test]
     fn is_time_locked_false_after_release() {
         // Set the lock at t=1000 with release_at=2000, then advance ledger to
         // t=2000 and verify the lock is no longer active.
-        let env = env_at(1_000);
-        let reason = Bytes::from_slice(&env, b"");
-        set_time_lock(&env, 8, 2_000, reason);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let reason = Bytes::from_slice(&env, b"");
+            set_time_lock(&env, 8, 2_000, reason);
 
-        // Advance time past release_at
-        env.ledger().with_mut(|l| l.timestamp = 2_000);
-        assert!(!is_time_locked(&env, 8));
+            // Advance time past release_at
+            env.ledger().with_mut(|l| l.timestamp = 2_000);
+            assert!(!is_time_locked(&env, 8));
+        });
     }
 
     #[test]
     fn is_time_locked_false_when_no_lock_set() {
-        let env = env_at(1_000);
-        assert!(!is_time_locked(&env, 99));
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            assert!(!is_time_locked(&env, 99));
+        });
     }
 
     #[test]
     fn clear_time_lock_removes_lock() {
-        let env = env_at(1_000);
-        let reason = Bytes::from_slice(&env, b"test");
-        set_time_lock(&env, 5, 5_000, reason);
-        assert!(is_time_locked(&env, 5));
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let reason = Bytes::from_slice(&env, b"test");
+            set_time_lock(&env, 5, 5_000, reason);
+            assert!(is_time_locked(&env, 5));
 
-        clear_time_lock(&env, 5);
-        assert!(!is_time_locked(&env, 5));
-        assert!(get_time_lock(&env, 5).is_none());
+            clear_time_lock(&env, 5);
+            assert!(!is_time_locked(&env, 5));
+            assert!(get_time_lock(&env, 5).is_none());
+        });
     }
 
     #[test]
     fn clear_time_lock_noop_when_not_set() {
-        let env = env_at(1_000);
-        // Must not panic
-        clear_time_lock(&env, 999);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            // Must not panic
+            clear_time_lock(&env, 999);
+        });
     }
 
     #[test]
     fn overwrite_existing_time_lock() {
-        let env = env_at(1_000);
-        let r1 = Bytes::from_slice(&env, b"first");
-        set_time_lock(&env, 3, 2_000, r1);
+        let (env, contract_id) = env_at(1_000);
+        env.as_contract(&contract_id, || {
+            let r1 = Bytes::from_slice(&env, b"first");
+            set_time_lock(&env, 3, 2_000, r1);
 
-        let r2 = Bytes::from_slice(&env, b"second");
-        set_time_lock(&env, 3, 4_000, r2.clone());
+            let r2 = Bytes::from_slice(&env, b"second");
+            set_time_lock(&env, 3, 4_000, r2.clone());
 
-        let stored = get_time_lock(&env, 3).unwrap();
-        assert_eq!(stored.release_at, 4_000);
-        assert_eq!(stored.reason, r2);
+            let stored = get_time_lock(&env, 3).unwrap();
+            assert_eq!(stored.release_at, 4_000);
+            assert_eq!(stored.reason, r2);
+        });
     }
 }
