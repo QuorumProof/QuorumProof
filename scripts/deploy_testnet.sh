@@ -16,7 +16,7 @@ MANIFEST_PATH="${MANIFEST_PATH:-testnet-deployment.json}"
 
 echo "Deploying to testnet..."
 
-stellar keys generate deployer --network testnet 2>/dev/null || true
+stellar keys generate deployer --network testnet --fund 2>/dev/null || true
 DEPLOYER_ADDRESS=$(stellar keys address deployer)
 
 CONTRACT_QUORUM_PROOF=$(stellar contract deploy \
