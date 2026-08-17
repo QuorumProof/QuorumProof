@@ -38,8 +38,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install soroban CLI
-        run: cargo install soroban-cli --version ^21
+      - name: Install Stellar CLI
+        run: |
+          VERSION=$(curl -sSL https://api.github.com/repos/stellar/stellar-cli/releases/latest | jq -r .tag_name | sed 's/^v//')
+          curl -sSL "https://github.com/stellar/stellar-cli/releases/download/v${VERSION}/stellar-cli-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /tmp
+          mkdir -p ~/.local/bin
+          mv /tmp/stellar ~/.local/bin/
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Skip network if not selected or secrets missing
         id: gate

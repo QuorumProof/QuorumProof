@@ -4,7 +4,7 @@
 # Usage:
 #   ./scripts/backup.sh [--network testnet|mainnet] [--encrypt] [--upload s3://bucket]
 #
-# Requires: soroban CLI, jq, openssl (for encryption), aws CLI (for S3 upload)
+# Requires: stellar CLI, jq, openssl (for encryption), aws CLI (for S3 upload)
 
 set -euo pipefail
 
@@ -54,7 +54,7 @@ echo "==> Starting backup of QuorumProof contract $CONTRACT_ID on $NETWORK"
 echo "    Timestamp: $TIMESTAMP"
 
 invoke() {
-  soroban contract invoke \
+  stellar contract invoke \
     --id "$CONTRACT_ID" \
     --network "$NETWORK" \
     -- "$@" 2>/dev/null
