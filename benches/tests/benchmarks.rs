@@ -596,7 +596,7 @@ fn bench_batch_issue_credentials_scaling() {
             metas.push_back(meta.clone());
         }
 
-        let m = measure(&env, || {
+        let m = measure_unlimited(&env, || {
             client.batch_issue_credentials(&issuer, &subjects, &cred_types, &metas, &None);
         });
 
