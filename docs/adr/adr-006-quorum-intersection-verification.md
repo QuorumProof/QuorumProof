@@ -86,18 +86,21 @@ Implement nested Federated Byzantine Agreement quorum slices with quorum interse
 ## Consequences
 
 ### Positive
-- **Partition detection**: Contract can now detect unsafe network partitions and reject consensus if quorum intersection is absent.
+- **Partition rejection enforced**: Contract NOW ENFORCES partition safety — credentials with multiple or nested slices require attestors to form quorum intersection in ALL slices, not just one. Disjoint partition attempts are automatically rejected at verification time.
 - **Byzantine safety**: Equivocating attestors are excluded transitively, preventing their votes from contributing at multiple levels.
 - **Budget compliance**: Off-chain certificate pattern keeps verification cost within Soroban limits even for 100+ node networks.
 - **Decentralization**: No trusted coordinator; clients compute and provide proofs.
 - **Future-proof**: Incremental step toward full SCP if needed; nested architecture is compatible.
-- **Backwards compatible**: Flat slices work unchanged; nested slices are opt-in.
+- **Backwards compatible**: Flat single-slice attestations work unchanged; multi-slice intersection checking is opt-in (triggered when multiple slices attest to same credential).
 
 ### Negative
 - **Client complexity**: SDK must implement certificate generation (hash, signature if needed, serialization).
-- **Partition detection is reactive**: Unsafe partition is detected when verification fails, not prevented proactively. (Acceptable: credential consensus requires quorum intersection, so partition automatically means no consensus until it's resolved.)
 - **~5-10% performance overhead**: Recursive is_quorum checks cost more than flat sum, especially for deep trees.
 - **Documentation burden**: Non-obvious contract API; requires clear SDK and developer docs.
+
+### Enforcement Details
+- **Automatic partition detection**: When is_attested() is called for a credential with multiple attesting slices, the contract automatically verifies that attestors form a quorum in ALL slices.
+- **Failing partition scenarios rejected**: Two disjoint slices independently reaching quorum on conflicting claims will both fail is_attested() checks because no common attestor set forms quorum in both slices.
 
 ## Implementation
 
@@ -133,9 +136,16 @@ Implement nested Federated Byzantine Agreement quorum slices with quorum interse
 - MAX_SLICES_PER_INTERSECTION_CHECK: 100
 
 ### Integration with Existing Code
-- **attest()**: Wire fork detection to call `suspend_attestor_recursive` for all conflicting attestors, ensuring transitive suspension
-- **is_attested()**: Unchanged; uses is_attestor_suspended which already exists
-- **Backwards compatibility**: Fallback to flat QuorumSlice for slices without NestedSliceNode entry
+- **attest()**: Records which slice is contributing an attestation to a credential via record_credential_slice(), enabling partition tracking. Wire fork detection to call `suspend_attestor_recursive` for all conflicting attestors, ensuring transitive suspension.
+- **is_attested()**: Enhanced to check quorum intersection when a credential has multiple or nested slices. Returns false unless attestors form quorum in ALL applicable slices.
+- **New helper functions**: 
+  - record_credential_slice(): Track credential-to-slice mappings for intersection checks
+  - get_credential_slices(): Retrieve all slices that have attested to a credential
+  - is_slice_nested(): Check if a slice uses nested references (depth > 1)
+  - requires_intersection_verification(): Determine if a credential needs intersection safety checks
+  - verify_credential_intersection(): Verify attestors form quorum in all attesting slices
+- **check_quorum_intersection()**: Removed no-op require_auth() call; verification is based on certificate validity
+- **Backwards compatibility**: Fallback to flat QuorumSlice for slices without NestedSliceNode entry; single-slice credentials bypass intersection checks
 
 ### Testing Strategy
 1. **Proptest**: is_quorum vs brute-force oracle for depth 1-3 trees; cycle detection; depth overflow
