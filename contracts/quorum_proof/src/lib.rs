@@ -11305,37 +11305,42 @@ impl QuorumProofContract {
     /// - `credential_id`: The credential to verify claims against.
     /// - `claim_types`: Ordered list of claim types to verify.
     /// - `proofs`: Ordered list of ZK proofs corresponding to each claim type.
+    /// - `vk_hashes`: Verifying key hashes for each proof.
     ///
     /// # Panics
-    /// Panics if `claim_types` and `proofs` have different lengths.
+    /// Panics if `claim_types`, `proofs`, and `vk_hashes` have different lengths.
     pub fn verify_claim_batch(
         env: Env,
         zk_verifier_id: Address,
-        zk_admin: Address,
         quorum_proof_id: Address,
         credential_id: u64,
         claim_types: Vec<ClaimType>,
         proofs: Vec<soroban_sdk::Bytes>,
+        vk_hashes: Vec<BytesN<32>>,
     ) -> Vec<bool> {
         Self::validate_array_bounds(claim_types.len(), 1, MAX_BATCH_SIZE, "claim_types");
         assert!(
-            claim_types.len() == proofs.len(),
-            "claim_types and proofs lengths must match"
+            claim_types.len() == proofs.len() && proofs.len() == vk_hashes.len(),
+            "claim_types, proofs, and vk_hashes lengths must match"
         );
         let mut results: Vec<bool> = Vec::new(&env);
         for i in 0..claim_types.len() {
+            let claim_type = claim_types.get(i).unwrap();
+            let proof = proofs.get(i).unwrap();
+            let vk_hash = vk_hashes.get(i).unwrap();
+
+            let public_inputs = Self::encode_claim_public_inputs(&env, credential_id, &claim_type);
+
             let args = Vec::from_array(
                 &env,
                 [
-                    zk_admin.clone().into_val(&env),
-                    quorum_proof_id.clone().into_val(&env),
-                    credential_id.into_val(&env),
-                    claim_types.get(i).unwrap().into_val(&env),
-                    proofs.get(i).unwrap().into_val(&env),
+                    proof.into_val(&env),
+                    public_inputs.into_val(&env),
+                    vk_hash.into_val(&env),
                 ],
             );
             let result: bool = env
-                .invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim"), args);
+                .invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args);
             results.push_back(result);
         }
         results
@@ -11469,16 +11474,16 @@ impl QuorumProofContract {
     /// Unified engineer verification entry point.
     ///
     /// Checks that the subject holds an SBT linked to the credential, then delegates
-    /// ZK claim verification to the `zk_verifier` contract.
+    /// ZK claim verification to the `zk_verifier` contract using cryptographic proof verification.
     ///
     /// # Parameters
-    /// - `quorum_proof_id`: Address of this contract (forwarded to the ZK verifier).
     /// - `sbt_registry_id`: Address of the deployed SBT registry contract.
     /// - `zk_verifier_id`: Address of the deployed ZK verifier contract.
     /// - `subject`: The engineer whose credential is being verified.
     /// - `credential_id`: The credential to verify.
     /// - `claim_type`: The specific claim to verify (degree, license, employment).
-    /// - `proof`: The ZK proof bytes for the claim.
+    /// - `proof`: The ZK proof bytes for the claim (BLS12-381 compressed format).
+    /// - `vk_hash`: The verifying key hash for the proof.
     /// - `verifier`: Optional address performing the verification. If `Some`, must be the subject
     ///   or an active delegate for the subject's SBT. If `None`, no caller check is performed.
     ///
@@ -11488,11 +11493,11 @@ impl QuorumProofContract {
         env: Env,
         sbt_registry_id: Address,
         zk_verifier_id: Address,
-        zk_admin: Address,
         subject: Address,
         credential_id: u64,
         claim_type: ClaimType,
         proof: soroban_sdk::Bytes,
+        vk_hash: BytesN<32>,
         verifier: Option<Address>,
     ) -> bool {
         let caller = verifier.unwrap_or_else(|| subject.clone());
@@ -11500,18 +11505,57 @@ impl QuorumProofContract {
         if !Self::is_authorized_verifier(&env, caller, sbt_registry_id, credential_id, subject.clone()) {
             return false;
         }
-        let quorum_proof_id = env.current_contract_address();
+
+        let public_inputs = Self::encode_claim_public_inputs(&env, credential_id, &claim_type);
+
         let args = Vec::from_array(
             &env,
             [
-                zk_admin.clone().into_val(&env),
-                quorum_proof_id.into_val(&env),
-                credential_id.into_val(&env),
-                claim_type.into_val(&env),
                 proof.into_val(&env),
+                public_inputs.into_val(&env),
+                vk_hash.into_val(&env),
             ],
         );
-        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim"), args)
+        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args)
+    }
+
+    /// Encode credential_id and claim_type as public inputs for ZK proof verification.
+    ///
+    /// Creates a 64-byte public input by concatenating:
+    /// - credential_id as 32-byte little-endian field element (bytes 0-31)
+    /// - claim_type as 32-byte little-endian field element (bytes 32-63)
+    ///
+    /// This binds the ZK proof to the specific credential and claim being verified,
+    /// ensuring that a proof valid for one (credential, claim) pair cannot be
+    /// replayed for a different pair.
+    fn encode_claim_public_inputs(env: &Env, credential_id: u64, claim_type: &ClaimType) -> soroban_sdk::Bytes {
+        let mut public_inputs = soroban_sdk::Bytes::new(env);
+
+        let cred_id_bytes = credential_id.to_le_bytes();
+        for byte in &cred_id_bytes {
+            public_inputs.push(*byte);
+        }
+        for _ in 0..(32 - cred_id_bytes.len()) {
+            public_inputs.push(0);
+        }
+
+        let claim_type_value: u64 = match claim_type {
+            ClaimType::HasDegree => 1,
+            ClaimType::HasLicense => 2,
+            ClaimType::HasEmploymentHistory => 3,
+            ClaimType::HasCertification => 4,
+            ClaimType::HasResearchPublication => 5,
+        };
+
+        let claim_bytes = claim_type_value.to_le_bytes();
+        for byte in &claim_bytes {
+            public_inputs.push(*byte);
+        }
+        for _ in 0..(32 - claim_bytes.len()) {
+            public_inputs.push(0);
+        }
+
+        public_inputs
     }
 
     /// Check if a caller is authorized to verify a credential.
@@ -20733,12 +20777,12 @@ mod tests {
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
-        &None,
+            &vk_hash,
+            &None,
         );
         assert!(result);
     }
@@ -20765,16 +20809,19 @@ mod tests {
 
         let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
 
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
+
         let proof = Bytes::from_slice(&env, b"valid-proof");
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
-        &None,
+            &vk_hash,
+            &None,
         );
         assert!(!result);
     }
@@ -20811,12 +20858,12 @@ mod tests {
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasLicense,
             &proof,
-        &None,
+            &vk_hash,
+            &None,
         );
         assert!(!result);
     }
@@ -20861,11 +20908,11 @@ mod tests {
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+            &vk_hash,
             &Some(hr_delegate),
         );
         assert!(result);
@@ -20888,6 +20935,8 @@ mod tests {
         let zk_admin = Address::generate(&env);
         ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
         sbt.initialize(&zk_admin, &qp_id);
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -20906,11 +20955,11 @@ mod tests {
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+            &vk_hash,
             &Some(hr_delegate),
         );
         assert!(!result);
@@ -20933,6 +20982,8 @@ mod tests {
         let zk_admin = Address::generate(&env);
         ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
         sbt.initialize(&zk_admin, &qp_id);
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -20947,11 +20998,11 @@ mod tests {
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
+            &vk_hash,
             &Some(stranger),
         );
         assert!(!result);
@@ -21717,12 +21768,12 @@ mod tests {
         let verified = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
-        &None,
+            &vk_hash,
+            &None,
         );
         assert!(verified);
 
@@ -21731,12 +21782,12 @@ mod tests {
         let not_verified = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &zk_admin,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &empty_proof,
-        &None,
+            &vk_hash,
+            &None,
         );
         assert!(!not_verified);
     }

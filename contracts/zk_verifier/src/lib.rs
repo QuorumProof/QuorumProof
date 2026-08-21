@@ -179,6 +179,12 @@ fn proof_binding_hash(
 /// 4. Multiple collision resistance checks
 ///
 /// Returns true if the proof passes all enhanced validation checks.
+///
+/// **WARNING: This is a structural/hash-binding heuristic, NOT actual cryptographic
+/// verification. It only checks byte patterns and hash outputs, not elliptic-curve
+/// pairing math. Use only for testing; production verification must use
+/// [`verify_groth16_proof`] which performs real BLS12-381 pairing checks.**
+#[cfg(any(test, feature = "testutils"))]
 fn groth16_verify(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
     // 1. Length check
     if proof.len() != GROTH16_PROOF_LEN {
@@ -224,6 +230,9 @@ fn groth16_verify(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
 }
 
 /// Enhanced VK binding with multiple collision resistance checks
+///
+/// **WARNING: This is not real cryptographic verification. Use only for testing.**
+#[cfg(any(test, feature = "testutils"))]
 fn verify_enhanced_vk_binding(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
     // Primary binding: SHA-256(vk_hash || proof_bytes)
     let mut binding_input = Bytes::new(env);
@@ -929,6 +938,13 @@ impl ZkVerifierContract {
     ///
     /// The proof must be exactly 256 bytes (BN254 uncompressed: A‖B‖C).
     /// A verifying key hash must have been registered via `set_verifying_key`.
+    ///
+    /// **WARNING: This is a test-only heuristic path that does NOT perform actual
+    /// cryptographic verification. It is only available in test builds. Production
+    /// code must use [`verify_groth16_proof`] which performs real BLS12-381 pairing
+    /// checks and binds the proof to specific credential_id and claim_type via
+    /// public inputs.**
+    #[cfg(any(test, feature = "testutils"))]
     pub fn verify_claim(
         env: Env,
         admin: Address,
@@ -1126,7 +1142,7 @@ impl ZkVerifierContract {
     }
 
     /// Admin-only contract upgrade to new WASM.
-    fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }

@@ -62,6 +62,7 @@ mod integration {
         sbt: SbtRegistryContractClient<'a>,
         zk: ZkVerifierContractClient<'a>,
         admin: soroban_sdk::Address,
+        vk_hash: BytesN<32>,
     }
 
     fn setup(env: &Env) -> Contracts<'_> {
@@ -89,7 +90,7 @@ mod integration {
         let vk_hash = BytesN::from_array(env, &[0u8; 32]);
         zk.set_verifying_key(&admin, &vk_hash);
 
-        Contracts { qp, sbt, zk, admin }
+        Contracts { qp, sbt, zk, admin, vk_hash }
     }
 
     fn metadata(env: &Env) -> Bytes {
@@ -273,12 +274,12 @@ mod integration {
         let result = c.qp.verify_engineer(
             &c.sbt.address,
             &c.zk.address,
-            &c.admin,
             &engineer,
             &cred_id,
             &QpClaimType::HasDegree,
             &valid_proof(&env),
-        &None,
+            &c.vk_hash,
+            &None,
         );
         assert!(result);
     }
@@ -297,12 +298,12 @@ mod integration {
         let result = c.qp.verify_engineer(
             &c.sbt.address,
             &c.zk.address,
-            &c.admin,
             &engineer,
             &cred_id,
             &QpClaimType::HasDegree,
             &valid_proof(&env),
-        &None,
+            &c.vk_hash,
+            &None,
         );
         assert!(!result);
     }
@@ -633,11 +634,11 @@ mod integration {
         let result = c.qp.verify_engineer(
             &c.sbt.address,
             &c.zk.address,
-            &c.admin,
             &engineer,
             &(cred_id + 1),
             &QpClaimType::HasDegree,
             &valid_proof(&env),
+            &c.vk_hash,
             &None,
         );
         assert!(!result);
