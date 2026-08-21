@@ -565,4 +565,250 @@ mod tests_bbs_plus {
             assert!(!result.disclosure_permitted);
         });
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Public Entrypoint Tests (Issue #1360)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_public_entrypoint_set_attribute_privacy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let attr = Bytes::from_slice(&env, b"credit_score");
+            QuorumProofContract::bbs_set_attribute_privacy(
+                env.clone(),
+                admin.clone(),
+                5u32,
+                attr.clone(),
+                PrivacyLevel::Confidential,
+            );
+
+            // Verify it was stored correctly
+            let policy = get_attribute_privacy(&env, 5u32, attr);
+            assert_eq!(policy.sensitivity, PrivacyLevel::Confidential);
+        });
+    }
+
+    #[test]
+    fn test_public_entrypoint_check_disclosure_permitted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let attr = Bytes::from_slice(&env, b"salary");
+            set_attribute_privacy(&env, admin, 3u32, attr.clone(), PrivacyLevel::Internal);
+
+            // Check through public entrypoint
+            let result = QuorumProofContract::bbs_check_disclosure_permitted(
+                env.clone(),
+                3u32,
+                attr,
+                false,
+            );
+            assert!(!result.disclosure_permitted);
+            assert_eq!(result.sensitivity, PrivacyLevel::Internal);
+        });
+    }
+
+    #[test]
+    fn test_public_entrypoint_batch_check_disclosure() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let attr1 = Bytes::from_slice(&env, b"name");
+            let attr2 = Bytes::from_slice(&env, b"ssn");
+            let attr3 = Bytes::from_slice(&env, b"email");
+
+            set_attribute_privacy(&env, admin.clone(), 2u32, attr1.clone(), PrivacyLevel::Public);
+            set_attribute_privacy(&env, admin.clone(), 2u32, attr2.clone(), PrivacyLevel::Confidential);
+            set_attribute_privacy(&env, admin, 2u32, attr3.clone(), PrivacyLevel::Internal);
+
+            let mut attrs = Vec::new(&env);
+            attrs.push_back(attr1);
+            attrs.push_back(attr2);
+            attrs.push_back(attr3);
+
+            let results = QuorumProofContract::bbs_batch_check_disclosure(
+                env.clone(),
+                2u32,
+                attrs.clone(),
+                true, // verifier_is_permissioned
+            );
+
+            assert_eq!(results.len(), 3);
+            assert_eq!(results.get(attrs.get(0).unwrap()).unwrap(), true); // public
+            assert_eq!(results.get(attrs.get(1).unwrap()).unwrap(), false); // confidential
+            assert_eq!(results.get(attrs.get(2).unwrap()).unwrap(), true); // internal + permissioned
+        });
+    }
+
+    #[test]
+    fn test_public_entrypoint_non_revocation_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let acc_bytes = Bytes::from_slice(&env, b"accumulator-v1");
+            let proof_bytes = Bytes::from_slice(&env, b"non-revocation-proof");
+
+            // Initialize accumulator
+            QuorumProofContract::bbs_add_to_revocation_accumulator(
+                env.clone(),
+                admin,
+                42u64,
+                acc_bytes,
+            );
+
+            // Create proof
+            QuorumProofContract::bbs_create_non_revocation_proof(
+                env.clone(),
+                holder,
+                42u64,
+                proof_bytes,
+            );
+
+            // Verify through public entrypoint
+            let is_valid = QuorumProofContract::bbs_verify_non_revocation(env, 42u64);
+            assert!(is_valid);
+        });
+    }
+
+    #[test]
+    fn test_public_entrypoint_non_revocation_stale_epoch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let v1 = Bytes::from_slice(&env, b"acc-v1");
+            let v2 = Bytes::from_slice(&env, b"acc-v2");
+            let proof = Bytes::from_slice(&env, b"proof-bytes");
+
+            // Initialize with v1
+            QuorumProofContract::bbs_add_to_revocation_accumulator(
+                env.clone(),
+                admin.clone(),
+                10u64,
+                v1,
+            );
+
+            // Create proof at epoch 1
+            QuorumProofContract::bbs_create_non_revocation_proof(
+                env.clone(),
+                holder.clone(),
+                10u64,
+                proof.clone(),
+            );
+
+            // Proof should be valid
+            assert!(QuorumProofContract::bbs_verify_non_revocation(
+                env.clone(),
+                10u64
+            ));
+
+            // Advance epoch
+            QuorumProofContract::bbs_add_to_revocation_accumulator(
+                env.clone(),
+                admin,
+                10u64,
+                v2,
+            );
+
+            // Proof is now stale (epoch mismatch)
+            assert!(!QuorumProofContract::bbs_verify_non_revocation(env, 10u64));
+        });
+    }
+
+    #[test]
+    fn test_public_entrypoint_rotate_issuer_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let key1 = Bytes::from_slice(&env, b"issuer-key-v1");
+            let key2 = Bytes::from_slice(&env, b"issuer-key-v2");
+
+            // Rotate initial key
+            QuorumProofContract::bbs_rotate_issuer_key(
+                env.clone(),
+                admin.clone(),
+                issuer.clone(),
+                key1,
+            );
+
+            // Rotate to new key
+            QuorumProofContract::bbs_rotate_issuer_key(
+                env.clone(),
+                admin,
+                issuer.clone(),
+                key2,
+            );
+
+            // Verify history
+            let history = get_bbs_issuer_key_history(&env, issuer.clone());
+            assert_eq!(history.len(), 2);
+            assert_eq!(history.get(0).unwrap().version, 1u32);
+            assert_eq!(history.get(1).unwrap().version, 2u32);
+
+            let info = get_bbs_issuer_key_info(&env, issuer);
+            assert_eq!(info.current_version, 2u32);
+            assert_eq!(info.total_versions, 2u32);
+        });
+    }
+
+    #[test]
+    fn test_public_entrypoint_privacy_enforcement_through_bbs_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let attr = Bytes::from_slice(&env, b"medical_record");
+
+            // Set attribute as confidential
+            QuorumProofContract::bbs_set_attribute_privacy(
+                env.clone(),
+                admin.clone(),
+                7u32,
+                attr.clone(),
+                PrivacyLevel::Confidential,
+            );
+
+            // Non-permissioned verifier cannot access
+            let result_noperm = QuorumProofContract::bbs_check_disclosure_permitted(
+                env.clone(),
+                7u32,
+                attr.clone(),
+                false,
+            );
+            assert!(!result_noperm.disclosure_permitted);
+
+            // Permissioned verifier also cannot access confidential
+            let result_perm = QuorumProofContract::bbs_check_disclosure_permitted(
+                env.clone(),
+                7u32,
+                attr,
+                true,
+            );
+            assert!(!result_perm.disclosure_permitted);
+        });
+    }
 }
