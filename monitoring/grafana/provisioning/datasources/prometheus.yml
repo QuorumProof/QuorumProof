@@ -8,9 +8,12 @@ datasources:
     isDefault: true
     editable: false
 
-  # #586 — Loki log aggregation datasource
+  # #586 — Loki log aggregation datasource.
+  # uid must match the value used in dashboard panel definitions
+  # (contract-health.json panel id=7 references datasource uid "loki").
   - name: Loki
     type: loki
+    uid: loki
     access: proxy
     url: http://loki:3100
     editable: false

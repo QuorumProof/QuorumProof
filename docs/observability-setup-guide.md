@@ -50,14 +50,15 @@ docker-compose up -d
 This starts the complete observability stack:
 
 ```
-Container Port Purpose
+Container    Port  Purpose
 ────────────────────────────────────────────────────────────
-prometheus 9090 Metrics DB & scraper
-grafana    3000 Visualization (admin/admin)
-loki       3100 Log aggregation
-promtail   —    Log shipper
-alertmanager 9093 Alert routing
-exporter   9101 QuorumProof metrics
+api-server   3001  QuorumProof REST API (writes logs to shared volume)
+prometheus   9090  Metrics DB & scraper
+grafana      3000  Visualization (admin/admin)
+loki         3100  Log aggregation
+promtail     —     Log shipper (tails /var/log/quorumproof/*.log)
+alertmanager 9093  Alert routing
+exporter     9101  QuorumProof metrics
 ```
 
 ### 2. Access Services
@@ -66,6 +67,7 @@ exporter   9101 QuorumProof metrics
 - **Prometheus:** http://localhost:9090
 - **AlertManager:** http://localhost:9093
 - **Loki:** http://localhost:3100
+- **api-server:** http://localhost:3001
 
 ### 3. Verify Metrics Collection
 
@@ -218,54 +220,113 @@ scrape_configs:
 
 ## Logging
 
+### ✅ Log Aggregation — Live
+
+> **Status: fully wired end-to-end as of #586.**
+>
+> api-server writes structured JSON logs to `/var/log/quorumproof/api.log` using
+> [pino](https://github.com/pinojs/pino). promtail tails that file and ships
+> every line to Loki. The "Contract Logs" panel in the `contract-health.json`
+> Grafana dashboard queries `{job="quorumproof-api"}` and will show live log
+> lines immediately after `docker compose up`.
+
+### Log Driver and Path
+
+| Component | Role | Path / mechanism |
+|-----------|------|-----------------|
+| api-server | Writer | pino → `/var/log/quorumproof/api.log` |
+| promtail | Shipper | Tails `quorumproof-logs` named volume at `/var/log/quorumproof/*.log` |
+| Loki | Store | Receives push from promtail, retains 30 days |
+| Grafana | Viewer | Queries Loki datasource (uid `loki`) with `{job="quorumproof-api"}` |
+
+The log path is shared via a Docker named volume (`quorumproof-logs`) so no
+host path configuration is required. Both api-server and promtail mount the
+same volume.
+
 ### Log Levels
 
 Configure logging verbosity via environment variables:
 
 ```bash
 # Application environment
-export LOG_LEVEL=info  # debug, info, warn, error
-export LOG_FORMAT=json  # json, text
+export LOG_LEVEL=info      # debug, info, warn, error (default: info)
+export LOG_STDOUT=true     # also write to stdout (default: true)
+export LOG_FILE=/var/log/quorumproof/api.log  # log file path
+```
+
+Module-specific overrides:
+
+```bash
+# Format: MODULE_LOGS=<module>:<level>[,<module>:<level>...]
+export MODULE_LOGS=auth:debug,webhook:warn
+```
+
+### Log Format
+
+Every log line is NDJSON. Required fields that Loki's JSON parser uses for
+label extraction:
+
+```json
+{
+  "level": "info",
+  "time": "2026-08-21T19:00:00.000Z",
+  "service": "quorumproof-api",
+  "module": "http",
+  "msg": "Request completed",
+  "method": "GET",
+  "path": "/health",
+  "status": 200,
+  "duration": 3
+}
 ```
 
 ### Log Shipping
 
-Logs are automatically shipped to Loki via Promtail. To access logs:
+Logs are automatically shipped to Loki by promtail. To access logs:
 
 **Via Grafana:**
 1. Open Grafana → Explore
-2. Select "Loki" datasource
+2. Select the `Loki` datasource
 3. Enter a query:
 
 ```logql
-{job="syslog"} | json
+{job="quorumproof-api"}
 ```
 
 **Common log queries:**
 
 ```logql
-# All credential issuance errors
-{job="app"} | json | operation="issue_credential" | level="error"
+# All error-level log lines
+{job="quorumproof-api"} | json | level="error"
 
-# Search for a specific credential ID
-{job="app"} | json | credential_id="cred_abc123"
+# HTTP requests to a specific path
+{job="quorumproof-api"} | json | path="/api/credentials"
 
-# Slow operations (> 1 second)
-{job="app"} | json | duration_ms > 1000
+# Slow responses (> 500 ms)
+{job="quorumproof-api"} | json | duration > 500
+
+# All auth module events
+{job="quorumproof-api"} | json | module="auth"
 ```
 
 ### Application Logging Integration
 
-To instrument your application with proper logging:
+The api-server uses the `logger` singleton from `src/services/logger.ts`:
 
-```rust
-// In your Rust code
-use log::{info, warn, error};
+```typescript
+import { logger } from './services/logger.js';
 
-info!("Credential issued: credential_id={}", credential_id);
-warn!("Rate limit approaching for issuer={}", issuer_id);
-error!("Contract call failed: {:?}", error);
+// Basic usage
+logger.info('Credential issued', 'credentials', { credentialId: 'cred-42' });
+logger.error('Contract call failed', 'soroban', { error: err.message });
+
+// Module-specific level filtering
+logger.debug('Detailed auth trace', 'auth', { sessionId });
 ```
+
+The HTTP middleware (`src/middleware/structuredLogging.ts`) automatically logs
+every incoming request and its completion with `method`, `path`, `status`, and
+`duration` fields.
 
 ---
 
@@ -438,9 +499,23 @@ quorumproof_consensus_lag_seconds
 ### Issue: Logs not appearing in Loki
 
 **Solution:**
-1. Check Promtail logs: `docker logs monitoring_promtail_1`
-2. Verify log file paths exist and are readable
-3. Check Loki configuration: `docker exec monitoring_loki_1 cat /etc/loki/loki.yml`
+1. Confirm api-server is running and writing to the log file:
+   ```bash
+   docker compose exec api-server ls -la /var/log/quorumproof/
+   docker compose exec api-server tail -5 /var/log/quorumproof/api.log
+   ```
+2. Check that the `quorumproof-logs` named volume is mounted by both services:
+   ```bash
+   docker compose config | grep -A5 quorumproof-logs
+   ```
+3. Check Promtail logs: `docker compose logs promtail`
+4. Verify promtail can read the file: the volume must be mounted at `/var/log/quorumproof` in the promtail container.
+5. Check Loki is ready: `curl -s http://localhost:3100/ready`
+6. Query Loki directly to rule out a Grafana configuration issue:
+   ```bash
+   curl -G http://localhost:3100/loki/api/v1/query \
+     --data-urlencode 'query={job="quorumproof-api"}' | jq .
+   ```
 
 ### Issue: High memory usage
 

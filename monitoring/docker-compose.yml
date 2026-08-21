@@ -1,6 +1,36 @@
 version: "3.8"
 
 services:
+  # #586 — api-server writes structured JSON logs to the shared log volume,
+  # which promtail then ships to Loki.
+  api-server:
+    build:
+      context: ../api-server
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      LOG_FILE: /var/log/quorumproof/api.log
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Optional: forward other env vars used by the app
+      STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      CONTRACT_QUORUM_PROOF: ${CONTRACT_QUORUM_PROOF:-}
+      DRAIN_TIMEOUT_MS: ${DRAIN_TIMEOUT_MS:-30000}
+    volumes:
+      # Bind-mount the host log directory so promtail can read the log file.
+      # The container creates the directory if it does not exist at startup.
+      - quorumproof-logs:/var/log/quorumproof
+    depends_on:
+      - loki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   quorumproof-exporter:
     build:
       context: ./exporter
@@ -70,8 +100,16 @@ services:
     image: grafana/promtail:3.0.0
     volumes:
       - ./loki/promtail.yml:/etc/promtail/promtail.yml:ro
-      - /var/log:/var/log:ro
+      # Mount the shared log volume so promtail can tail api.log
+      - quorumproof-logs:/var/log/quorumproof:ro
     command: -config.file=/etc/promtail/promtail.yml
     depends_on:
       - loki
+      - api-server
     restart: unless-stopped
+
+volumes:
+  # Named volume shared between api-server (writer) and promtail (reader).
+  # Using a named volume rather than a host bind-mount avoids permission
+  # differences between Docker Desktop (macOS/Windows) and Linux hosts.
+  quorumproof-logs:
