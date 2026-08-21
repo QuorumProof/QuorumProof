@@ -1,14 +1,19 @@
 /**
- * MFA Service — Issue #1299
+ * MFA Service — Issue #1299 / #1364
  *
  * Implements TOTP-based Multi-Factor Authentication using the RFC 6238 standard.
  * Uses @noble/hashes for HMAC-SHA1 (TOTP standard) without requiring extra deps.
  *
  * Each user can have one active TOTP secret. Pending secrets are stored until
  * the user verifies their first code, at which point MFA is fully enabled.
+ *
+ * Enrollment and backup code consumption are durable and visible across instances
+ * using DurableLog (replaces in-memory Map from #1364).
  */
 
 import crypto from 'crypto';
+import path from 'path';
+import { DurableLog } from './durableLog.js';
 
 export interface MfaRecord {
   userId: string;
@@ -147,9 +152,19 @@ function generateBackupCodes(): { plain: string[]; hashed: string[] } {
 // MfaService
 // ---------------------------------------------------------------------------
 
+export interface MfaServiceOptions {
+  dataDir?: string;
+}
+
 export class MfaService {
-  /** userId → MfaRecord */
-  private readonly store = new Map<string, MfaRecord>();
+  readonly dataDir: string;
+  private readonly store: DurableLog<MfaRecord>;
+
+  constructor(options: MfaServiceOptions = {}) {
+    const dataDir = options.dataDir ?? process.env.MFA_STORE_DATA_DIR ?? path.join(process.cwd(), '.data', 'mfa');
+    this.dataDir = dataDir;
+    this.store = new DurableLog<MfaRecord>(path.join(dataDir, 'records.jsonl'));
+  }
 
   /**
    * Begin MFA setup for a user.
@@ -241,15 +256,14 @@ export class MfaService {
 
   /** Disable MFA for a user (admin use / account recovery). */
   disableMfa(userId: string): boolean {
-    const record = this.store.get(userId);
-    if (!record) return false;
+    if (!this.store.has(userId)) return false;
     this.store.delete(userId);
     return true;
   }
 
   /** For testing only. */
   _resetForTest(): void {
-    this.store.clear();
+    for (const key of this.store.keys()) this.store.delete(key);
   }
 }
 
