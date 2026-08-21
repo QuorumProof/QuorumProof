@@ -46,6 +46,35 @@ require_cmd() {
   command -v "$1" &>/dev/null || fail "Required command not found: $1"
 }
 
+run_smoke_test_live_contract() {
+  local contract_id="$1"
+  local test_phase="$2"
+
+  log "[${test_phase}] Testing live contract $contract_id on $NETWORK..."
+
+  stellar keys generate smoketest --network "$NETWORK" 2>/dev/null || true
+
+  log "[${test_phase}] Verifying contract reachability (get_version)..."
+  stellar contract invoke \
+    --id "$contract_id" \
+    --source smoketest \
+    --network "$NETWORK" \
+    --rpc-url "$RPC_URL" \
+    -- get_version \
+    || fail "${test_phase} smoke test failed: contract $contract_id did not respond to get_version"
+
+  log "[${test_phase}] Verifying contract state (get_state_metrics)..."
+  stellar contract invoke \
+    --id "$contract_id" \
+    --source smoketest \
+    --network "$NETWORK" \
+    --rpc-url "$RPC_URL" \
+    -- get_state_metrics \
+    || fail "${test_phase} smoke test failed: contract $contract_id did not respond to get_state_metrics"
+
+  log "[${test_phase}] Live contract smoke tests passed."
+}
+
 require_cmd stellar
 require_cmd jq
 
@@ -74,10 +103,7 @@ log "Pre-upgrade WASM hash: $PRE_WASM_HASH (saved to $SNAPSHOT_FILE)"
 
 # ── Step 2: Pre-upgrade smoke tests ──────────────────────────────────────────
 log "Step 2: Running pre-upgrade smoke tests..."
-if ! "$ROOT_DIR/scripts/test.sh" 2>&1; then
-  fail "Pre-upgrade smoke tests failed — aborting upgrade"
-fi
-log "Pre-upgrade smoke tests passed."
+run_smoke_test_live_contract "$CONTRACT_ID" "Pre-upgrade"
 
 # ── Step 3: Upload new WASM and upgrade ──────────────────────────────────────
 log "Step 3: Uploading new WASM: $NEW_WASM"
@@ -106,7 +132,7 @@ log "Upgrade transaction submitted."
 # ── Step 4: Post-upgrade smoke tests ─────────────────────────────────────────
 log "Step 4: Running post-upgrade smoke tests..."
 POST_TEST_EXIT=0
-"$ROOT_DIR/scripts/test.sh" 2>&1 || POST_TEST_EXIT=$?
+run_smoke_test_live_contract "$CONTRACT_ID" "Post-upgrade" || POST_TEST_EXIT=$?
 
 if [[ $POST_TEST_EXIT -ne 0 ]]; then
   log "Post-upgrade smoke tests FAILED (exit $POST_TEST_EXIT). Initiating rollback..."
