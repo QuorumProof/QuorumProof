@@ -22570,17 +22570,10 @@ mod tests {
         let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
         // Create credential
-        let mut metadata = Map::new(&env);
-        metadata.set(
-            soroban_sdk::String::from_str(&env, "name"),
-            soroban_sdk::String::from_str(&env, "Test Cred"),
-        );
-        let metadata_hash = client.compute_hash(
-            &soroban_sdk::Bytes::from_slice(&env, b"test_metadata"),
-        );
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test_metadata");
         let cred_type: u32 = 1;
         let credential_id =
-            client.issue_credential(&issuer, &subject, &cred_type, &metadata_hash);
+            client.issue_credential(&issuer, &subject, &cred_type, &metadata, &None, &0u64);
 
         set_ledger_timestamp(&env, 1000);
         // Delegate voting rights with expiry at 3000
@@ -22618,12 +22611,10 @@ mod tests {
         let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
         // Create credential
-        let metadata_hash = client.compute_hash(
-            &soroban_sdk::Bytes::from_slice(&env, b"test_metadata"),
-        );
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test_metadata");
         let cred_type: u32 = 1;
         let credential_id =
-            client.issue_credential(&issuer, &subject, &cred_type, &metadata_hash);
+            client.issue_credential(&issuer, &subject, &cred_type, &metadata, &None, &0u64);
 
         set_ledger_timestamp(&env, 1000);
         // Delegate voting rights with expiry at 2000
@@ -22656,12 +22647,10 @@ mod tests {
         let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
 
         // Create credential
-        let metadata_hash = client.compute_hash(
-            &soroban_sdk::Bytes::from_slice(&env, b"test_metadata"),
-        );
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test_metadata");
         let cred_type: u32 = 1;
         let credential_id =
-            client.issue_credential(&issuer, &subject, &cred_type, &metadata_hash);
+            client.issue_credential(&issuer, &subject, &cred_type, &metadata, &None, &0u64);
 
         set_ledger_timestamp(&env, 1000);
         // Delegate voting rights
