@@ -980,6 +980,10 @@ impl ZkVerifierContract {
     /// 
     /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
     /// Cache entries expire after `ttl` ledgers.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
     pub fn verify_proof_cached(
         env: Env,
         admin: Address,
@@ -1032,6 +1036,10 @@ impl ZkVerifierContract {
     /// 
     /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
     /// Cache entries are stored indefinitely until explicitly cleared.
+    ///
+    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
     pub fn verify_claim_with_cache(
         env: Env,
         admin: Address,
@@ -1349,6 +1357,10 @@ impl ZkVerifierContract {
     /// Verify a Groth16 ZK proof anonymously using a holder commitment.
     /// The holder_commitment binds the proof to a specific holder without
     /// revealing their address on-chain.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
     pub fn verify_claim_anonymous(
         env: Env,
         _credential_id: u64,
