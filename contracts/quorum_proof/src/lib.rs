@@ -19234,7 +19234,7 @@ impl QuorumProofContract {
     }
 
     /// Public entrypoint: Add a credential to the BBS+ revocation accumulator.
-    pub fn bbs_add_to_revocation_accumulator(
+    pub fn bbs_add_revocation_accumulator(
         env: Env,
         caller: Address,
         credential_id: u64,

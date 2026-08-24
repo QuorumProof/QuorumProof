@@ -623,20 +623,30 @@ mod tests_bbs_plus {
         let contract_id = env.register_contract(None, QuorumProofContract);
         let admin = Address::generate(&env);
 
+        let attr1 = Bytes::from_slice(&env, b"name");
+        let attr2 = Bytes::from_slice(&env, b"ssn");
+        let attr3 = Bytes::from_slice(&env, b"email");
+
+        // Each call requires the admin's auth; give each its own frame so
+        // mock_all_auths doesn't see a repeat authorization for the same
+        // address within a single frame (soroban-env-host rejects that as
+        // Error(Auth, ExistingValue) — "frame is already authorized").
         env.as_contract(&contract_id, || {
-            let attr1 = Bytes::from_slice(&env, b"name");
-            let attr2 = Bytes::from_slice(&env, b"ssn");
-            let attr3 = Bytes::from_slice(&env, b"email");
-
             set_attribute_privacy(&env, admin.clone(), 2u32, attr1.clone(), PrivacyLevel::Public);
+        });
+        env.as_contract(&contract_id, || {
             set_attribute_privacy(&env, admin.clone(), 2u32, attr2.clone(), PrivacyLevel::Confidential);
+        });
+        env.as_contract(&contract_id, || {
             set_attribute_privacy(&env, admin, 2u32, attr3.clone(), PrivacyLevel::Internal);
+        });
 
-            let mut attrs = Vec::new(&env);
-            attrs.push_back(attr1);
-            attrs.push_back(attr2);
-            attrs.push_back(attr3);
+        let mut attrs = Vec::new(&env);
+        attrs.push_back(attr1);
+        attrs.push_back(attr2);
+        attrs.push_back(attr3);
 
+        env.as_contract(&contract_id, || {
             let results = QuorumProofContract::bbs_batch_check_disclosure(
                 env.clone(),
                 2u32,
@@ -659,12 +669,12 @@ mod tests_bbs_plus {
         let admin = Address::generate(&env);
         let holder = Address::generate(&env);
 
-        env.as_contract(&contract_id, || {
+        env.clone().as_contract(&contract_id, || {
             let acc_bytes = Bytes::from_slice(&env, b"accumulator-v1");
             let proof_bytes = Bytes::from_slice(&env, b"non-revocation-proof");
 
             // Initialize accumulator
-            QuorumProofContract::bbs_add_to_revocation_accumulator(
+            QuorumProofContract::bbs_add_revocation_accumulator(
                 env.clone(),
                 admin,
                 42u64,
@@ -693,43 +703,56 @@ mod tests_bbs_plus {
         let admin = Address::generate(&env);
         let holder = Address::generate(&env);
 
-        env.as_contract(&contract_id, || {
-            let v1 = Bytes::from_slice(&env, b"acc-v1");
-            let v2 = Bytes::from_slice(&env, b"acc-v2");
-            let proof = Bytes::from_slice(&env, b"proof-bytes");
+        let v1 = Bytes::from_slice(&env, b"acc-v1");
+        let v2 = Bytes::from_slice(&env, b"acc-v2");
+        let proof = Bytes::from_slice(&env, b"proof-bytes");
 
-            // Initialize with v1
-            QuorumProofContract::bbs_add_to_revocation_accumulator(
+        // Each call requiring admin/holder auth gets its own frame — reusing
+        // the same address's auth twice within one frame trips
+        // mock_all_auths's Error(Auth, ExistingValue) ("frame is already
+        // authorized").
+
+        // Initialize with v1
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::bbs_add_revocation_accumulator(
                 env.clone(),
                 admin.clone(),
                 10u64,
                 v1,
             );
+        });
 
-            // Create proof at epoch 1
+        // Create proof at epoch 1
+        env.as_contract(&contract_id, || {
             QuorumProofContract::bbs_create_non_revocation_proof(
                 env.clone(),
                 holder.clone(),
                 10u64,
                 proof.clone(),
             );
+        });
 
-            // Proof should be valid
+        // Proof should be valid
+        env.as_contract(&contract_id, || {
             assert!(QuorumProofContract::bbs_verify_non_revocation(
                 env.clone(),
                 10u64
             ));
+        });
 
-            // Advance epoch
-            QuorumProofContract::bbs_add_to_revocation_accumulator(
+        // Advance epoch
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::bbs_add_revocation_accumulator(
                 env.clone(),
                 admin,
                 10u64,
                 v2,
             );
+        });
 
-            // Proof is now stale (epoch mismatch)
-            assert!(!QuorumProofContract::bbs_verify_non_revocation(env, 10u64));
+        // Proof is now stale (epoch mismatch)
+        env.as_contract(&contract_id, || {
+            assert!(!QuorumProofContract::bbs_verify_non_revocation(env.clone(), 10u64));
         });
     }
 
@@ -741,27 +764,36 @@ mod tests_bbs_plus {
         let admin = Address::generate(&env);
         let issuer = Address::generate(&env);
 
-        env.as_contract(&contract_id, || {
-            let key1 = Bytes::from_slice(&env, b"issuer-key-v1");
-            let key2 = Bytes::from_slice(&env, b"issuer-key-v2");
+        let key1 = Bytes::from_slice(&env, b"issuer-key-v1");
+        let key2 = Bytes::from_slice(&env, b"issuer-key-v2");
 
-            // Rotate initial key
+        // Each rotation requires the admin's auth; give each its own frame
+        // so mock_all_auths doesn't see a repeat authorization for the same
+        // address within a single frame (soroban-env-host rejects that as
+        // Error(Auth, ExistingValue) — "frame is already authorized").
+
+        // Rotate initial key
+        env.as_contract(&contract_id, || {
             QuorumProofContract::bbs_rotate_issuer_key(
                 env.clone(),
                 admin.clone(),
                 issuer.clone(),
                 key1,
             );
+        });
 
-            // Rotate to new key
+        // Rotate to new key
+        env.as_contract(&contract_id, || {
             QuorumProofContract::bbs_rotate_issuer_key(
                 env.clone(),
                 admin,
                 issuer.clone(),
                 key2,
             );
+        });
 
-            // Verify history
+        // Verify history
+        env.as_contract(&contract_id, || {
             let history = get_bbs_issuer_key_history(&env, issuer.clone());
             assert_eq!(history.len(), 2);
             assert_eq!(history.get(0).unwrap().version, 1u32);
