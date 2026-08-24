@@ -524,11 +524,11 @@ fn bench_verify_engineer() {
         qp_client.verify_engineer(
             &sbt_id,
             &zk_id,
-            &admin,
             &engineer,
             &cred_id,
             &QpClaimType::HasDegree,
             &proof,
+            &vk_hash,
             &None,
         );
     });
