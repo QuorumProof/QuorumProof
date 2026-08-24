@@ -25,9 +25,3 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
-
-[patch.crates-io]
-# Override h2 0.3.27 with secure version to fix RUSTSEC-2026-0258
-h2 = { version = "0.4.16" }
-# Override mio 1.2.2 with newer version that doesn't have compilation bugs
-mio = { version = "1.2.4" }
