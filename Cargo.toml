@@ -29,3 +29,5 @@ debug-assertions = true
 [patch.crates-io]
 # Pin h2 to secure version to fix RUSTSEC-2026-0258
 h2 = { version = "=0.4.16" }
+# Pin ed25519-dalek to version compatible with soroban-env-host
+ed25519-dalek = { version = "=2.2.0" }
