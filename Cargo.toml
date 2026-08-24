@@ -25,11 +25,3 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
-
-[patch.crates-io]
-# Fix h2 security vulnerability RUSTSEC-2026-0258
-h2 = "=0.4.16"
-# Constrain rand to compatible version with soroban-env-host
-rand = "=0.8.5"
-rand_chacha = "=0.3.1"
-ed25519-dalek = "=2.1.1"
