@@ -22626,7 +22626,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "DelegationNotFound")]
+    #[should_panic(expected = "attestor not in slice and no valid delegation found")]
     fn test_attest_with_revoked_delegation_fails() {
         let env = Env::default();
         env.mock_all_auths();
