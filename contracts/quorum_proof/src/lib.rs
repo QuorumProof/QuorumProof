@@ -11533,10 +11533,10 @@ impl QuorumProofContract {
 
         let cred_id_bytes = credential_id.to_le_bytes();
         for byte in &cred_id_bytes {
-            public_inputs.push(*byte);
+            public_inputs.push_back(*byte);
         }
         for _ in 0..(32 - cred_id_bytes.len()) {
-            public_inputs.push(0);
+            public_inputs.push_back(0);
         }
 
         let claim_type_value: u64 = match claim_type {
@@ -11549,10 +11549,10 @@ impl QuorumProofContract {
 
         let claim_bytes = claim_type_value.to_le_bytes();
         for byte in &claim_bytes {
-            public_inputs.push(*byte);
+            public_inputs.push_back(*byte);
         }
         for _ in 0..(32 - claim_bytes.len()) {
-            public_inputs.push(0);
+            public_inputs.push_back(0);
         }
 
         public_inputs
