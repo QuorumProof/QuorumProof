@@ -9,7 +9,6 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.11", features = ["json"] }
-h2 = "=0.4.16"  # Pin h2 to fixed security version
 dotenv = "0.15"
 anyhow = "1"
 
