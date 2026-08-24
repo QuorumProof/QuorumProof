@@ -9678,12 +9678,18 @@ impl QuorumProofContract {
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
 
-        // Check if attestor has already attested for this credential
-        for rec in records.iter() {
-            if rec.attestor == attestor {
-                panic!("attestor has already attested for this credential");
-            }
-        }
+        // Check if attestor has already attested for this credential in this slice.
+        // Issue #1362: a credential can be attested across multiple (e.g. overlapping
+        // or nested) slices, so the same attestor may legitimately attest once per
+        // slice — the duplicate guard must be scoped per (credential, slice), not
+        // globally per credential.
+        let already_attested_in_slice = env.storage().instance().has(
+            &DataKey5::AttestationWeight(credential_id, slice_id, attestor.clone()),
+        );
+        assert!(
+            !already_attested_in_slice,
+            "attestor has already attested for this credential"
+        );
 
         let record = AttestationRecord {
             attestor: attestor.clone(),

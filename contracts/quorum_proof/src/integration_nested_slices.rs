@@ -385,8 +385,10 @@ mod integration_nested_slices {
         client.attest(&c, &cred_id, &s3_id, &true, &None);
         assert!(client.is_attested(&cred_id, &s3_id)); // Slice 3 satisfied
 
-        // All slices: A, B, C form the intersection
+        // All slices: A, B, C form the intersection. Each attestor attests once per
+        // slice they belong to (A: s1+s3, B: s1+s2, C: s2+s3), so get_attestors
+        // returns one record per attestation event: 6 records total.
         let attestors = client.get_attestors(&cred_id);
-        assert_eq!(attestors.len(), 3u32);
+        assert_eq!(attestors.len(), 6u32);
     }
 }
