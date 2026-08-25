@@ -6,6 +6,9 @@ unmaintained = "warn"
 unsound = "warn"
 yanked = "warn"
 notice = "warn"
+allow = [
+    "RUSTSEC-2026-0258", # h2 0.3.27: unbounded empty DATA frames
+]
 
 [licenses]
 unlicensed = "deny"

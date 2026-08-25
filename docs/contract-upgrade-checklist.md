@@ -109,6 +109,35 @@ holders and monitoring to react.
 
 ## 5. Post-Upgrade Validation
 
+### 5a. Automated Smoke Tests (Programmatic Verification)
+
+The `scripts/upgrade_rollback.sh` script runs automated smoke tests before and
+after the upgrade:
+
+- **Pre-upgrade smoke test** — Verifies the live contract responds to
+  `get_version()` and `get_state_metrics()` calls. If this check fails, the
+  upgrade is aborted and no WASM is deployed.
+- **Post-upgrade smoke test** — Re-runs the same checks (`get_version()` and
+  `get_state_metrics()`) against the live contract **after** the new WASM is
+  deployed. If this check fails, `scripts/upgrade_rollback.sh` automatically:
+  1. Rolls back the WASM to the previous hash
+  2. Sends a failure notification to `NOTIFY_WEBHOOK` (if configured)
+  3. Exits with status code 1
+
+**Why these specific checks?**
+
+- `get_version()` confirms the contract code is live and responds to read
+  calls. A broken WASM or deployment failure will not respond.
+- `get_state_metrics()` confirms the contract can access its stored state. A
+  storage layout regression (e.g., reordered `DataKey` variants) would cause
+  this to fail or return incorrect values.
+
+**These automated checks do NOT replace manual validation** (section 5b below).
+They are a rapid failure-detection mechanism for deployments; operator review
+is still required.
+
+### 5b. Manual Spot-Check Verification
+
 Run these checks immediately after the upgrade transaction confirms:
 
 - [ ] **Contract still responds** — Call `is_paused()`. Any response (true or

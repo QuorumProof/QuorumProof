@@ -9,7 +9,8 @@ from datetime import datetime
 
 import requests
 from prometheus_client import start_http_server, CollectorRegistry
-from stellar_sdk import Server
+from stellar_sdk import SorobanServer
+from stellar_sdk.soroban_rpc import EventFilter, EventFilterType
 
 from metrics import (
     registry,
@@ -60,8 +61,9 @@ class QuorumProofExporter:
         self.contract_id = contract_id
         self.scrape_interval = scrape_interval
         self.exporter_port = exporter_port
-        self.server = Server(rpc_url)
+        self.server = SorobanServer(rpc_url)
         self.last_ledger = 0
+        self.event_cursor: Optional[str] = None
         self.event_cache: Dict[str, Any] = {}
         baseline_path = os.getenv("PERF_BASELINE_PATH", "performance_baseline.json")
         self.perf_detector = PerformanceRegressionDetector(baseline_path=baseline_path)
@@ -243,97 +245,114 @@ class QuorumProofExporter:
         }
 
     def _fetch_events(self) -> list:
-        """Fetch contract events from Stellar RPC."""
-        # Use Stellar RPC to get contract events
-        # This is a simplified implementation; actual implementation depends on RPC API
+        """Fetch contract events from Soroban RPC using the correct JSON-RPC method."""
         try:
-            response = requests.get(
-                f"{self.rpc_url}/events",
-                params={
-                    "contract_id": self.contract_id,
-                    "start_ledger": self.last_ledger,
-                    "limit": 1000,
-                },
-                timeout=10,
+            event_filter = EventFilter(
+                event_type=EventFilterType.CONTRACT,
+                contract_ids=[self.contract_id],
             )
-            response.raise_for_status()
-            data = response.json()
+            response = self.server.get_events(
+                start_ledger=self.last_ledger,
+                filters=[event_filter],
+                cursor=self.event_cursor,
+                limit=1000,
+            )
 
-            if data.get("events"):
-                self.last_ledger = data["events"][-1].get("ledger", self.last_ledger)
+            if response.events:
+                self.last_ledger = response.events[-1].ledger
+                self.event_cursor = response.events[-1].paging_token
 
-            return data.get("events", [])
+            return response.events
         except Exception as e:
             logger.error(f"Failed to fetch events: {e}")
             return []
 
-    def _process_event(self, event: Dict[str, Any]):
-        """Process a contract event and update metrics."""
-        event_type = event.get("type")
-        data = event.get("data", {})
+    def _process_event(self, event: Any):
+        """Process a contract event and update metrics.
 
-        if event_type == "CredentialIssued":
-            credentials_issued_total.inc()
-            active_slices_total.set(data.get("slice_count", 0))
+        Handles Soroban RPC EventInfo objects with XDR-encoded values.
+        Skips malformed or unexpected event types without crashing.
+        """
+        import stellar_sdk.scval as scval
 
-        elif event_type == "CredentialRevoked":
-            credentials_revoked_total.inc()
+        try:
+            event_type = event.event_type
+            try:
+                if event.value:
+                    data = scval.to_native(event.value) or {}
+                else:
+                    data = {}
+            except Exception as e:
+                logger.warning(f"Failed to decode event value: {e}")
+                data = {}
 
-        elif event_type == "AttestationCreated":
-            attestations_total.inc()
-            # Update attestation success rate
-            self._update_attestation_rate(data)
+            if event_type == "CredentialIssued":
+                credentials_issued_total.inc()
+                if isinstance(data, dict):
+                    active_slices_total.set(data.get("slice_count", 0))
 
-        elif event_type == "ProofRequested":
-            proof_requests_total.inc()
+            elif event_type == "CredentialRevoked":
+                credentials_revoked_total.inc()
 
-        elif event_type == "MigrationProgress":
-            # Emitted by migrate_next_chunk on every chunk — a near-real-time
-            # complement to the periodic get_migration_job poll in
-            # _scrape_migration_jobs, which remains the source of truth for
-            # staleness detection (MigrationStalled) since it doesn't depend
-            # on this event pipeline having kept up.
-            migration_id = data.get("migration_id")
-            if migration_id is not None:
-                labels = {"migration_id": str(migration_id)}
-                migration_cursor.labels(**labels).set(data.get("cursor", 0))
-                migration_total_items.labels(**labels).set(data.get("total_items", 0))
-                migration_status.labels(**labels).set(data.get("status", 0))
+            elif event_type == "AttestationCreated":
+                attestations_total.inc()
+                if isinstance(data, dict):
+                    self._update_attestation_rate(data)
 
-        elif event_type == "RateLimitExceeded":
-            address = data.get("address", "unknown")
-            rate_limit_hits_total.labels(address=address).inc()
+            elif event_type == "ProofRequested":
+                proof_requests_total.inc()
 
-        elif event_type == "ContractPaused":
-            contract_paused.set(1)
+            elif event_type == "MigrationProgress":
+                if isinstance(data, dict):
+                    migration_id = data.get("migration_id")
+                    if migration_id is not None:
+                        labels = {"migration_id": str(migration_id)}
+                        migration_cursor.labels(**labels).set(data.get("cursor", 0))
+                        migration_total_items.labels(**labels).set(data.get("total_items", 0))
+                        migration_status.labels(**labels).set(data.get("status", 0))
 
-        elif event_type == "ContractUnpaused":
-            contract_paused.set(0)
+            elif event_type == "RateLimitExceeded":
+                if isinstance(data, dict):
+                    address = data.get("address", "unknown")
+                    rate_limit_hits_total.labels(address=address).inc()
 
-        elif event_type == "APIError":
-            error_code = data.get("error_code", "unknown")
-            api_errors_total.labels(error_code=error_code).inc()
+            elif event_type == "ContractPaused":
+                contract_paused.set(1)
 
-        elif event_type == "GasUsage":
-            operation = data.get("operation", "unknown")
-            gas = data.get("gas_used", 0)
-            contract_gas_usage.labels(operation=operation).set(gas)
+            elif event_type == "ContractUnpaused":
+                contract_paused.set(0)
 
-        elif event_type == "OperationLatency":
-            # #846 — Feed per-operation timing into the regression detector
-            operation = data.get("operation", "unknown")
-            duration = data.get("duration_seconds", 0.0)
-            self.perf_detector.record_query(operation, duration)
+            elif event_type == "APIError":
+                if isinstance(data, dict):
+                    error_code = data.get("error_code", "unknown")
+                    api_errors_total.labels(error_code=error_code).inc()
 
-        elif event_type == "StateSnapshot":
-            size = data.get("state_size", 0)
-            contract_state_size.set(size)
+            elif event_type == "GasUsage":
+                if isinstance(data, dict):
+                    operation = data.get("operation", "unknown")
+                    gas = data.get("gas_used", 0)
+                    contract_gas_usage.labels(operation=operation).set(gas)
 
-        elif event_type == "BackupVerified":
-            success = data.get("success", False)
-            backup_verification_status.set(1 if success else 0)
-            if success:
-                backup_last_success_timestamp.set(time.time())
+            elif event_type == "OperationLatency":
+                if isinstance(data, dict):
+                    operation = data.get("operation", "unknown")
+                    duration = data.get("duration_seconds", 0.0)
+                    self.perf_detector.record_query(operation, duration)
+
+            elif event_type == "StateSnapshot":
+                if isinstance(data, dict):
+                    size = data.get("state_size", 0)
+                    contract_state_size.set(size)
+
+            elif event_type == "BackupVerified":
+                if isinstance(data, dict):
+                    success = data.get("success", False)
+                    backup_verification_status.set(1 if success else 0)
+                    if success:
+                        backup_last_success_timestamp.set(time.time())
+
+        except Exception as e:
+            logger.error(f"Error processing event: {e}")
 
     def _update_attestation_rate(self, event_data: Dict[str, Any]):
         """Calculate and update attestation success rate."""
@@ -350,8 +369,8 @@ class QuorumProofExporter:
     def health_check(self) -> bool:
         """Check if the exporter is healthy."""
         try:
-            response = requests.get(f"{self.rpc_url}/health", timeout=5)
-            return response.status_code == 200
+            self.server.get_health()
+            return True
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             return False
