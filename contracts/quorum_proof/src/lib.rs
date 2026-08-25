@@ -1063,6 +1063,8 @@ pub enum DataKey10 {
     // ── Feature 1234: Attestor Replacement ───────────────────────────────────
     /// Replacement history for attestors in a slice (slice_id -> Vec<AttestorReplacementRecord>)
     AttestorReplacementHistory(u64),
+    /// Issue #1361: Reverse index for delegations (slice_id, delegate -> delegator)
+    DelegateOf(u64, Address),
 }
 
 /// Storage keys for issue #881: consent management.
@@ -9113,6 +9115,10 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey10::SliceDelegation(slice_id, delegator.clone()), &delegation);
+        // Issue #1361: Store reverse index for delegate lookup
+        env.storage()
+            .instance()
+            .set(&DataKey10::DelegateOf(slice_id, delegate.clone()), &delegator);
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -9138,7 +9144,7 @@ impl QuorumProofContract {
     pub fn revoke_slice_delegation(env: Env, delegator: Address, slice_id: u64) {
         delegator.require_auth();
 
-        let _delegation: SliceDelegation = env
+        let delegation: SliceDelegation = env
             .storage()
             .instance()
             .get(&DataKey10::SliceDelegation(slice_id, delegator.clone()))
@@ -9147,6 +9153,10 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .remove(&DataKey10::SliceDelegation(slice_id, delegator.clone()));
+        // Issue #1361: Remove reverse index
+        env.storage()
+            .instance()
+            .remove(&DataKey10::DelegateOf(slice_id, delegation.delegate));
 
         // Invalidate threshold verification cache for this slice since the signatories may have changed
         Self::invalidate_threshold_caches_for_slice(&env, slice_id);
@@ -9155,6 +9165,60 @@ impl QuorumProofContract {
             (symbol_short!("dlgRevoke"), slice_id),
             delegator,
         );
+    }
+
+    /// Issue #1361: Helper to resolve the effective attestor, handling delegations
+    /// Returns the delegator if caller is a delegate, otherwise returns the caller
+    fn resolve_attestor(
+        env: &Env,
+        caller: &Address,
+        slice_id: u64,
+        slice: &QuorumSlice,
+    ) -> Address {
+        // Check if caller is directly in the slice
+        let in_slice = env
+            .storage()
+            .instance()
+            .get::<_, Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+            .map(|set| set.contains_key(caller.clone()))
+            .unwrap_or_else(|| slice.attestors.contains(caller));
+
+        if in_slice {
+            return caller.clone();
+        }
+
+        // Look for a delegation where caller is the delegate
+        if let Some(delegator) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey10::DelegateOf(slice_id, caller.clone()))
+        {
+            // Validate that delegator is still in the slice
+            let delegator_in_slice = env
+                .storage()
+                .instance()
+                .get::<_, Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
+                .map(|set| set.contains_key(delegator.clone()))
+                .unwrap_or_else(|| slice.attestors.contains(&delegator));
+            assert!(delegator_in_slice, "delegator not in slice");
+
+            // Validate delegation hasn't been revoked and isn't expired
+            let delegation: SliceDelegation = env
+                .storage()
+                .instance()
+                .get(&DataKey10::SliceDelegation(slice_id, delegator.clone()))
+                .unwrap_or_else(|| panic_with_error!(env, ContractError::DelegationNotFound));
+
+            // Check if delegation is expired
+            if let Some(expiry) = delegation.expires_at {
+                let now = env.ledger().timestamp();
+                assert!(now < expiry, "delegation has expired");
+            }
+
+            return delegator;
+        }
+
+        panic!("attestor not in slice and no valid delegation found");
     }
 
     /// Issue #897: Validate that slice threshold is achievable
@@ -9546,22 +9610,16 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
-        // Issue #517: O(1) attestor membership check via attestor set.
-        let in_slice = env
-            .storage()
-            .instance()
-            .get::<_, Map<Address, bool>>(&DataKey2::AttestorSet(slice_id))
-            .map(|set| set.contains_key(attestor.clone()))
-            .unwrap_or_else(|| slice.attestors.contains(&attestor));
-        assert!(in_slice, "attestor not in slice");
+        // Issue #1361: Resolve effective attestor, handling delegations
+        let attestor_to_use = Self::resolve_attestor(&env, &attestor, slice_id, &slice);
 
-        // Check if attestor is suspended
-        if Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
+        // Check if attestor (or delegator if delegated) is suspended
+        if Self::is_attestor_suspended(env.clone(), slice_id, attestor_to_use.clone()) {
             panic!("attestor is suspended");
         }
 
         // Check for fork before allowing attestation
-        if Self::detect_fork_inner(&env, credential_id, slice_id, &attestor, attestation_value) {
+        if Self::detect_fork_inner(&env, credential_id, slice_id, &attestor_to_use, attestation_value) {
             // Store fork information
             let records: Vec<AttestationRecord> = env
                 .storage()
@@ -9583,7 +9641,7 @@ impl QuorumProofContract {
                     attested_values.push_back(record.attestation_value);
                 }
             }
-            conflicting_attestors.push_back(attestor.clone());
+            conflicting_attestors.push_back(attestor_to_use.clone());
             attested_values.push_back(attestation_value);
 
             let fork_info = ForkInfo {
@@ -9627,15 +9685,15 @@ impl QuorumProofContract {
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
 
-        // Check if attestor has already attested for this credential
+        // Check if attestor_to_use (delegator if delegated, else attestor) has already attested for this credential
         for rec in records.iter() {
-            if rec.attestor == attestor {
+            if rec.attestor == attestor_to_use {
                 panic!("attestor has already attested for this credential");
             }
         }
 
         let record = AttestationRecord {
-            attestor: attestor.clone(),
+            attestor: attestor_to_use.clone(),
             attested_at: env.ledger().timestamp(),
             expires_at,
             attestation_value,
@@ -9648,11 +9706,11 @@ impl QuorumProofContract {
         let attestation_weight = slice
             .attestors
             .iter()
-            .position(|candidate| candidate == attestor)
+            .position(|candidate| candidate == attestor_to_use)
             .and_then(|position| slice.weights.get(position as u32))
             .expect("attestor weight missing");
         env.storage().instance().set(
-            &DataKey5::AttestationWeight(credential_id, slice_id, attestor.clone()),
+            &DataKey5::AttestationWeight(credential_id, slice_id, attestor_to_use.clone()),
             &attestation_weight,
         );
         env.storage()
@@ -9663,7 +9721,7 @@ impl QuorumProofContract {
         Self::invalidate_verification_cache(&env, credential_id, slice_id);
 
         let event_data = AttestationEventData {
-            attestor: attestor.clone(),
+            attestor: attestor_to_use.clone(),
             credential_id,
             slice_id,
         };
@@ -9674,11 +9732,11 @@ impl QuorumProofContract {
         let count: u64 = env
             .storage()
             .instance()
-            .get(&DataKey::AttestorCount(attestor.clone()))
+            .get(&DataKey::AttestorCount(attestor_to_use.clone()))
             .unwrap_or(0u64);
         env.storage()
             .instance()
-            .set(&DataKey::AttestorCount(attestor.clone()), &(count + 1));
+            .set(&DataKey::AttestorCount(attestor_to_use.clone()), &(count + 1));
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -9698,7 +9756,7 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
         // Award reputation for each honest attestation.
-        Self::reward_attestor_reputation(&env, &attestor);
+        Self::reward_attestor_reputation(&env, &attestor_to_use);
 
         // Record activity for the holder
         let credential: Credential = env
@@ -9711,7 +9769,7 @@ impl QuorumProofContract {
             credential.subject.clone(),
             ActivityType::CredentialAttested,
             credential_id,
-            attestor.clone(),
+            attestor_to_use.clone(),
             Some(slice_id),
         );
 
@@ -9732,7 +9790,7 @@ impl QuorumProofContract {
         // Notify the credential holder
         let notification = HolderNotification {
             credential_id,
-            attestor: attestor.clone(),
+            attestor: attestor_to_use.clone(),
             slice_id,
             notified_at: env.ledger().timestamp(),
         };
@@ -9779,15 +9837,9 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Slice(slice_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
-        let mut in_slice = false;
-        for a in slice.attestors.iter() {
-            if a == attestor {
-                in_slice = true;
-                break;
-            }
-        }
-        assert!(in_slice, "attestor not in slice");
-        if Self::is_attestor_suspended(env.clone(), slice_id, attestor.clone()) {
+        // Issue #1361: Resolve effective attestor, handling delegations
+        let attestor_to_use = Self::resolve_attestor(&env, &attestor, slice_id, &slice);
+        if Self::is_attestor_suspended(env.clone(), slice_id, attestor_to_use.clone()) {
             panic!("attestor is suspended");
         }
 
@@ -9818,7 +9870,7 @@ impl QuorumProofContract {
                 &env,
                 credential_id,
                 slice_id,
-                &attestor,
+                &attestor_to_use,
                 attestation_value,
             ) {
                 panic_with_error!(&env, ContractError::ForkDetected);
@@ -9830,12 +9882,12 @@ impl QuorumProofContract {
                 .get(&DataKey::Attestors(credential_id))
                 .unwrap_or(Vec::new(&env));
             for rec in records.iter() {
-                if rec.attestor == attestor {
+                if rec.attestor == attestor_to_use {
                     panic!("attestor has already attested for this credential");
                 }
             }
             records.push_back(AttestationRecord {
-                attestor: attestor.clone(),
+                attestor: attestor_to_use.clone(),
                 attested_at: now,
                 expires_at,
                 attestation_value,
@@ -9848,7 +9900,7 @@ impl QuorumProofContract {
             Self::invalidate_verification_cache(&env, credential_id, slice_id);
 
             let event_data = AttestationEventData {
-                attestor: attestor.clone(),
+                attestor: attestor_to_use.clone(),
                 credential_id,
                 slice_id,
             };
@@ -9860,18 +9912,18 @@ impl QuorumProofContract {
             let count: u64 = env
                 .storage()
                 .instance()
-                .get(&DataKey::AttestorCount(attestor.clone()))
+                .get(&DataKey::AttestorCount(attestor_to_use.clone()))
                 .unwrap_or(0u64);
             env.storage()
                 .instance()
-                .set(&DataKey::AttestorCount(attestor.clone()), &(count + 1));
+                .set(&DataKey::AttestorCount(attestor_to_use.clone()), &(count + 1));
 
             Self::record_holder_activity(
                 &env,
                 credential.subject.clone(),
                 ActivityType::CredentialAttested,
                 credential_id,
-                attestor.clone(),
+                attestor_to_use.clone(),
                 Some(slice_id),
             );
 
@@ -9887,7 +9939,7 @@ impl QuorumProofContract {
 
             let notification = HolderNotification {
                 credential_id,
-                attestor: attestor.clone(),
+                attestor: attestor_to_use.clone(),
                 slice_id,
                 notified_at: now,
             };
@@ -22713,6 +22765,123 @@ mod tests {
         // Verify delegation was removed
         let delegation_opt = client.get_slice_delegation(&slice_id, &delegator);
         assert!(delegation_opt.is_none());
+    }
+
+    // Issue #1361: Delegated Attestation Tests
+    #[test]
+    fn test_attest_with_delegation_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Create slice with delegator
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(delegator.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Create credential
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test_metadata");
+        let cred_type: u32 = 1;
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &cred_type, &metadata, &None, &0u64);
+
+        set_ledger_timestamp(&env, 1000);
+        // Delegate voting rights with expiry at 3000
+        client.delegate_slice_vote(&delegator, &slice_id, &delegate.clone(), &Some(3000u64));
+
+        set_ledger_timestamp(&env, 2000);
+        // Delegate attests on behalf of delegator
+        client.attest(&delegate, &credential_id, &slice_id, &true, &None);
+
+        // Verify attestation was recorded as delegator
+        let attestors_list = client.get_attestors(&credential_id);
+        assert_eq!(attestors_list.len(), 1u32);
+        assert_eq!(attestors_list.get(0).unwrap(), delegator);
+    }
+
+    #[test]
+    #[should_panic(expected = "delegation has expired")]
+    fn test_attest_with_expired_delegation_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Create slice with delegator
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(delegator.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Create credential
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test_metadata");
+        let cred_type: u32 = 1;
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &cred_type, &metadata, &None, &0u64);
+
+        set_ledger_timestamp(&env, 1000);
+        // Delegate voting rights with expiry at 2000
+        client.delegate_slice_vote(&delegator, &slice_id, &delegate.clone(), &Some(2000u64));
+
+        set_ledger_timestamp(&env, 2500);
+        // Delegate tries to attest after expiry should fail
+        client.attest(&delegate, &credential_id, &slice_id, &true, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestor not in slice and no valid delegation found")]
+    fn test_attest_with_revoked_delegation_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Create slice with delegator
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(delegator.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(1u32);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        // Create credential
+        let metadata = soroban_sdk::Bytes::from_slice(&env, b"test_metadata");
+        let cred_type: u32 = 1;
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &cred_type, &metadata, &None, &0u64);
+
+        set_ledger_timestamp(&env, 1000);
+        // Delegate voting rights
+        client.delegate_slice_vote(&delegator, &slice_id, &delegate.clone(), &Some(3000u64));
+
+        set_ledger_timestamp(&env, 1500);
+        // Revoke the delegation
+        client.revoke_slice_delegation(&delegator, &slice_id);
+
+        set_ledger_timestamp(&env, 2000);
+        // Delegate tries to attest with revoked delegation should fail
+        client.attest(&delegate, &credential_id, &slice_id, &true, &None);
     }
 
     // Issue #897: Threshold Validation Tests
