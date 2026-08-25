@@ -15,9 +15,22 @@ Stellar RPC / Horizon
         │
         ▼
       Grafana             (port 3000)
+
+  api-server              (REST API, port 3001)
+        │ pino → /var/log/quorumproof/api.log
+        ▼
+    promtail              (tails quorumproof-logs volume)
+        │
+        ▼
+       Loki               (log store, port 3100)
+        │
+        ▼
+      Grafana             (Contract Logs panel, {job="quorumproof-api"})
 ```
 
 The `quorumproof-exporter` polls contract events from the Stellar RPC and exposes them as Prometheus metrics. No changes to the smart contract are required.
+
+api-server writes structured JSON logs via pino to a shared Docker named volume (`quorumproof-logs`). promtail tails that volume and ships every line to Loki. Grafana's "Contract Logs" panel in the `contract-health.json` dashboard queries `{job="quorumproof-api"}` and is **non-empty** after the first request reaches api-server.
 
 ---
 
@@ -120,6 +133,62 @@ EXPORTER_PORT=9101
 3. Increment / observe the metric in the event handler.
 4. Restart the exporter: `docker compose restart quorumproof-exporter`.
 5. Add a panel to the relevant Grafana dashboard JSON.
+
+---
+
+## Log Aggregation
+
+> **Status: live as of #586.** No manual configuration required.
+
+api-server uses [pino](https://github.com/pinojs/pino) to write structured
+JSON logs to `/var/log/quorumproof/api.log` inside the container. A Docker
+named volume (`quorumproof-logs`) is shared between api-server and promtail,
+so every log line is automatically shipped to Loki.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_FILE` | `/var/log/quorumproof/api.log` | Log file path inside the container |
+| `LOG_LEVEL` | `info` | Minimum log level (`debug`/`info`/`warn`/`error`) |
+| `LOG_STDOUT` | `true` | Also emit logs to stdout (useful for `docker compose logs`) |
+| `MODULE_LOGS` | _(unset)_ | Per-module overrides: `auth:debug,webhook:warn` |
+
+### Querying Logs in Grafana
+
+Open **Grafana → Explore** and select the **Loki** datasource:
+
+```logql
+# All api-server logs
+{job="quorumproof-api"}
+
+# Errors only
+{job="quorumproof-api"} | json | level="error"
+
+# Requests to /api/credentials
+{job="quorumproof-api"} | json | path=~"/api/credentials.*"
+
+# Requests slower than 500 ms
+{job="quorumproof-api"} | json | duration > 500
+```
+
+The pre-provisioned **Contract Logs** panel in the `contract-health.json`
+dashboard shows all api-server logs using the query `{job="quorumproof-api"}`.
+
+### Troubleshooting Log Pipeline
+
+```bash
+# Confirm api-server is writing logs
+docker compose -f monitoring/docker-compose.yml exec api-server \
+  tail -5 /var/log/quorumproof/api.log
+
+# Check promtail is reading from the volume
+docker compose -f monitoring/docker-compose.yml logs promtail | tail -20
+
+# Query Loki directly (bypasses Grafana)
+curl -G http://localhost:3100/loki/api/v1/query \
+  --data-urlencode 'query={job="quorumproof-api"}' | jq .data.result
+```
 
 ---
 
