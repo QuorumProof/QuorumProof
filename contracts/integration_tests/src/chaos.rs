@@ -72,11 +72,11 @@ fn chaos_revoke_after_mint_graceful_degradation() {
     let result = c.qp.verify_engineer(
         &c.sbt.address,
         &c.zk.address,
-        &c.admin,
         &engineer,
         &cred_id,
         &QpClaimType::HasDegree,
         &valid_proof(&env),
+        &BytesN::from_array(&env, &[0u8; 32]),
         &None,
     );
     // Outcome is deterministic; the important property is no uncontrolled panic
@@ -100,11 +100,11 @@ fn chaos_empty_proof_returns_false() {
     let result = c.qp.verify_engineer(
         &c.sbt.address,
         &c.zk.address,
-        &c.admin,
         &engineer,
         &cred_id,
         &QpClaimType::HasDegree,
         &empty_proof,
+        &BytesN::from_array(&env, &[0u8; 32]),
         &None,
     );
     assert!(!result, "chaos: empty proof must yield false, not a panic");
@@ -121,11 +121,11 @@ fn chaos_nonexistent_credential_returns_false() {
     let result = c.qp.verify_engineer(
         &c.sbt.address,
         &c.zk.address,
-        &c.admin,
         &engineer,
         &9999u64,
         &QpClaimType::HasDegree,
         &valid_proof(&env),
+        &BytesN::from_array(&env, &[0u8; 32]),
         &None,
     );
     assert!(!result, "chaos: non-existent credential must yield false");
@@ -262,11 +262,11 @@ fn chaos_mismatched_credential_id_returns_false() {
     let result = c.qp.verify_engineer(
         &c.sbt.address,
         &c.zk.address,
-        &c.admin,
         &engineer,
         &(cred_id + 1),
         &QpClaimType::HasDegree,
         &valid_proof(&env),
+        &BytesN::from_array(&env, &[0u8; 32]),
         &None,
     );
     assert!(!result, "chaos: mismatched credential ID must yield false, not panic");
