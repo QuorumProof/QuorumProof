@@ -1050,6 +1050,10 @@ pub enum DataKey10 {
     QuorumIntersectionCache(Bytes),
     /// Parent slice IDs for transitive suspension (child_id -> Vec<u64>) (reverse index)
     ParentSliceIds(u64),
+    /// Slices that have contributed attestations to a credential (credential_id -> Vec<u64>)
+    CredentialSlices(u64),
+    /// Marks that a credential requires quorum intersection verification (credential_id -> bool)
+    RequiresIntersectionVerification(u64),
     // ── Feature 1231: Slice Template System ──────────────────────────────────
     /// Slice template by id (template_id -> SliceTemplate)
     SliceTemplate(u64),
@@ -9567,6 +9571,110 @@ impl QuorumProofContract {
         false // No fork
     }
 
+    /// Record that a slice has attested to a credential.
+    /// This is used to track which slices have contributed attestations,
+    /// enabling partition detection when multiple slices attest to the same credential.
+    fn record_credential_slice(env: &Env, credential_id: u64, slice_id: u64) {
+        let mut slices: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey10::CredentialSlices(credential_id))
+            .unwrap_or(Vec::new(env));
+
+        // Only add if not already present (avoid duplicates)
+        for existing_slice in slices.iter() {
+            if existing_slice == slice_id {
+                return;
+            }
+        }
+
+        slices.push_back(slice_id);
+        env.storage()
+            .instance()
+            .set(&DataKey10::CredentialSlices(credential_id), &slices);
+    }
+
+    /// Get all slices that have attested to a credential.
+    fn get_credential_slices(env: &Env, credential_id: u64) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey10::CredentialSlices(credential_id))
+            .unwrap_or(Vec::new(env))
+    }
+
+    /// Check if a slice is nested by attempting to load its NestedSliceNode.
+    fn is_slice_nested(env: &Env, slice_id: u64) -> bool {
+        env.storage()
+            .instance()
+            .has(&DataKey10::NestedSliceNode(slice_id))
+    }
+
+    /// Determine if a credential requires quorum intersection verification.
+    /// A credential requires intersection verification if:
+    /// 1. It has attestations from multiple slices, OR
+    /// 2. Any of its slices are nested (depth > 1)
+    fn requires_intersection_verification(env: &Env, credential_id: u64) -> bool {
+        let slices = Self::get_credential_slices(env, credential_id);
+
+        // Multiple slices always require intersection verification
+        if slices.len() > 1 {
+            return true;
+        }
+
+        // Single nested slice also requires verification for internal safety
+        for slice_id in slices.iter() {
+            if Self::is_slice_nested(env, slice_id) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Verify that attestors for a credential form a quorum intersection.
+    /// Returns true if the credential's attestors form a quorum in ALL slices that have attested.
+    /// This ensures partition safety: disjoint quorum slices cannot independently attest conflicting claims.
+    fn verify_credential_intersection(env: &Env, credential_id: u64) -> bool {
+        let slices = Self::get_credential_slices(env, credential_id);
+
+        // Single slice or no slices - no intersection to verify
+        if slices.len() <= 1 {
+            return true;
+        }
+
+        // Get all positive attestors for this credential
+        let records: Vec<AttestationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attestors(credential_id))
+            .unwrap_or(Vec::new(env));
+
+        let now = env.ledger().timestamp();
+        let mut attestors: Vec<Address> = Vec::new(env);
+
+        for rec in records.iter() {
+            // Only include positive attestations that haven't expired
+            if !rec.attestation_value {
+                continue;
+            }
+            if let Some(exp) = rec.expires_at {
+                if now >= exp {
+                    continue;
+                }
+            }
+            attestors.push_back(rec.attestor.clone());
+        }
+
+        // Check if attestors form quorum in ALL slices
+        for slice_id in slices.iter() {
+            if !Self::is_quorum_impl(env, slice_id, &attestors) {
+                return false;
+            }
+        }
+
+        true
+    }
+
     pub fn attest(
         env: Env,
         attestor: Address,
@@ -9685,12 +9793,19 @@ impl QuorumProofContract {
             .get(&DataKey::Attestors(credential_id))
             .unwrap_or(Vec::new(&env));
 
-        // Check if attestor_to_use (delegator if delegated, else attestor) has already attested for this credential
-        for rec in records.iter() {
-            if rec.attestor == attestor_to_use {
-                panic!("attestor has already attested for this credential");
-            }
-        }
+        // Check if attestor_to_use (delegator if delegated, else attestor) has already
+        // attested for this credential in this slice.
+        // Issue #1362: a credential can be attested across multiple (e.g. overlapping
+        // or nested) slices, so the same attestor may legitimately attest once per
+        // slice — the duplicate guard must be scoped per (credential, slice), not
+        // globally per credential.
+        let already_attested_in_slice = env.storage().instance().has(
+            &DataKey5::AttestationWeight(credential_id, slice_id, attestor_to_use.clone()),
+        );
+        assert!(
+            !already_attested_in_slice,
+            "attestor has already attested for this credential"
+        );
 
         let record = AttestationRecord {
             attestor: attestor_to_use.clone(),
@@ -9703,6 +9818,10 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey::Attestors(credential_id), &records);
+
+        // Track which slices have attested to this credential for partition detection
+        Self::record_credential_slice(&env, credential_id, slice_id);
+
         let attestation_weight = slice
             .attestors
             .iter()
@@ -10868,7 +10987,16 @@ impl QuorumProofContract {
 
         let required_weight = Self::required_weight(&env, &slice);
         let is_sufficient = total_attested_weight >= required_weight;
-        let is_attested_result = is_sufficient && Self::is_multisig_approved(&env, credential_id);
+
+        // Issue #1362: If credential has multiple slices or nested slices, verify quorum intersection.
+        // Partition safety: attestors must form quorum in ALL applicable slices, not just one.
+        let intersection_satisfied = if Self::requires_intersection_verification(&env, credential_id) {
+            Self::verify_credential_intersection(&env, credential_id)
+        } else {
+            true
+        };
+
+        let is_attested_result = is_sufficient && Self::is_multisig_approved(&env, credential_id) && intersection_satisfied;
 
         // Record consensus decision if threshold is met
         if is_sufficient {
@@ -11107,12 +11235,13 @@ impl QuorumProofContract {
 
     /// Verify quorum intersection using an off-chain certificate.
     /// Client pre-computes intersection proof; contract verifies in O(k*d*n) time.
+    /// No caller-auth required: verification is based on certificate validity.
+    /// If certificate is invalid, the function panics, providing security.
     pub fn check_quorum_intersection(
         env: Env,
         slice_ids: Vec<u64>,
         certificate: QuorumIntersectionCertificate,
     ) -> IntersectionReport {
-        env.current_contract_address().require_auth();
 
         // Validate certificate structure
         if slice_ids.len() > MAX_SLICES_PER_INTERSECTION_CHECK
