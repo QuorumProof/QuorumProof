@@ -62,6 +62,7 @@ mod integration {
         sbt: SbtRegistryContractClient<'a>,
         zk: ZkVerifierContractClient<'a>,
         admin: soroban_sdk::Address,
+        vk_hash: BytesN<32>,
     }
 
     fn setup(env: &Env) -> Contracts<'_> {
@@ -89,7 +90,7 @@ mod integration {
         let vk_hash = BytesN::from_array(env, &[0u8; 32]);
         zk.set_verifying_key(&admin, &vk_hash);
 
-        Contracts { qp, sbt, zk, admin }
+        Contracts { qp, sbt, zk, admin, vk_hash }
     }
 
     fn metadata(env: &Env) -> Bytes {
@@ -270,15 +271,30 @@ mod integration {
         let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
         c.sbt.mint(&engineer, &cred_id, &uri);
 
+        // verify_engineer's production path performs a real BLS12-381 pairing
+        // check bound to (credential_id, claim_type) via
+        // encode_claim_public_inputs, so it needs a genuinely valid proof
+        // against a registered Groth16 verifying key — c.vk_hash/valid_proof()
+        // only satisfy the legacy structural heuristic.
+        let toy_vk = zk_verifier::groth16_test_prover::generate_vk(&env, 900, 2);
+        c.zk.set_groth16_verifying_key(&c.admin, &toy_vk.vk_hash, &toy_vk.vk);
+        let claim_type_value = 1u64; // ClaimType::HasDegree
+        let toy_proof = zk_verifier::groth16_test_prover::generate_proof(
+            &env,
+            &toy_vk,
+            901,
+            &[cred_id, claim_type_value],
+        );
+
         let result = c.qp.verify_engineer(
             &c.sbt.address,
             &c.zk.address,
-            &c.admin,
             &engineer,
             &cred_id,
             &QpClaimType::HasDegree,
-            &valid_proof(&env),
-        &None,
+            &toy_proof.proof,
+            &toy_vk.vk_hash,
+            &None,
         );
         assert!(result);
     }
@@ -297,12 +313,12 @@ mod integration {
         let result = c.qp.verify_engineer(
             &c.sbt.address,
             &c.zk.address,
-            &c.admin,
             &engineer,
             &cred_id,
             &QpClaimType::HasDegree,
             &valid_proof(&env),
-        &None,
+            &c.vk_hash,
+            &None,
         );
         assert!(!result);
     }
@@ -633,11 +649,11 @@ mod integration {
         let result = c.qp.verify_engineer(
             &c.sbt.address,
             &c.zk.address,
-            &c.admin,
             &engineer,
             &(cred_id + 1),
             &QpClaimType::HasDegree,
             &valid_proof(&env),
+            &c.vk_hash,
             &None,
         );
         assert!(!result);

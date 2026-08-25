@@ -120,14 +120,29 @@ fn full_flow_issue_slice_attest_sbt_zk_proof() {
     let verified = c.zk.verify_claim(&c.admin, &c.qp.address, &cred_id, &ClaimType::HasDegree, &valid_proof(&env));
     assert!(verified);
 
+    // verify_engineer's production path performs a real BLS12-381 pairing
+    // check bound to (credential_id, claim_type) via encode_claim_public_inputs,
+    // so it needs a genuinely valid proof against a registered Groth16 VK —
+    // the legacy vk_hash/valid_proof() fixtures above only satisfy the
+    // structural heuristic the old code path used.
+    let toy_vk = zk_verifier::groth16_test_prover::generate_vk(&env, 910, 2);
+    c.zk.set_groth16_verifying_key(&c.admin, &toy_vk.vk_hash, &toy_vk.vk);
+    let claim_type_value = 1u64; // ClaimType::HasDegree
+    let toy_proof = zk_verifier::groth16_test_prover::generate_proof(
+        &env,
+        &toy_vk,
+        911,
+        &[cred_id, claim_type_value],
+    );
+
     let engineer_ok = c.qp.verify_engineer(
         &c.sbt.address,
         &c.zk.address,
-        &c.admin,
         &holder,
         &cred_id,
         &QpClaimType::HasDegree,
-        &valid_proof(&env),
+        &toy_proof.proof,
+        &toy_vk.vk_hash,
         &None,
     );
     assert!(engineer_ok);
