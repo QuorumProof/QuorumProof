@@ -1,11 +1,15 @@
 /**
  * Tests for Issue #1302: Passwordless Authentication
+ * Tests for Issue #1366: Durable multi-instance support
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import fs from 'fs';
+import path from 'path';
 import {
+  PasswordlessAuthService,
   createMagicLinkToken,
   verifyMagicLinkToken,
   createWebAuthnChallenge,
@@ -15,6 +19,7 @@ import {
   clearPasswordlessStores,
   TOKEN_EXPIRY_MS,
   CHALLENGE_EXPIRY_MS,
+  _setDefaultPasswordlessAuthServiceForTest,
 } from '../src/services/passwordlessAuth.js';
 import passwordlessAuthRouter from '../src/routes/passwordlessAuth.js';
 
@@ -419,5 +424,198 @@ describe('WebAuthn authentication routes', () => {
 
     expect(authVerify.status).toBe(200);
     expect(authVerify.body.success).toBe(true);
+  });
+});
+
+// ─── Multi-Instance Tests (Issue #1366) ────────────────────────────────────────
+
+describe('Multi-Instance Durability (Issue #1366)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    // Use a temporary directory for each test
+    dataDir = path.join(process.cwd(), '.data', `test-passwordless-${Date.now()}`);
+    const service = new PasswordlessAuthService({ dataDir });
+    _setDefaultPasswordlessAuthServiceForTest(service);
+  });
+
+  afterEach(() => {
+    // Clean up test data directory
+    if (fs.existsSync(dataDir)) {
+      fs.rmSync(dataDir, { recursive: true });
+    }
+  });
+
+  it('magic link token is single-use across instances (instance A creates, B redeems, A fails on second attempt)', () => {
+    // Instance A process 1: create a token
+    const serviceA1 = new PasswordlessAuthService({ dataDir });
+    const { token } = serviceA1.createMagicLinkToken('alice@example.com');
+
+    // Instance B process: redeem the token (same data directory, fresh instance that reloads from disk)
+    const serviceB = new PasswordlessAuthService({ dataDir });
+    const result1 = serviceB.verifyMagicLinkToken(token);
+    expect(result1.success).toBe(true);
+    expect(result1.email).toBe('alice@example.com');
+
+    // Instance A process 2: attempt to redeem again (fresh instance that reloads from disk)
+    const serviceA2 = new PasswordlessAuthService({ dataDir });
+    const result2 = serviceA2.verifyMagicLinkToken(token);
+    expect(result2.success).toBe(false);
+    expect(result2.error).toContain('already been used');
+  });
+
+  it('WebAuthn credential registered on instance A is recognized by instance B', () => {
+    // Instance A: create registration challenge and register credential
+    const instanceA = new PasswordlessAuthService({ dataDir });
+    const regChallenge = instanceA.createWebAuthnChallenge('user1', 'registration');
+    const regClientData = Buffer.from(
+      JSON.stringify({ type: 'webauthn.create', challenge: regChallenge.challenge })
+    ).toString('base64url');
+
+    const regResult = instanceA.verifyWebAuthnRegistration({
+      challenge: regChallenge.challenge,
+      credential_id: 'cred-multi-instance',
+      public_key: 'pubkey-xyz',
+      client_data_json: regClientData,
+      user_id: 'user1',
+    });
+    expect(regResult.success).toBe(true);
+
+    // Instance B: get credentials for user (should see the registered credential)
+    const instanceB = new PasswordlessAuthService({ dataDir });
+    const credentials = instanceB.getCredentialsForUser('user1');
+    expect(credentials).toHaveLength(1);
+    expect(credentials[0].credential_id).toBe('cred-multi-instance');
+
+    // Instance B: authenticate with the credential (should succeed)
+    const authChallenge = instanceB.createWebAuthnChallenge('user1', 'authentication');
+    const authClientData = Buffer.from(
+      JSON.stringify({ type: 'webauthn.get', challenge: authChallenge.challenge })
+    ).toString('base64url');
+
+    const authResult = instanceB.verifyWebAuthnAuthentication({
+      challenge: authChallenge.challenge,
+      credential_id: 'cred-multi-instance',
+      client_data_json: authClientData,
+      authenticator_data: 'authdata-stub',
+      signature: 'sig-stub',
+      sign_count: 1,
+      user_id: 'user1',
+    });
+    expect(authResult.success).toBe(true);
+  });
+
+  it('WebAuthn credentials survive a simulated restart (new service instance, same data dir)', () => {
+    // First instance: register credential
+    const instance1 = new PasswordlessAuthService({ dataDir });
+    const challenge1 = instance1.createWebAuthnChallenge('user1', 'registration');
+    const clientData1 = Buffer.from(
+      JSON.stringify({ type: 'webauthn.create', challenge: challenge1.challenge })
+    ).toString('base64url');
+
+    instance1.verifyWebAuthnRegistration({
+      challenge: challenge1.challenge,
+      credential_id: 'cred-persistent',
+      public_key: 'pubkey-abc',
+      client_data_json: clientData1,
+      user_id: 'user1',
+    });
+
+    // Simulate restart: new instance, same data directory
+    const instance2 = new PasswordlessAuthService({ dataDir });
+
+    // Verify credential persisted
+    const credentials = instance2.getCredentialsForUser('user1');
+    expect(credentials).toHaveLength(1);
+    expect(credentials[0].credential_id).toBe('cred-persistent');
+    expect(credentials[0].public_key).toBe('pubkey-abc');
+    expect(credentials[0].user_id).toBe('user1');
+  });
+
+  it('magic link token invalidation from instance A is visible to instance B', () => {
+    const instanceA = new PasswordlessAuthService({ dataDir });
+    const instanceB = new PasswordlessAuthService({ dataDir });
+
+    // Create first token
+    const { token: token1 } = instanceA.createMagicLinkToken('alice@example.com');
+
+    // Create second token for same email (invalidates first)
+    instanceA.createMagicLinkToken('alice@example.com');
+
+    // Instance B attempts to redeem first token (should fail)
+    const result = instanceB.verifyMagicLinkToken(token1);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Invalid or expired');
+  });
+
+  it('WebAuthn sign_count update from instance A is visible to instance B', () => {
+    // Register credential
+    const serviceA1 = new PasswordlessAuthService({ dataDir });
+    const challenge1 = serviceA1.createWebAuthnChallenge('user1', 'registration');
+    const clientData1 = Buffer.from(
+      JSON.stringify({ type: 'webauthn.create', challenge: challenge1.challenge })
+    ).toString('base64url');
+
+    serviceA1.verifyWebAuthnRegistration({
+      challenge: challenge1.challenge,
+      credential_id: 'cred-sign-count',
+      public_key: 'pubkey-xyz',
+      client_data_json: clientData1,
+      user_id: 'user1',
+    });
+
+    // Authenticate on instance A with sign_count=1
+    const serviceA2 = new PasswordlessAuthService({ dataDir });
+    const authChallenge1 = serviceA2.createWebAuthnChallenge('user1', 'authentication');
+    const authClientData1 = Buffer.from(
+      JSON.stringify({ type: 'webauthn.get', challenge: authChallenge1.challenge })
+    ).toString('base64url');
+
+    serviceA2.verifyWebAuthnAuthentication({
+      challenge: authChallenge1.challenge,
+      credential_id: 'cred-sign-count',
+      client_data_json: authClientData1,
+      authenticator_data: 'ad',
+      signature: 'sig',
+      sign_count: 1,
+      user_id: 'user1',
+    });
+
+    // Instance B attempts to authenticate with sign_count=1 (should fail as replay)
+    const serviceB1 = new PasswordlessAuthService({ dataDir });
+    const authChallenge2 = serviceB1.createWebAuthnChallenge('user1', 'authentication');
+    const authClientData2 = Buffer.from(
+      JSON.stringify({ type: 'webauthn.get', challenge: authChallenge2.challenge })
+    ).toString('base64url');
+
+    const result = serviceB1.verifyWebAuthnAuthentication({
+      challenge: authChallenge2.challenge,
+      credential_id: 'cred-sign-count',
+      client_data_json: authClientData2,
+      authenticator_data: 'ad',
+      signature: 'sig',
+      sign_count: 1, // same as before
+      user_id: 'user1',
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('replay');
+
+    // Instance B authenticates with sign_count=2 (should succeed)
+    const serviceB2 = new PasswordlessAuthService({ dataDir });
+    const authChallenge3 = serviceB2.createWebAuthnChallenge('user1', 'authentication');
+    const authClientData3 = Buffer.from(
+      JSON.stringify({ type: 'webauthn.get', challenge: authChallenge3.challenge })
+    ).toString('base64url');
+
+    const result2 = serviceB2.verifyWebAuthnAuthentication({
+      challenge: authChallenge3.challenge,
+      credential_id: 'cred-sign-count',
+      client_data_json: authClientData3,
+      authenticator_data: 'ad',
+      signature: 'sig',
+      sign_count: 2,
+      user_id: 'user1',
+    });
+    expect(result2.success).toBe(true);
   });
 });
