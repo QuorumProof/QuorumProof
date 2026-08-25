@@ -10725,6 +10725,12 @@ impl QuorumProofContract {
         if credential.suspended {
             return false;
         }
+        // Issue #1287: Check BBS+ non-revocation for BBS+ credentials
+        if Self::is_bbs_credential(env.clone(), credential_id) {
+            if !bbs_plus_features::verify_non_revocation(&env, credential_id) {
+                return false;
+            }
+        }
         // Issue #872: Time-locked attestation — attestation is not yet active
         // while the fraud-detection window is still open.
         if time_lock_attestation::is_time_locked(&env, credential_id) {
@@ -19261,6 +19267,88 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey11::BbsCredentialFlag(credential_id))
             .expect("credential was not issued with BBS+ selective disclosure")
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BBS+ Public Entrypoints (Issues #1287–#1290)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Public entrypoint: Set the privacy level for a credential attribute.
+    /// Only the attribute's issuer or an authorized admin can call this.
+    pub fn bbs_set_attribute_privacy(
+        env: Env,
+        caller: Address,
+        credential_type: u32,
+        attribute_name: Bytes,
+        sensitivity: bbs_plus_features::PrivacyLevel,
+    ) {
+        bbs_plus_features::set_attribute_privacy(
+            &env,
+            caller,
+            credential_type,
+            attribute_name,
+            sensitivity,
+        );
+    }
+
+    /// Public entrypoint: Check whether disclosure of an attribute is permitted.
+    pub fn bbs_check_disclosure_permitted(
+        env: Env,
+        credential_type: u32,
+        attribute_name: Bytes,
+        verifier_is_permissioned: bool,
+    ) -> bbs_plus_features::DisclosureCheckResult {
+        bbs_plus_features::check_disclosure_permitted(&env, credential_type, attribute_name, verifier_is_permissioned)
+    }
+
+    /// Public entrypoint: Batch-check disclosure permissions.
+    pub fn bbs_batch_check_disclosure(
+        env: Env,
+        credential_type: u32,
+        attribute_names: Vec<Bytes>,
+        verifier_is_permissioned: bool,
+    ) -> Map<Bytes, bool> {
+        bbs_plus_features::batch_check_disclosure(&env, credential_type, attribute_names, verifier_is_permissioned)
+    }
+
+    /// Public entrypoint: Store a non-revocation proof for a credential.
+    pub fn bbs_create_non_revocation_proof(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+        proof_bytes: Bytes,
+    ) {
+        bbs_plus_features::create_non_revocation_proof(&env, holder, credential_id, proof_bytes);
+    }
+
+    /// Public entrypoint: Verify a stored non-revocation proof.
+    pub fn bbs_verify_non_revocation(env: Env, credential_id: u64) -> bool {
+        bbs_plus_features::verify_non_revocation(&env, credential_id)
+    }
+
+    /// Public entrypoint: Rotate a BBS+ issuer key.
+    pub fn bbs_rotate_issuer_key(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        new_key: Bytes,
+    ) {
+        bbs_plus_features::rotate_issuer_key(&env, admin, issuer, new_key);
+    }
+
+    /// Public entrypoint: Add a credential to the BBS+ revocation accumulator.
+    pub fn bbs_add_revocation_accumulator(
+        env: Env,
+        caller: Address,
+        credential_id: u64,
+        accumulator_value: Bytes,
+    ) {
+        bbs_plus_features::add_to_revocation_accumulator(&env, caller, credential_id, accumulator_value);
+    }
+
+    /// Public entrypoint: Get the current revocation accumulator state.
+    pub fn bbs_get_revocation_accumulator(env: Env) -> Option<bbs_plus_features::BbsRevocationAccumulator> {
+        bbs_plus_features::get_revocation_accumulator(&env)
     }
 }
 
