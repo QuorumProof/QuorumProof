@@ -3528,6 +3528,13 @@ impl QuorumProofContract {
         state_metrics::collect(&env)
     }
 
+    /// Per-action credential lifecycle counters (`"credential"` for issuance,
+    /// `"revocation"` for revocation), as a map of action label to event
+    /// count. Unauthenticated and O(1), like `get_state_metrics`.
+    pub fn get_credential_action_counts(env: Env) -> soroban_sdk::Map<String, u64> {
+        state_metrics::get_credential_action_counts(&env)
+    }
+
     /// Return the schema version distribution across all credentials.
     /// Scans all credential IDs from 1 to current count and returns counts per schema version.
     pub fn get_metadata_schema_distribution(env: Env) -> soroban_sdk::Map<u32, u32> {
@@ -16133,9 +16140,11 @@ impl QuorumProofContract {
 
     // ── Missing helper methods ────────────────────────────────────────────────
 
-    /// Update credential metrics (no-op stub for tracking purposes).
-    fn update_credential_metrics(_env: &Env, _credential_id: u64, _action: &str) {
-        // Metrics tracking stub — extend as needed
+    /// Record a credential lifecycle event against the per-action counters
+    /// exposed by `get_credential_action_counts` (issue #1390). The credential
+    /// id is not stored — the counters are aggregate, so they stay O(1).
+    fn update_credential_metrics(env: &Env, _credential_id: u64, action: &str) {
+        state_metrics::record_credential_action(env, &String::from_str(env, action));
     }
 
     /// Validate that a metadata hash is non-empty.
