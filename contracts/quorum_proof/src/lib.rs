@@ -2870,6 +2870,7 @@ impl QuorumProofContract {
         public_key: soroban_sdk::Bytes,
     ) {
         address.require_auth();
+        Self::enforce_write_limit(&env);
 
         assert!(!did.is_empty(), "DID string cannot be empty");
 
@@ -2967,6 +2968,7 @@ impl QuorumProofContract {
         new_public_key: soroban_sdk::Bytes,
     ) {
         address.require_auth();
+        Self::enforce_write_limit(&env);
 
         let did_bytes: soroban_sdk::Bytes = env
             .storage()
@@ -3001,6 +3003,7 @@ impl QuorumProofContract {
     /// remains on-chain for resolution and audit purposes.
     pub fn deactivate_did(env: Env, address: Address) {
         address.require_auth();
+        Self::enforce_write_limit(&env);
 
         let did_bytes: soroban_sdk::Bytes = env
             .storage()
@@ -3694,6 +3697,22 @@ impl QuorumProofContract {
     /// Read the current circuit breaker configuration.
     pub fn get_circuit_breaker_config(env: Env) -> circuit_breaker::CircuitBreakerConfig {
         circuit_breaker::get_config(&env)
+    }
+
+    /// Apply only the circuit breaker's degraded-mode write cap (issue #1393).
+    ///
+    /// Mutating entry points that deliberately stay callable while the contract
+    /// is paused — or that predate `require_not_paused` and whose pause
+    /// semantics must not change — call this instead, so the Degraded-state
+    /// write cap is contract-wide rather than covering only the
+    /// `require_not_paused` paths. Entry points already calling
+    /// `require_not_paused` are covered by it and must not call this too, or
+    /// they would consume two write slots per call.
+    fn enforce_write_limit(env: &Env) {
+        circuit_breaker::check_and_recover(env);
+        if let Err(e) = circuit_breaker::enforce_degraded_write_limit(env) {
+            panic_with_error!(env, e);
+        }
     }
 
     fn require_not_paused(env: &Env) {
@@ -8698,6 +8717,7 @@ impl QuorumProofContract {
     /// If the removal would make the threshold unreachable, the threshold is clamped to the new total weight.
     pub fn remove_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         let mut slice: QuorumSlice = env
             .storage()
             .instance()
@@ -8759,6 +8779,7 @@ impl QuorumProofContract {
     /// the total weight sum (existing + new attestor).
     pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address, weight: u32) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         Self::require_valid_address(&env, &creator);
         Self::require_valid_address(&env, &attestor);
         let mut slice: QuorumSlice = env
@@ -8824,6 +8845,7 @@ impl QuorumProofContract {
         new_weight: u32,
     ) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         Self::validate_weight(new_weight);
         let mut slice: QuorumSlice = env
             .storage()
@@ -8899,6 +8921,7 @@ impl QuorumProofContract {
     /// Must be greater than 0 and cannot exceed the total weight sum of all attestors.
     pub fn update_slice_threshold(env: Env, creator: Address, slice_id: u64, new_threshold: u32) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         let mut slice: QuorumSlice = env
             .storage()
             .instance()
@@ -8985,6 +9008,7 @@ impl QuorumProofContract {
         percentage: u32,
     ) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         assert!(
             (1..=100).contains(&percentage),
             "percentage threshold must be between 1 and 100"
@@ -9093,6 +9117,7 @@ impl QuorumProofContract {
         expires_at: Option<u64>,
     ) {
         delegator.require_auth();
+        Self::enforce_write_limit(&env);
         Self::require_valid_address(&env, &delegator);
         Self::require_valid_address(&env, &delegate);
 
@@ -9158,6 +9183,7 @@ impl QuorumProofContract {
     /// Issue #896: Revoke a vote delegation
     pub fn revoke_slice_delegation(env: Env, delegator: Address, slice_id: u64) {
         delegator.require_auth();
+        Self::enforce_write_limit(&env);
 
         let delegation: SliceDelegation = env
             .storage()
@@ -10245,6 +10271,7 @@ impl QuorumProofContract {
     /// Add a holder to an issuer's whitelist.
     pub fn add_holder_to_whitelist(env: Env, issuer: Address, holder: Address) {
         issuer.require_auth();
+        Self::enforce_write_limit(&env);
         Self::require_valid_address(&env, &holder);
 
         env.storage().instance().set(
@@ -10289,6 +10316,7 @@ impl QuorumProofContract {
     /// Remove a holder from an issuer's whitelist.
     pub fn remove_holder_from_whitelist(env: Env, issuer: Address, holder: Address) {
         issuer.require_auth();
+        Self::enforce_write_limit(&env);
 
         env.storage()
             .instance()
@@ -10333,6 +10361,7 @@ impl QuorumProofContract {
         threshold: u32,
     ) {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -10797,6 +10826,7 @@ impl QuorumProofContract {
     /// Explicitly roll back an expired attestation request.
     /// Anyone can trigger rollback once the window has passed and threshold wasn't met.
     pub fn rollback_attestation_request(env: Env, request_id: u64) {
+        Self::enforce_write_limit(&env);
         let mut request: AttestationRequest = env
             .storage()
             .instance()
@@ -10842,6 +10872,7 @@ impl QuorumProofContract {
 
     /// Check if a credential's attestation request window has expired without reaching threshold.
     pub fn check_and_rollback_attestation(env: Env, request_id: u64) -> bool {
+        Self::enforce_write_limit(&env);
         let mut request: AttestationRequest = env
             .storage()
             .instance()
@@ -11939,6 +11970,7 @@ impl QuorumProofContract {
         parent_type: Option<u32>,
     ) {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -12824,6 +12856,7 @@ impl QuorumProofContract {
     /// Panics if no pending recovery exists for the attestor.
     pub fn complete_reputation_recovery(env: Env, admin: Address, attestor: Address) {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -14119,6 +14152,7 @@ impl QuorumProofContract {
         metadata: soroban_sdk::Bytes,
     ) {
         attestor.require_auth();
+        Self::enforce_write_limit(&env);
         // Verify the attestor has actually attested this credential
         let records: Vec<AttestationRecord> = env
             .storage()
@@ -15409,6 +15443,7 @@ impl QuorumProofContract {
     /// The amount collected (may be zero if nothing was pending).
     pub fn collect_slashed_stake(env: Env, admin: Address, attestor: Address) -> u64 {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -16463,6 +16498,7 @@ impl QuorumProofContract {
     /// Subject approves a pending consent request.
     pub fn approve_credential_request(env: Env, subject: Address, request_id: u64) {
         subject.require_auth();
+        Self::enforce_write_limit(&env);
 
         let mut request: ConsentRequest = env
             .storage()
@@ -16496,6 +16532,7 @@ impl QuorumProofContract {
         nonce: u64,
     ) -> u64 {
         issuer.require_auth();
+        Self::enforce_write_limit(&env);
 
         let request: ConsentRequest = env
             .storage()
@@ -17261,6 +17298,7 @@ impl QuorumProofContract {
         new_priority: AttestationPriority,
     ) {
         caller.require_auth();
+        Self::enforce_write_limit(&env);
         let mut entry: AttestationQueueEntry = env.storage().instance()
             .get(&DataKey3::AttestationQueueEntry(entry_id))
             .expect("queue entry not found");
@@ -17290,6 +17328,7 @@ impl QuorumProofContract {
         entry_id: u64,
     ) {
         caller.require_auth();
+        Self::enforce_write_limit(&env);
         let entry: AttestationQueueEntry = env.storage().instance()
             .get(&DataKey3::AttestationQueueEntry(entry_id))
             .expect("queue entry not found");
@@ -17318,6 +17357,7 @@ impl QuorumProofContract {
         max_entries: u32,
     ) -> u32 {
         caller.require_auth();
+        Self::enforce_write_limit(&env);
         let count: u64 = env.storage().instance()
             .get(&DataKey3::AttestationQueueCount)
             .unwrap_or(0u64);
@@ -17730,6 +17770,7 @@ impl QuorumProofContract {
         threshold: u32,
     ) -> u64 {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
 
         let now = env.ledger().timestamp();
 
@@ -17834,6 +17875,7 @@ impl QuorumProofContract {
         change_description: soroban_sdk::String,
     ) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
 
         let mut template: SliceTemplate = env
             .storage()
@@ -17991,6 +18033,7 @@ impl QuorumProofContract {
         reason: soroban_sdk::String,
     ) {
         owner.require_auth();
+        Self::enforce_write_limit(&env);
 
         let now = env.ledger().timestamp();
 
@@ -19426,6 +19469,7 @@ impl QuorumProofContract {
         nonce: Bytes,
     ) -> Bytes {
         holder.require_auth();
+        Self::enforce_write_limit(&env);
 
         // Verify credential exists and is BBS+-enabled
         let bbs_cred: BbsCredential = env
