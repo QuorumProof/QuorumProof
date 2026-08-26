@@ -6279,7 +6279,7 @@ impl QuorumProofContract {
             let type_def: CredentialTypeDef = env.storage()
                 .instance()
                 .get(&DataKey::CredentialType(credential_type))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialTypeNotFound));
             env.storage()
                 .instance()
                 .set(&DataKey10::CredentialTypeDefVersion(id), &type_def.version);
@@ -6521,7 +6521,7 @@ impl QuorumProofContract {
             let type_def: CredentialTypeDef = env.storage()
                 .instance()
                 .get(&DataKey::CredentialType(credential_type))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(env, ContractError::CredentialTypeNotFound));
             env.storage()
                 .instance()
                 .set(&DataKey10::CredentialTypeDefVersion(id), &type_def.version);
@@ -8838,7 +8838,10 @@ impl QuorumProofContract {
             .iter()
             .position(|candidate| candidate == attestor)
             .expect("attestor not in slice") as u32;
-        let old_weight = slice.weights.get(position).unwrap();
+        let old_weight = slice
+            .weights
+            .get(position)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInSlice));
         slice.weights.set(position, new_weight);
 
         let total_weight = Self::total_slice_weight(&slice.weights);
@@ -12402,7 +12405,7 @@ impl QuorumProofContract {
                 .storage()
                 .instance()
                 .get(&DataKey::Credential(id))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
             if credential.credential_type != type_id {
                 continue;
             }
@@ -17986,7 +17989,10 @@ impl QuorumProofContract {
             .expect("old attestor not in slice");
 
         // Get the weight of the old attestor
-        let attestor_weight = slice.weights.get(attestor_idx as u32).unwrap();
+        let attestor_weight = slice
+            .weights
+            .get(attestor_idx as u32)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInSlice));
 
         // Update slice
         let mut new_attestors = Vec::new(&env);
@@ -19147,16 +19153,15 @@ impl QuorumProofContract {
         slice: QuorumSlice,
         credential_type: u32,
     ) -> bool {
-        let rule: Option<CompositionRule> = env
+        let rule: CompositionRule = match env
             .storage()
             .instance()
-            .get(&DataKey11::SliceCompositionRule(credential_type));
-
-        if rule.is_none() {
-            return true;
-        }
-
-        let rule = rule.unwrap();
+            .get(&DataKey11::SliceCompositionRule(credential_type))
+        {
+            Some(rule) => rule,
+            // No composition rule configured for this credential type.
+            None => return true,
+        };
         let mut type_counts: Map<u32, u32> = Map::new(&env);
 
         for attestor_addr in slice.attestors.iter() {
