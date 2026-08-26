@@ -111,7 +111,34 @@ evaluated on the scrape interval:
   The source of truth when triaging an alert, and the fallback view when
   `CriticalEventAlertingDegraded` fires.
 - `GET /metrics/events` — Prometheus exposition of the counters consumed by
-  `alerts.yml`.
+  `alerts.yml`. **Scraped** by the `api-server-critical-events` job in
+  `monitoring/prometheus/prometheus.yml`, every 15s (matching
+  `EVENT_LISTENER_POLL_MS`'s default) — without that job the four
+  critical-event alert rules below have no data and can never fire, no
+  matter how many revocations/disputes/upgrades actually occur. Expected
+  alert latency once scraped: up to one scrape interval (15s) for the
+  counter to land in Prometheus, plus each rule's own evaluation window —
+  effectively immediate (`for: 0m` on all four) for `DisputeRaised` and
+  `ContractUpgradeDetected` (5m windows), and up to 15m of accumulation for
+  `RevocationSpike`'s volume threshold to be reached.
+
+### Scrape target inventory
+
+Every route Prometheus is meant to cover, kept here so a future new
+`/metrics/*` route doesn't silently repeat this gap — cross-check against
+`monitoring/prometheus/prometheus.yml`'s `scrape_configs` when adding one:
+
+| Route | Scrape job | Consumed by |
+|---|---|---|
+| `GET /metrics/events` (this doc) | `api-server-critical-events` | `RevocationSpike`, `DisputeRaised`, `ContractUpgradeDetected`, `CriticalEventAlertingDegraded` |
+| `quorumproof-exporter` `:9101/metrics` | `quorumproof-exporter` | `HighErrorRate`, `APIDown`, `ContractPaused`, `LowAttestationRate`, `RateLimitSpike`, and most other rules in `alerts.yml` |
+| Prometheus self-scrape `:9090` | `prometheus` | Prometheus's own operational metrics |
+
+`GET /metrics/ws` (`docs/websocket-scaling.md`) and `GET /metrics/rpc`
+(`docs/resilience.md`) are exposed by api-server but are **not** currently
+scraped by `monitoring/prometheus/prometheus.yml` — no `alerts.yml` rule
+depends on them today, but adding one without also adding a scrape job
+would reproduce this exact bug.
 
 ## Alerting channel setup
 
