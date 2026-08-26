@@ -66,6 +66,7 @@ const TOPIC_TEMPLATE_UPDATED: &str = "TemplateUpdated";
 const TOPIC_ATTESTOR_REPLACEMENT: &str = "AttestorReplaced";
 const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
 const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
+const TOPIC_KEY_ESCROW_ROTATED: &str = "KeyEscrowRotated";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
 const STANDARD_TTL: u32 = 16_384;
@@ -17041,6 +17042,31 @@ impl QuorumProofContract {
         Self::require_not_paused(&env);
         crate::rbac::require_role(&env, &issuer, rbac::Role::Issuer);
         crate::key_escrow::deposit_key_escrow(&env, &issuer, guardians, shares, threshold)
+    }
+
+    /// Replaces the guardian set, share blobs and threshold of an existing
+    /// escrow — the recovery path for a lost or compromised guardian key, or
+    /// for adding/removing a guardian. Re-splitting the key happens off-chain
+    /// exactly as for `deposit_key_escrow`. Issuer-only, and only while the
+    /// escrow has not been recovered; any in-progress recovery submissions are
+    /// cleared. See the module docs in `key_escrow.rs` for the full flow.
+    pub fn rotate_key_escrow_guardians(
+        env: Env,
+        issuer: Address,
+        new_guardians: Vec<Address>,
+        new_shares: Vec<BytesN<32>>,
+        new_threshold: u32,
+    ) -> key_escrow::KeyEscrow {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::require_role(&env, &issuer, rbac::Role::Issuer);
+        crate::key_escrow::rotate_key_escrow_guardians(
+            &env,
+            &issuer,
+            new_guardians,
+            new_shares,
+            new_threshold,
+        )
     }
 
     /// A guardian confirms it holds its share and consents to a recovery
