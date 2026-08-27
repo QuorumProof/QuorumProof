@@ -113,6 +113,23 @@ Alerts are routed to the `quorumproof-ops` receiver (configure in `monitoring/pr
 
 ---
 
+## Contract Diagnostic Reports
+
+`validate_contract_state` runs a consistency check over contract storage and
+returns a `ContractDiagnosticReport`; `get_last_diagnostic_report` returns the
+most recently cached one without re-running the checks. **The contract has no
+self-triggering mechanism** — `validate_contract_state` is only ever invoked
+when something calls it. Operators must schedule that call themselves (e.g.
+from the `monitoring/` exporter or a cron-driven script) or `get_last_diagnostic_report`
+can silently return an arbitrarily stale report.
+
+Use `is_last_diagnostic_stale(max_age_seconds)` from off-chain monitoring to
+check freshness instead of re-implementing the age comparison against the
+report's `generated_at` timestamp — it returns `true` both when no report has
+ever been computed and when the last one is older than `max_age_seconds`.
+
+---
+
 ## Exporter Configuration
 
 The exporter reads from environment variables:

@@ -102,6 +102,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 ## 📖 Documentation
 
 - [Architecture Overview](docs/architecture.md)
+- [Contract Module Index](contracts/quorum_proof/README.md) — maps each contract source file to its purpose and originating issue
 - [Trust Slice Model](docs/trust-slices.md)
 - [ZK Verification Design](docs/zk-verification.md)
 - [Threat Model & Security](docs/threat-model.md)
@@ -110,6 +111,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 - [Issuer Security Checklist](docs/issuer-security-checklist.md)
 - [Troubleshooting Guide](docs/troubleshooting-guide.md)
 - [Backup System](docs/backup-system.md)
+- [Batch Issuance Limits](docs/batch-issuance-limits.md)
 - [Roadmap](docs/roadmap.md)
 - [REST API Documentation Auto-Generation](api-server/docs/API_DOCUMENTATION.md) — OpenAPI 3.1, Swagger UI, ReDoc, TypeScript client
 

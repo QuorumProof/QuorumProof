@@ -210,3 +210,33 @@ pub fn get_key_escrow(env: &Env, issuer: &Address) -> Option<KeyEscrow> {
         .instance()
         .get(&DataKeyEscrow::Escrow(issuer.clone()))
 }
+
+/// Issuer-only: cancels an in-progress recovery for `issuer`'s escrow,
+/// clearing any accumulated `submit_recovery_share` progress so guardians
+/// must resubmit before a future `recover_key` can succeed.
+pub fn cancel_key_recovery(env: &Env, issuer: &Address) {
+    let escrow: KeyEscrow = env
+        .storage()
+        .instance()
+        .get(&DataKeyEscrow::Escrow(issuer.clone()))
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::EscrowNotFound));
+
+    if escrow.recovered {
+        panic_with_error!(env, ContractError::EscrowAlreadyRecovered);
+    }
+
+    env.storage()
+        .instance()
+        .set(&DataKeyEscrow::RecoverySubmissions(issuer.clone()), &Vec::<Address>::new(env));
+    env.storage()
+        .instance()
+        .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+    let topic = String::from_str(env, crate::TOPIC_KEY_ESCROW_RECOVERY_CANCELLED);
+    let mut topics: Vec<soroban_sdk::String> = Vec::new(env);
+    topics.push_back(topic);
+    env.events().publish(
+        topics,
+        (crate::TOPIC_KEY_ESCROW_RECOVERY_CANCELLED, issuer.clone()),
+    );
+}
