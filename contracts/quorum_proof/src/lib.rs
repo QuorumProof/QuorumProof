@@ -841,6 +841,8 @@ pub enum ContractError {
     InsufficientShares = 92,
     /// Referenced slice schema version is not registered
     SchemaNotFound = 93,
+    /// Issue #1394: Attempted to purge a role assignment/delegation that has not expired yet
+    GrantNotExpired = 94,
 }
 
 #[contracttype]
@@ -17009,6 +17011,32 @@ impl QuorumProofContract {
     /// Get the full RBAC audit log.
     pub fn get_role_audit_log(env: Env) -> Vec<rbac::RoleAuditEntry> {
         crate::rbac::get_audit_log(&env)
+    }
+
+    /// Check whether an address's role assignment has passed its expiry.
+    pub fn is_role_expired(env: Env, address: Address) -> bool {
+        crate::rbac::is_role_expired(&env, &address)
+    }
+
+    /// Check whether an address's role delegation has passed its expiry.
+    pub fn is_delegation_expired(env: Env, address: Address) -> bool {
+        crate::rbac::is_delegation_expired(&env, &address)
+    }
+
+    /// Admin-only: purge an expired role assignment's storage entry.
+    /// Panics if the assignment does not exist or has not yet expired.
+    pub fn purge_expired_role(env: Env, admin: Address, address: Address) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::purge_expired_role(&env, &admin, &address);
+    }
+
+    /// Admin-only: purge an expired role delegation's storage entry.
+    /// Panics if the delegation does not exist or has not yet expired.
+    pub fn purge_expired_delegation(env: Env, admin: Address, address: Address) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::purge_expired_delegation(&env, &admin, &address);
     }
 
     // ── BBS+ Key Escrow (#1295) ─────────────────────────────────────────
