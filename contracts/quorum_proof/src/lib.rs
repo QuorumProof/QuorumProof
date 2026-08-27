@@ -4308,6 +4308,24 @@ impl QuorumProofContract {
             .get(&DataKey10::LastDiagnosticReport)
     }
 
+    /// Returns `true` if no diagnostic report has ever been computed, or if
+    /// the last one is older than `max_age_seconds`. Lets off-chain
+    /// monitoring check report freshness without re-implementing the age
+    /// comparison against `ContractDiagnosticReport::generated_at` itself.
+    pub fn is_last_diagnostic_stale(env: Env, max_age_seconds: u64) -> bool {
+        let report: Option<ContractDiagnosticReport> = env
+            .storage()
+            .instance()
+            .get(&DataKey10::LastDiagnosticReport);
+        match report {
+            None => true,
+            Some(report) => {
+                let now = env.ledger().timestamp();
+                now.saturating_sub(report.generated_at) > max_age_seconds
+            }
+        }
+    }
+
     /// Check if an issuer is on the rate limit whitelist.
     pub fn is_rate_limit_whitelisted(env: Env, issuer: Address) -> bool {
         env.storage()
@@ -27856,6 +27874,36 @@ mod doc_tests {
         assert!(client.get_last_diagnostic_report().is_none());
         client.validate_contract_state();
         assert!(client.get_last_diagnostic_report().is_some());
+    }
+
+    #[test]
+    fn test_is_last_diagnostic_stale_true_before_any_validation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        assert!(client.is_last_diagnostic_stale(&3600u64));
+    }
+
+    #[test]
+    fn test_is_last_diagnostic_stale_false_when_fresh() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        client.validate_contract_state();
+        assert!(!client.is_last_diagnostic_stale(&3600u64));
+    }
+
+    #[test]
+    fn test_is_last_diagnostic_stale_true_after_max_age_elapsed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        client.validate_contract_state();
+        set_ledger_timestamp(&env, env.ledger().timestamp() + 7200);
+        assert!(client.is_last_diagnostic_stale(&3600u64));
     }
 
     #[test]
