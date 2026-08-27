@@ -102,6 +102,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 ## 📖 Documentation
 
 - [Architecture Overview](docs/architecture.md)
+- [Contract Module Index](contracts/quorum_proof/README.md) — maps each contract source file to its purpose and originating issue
 - [Trust Slice Model](docs/trust-slices.md)
 - [ZK Verification Design](docs/zk-verification.md)
 - [Threat Model & Security](docs/threat-model.md)
