@@ -2612,6 +2612,33 @@ pub struct CongestionConfig {
     pub max_max_calls: u32,
 }
 
+/// Issue #1397: Combined read-only snapshot of all three independent
+/// throttling systems (circuit breaker, rate limiting, congestion), so an
+/// operator/dashboard can read all of their current state in one round trip
+/// instead of calling each system's getters separately. See
+/// `docs/throttling.md` for how these systems interact and their precedence
+/// order when more than one applies to a single call.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ThrottlingStatus {
+    /// Circuit breaker: current operational state (Normal/Degraded/Paused).
+    pub circuit_breaker_state: circuit_breaker::CircuitBreakerState,
+    /// Circuit breaker: active degradation/pause details, if any.
+    pub circuit_breaker_activation: Option<circuit_breaker::CircuitBreakerActivation>,
+    /// Circuit breaker: max writes allowed per ledger while Degraded.
+    pub degraded_write_limit: u32,
+    /// Circuit breaker: writes recorded in the current Degraded window.
+    pub degraded_write_count: u32,
+    /// Rate limiting: global (default) max calls per window.
+    pub rate_limit_max_calls: u32,
+    /// Rate limiting: global (default) window length in seconds.
+    pub rate_limit_window_seconds: u64,
+    /// Congestion: current classification (Low/Normal/High).
+    pub congestion_level: CongestionLevel,
+    /// Congestion: thresholds/factors driving automatic rate-limit adjustment.
+    pub congestion_config: CongestionConfig,
+}
+
 // ── Feature (b): Admin bypass for emergency attestations ─────────────────────
 
 /// Audit record written every time the admin bypass is exercised.
@@ -4017,6 +4044,23 @@ impl QuorumProofContract {
             .get::<_, NetworkCongestionMetrics>(&DataKey10::CongestionMetrics)
             .map(|m| m.level)
             .unwrap_or(CongestionLevel::Normal)
+    }
+
+    /// Issue #1397: Read the current state of all three independent
+    /// throttling systems (circuit breaker, rate limiting, congestion) in a
+    /// single round trip. See `docs/throttling.md` for how they interact.
+    pub fn get_throttling_status(env: Env) -> ThrottlingStatus {
+        let rate_limit_config = Self::get_rate_limit_config(&env);
+        ThrottlingStatus {
+            circuit_breaker_state: circuit_breaker::get_state(&env),
+            circuit_breaker_activation: circuit_breaker::get_activation(&env),
+            degraded_write_limit: circuit_breaker::get_config(&env).degraded_write_limit,
+            degraded_write_count: circuit_breaker::get_degraded_write_count(&env),
+            rate_limit_max_calls: rate_limit_config.max_calls,
+            rate_limit_window_seconds: rate_limit_config.window_seconds,
+            congestion_level: Self::get_congestion_level(env.clone()),
+            congestion_config: Self::get_congestion_config(env),
+        }
     }
 
     // ── Feature (b): Admin bypass for urgent / emergency attestations ──────────
@@ -27680,6 +27724,78 @@ mod doc_tests {
         client.update_congestion_and_adjust();
         let m = client.get_congestion_metrics().unwrap();
         assert_eq!(m.calls_in_window, 1);
+    }
+
+    // ── Issue #1397: Throttling systems interaction ───────────────────────────
+
+    #[test]
+    fn test_rate_limit_whitelist_does_not_bypass_degraded_write_cap() {
+        // A rate-limit-whitelisted issuer still hits the circuit breaker's
+        // degraded write cap: whitelisting only bypasses system #2 (rate
+        // limiting), not system #1 (circuit breaker). See docs/throttling.md.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        client.set_circuit_breaker_config(
+            &admin,
+            &circuit_breaker::CircuitBreakerConfig {
+                ttl_seconds: 86_400,
+                degraded_write_limit: 1,
+                auto_recover: false,
+            },
+        );
+        let reason = String::from_str(&env, "load test");
+        client.emergency_degrade(&admin, &reason);
+        assert_eq!(
+            client.get_circuit_breaker_state(),
+            circuit_breaker::CircuitBreakerState::Degraded
+        );
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        // First write: within the degraded-write cap (limit=1) — succeeds
+        // even though the contract is Degraded, and the whitelist means rate
+        // limiting never even gets consulted.
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        // Second write: the whitelist still bypasses rate limiting, but the
+        // circuit breaker's degraded write cap is unconditional and rejects
+        // it regardless of whitelist status.
+        let subject2 = Address::generate(&env);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.issue_credential(&issuer, &subject2, &1u32, &metadata, &None, &0u64);
+        }));
+        assert!(
+            result.is_err(),
+            "whitelisted issuer must still be rejected by the degraded write cap"
+        );
+    }
+
+    #[test]
+    fn test_get_throttling_status_combines_all_three_systems() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        client.set_rate_limit_config(&admin, &42u32, &3600u64);
+        let reason = String::from_str(&env, "combined status check");
+        client.emergency_degrade(&admin, &reason);
+
+        let status = client.get_throttling_status();
+        assert_eq!(
+            status.circuit_breaker_state,
+            circuit_breaker::CircuitBreakerState::Degraded
+        );
+        assert!(status.circuit_breaker_activation.is_some());
+        assert_eq!(status.rate_limit_max_calls, 42);
+        assert_eq!(status.rate_limit_window_seconds, 3600);
+        assert_eq!(status.congestion_level, CongestionLevel::Normal);
     }
 
     // ── Feature (b): Admin bypass rate-limit tests ────────────────────────────
