@@ -66,6 +66,7 @@ const TOPIC_TEMPLATE_UPDATED: &str = "TemplateUpdated";
 const TOPIC_ATTESTOR_REPLACEMENT: &str = "AttestorReplaced";
 const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
 const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
+const TOPIC_KEY_ESCROW_RECOVERY_CANCELLED: &str = "KeyEscrowRecoveryCancelled";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
 const STANDARD_TTL: u32 = 16_384;
@@ -17054,6 +17055,15 @@ impl QuorumProofContract {
         crate::key_escrow::get_key_escrow(&env, &issuer)
     }
 
+    /// Issuer-only: cancels an in-progress recovery for the caller's escrow,
+    /// clearing any accumulated `submit_recovery_share` progress. Guardians
+    /// may resubmit afterward to start a fresh recovery attempt.
+    pub fn cancel_key_recovery(env: Env, issuer: Address) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        crate::key_escrow::cancel_key_recovery(&env, &issuer)
+    }
+
     // ── Attestation Queue Management (#843) ────────────────────────────
 
     /// Add an attestation to the queue for later processing.
@@ -28322,6 +28332,74 @@ mod doc_tests {
         // Verify the mechanism is in place by checking the challenge exists
         let challenge = client.get_challenge(&challenge_id);
         assert_eq!(challenge.status, 0u32); // Active status
+    }
+
+    // ── Feature #7/#1295: cancel_key_recovery tests ─────────────────────────
+
+    fn setup_key_escrow(
+        env: &Env,
+        client: &QuorumProofContractClient<'_>,
+        admin: &Address,
+    ) -> (Address, Vec<Address>) {
+        let issuer = Address::generate(env);
+        client.assign_role(admin, &issuer, &(rbac::Role::Issuer as u32), &0u64);
+
+        let guardians = vec![env, Address::generate(env), Address::generate(env), Address::generate(env)];
+        let shares = vec![
+            env,
+            soroban_sdk::BytesN::<32>::from_array(env, &[1u8; 32]),
+            soroban_sdk::BytesN::<32>::from_array(env, &[2u8; 32]),
+            soroban_sdk::BytesN::<32>::from_array(env, &[3u8; 32]),
+        ];
+        client.deposit_key_escrow(&issuer, &guardians, &shares, &2u32);
+        (issuer, guardians)
+    }
+
+    #[test]
+    fn test_cancel_key_recovery_resets_submission_count() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let (issuer, guardians) = setup_key_escrow(&env, &client, &admin);
+
+        client.submit_recovery_share(&guardians.get(0).unwrap(), &issuer);
+        assert_eq!(
+            client.submit_recovery_share(&guardians.get(1).unwrap(), &issuer),
+            2
+        );
+
+        client.cancel_key_recovery(&issuer);
+
+        // After cancellation, both guardians may resubmit as if fresh.
+        let count = client.submit_recovery_share(&guardians.get(0).unwrap(), &issuer);
+        assert_eq!(count, 1, "submission count should reset to zero after cancellation");
+    }
+
+    #[test]
+    fn test_cancel_key_recovery_allows_guardian_resubmit() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let (issuer, guardians) = setup_key_escrow(&env, &client, &admin);
+
+        client.submit_recovery_share(&guardians.get(0).unwrap(), &issuer);
+        client.cancel_key_recovery(&issuer);
+
+        // Resubmitting the same guardian must not be rejected as a duplicate.
+        let count = client.submit_recovery_share(&guardians.get(0).unwrap(), &issuer);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cancel_key_recovery_after_recovered_fails() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let (issuer, guardians) = setup_key_escrow(&env, &client, &admin);
+
+        client.submit_recovery_share(&guardians.get(0).unwrap(), &issuer);
+        client.submit_recovery_share(&guardians.get(1).unwrap(), &issuer);
+        client.recover_key(&issuer, &issuer);
+
+        client.cancel_key_recovery(&issuer);
     }
 }
 
