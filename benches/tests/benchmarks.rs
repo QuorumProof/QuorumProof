@@ -32,7 +32,7 @@
 //   cargo run  --manifest-path benches/Cargo.toml --bin scaling_report
 // or just `scripts/scaling_benchmark_report.sh` to do both.
 use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, Vec};
-use quorum_proof::{ClaimType as QpClaimType, QuorumProofContract, QuorumProofContractClient};
+use quorum_proof::{ClaimType as QpClaimType, DidKeyType, QuorumProofContract, QuorumProofContractClient};
 use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
 use zk_verifier::{AggregateProof, ClaimType, ZkVerifierContract, ZkVerifierContractClient};
 use quorum_proof_benches::scaling;
@@ -602,6 +602,77 @@ fn bench_batch_issue_credentials_scaling() {
 
         println!("[bench_batch_issue_credentials_scaling n={}] cpu={} mem={}", n, m.cpu, m.mem);
         scaling::record_point("batch_issue_credentials", n, m.cpu, m.mem);
+    }
+}
+
+/// Issue #1398: Measures `batch_issue_credentials_by_did` across a batch-size
+/// sweep, with a slice already created at `MAX_ATTESTORS_PER_SLICE` (20,
+/// contracts/quorum_proof/src/lib.rs:74) attestors present in contract state —
+/// the realistic worst case of a heavily-attested deployment issuing a large
+/// batch via the DID resolution path (register_did + DID lookup per subject
+/// adds real overhead the plain-Address `batch_issue_credentials` bench above
+/// doesn't capture).
+///
+/// `n=100` is intentionally included even though it exceeds `MAX_BATCH_SIZE`
+/// (50, contracts/quorum_proof/src/lib.rs:75): the call reverts before doing
+/// any issuance work, which *is* the practical batch-size ceiling this bench
+/// exists to document (see docs/batch-issuance-limits.md). It is recorded as
+/// a rejection, not a cpu/mem data point.
+#[test]
+fn bench_batch_issue_credentials_by_did_scaling() {
+    for n in [1u32, 10, 50, 100] {
+        let env = Env::default();
+        let (client, _) = setup_qp(&env);
+        let issuer = Address::generate(&env);
+        let meta = Bytes::from_slice(&env, b"QmBenchHash000000000000000000000000");
+
+        // Realistic worst case: a slice already at MAX_ATTESTORS_PER_SLICE exists
+        // in contract state alongside the batch issuance.
+        let mut slice_attestors = Vec::new(&env);
+        let mut slice_weights = Vec::new(&env);
+        for _ in 0..20u32 {
+            slice_attestors.push_back(Address::generate(&env));
+            slice_weights.push_back(1u32);
+        }
+        client.create_slice(&issuer, &slice_attestors, &slice_weights, &1u32);
+
+        if n > 50 {
+            let mut subject_dids = Vec::new(&env);
+            let mut cred_types = Vec::new(&env);
+            let mut metas = Vec::new(&env);
+            for i in 1u32..=n {
+                let did = soroban_sdk::String::from_str(&env, &format!("did:bench:{}", i));
+                subject_dids.push_back(did);
+                cred_types.push_back(i);
+                metas.push_back(meta.clone());
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.batch_issue_credentials_by_did(&issuer, &subject_dids, &cred_types, &metas, &None);
+            }));
+            assert!(result.is_err(), "batch of {} must exceed MAX_BATCH_SIZE and revert", n);
+            println!("[bench_batch_issue_credentials_by_did_scaling n={}] rejected: exceeds MAX_BATCH_SIZE", n);
+            continue;
+        }
+
+        let mut subject_dids = Vec::new(&env);
+        let mut cred_types = Vec::new(&env);
+        let mut metas = Vec::new(&env);
+        for i in 1u32..=n {
+            let address = Address::generate(&env);
+            let did = soroban_sdk::String::from_str(&env, &format!("did:bench:{}", i));
+            let public_key = Bytes::from_slice(&env, &[0u8; 32]);
+            client.register_did(&address, &did, &DidKeyType::Ed25519VerificationKey2020, &public_key);
+            subject_dids.push_back(did);
+            cred_types.push_back(i);
+            metas.push_back(meta.clone());
+        }
+
+        let m = measure_unlimited(&env, || {
+            client.batch_issue_credentials_by_did(&issuer, &subject_dids, &cred_types, &metas, &None);
+        });
+
+        println!("[bench_batch_issue_credentials_by_did_scaling n={}] cpu={} mem={}", n, m.cpu, m.mem);
+        scaling::record_point("batch_issue_credentials_by_did", n, m.cpu, m.mem);
     }
 }
 
