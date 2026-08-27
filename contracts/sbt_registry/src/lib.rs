@@ -160,6 +160,11 @@ pub enum DataKey {
     /// The pending clawback id for an SBT, if any (sbt_id -> clawback_id).
     /// Enforces that only one clawback may be pending per SBT at a time.
     PendingClawbackBySbt(u64),
+    /// Issue #1413: Global list of all currently-pending clawback IDs.
+    /// Maintained on initiate/cancel so callers can enumerate active clawbacks
+    /// without iterating ClawbackRequestCount (which includes
+    /// cancelled/executed entries too).
+    PendingClawbacks,
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -796,8 +801,13 @@ impl SbtRegistryContract {
             expires_at,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Delegation(token_id), &delegation);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Delegation(token_id),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
     }
 
     /// Revoke an active delegation for a specific SBT. Only the token owner may call this.
@@ -810,14 +820,14 @@ impl SbtRegistryContract {
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
     }
 
     /// Retrieve delegation details for a token.
     pub fn get_delegation(env: Env, token_id: u64) -> Delegation {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Delegation(token_id))
             .expect("delegation not found")
     }
@@ -826,7 +836,7 @@ impl SbtRegistryContract {
     pub fn is_delegate_active(env: Env, token_id: u64, delegatee: Address) -> bool {
         let current_ts: u64 = env.ledger().timestamp();
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Delegation(token_id))
             .map_or(false, |delegation: Delegation| {
                 delegation.delegatee == delegatee && delegation.expires_at > current_ts
@@ -864,8 +874,13 @@ impl SbtRegistryContract {
         };
 
         env.storage()
-            .instance()
-            .set(&DataKey::UsageDelegation(sbt_id, delegatee), &delegation);
+            .persistent()
+            .set(&DataKey::UsageDelegation(sbt_id, delegatee.clone()), &delegation);
+        env.storage().persistent().extend_ttl(
+            &DataKey::UsageDelegation(sbt_id, delegatee),
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
     }
 
     /// Verify a delegated SBT specifically for DeFi protocol usages.
@@ -875,7 +890,7 @@ impl SbtRegistryContract {
         }
 
         let key = DataKey::UsageDelegation(sbt_id, delegatee);
-        if let Some(delegation) = env.storage().instance().get::<_, ScopedDelegation>(&key) {
+        if let Some(delegation) = env.storage().persistent().get::<_, ScopedDelegation>(&key) {
             let current_ts = env.ledger().timestamp();
             match delegation.scope {
                 UsageScope::DeFiCollateral(expires_at) => {
@@ -914,7 +929,7 @@ impl SbtRegistryContract {
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             owner.clone(),
@@ -999,7 +1014,7 @@ impl SbtRegistryContract {
         env.storage().persistent().remove(&DataKey::Token(sbt_id));
         env.storage().persistent().remove(&DataKey::Owner(sbt_id));
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(sbt_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             owner.clone(),
@@ -1069,7 +1084,7 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             old_owner.clone(),
@@ -1135,7 +1150,7 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             old_owner.clone(),
@@ -2131,7 +2146,7 @@ impl SbtRegistryContract {
                 .persistent()
                 .remove(&DataKey::Owner(entry.token_id));
             env.storage()
-                .instance()
+                .persistent()
                 .remove(&DataKey::Delegation(entry.token_id));
             env.storage().instance().remove(&DataKey::OwnerCredential(
                 entry.caller.clone(),
@@ -2222,7 +2237,7 @@ impl SbtRegistryContract {
                 .persistent()
                 .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
             env.storage()
-                .instance()
+                .persistent()
                 .remove(&DataKey::Delegation(entry.token_id));
             env.storage().instance().remove(&DataKey::OwnerCredential(
                 old_owner.clone(),
@@ -2810,6 +2825,24 @@ impl SbtRegistryContract {
             EXTENDED_TTL,
         );
 
+        // Issue #1413: maintain the global pending-clawbacks index.
+        let mut pending: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingClawbacks)
+            .unwrap_or(Vec::new(&env));
+        if !pending.iter().any(|id| id == clawback_id) {
+            pending.push_back(clawback_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingClawbacks, &pending);
+            env.storage().persistent().extend_ttl(
+                &DataKey::PendingClawbacks,
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+        }
+
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("clawback").into_val(&env));
         topics.push_back(sbt_id.into_val(&env));
@@ -2842,10 +2875,41 @@ impl SbtRegistryContract {
             .persistent()
             .remove(&DataKey::PendingClawbackBySbt(request.sbt_id));
 
+        // Issue #1413: remove from the global pending-clawbacks index.
+        let mut pending: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingClawbacks)
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = pending.iter().position(|id| id == clawback_id) {
+            pending.remove(pos as u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingClawbacks, &pending);
+            if !pending.is_empty() {
+                env.storage().persistent().extend_ttl(
+                    &DataKey::PendingClawbacks,
+                    STANDARD_TTL,
+                    EXTENDED_TTL,
+                );
+            }
+        }
+
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("clw_cncl").into_val(&env));
         topics.push_back(clawback_id.into_val(&env));
         env.events().publish(topics, issuer);
+    }
+
+    /// Issue #1413: Return all currently-pending clawback IDs.
+    ///
+    /// These are clawbacks with `status = "pending"` that have not yet been
+    /// cancelled or executed. Useful for dashboards and bulk notifications.
+    pub fn get_pending_clawbacks(env: Env) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingClawbacks)
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Look up a clawback request by id.
@@ -3159,7 +3223,7 @@ impl SbtRegistryContract {
 
         // Remove delegation from old owner
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(sbt_id));
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
@@ -3340,11 +3404,26 @@ impl SbtRegistryContract {
     /// `key`/`value`, enabling granular verification (e.g. "find all SBTs
     /// where specialization = mechanical_engineering") without exposing the
     /// full credential. Private attributes are never returned by this query.
-    pub fn query_sbt_by_attribute(env: Env, key: Bytes, value: Bytes) -> Vec<u64> {
-        env.storage()
+    ///
+    /// # Pagination
+    /// Use `offset` and `limit` to page through large result sets.
+    /// `offset` is the zero-based index of the first result to return.
+    /// `limit` is the maximum number of results to return (capped at 100).
+    /// Pass `offset = 0, limit = 100` for the first page.
+    pub fn query_sbt_by_attribute(env: Env, key: Bytes, value: Bytes, offset: u64, limit: u64) -> Vec<u64> {
+        let all: Vec<u64> = env
+            .storage()
             .persistent()
             .get(&DataKey::AttributeIndex(key, value))
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+        let cap: u64 = if limit == 0 { 100 } else { limit.min(100) };
+        let start = offset.min(all.len() as u64) as u32;
+        let end = (offset + cap).min(all.len() as u64) as u32;
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            page.push_back(all.get(i).unwrap());
+        }
+        page
     }
 
     fn add_to_attribute_index(env: &Env, key: &Bytes, value: &Bytes, sbt_id: u64) {
@@ -3437,14 +3516,19 @@ impl SbtRegistryContract {
 
         let mut registry: Vec<u64> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::GlobalMarketplaceRegistry)
             .unwrap_or(Vec::new(&env));
         if !registry.iter().any(|id| id == sbt_id) {
             registry.push_back(sbt_id);
             env.storage()
-                .instance()
+                .persistent()
                 .set(&DataKey::GlobalMarketplaceRegistry, &registry);
+            env.storage().persistent().extend_ttl(
+                &DataKey::GlobalMarketplaceRegistry,
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
         }
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
@@ -3544,11 +3628,26 @@ impl SbtRegistryContract {
     /// On-chain registry index of every SBT that has ever been registered in
     /// at least one marketplace — the discovery entry point for marketplace
     /// aggregators that don't already know a marketplace_id.
-    pub fn get_all_registered_sbts(env: Env) -> Vec<u64> {
-        env.storage()
-            .instance()
+    ///
+    /// # Pagination
+    /// Use `offset` and `limit` to page through large result sets.
+    /// `offset` is the zero-based index of the first result to return.
+    /// `limit` is the maximum number of results to return (capped at 100).
+    /// Pass `offset = 0, limit = 100` for the first page.
+    pub fn get_all_registered_sbts(env: Env, offset: u64, limit: u64) -> Vec<u64> {
+        let all: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::GlobalMarketplaceRegistry)
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+        let cap: u64 = if limit == 0 { 100 } else { limit.min(100) };
+        let start = offset.min(all.len() as u64) as u32;
+        let end = (offset + cap).min(all.len() as u64) as u32;
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            page.push_back(all.get(i).unwrap());
+        }
+        page
     }
 
     // ---------------------------------------------------------------
@@ -5924,5 +6023,476 @@ mod tests {
         // A verifier only needs commitment + proof; verification succeeds
         // without ever supplying or learning `owner`.
         assert!(client.verify_sbt_commitment(&commitment, &proof));
+    }
+
+    // ── Issue #1412: batch_mint ───────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_mint_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred1 = qp_client.issue_credential(&issuer, &owner1, &1u32, &meta, &None, &0u64);
+        let cred2 = qp_client.issue_credential(&issuer, &owner2, &2u32, &meta, &None, &0u64);
+
+        let entries = soroban_sdk::vec![
+            &env,
+            BatchMintEntry {
+                owner: owner1.clone(),
+                credential_id: cred1,
+                metadata_uri: Bytes::from_slice(&env, b"ipfs://1"),
+            },
+            BatchMintEntry {
+                owner: owner2.clone(),
+                credential_id: cred2,
+                metadata_uri: Bytes::from_slice(&env, b"ipfs://2"),
+            },
+        ];
+
+        let ids = client.batch_mint(&entries);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(client.owner_of(&ids.get(0).unwrap()), owner1);
+        assert_eq!(client.owner_of(&ids.get(1).unwrap()), owner2);
+    }
+
+    #[test]
+    fn test_batch_mint_empty_returns_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let empty: soroban_sdk::Vec<BatchMintEntry> = soroban_sdk::vec![&env];
+        let ids = client.batch_mint(&empty);
+        assert_eq!(ids.len(), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_batch_mint_rejects_duplicate_owner_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+
+        let entries = soroban_sdk::vec![
+            &env,
+            BatchMintEntry {
+                owner: owner.clone(),
+                credential_id: cred,
+                metadata_uri: Bytes::from_slice(&env, b"ipfs://a"),
+            },
+            BatchMintEntry {
+                owner: owner.clone(),
+                credential_id: cred,
+                metadata_uri: Bytes::from_slice(&env, b"ipfs://b"),
+            },
+        ];
+        client.batch_mint(&entries);
+    }
+
+    // ── Issue #1412: batch_burn ───────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_burn_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let cred2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None, &0u64);
+        let t1 = client.mint(&owner, &cred1, &Bytes::from_slice(&env, b"ipfs://1"));
+        let t2 = client.mint(&owner, &cred2, &Bytes::from_slice(&env, b"ipfs://2"));
+
+        let entries = soroban_sdk::vec![
+            &env,
+            BatchBurnEntry { caller: owner.clone(), token_id: t1 },
+            BatchBurnEntry { caller: owner.clone(), token_id: t2 },
+        ];
+        let burned = client.batch_burn(&entries);
+        assert_eq!(burned.len(), 2);
+        assert_eq!(client.get_tokens_by_owner(&owner).len(), 0);
+    }
+
+    #[test]
+    fn test_batch_burn_empty_returns_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let empty: soroban_sdk::Vec<BatchBurnEntry> = soroban_sdk::vec![&env];
+        let result = client.batch_burn(&empty);
+        assert_eq!(result.len(), 0);
+    }
+
+    // ── Issue #1412: batch_transfer ──────────────────────────────────────────
+
+    #[test]
+    fn test_batch_transfer_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let entries = soroban_sdk::vec![
+            &env,
+            BatchTransferEntry { token_id, new_owner: new_owner.clone() },
+        ];
+        let transferred = client.batch_transfer(&admin, &entries);
+        assert_eq!(transferred.len(), 1);
+        assert_eq!(client.owner_of(&token_id), new_owner);
+    }
+
+    #[test]
+    fn test_batch_transfer_empty_returns_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        let empty: soroban_sdk::Vec<BatchTransferEntry> = soroban_sdk::vec![&env];
+        let result = client.batch_transfer(&admin, &empty);
+        assert_eq!(result.len(), 0);
+    }
+
+    // ── Issue #1412: clawback timelock ───────────────────────────────────────
+
+    #[test]
+    fn test_initiate_sbt_clawback_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let reason = Bytes::from_slice(&env, b"fraudulent");
+        let clawback_id = client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
+        assert_eq!(clawback_id, 1);
+
+        let req = client.get_clawback_request(&clawback_id);
+        assert_eq!(req.sbt_id, token_id);
+        assert_eq!(req.issuer, admin);
+    }
+
+    #[test]
+    fn test_cancel_sbt_clawback_before_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let reason = Bytes::from_slice(&env, b"test");
+        let clawback_id = client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
+        client.cancel_sbt_clawback(&admin, &clawback_id);
+
+        let req = client.get_clawback_request(&clawback_id);
+        assert_eq!(req.status, symbol_short!("cancelled"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_initiate_clawback_rejects_duplicate_for_same_sbt() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let reason = Bytes::from_slice(&env, b"fraud");
+        client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
+        // Second initiation for the same SBT must panic (ClawbackAlreadyExists).
+        client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
+    }
+
+    // ── Issue #1412: marketplace register/deregister/query ───────────────────
+
+    #[test]
+    fn test_register_sbt_in_marketplace_and_query() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let market_id = Bytes::from_slice(&env, b"market_A");
+        let listing_meta = Bytes::from_slice(&env, b"{}");
+        client.register_sbt_in_marketplace(&owner, &token_id, &market_id, &listing_meta);
+
+        let results = client.query_marketplace_sbt(&market_id);
+        assert!(results.iter().any(|id| id == token_id));
+    }
+
+    #[test]
+    fn test_deregister_sbt_from_marketplace() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let market_id = Bytes::from_slice(&env, b"market_B");
+        let listing_meta = Bytes::from_slice(&env, b"{}");
+        client.register_sbt_in_marketplace(&owner, &token_id, &market_id, &listing_meta);
+        client.deregister_sbt_from_marketplace(&owner, &token_id, &market_id);
+
+        let results = client.query_marketplace_sbt(&market_id);
+        assert!(!results.iter().any(|id| id == token_id));
+    }
+
+    #[test]
+    fn test_get_all_registered_sbts_pagination() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let market_id = Bytes::from_slice(&env, b"market_C");
+        let listing_meta = Bytes::from_slice(&env, b"{}");
+
+        for i in 0u32..3 {
+            let owner = Address::generate(&env);
+            let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+            let cred = qp_client.issue_credential(&issuer, &owner, &i, &meta, &None, &0u64);
+            let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://x"));
+            client.register_sbt_in_marketplace(&owner, &token_id, &market_id, &listing_meta);
+        }
+
+        // First page: offset=0, limit=2 → 2 items.
+        let page1 = client.get_all_registered_sbts(&0u64, &2u64);
+        assert_eq!(page1.len(), 2);
+
+        // Second page: offset=2, limit=2 → 1 item.
+        let page2 = client.get_all_registered_sbts(&2u64, &2u64);
+        assert_eq!(page2.len(), 1);
+
+        // Out-of-range page: offset=10 → empty.
+        let page3 = client.get_all_registered_sbts(&10u64, &2u64);
+        assert_eq!(page3.len(), 0);
+    }
+
+    // ── Issue #1412: attributes ───────────────────────────────────────────────
+
+    #[test]
+    fn test_add_sbt_attribute_and_get() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let key = Bytes::from_slice(&env, b"specialization");
+        let value = Bytes::from_slice(&env, b"mechanical");
+        client.add_sbt_attribute(&admin, &token_id, &key, &value, &false);
+
+        let v = client.get_sbt_attribute(&owner, &token_id, &key);
+        assert_eq!(v, value);
+    }
+
+    #[test]
+    fn test_remove_sbt_attribute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let key = Bytes::from_slice(&env, b"tier");
+        let value = Bytes::from_slice(&env, b"gold");
+        client.add_sbt_attribute(&admin, &token_id, &key, &value, &false);
+        client.remove_sbt_attribute(&admin, &token_id, &key);
+
+        let keys = client.get_sbt_attribute_keys(&token_id);
+        assert!(!keys.iter().any(|k| k == key));
+    }
+
+    #[test]
+    fn test_query_sbt_by_attribute_pagination() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let key = Bytes::from_slice(&env, b"role");
+        let value = Bytes::from_slice(&env, b"engineer");
+
+        for i in 0u32..4 {
+            let owner = Address::generate(&env);
+            let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+            let cred = qp_client.issue_credential(&admin, &owner, &i, &meta, &None, &0u64);
+            let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://x"));
+            client.add_sbt_attribute(&admin, &token_id, &key, &value, &false);
+        }
+
+        // First page: 3 items.
+        let page1 = client.query_sbt_by_attribute(&key, &value, &0u64, &3u64);
+        assert_eq!(page1.len(), 3);
+
+        // Second page: 1 item.
+        let page2 = client.query_sbt_by_attribute(&key, &value, &3u64, &3u64);
+        assert_eq!(page2.len(), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_private_attribute_denied_to_non_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let key = Bytes::from_slice(&env, b"secret");
+        let value = Bytes::from_slice(&env, b"private_data");
+        client.add_sbt_attribute(&admin, &token_id, &key, &value, &true);
+
+        // Stranger reading a private attribute must panic.
+        client.get_sbt_attribute(&stranger, &token_id, &key);
+    }
+
+    // ── Issue #1412: co-owner and dual-transfer ───────────────────────────────
+
+    #[test]
+    fn test_set_co_owner_and_transfer_ownership_dual() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let co_owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        client.set_co_owner(&owner, &token_id, &co_owner);
+        let token = client.get_token(&token_id);
+        assert_eq!(token.co_owner, Some(co_owner.clone()));
+
+        client.transfer_ownership_dual(&token_id, &new_owner);
+        assert_eq!(client.owner_of(&token_id), new_owner);
+    }
+
+    #[test]
+    fn test_remove_co_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let co_owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        client.set_co_owner(&owner, &token_id, &co_owner);
+        client.remove_co_owner(&owner, &co_owner, &token_id);
+
+        let token = client.get_token(&token_id);
+        assert_eq!(token.co_owner, None);
+    }
+
+    // ── Issue #1411: delegation uses persistent storage with TTL ─────────────
+
+    #[test]
+    fn test_delegation_persists_same_as_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+
+        let expires_at = env.ledger().timestamp() + 10_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+
+        let d = client.get_delegation(&token_id);
+        assert_eq!(d.delegatee, delegatee);
+        assert_eq!(d.expires_at, expires_at);
+        assert!(client.is_delegate_active(&token_id, &delegatee));
+    }
+
+    // ── Issue #1413: PendingClawbacks index ──────────────────────────────────
+
+    #[test]
+    fn test_pending_clawbacks_index_maintained() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred1 = qp_client.issue_credential(&admin, &owner1, &1u32, &meta, &None, &0u64);
+        let cred2 = qp_client.issue_credential(&admin, &owner2, &2u32, &meta, &None, &0u64);
+        let t1 = client.mint(&owner1, &cred1, &Bytes::from_slice(&env, b"ipfs://1"));
+        let t2 = client.mint(&owner2, &cred2, &Bytes::from_slice(&env, b"ipfs://2"));
+
+        let reason = Bytes::from_slice(&env, b"fraud");
+        let id1 = client.initiate_sbt_clawback(&admin, &t1, &reason, &3600u64);
+        let id2 = client.initiate_sbt_clawback(&admin, &t2, &reason, &3600u64);
+
+        let pending = client.get_pending_clawbacks();
+        assert!(pending.iter().any(|id| id == id1));
+        assert!(pending.iter().any(|id| id == id2));
+
+        // Cancel id1 — must be removed from the index.
+        client.cancel_sbt_clawback(&admin, &id1);
+        let after = client.get_pending_clawbacks();
+        assert!(!after.iter().any(|id| id == id1));
+        assert!(after.iter().any(|id| id == id2));
+    }
+
+    #[test]
+    fn test_get_pending_clawbacks_empty_initially() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+        assert_eq!(client.get_pending_clawbacks().len(), 0);
     }
 }

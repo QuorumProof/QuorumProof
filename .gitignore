@@ -126,3 +126,15 @@ FILES_CHANGED.txt
 TASK_IMPLEMENTATIONS.md
 IMPLEMENTATION_SUMMARY.md
 VERIFICATION_CHECKLIST.md
+
+# Soroban compiled WASM artifacts (never commit wasm blobs)
+**/*.wasm
+contracts/*/target/
+
+# Cargo incremental build state
+**/.cargo-lock
+**/incremental/
+
+# Test snapshots (runtime-generated, not committed except API contract baseline)
+contracts/**/snapshots/
+contracts/**/*.snap
