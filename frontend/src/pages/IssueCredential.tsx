@@ -1,6 +1,6 @@
 import { Navbar } from '../components/Navbar';
 import { IssueCredentialForm } from '../components/IssueCredentialForm';
-import { WalletGuard } from '../components/WalletGate';
+import { WalletGuard } from '../components/WalletGuard';
 import { useWallet } from '../hooks';
 
 function formatAddress(addr: string) {
