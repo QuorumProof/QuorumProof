@@ -163,6 +163,17 @@ Run tests:
 cargo test
 ```
 
+### Formal Verification
+
+QuorumProof uses TLA+ formal specifications to mathematically verify critical properties of smart contracts. See [formal-verification/README.md](formal-verification/README.md) for:
+
+- **CredentialIssuance.tla** — Credential lifecycle safety invariants
+- **QuorumSliceAttestation.tla** — FBA attestation and threshold enforcement
+- **SbtNonTransferability.tla** — Soulbound token ownership immutability guarantee
+- **ZkVerifierVerificationTransition.tla** — Stub-to-real verification migration specification
+
+All specifications are model-checked with TLC to ensure properties hold in all reachable states. See the formal verification README for how to run checks, understand the gap analysis, and contribute new specs.
+
 ## 🌍 Why This Matters
 
 **The Problem**: A Mechanical Engineer licensed in Brazil applying for a role in Germany faces weeks of manual credential verification across institutions, embassies, and licensing bodies.
