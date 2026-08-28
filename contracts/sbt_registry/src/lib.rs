@@ -234,7 +234,7 @@ pub struct OwnershipHistoryEntry {
     pub co_owner: Option<Address>,
     /// Ledger timestamp when this ownership state took effect.
     pub changed_at: u64,
-    /// Event kind: "mint", "dual_xfer", "set_co", "rm_co"
+    /// Event kind: "mint", "dual_xfer", "set_co", "rm_co", "attestor"
     pub event: Symbol,
 }
 
@@ -3307,6 +3307,13 @@ impl SbtRegistryContract {
 
         Self::record_notification(&env, new_holder.clone(), sbt_id, symbol_short!("transfer"));
         Self::log_sbt_activity(&env, sbt_id, symbol_short!("transfer"), attestor);
+        Self::record_ownership_history(
+            &env,
+            sbt_id,
+            new_holder,
+            token.co_owner,
+            symbol_short!("attestor"),
+        );
     }
 
     /// Get the attestor delegation record for an SBT.
@@ -6072,6 +6079,34 @@ mod tests {
         assert_eq!(client.owner_of(&token_id), new_holder);
         let tokens = client.get_tokens_by_owner(&new_holder);
         assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    fn test_transfer_sbt_via_attestor_records_ownership_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+
+        client.delegate_sbt_transfer(&owner, &token_id, &attestor, &new_holder, &reason);
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+
+        let history = client.get_ownership_history(&token_id);
+        assert_eq!(history.len(), 2); // mint + attestor transfer
+        let last = history.last().unwrap();
+        assert_eq!(last.event, symbol_short!("attestor"));
+        assert_eq!(last.owner, new_holder);
     }
 
     #[test]
