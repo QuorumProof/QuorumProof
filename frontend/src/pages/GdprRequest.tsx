@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useWallet } from '../context/WalletContextValue';
 import { Navbar } from '../components/Navbar';
 import { createSignedGdprRequest } from '../lib/gdprSigning';
+import { apiClient, ApiError } from '../lib/apiClient';
 
 type RequestStatus = 'pending_consent' | 'anonymized' | 'rejected';
 
@@ -14,7 +15,17 @@ interface GdprRequestRecord {
   requiredConsents: number;
 }
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+// Type validators for responses
+const isGdprRequestRecord = (data: any): data is GdprRequestRecord => {
+  return (
+    typeof data === 'object' &&
+    typeof data.requestId === 'string' &&
+    typeof data.credentialId === 'number' &&
+    typeof data.status === 'string' &&
+    Array.isArray(data.attestorConsents) &&
+    typeof data.requiredConsents === 'number'
+  );
+};
 
 export default function GdprRequest() {
   const { address: walletAddress, isConnected } = useWallet();
@@ -35,6 +46,15 @@ export default function GdprRequest() {
   const [consentResult, setConsentResult] = useState<GdprRequestRecord | null>(null);
 
   const [walletMismatch, setWalletMismatch] = useState<string | null>(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      apiClient.cancelRequest('gdpr-submit');
+      apiClient.cancelRequest('gdpr-lookup');
+      apiClient.cancelRequest('gdpr-consent');
+    };
+  }, []);
 
   const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,25 +78,22 @@ export default function GdprRequest() {
       // Sign the GDPR request with the wallet to prove ownership
       const signedPayload = await createSignedGdprRequest(id, walletAddress);
 
-      const res = await fetch(`${API_BASE}/api/gdpr/request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(signedPayload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        if (res.status === 403) {
-          setWalletMismatch(data.error ?? 'Wallet address does not match credential subject.');
-        }
-        throw new Error(data.error ?? 'Request failed');
-      }
-      setCreatedRequest(data as GdprRequestRecord);
+      const data = await apiClient.post<GdprRequestRecord>(
+        '/api/gdpr/request',
+        signedPayload,
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-submit' }
+      );
+      setCreatedRequest(data);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setWalletMismatch(err.message);
+      }
       const message = err instanceof Error ? err.message : 'Request failed.';
       if (message.includes('signature') || message.includes('User denied')) {
         setSubmitError('Signature request cancelled. Please sign with your wallet to proceed.');
       } else {
         setSubmitError(message);
+      }
       }
     } finally {
       setSubmitting(false);
@@ -93,10 +110,11 @@ export default function GdprRequest() {
     setLookupError(null);
     setLookupResult(null);
     try {
-      const res = await fetch(`${API_BASE}/api/gdpr/request/${encodeURIComponent(id)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Not found');
-      setLookupResult(data as GdprRequestRecord);
+      const data = await apiClient.get<GdprRequestRecord>(
+        `/api/gdpr/request/${encodeURIComponent(id)}`,
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-lookup' }
+      );
+      setLookupResult(data);
     } catch (err) {
       setLookupError(err instanceof Error ? err.message : 'Lookup failed.');
     }
@@ -116,14 +134,12 @@ export default function GdprRequest() {
     setConsentResult(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/gdpr/consent`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requestId: reqId, attestorAddress: addr }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Consent failed');
-      setConsentResult(data as GdprRequestRecord);
+      const data = await apiClient.post<GdprRequestRecord>(
+        '/api/gdpr/consent',
+        { requestId: reqId, attestorAddress: addr },
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-consent' }
+      );
+      setConsentResult(data);
     } catch (err) {
       setConsentError(err instanceof Error ? err.message : 'Consent failed.');
     } finally {
