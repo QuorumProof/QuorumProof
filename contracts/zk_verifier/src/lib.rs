@@ -2,9 +2,6 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Vec};
 use soroban_sdk::xdr::ToXdr;
 
-// For range proof hashing
-use sha2::{Sha256, Digest};
-
 mod plonk;
 mod groth16;
 // `test` so this crate's own `mod tests` can use it; `testutils` so downstream
@@ -450,39 +447,32 @@ fn groth16_real_verify(env: &Env, vk_hash: &BytesN<32>, public_inputs: &Bytes, p
     groth16::verify(&vk.to_core(), &ic_buf[..ic_len], &pi_buf[..pi_len_usize], &proof_buf)
 }
 
-/// Simplified range proof verification using hash-based commitments.
-/// This is a simplified implementation for MVP - in production would use bulletproofs.
-fn verify_bulletproof_range(proof: &BulletproofRangeProof) -> bool {
-    // Basic structure validation
-    if proof.proof_bytes.len() < 64 {
-        return false; // Proof too short
-    }
-    
-    if proof.min_value > proof.max_value {
-        return false; // Invalid range
-    }
-    
-    if proof.bit_length == 0 || proof.bit_length > 64 {
-        return false; // Invalid bit length
-    }
-    
-    // Hash-based verification (simplified for MVP)
-    // In production, this would be full bulletproof verification
-    let mut hasher = Sha256::new();
-    hasher.update(&proof.commitment.to_array());
-    hasher.update(&proof.min_value.to_le_bytes());
-    hasher.update(&proof.max_value.to_le_bytes());
-    hasher.update(&proof.bit_length.to_le_bytes());
-    
-    // Convert proof bytes for hashing
-    for i in 0..proof.proof_bytes.len() {
-        hasher.update(&[proof.proof_bytes.get(i).unwrap_or(0)]);
-    }
-    
-    let hash = hasher.finalize();
-    
-    // Simple verification: hash should not start with 0x00 (collision resistance)
-    hash[0] != 0x00 && hash[31] != 0xFF
+/// Range proof verification stub — always rejects until real Bulletproofs are implemented.
+///
+/// The previous implementation used a SHA-256 hash heuristic with no cryptographic
+/// binding to the committed value: any 64+ byte blob whose digest happened to avoid
+/// the 0x00/0xFF boundary bytes would pass (roughly 1-in-65536 chance per random
+/// attempt, with no rate limiting at the contract level). This provided a false sense
+/// of soundness while exposing salary/GPA/experience/age range disclosures to trivial
+/// forgery.
+///
+/// **This stub always returns `false` (fail-closed).** No range proof can be accepted
+/// until a genuine Bulletproofs implementation — with a proper inner-product argument
+/// cryptographically binding `proof.commitment` to the secret value and the
+/// `[min_value, max_value]` range — is integrated. The implementation must:
+///
+/// - Verify the inner-product proof against `proof.commitment` using the Pedersen
+///   generators fixed for this circuit
+/// - Enforce that the committed value is in `[proof.min_value, proof.max_value]`
+///   via the range constraint, not just via a hash check
+/// - Be instantiated over BLS12-381 (matching the rest of the ZK stack) or a
+///   compatible no_std-compatible crate
+///
+/// Tracked in GitHub issue #1415.
+fn verify_bulletproof_range(_proof: &BulletproofRangeProof) -> bool {
+    // Fail-closed: reject all range proofs until real Bulletproofs are implemented.
+    // See doc comment above for what the real implementation must do.
+    false
 }
 
 
@@ -1189,86 +1179,82 @@ impl ZkVerifierContract {
             .expect("proof metadata not found")
     }
 
-    /// Encrypt metadata for a credential (Issue #381).
+    /// Encrypt metadata stub — not implemented (Issue #1416).
+    ///
+    /// On-chain encryption is not the correct design for this contract: Soroban
+    /// ledger state is publicly visible regardless of any flag, so setting
+    /// `metadata.encrypted = true` without transforming the underlying bytes
+    /// creates a false sense of privacy. Real confidentiality requires:
+    ///
+    /// 1. Encrypting `description` and `proof_hash` **off-chain** using a
+    ///    symmetric key (e.g., AES-256-GCM) controlled by the credential holder.
+    /// 2. Storing only the resulting ciphertext on-chain via `store_proof_metadata`.
+    /// 3. Distributing the decryption key out-of-band to authorised verifiers.
+    ///
+    /// This function is intentionally unimplemented and will panic to prevent
+    /// callers from relying on a no-op for confidentiality guarantees.
+    /// Tracked in GitHub issue #1416.
     pub fn encrypt_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
-        if let Some(mut metadata) = env.storage().instance().get::<_, ProofMetadata>(&key) {
-            metadata.encrypted = true;
-            env.storage().instance().set(&key, &metadata);
-        }
+        panic!("encrypt_metadata is not implemented: encryption must be performed off-chain before storing metadata. See issue #1416.");
     }
 
-    /// Decrypt metadata for a credential (Issue #381).
+    /// Decrypt metadata stub — not implemented (Issue #1416).
+    ///
+    /// Mirrors [`Self::encrypt_metadata`]: decryption must be performed off-chain
+    /// by the credential holder or an authorised verifier using the key distributed
+    /// out-of-band. This function is intentionally unimplemented and will panic.
+    /// Tracked in GitHub issue #1416.
     pub fn decrypt_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) -> ProofMetadata {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type);
-        env.storage().instance()
-            .get(&key)
-            .expect("proof metadata not found")
+        panic!("decrypt_metadata is not implemented: decryption must be performed off-chain. See issue #1416.");
     }
 
     // ===== Issue #382: Metadata Compression =====
 
-    /// Compress metadata for a credential (Issue #382).
+    /// Compress metadata stub — not implemented (Issue #1417).
+    ///
+    /// The previous implementation only set `metadata.compressed = true` without
+    /// transforming the underlying `description` or `proof_hash` bytes, so it
+    /// provided zero byte-level compression and no reduction in storage rent.
+    ///
+    /// Real compression for `ProofMetadata.description` (a short text field)
+    /// must operate on the raw bytes before storing them on-chain. At typical
+    /// description lengths (< 256 bytes), compression gains are modest; the
+    /// primary benefit is for `description` fields carrying structured data.
+    ///
+    /// Until a genuine no_std-compatible compression scheme is integrated,
+    /// this function panics to prevent callers from relying on a no-op.
+    /// Tracked in GitHub issue #1417.
     pub fn compress_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
-        if let Some(mut metadata) = env.storage().instance().get::<_, ProofMetadata>(&key) {
-            metadata.compressed = true;
-            env.storage().instance().set(&key, &metadata);
-        }
+        panic!("compress_metadata is not implemented: compression must be performed off-chain before storing metadata. See issue #1417.");
     }
 
-    /// Decompress metadata for a credential (Issue #382).
+    /// Decompress metadata stub — not implemented (Issue #1417).
+    ///
+    /// Mirrors [`Self::compress_metadata`]: decompression must be performed
+    /// off-chain. This function panics to prevent reliance on a no-op.
+    /// Tracked in GitHub issue #1417.
     pub fn decompress_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) -> ProofMetadata {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type);
-        let mut metadata: ProofMetadata = env.storage().instance()
-            .get(&key)
-            .expect("proof metadata not found");
-        metadata.compressed = false;
-        metadata
+        panic!("decompress_metadata is not implemented: decompression must be performed off-chain. See issue #1417.");
     }
 
     // ===== Issue #383: Proof Revocation =====

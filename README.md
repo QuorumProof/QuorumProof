@@ -16,13 +16,29 @@ Each node in the slice co-signs a **Soulbound Token (SBT)** on Stellar, creating
 
 This applies the Stellar whitepaper's "individual trust decisions" model to a high-stakes professional use case.
 
-## ⚠️ ZK Verification — Non-Functional Stub
+## ✅ ZK Verification — Implementation Status
 
-> **Do not use `verify_claim` in production.**
-> The `zk_verifier` contract accepts **any non-empty byte string** as a valid proof.
-> It performs **no cryptographic verification** and provides **no privacy guarantees**.
-> It is admin-gated to limit exposure, but the gate is not a substitute for real ZK logic.
-> Real proof verification (Groth16/PLONK) is tracked in [#ZK-IMPL](https://github.com/cryptonautt/QuorumProof/issues) and targeted for v1.1.
+Real **BLS12-381 pairing-based** Groth16 and PLONK verification is implemented in
+`verify_groth16_proof` and `verify_plonk_proof` (see `groth16.rs` and `plonk.rs`).
+
+> **`verify_claim` and related legacy functions are test-only.** They are compiled
+> exclusively behind `#[cfg(any(test, feature = "testutils"))]` and are **not
+> exported to the production WASM binary**. Do not rely on them in integration code.
+
+> **`verify_bulletproof_range` is a fail-closed stub** (always returns `false`) until
+> a genuine Bulletproofs inner-product argument over BLS12-381 is integrated.
+> The previous SHA-256 hash heuristic had no cryptographic binding to the committed
+> value and has been removed. Tracked in [#1415](https://github.com/cryptonautt/QuorumProof/issues/1415).
+
+> **`encrypt_metadata` / `decrypt_metadata`** have been replaced with panicking stubs.
+> On-chain encryption is not the correct design for Soroban — ledger state is publicly
+> visible regardless of any flag. Callers must encrypt off-chain before storing metadata.
+> Tracked in [#1416](https://github.com/cryptonautt/QuorumProof/issues/1416).
+
+> **`compress_metadata` / `decompress_metadata`** have been replaced with panicking stubs.
+> The previous implementation only toggled a flag with no effect on stored byte length.
+> Callers must compress off-chain before storing metadata.
+> Tracked in [#1417](https://github.com/cryptonautt/QuorumProof/issues/1417).
 
 ## 🚀 Features
 

@@ -126,3 +126,11 @@ FILES_CHANGED.txt
 TASK_IMPLEMENTATIONS.md
 IMPLEMENTATION_SUMMARY.md
 VERIFICATION_CHECKLIST.md
+
+# Test snapshot files (explicitly)
+**/__snapshots__/*.snap
+**/snapshots/*.snap
+
+# Generated CI check artifacts
+wasm_check_*.txt
+ci_wasm_export_*.txt
