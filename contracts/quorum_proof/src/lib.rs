@@ -909,6 +909,13 @@ pub enum DataKey {
     SuspensionReason(u64),
     /// Number of migrations still pending, surfaced by the health check.
     PendingMigrationCount,
+    /// Issue #1389: Total number of verification calls made (across all
+    /// verification entry points), regardless of outcome.
+    TotalVerificationCount,
+    /// Issue #1389: Number of verification calls that succeeded.
+    SuccessfulVerificationCount,
+    /// Issue #1389: Number of verification calls that failed.
+    FailedVerificationCount,
 }
 
 #[contracttype]
@@ -11140,7 +11147,9 @@ impl QuorumProofContract {
 
     /// Public interface to is_quorum for testing and diagnostics
     pub fn is_quorum(env: Env, slice_id: u64, candidates: Vec<Address>) -> bool {
-        Self::is_quorum_impl(&env, slice_id, &candidates)
+        let result = Self::is_quorum_impl(&env, slice_id, &candidates);
+        Self::record_verification(&env, result);
+        result
     }
 
     /// Helper: Load required weight for a nested slice node (handles both absolute and percentage)
@@ -11288,6 +11297,7 @@ impl QuorumProofContract {
             safe_nodes.clone(),
         );
 
+        Self::record_verification(&env, true);
         report
     }
 
@@ -11585,6 +11595,7 @@ impl QuorumProofContract {
             );
             let result: bool = env
                 .invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args);
+            Self::record_verification(&env, result);
             results.push_back(result);
         }
         results
@@ -11747,6 +11758,7 @@ impl QuorumProofContract {
         let caller = verifier.unwrap_or_else(|| subject.clone());
         // Check if the current caller (subject or delegate) is authorized for the requested subject.
         if !Self::is_authorized_verifier(&env, caller, sbt_registry_id, credential_id, subject.clone()) {
+            Self::record_verification(&env, false);
             return false;
         }
 
@@ -11760,7 +11772,10 @@ impl QuorumProofContract {
                 vk_hash.into_val(&env),
             ],
         );
-        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args)
+        let result: bool =
+            env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args);
+        Self::record_verification(&env, result);
+        result
     }
 
     /// Encode credential_id and claim_type as public inputs for ZK proof verification.
@@ -11903,7 +11918,10 @@ impl QuorumProofContract {
                 proof.into_val(&env),
             ],
         );
-        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim_anonymous"), args)
+        let result: bool =
+            env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim_anonymous"), args);
+        Self::record_verification(&env, result);
+        result
     }
 
     /// Register a human-readable label for a credential type with optional parent type.
@@ -16156,12 +16174,36 @@ impl QuorumProofContract {
         env.events().publish(topics, (credential_id, from, to));
     }
 
-    /// Get verification statistics (stub — returns zeroed stats).
-    pub fn get_verification_stats(_env: Env) -> VerificationStats {
+    /// Issue #1389: Record the outcome of a verification call in the
+    /// persistent counters backing `get_verification_stats`.
+    fn record_verification(env: &Env, success: bool) {
+        let storage = env.storage().instance();
+
+        let total: u64 = storage.get(&DataKey::TotalVerificationCount).unwrap_or(0);
+        storage.set(&DataKey::TotalVerificationCount, &(total + 1));
+
+        if success {
+            let successful: u64 = storage
+                .get(&DataKey::SuccessfulVerificationCount)
+                .unwrap_or(0);
+            storage.set(&DataKey::SuccessfulVerificationCount, &(successful + 1));
+        } else {
+            let failed: u64 = storage.get(&DataKey::FailedVerificationCount).unwrap_or(0);
+            storage.set(&DataKey::FailedVerificationCount, &(failed + 1));
+        }
+    }
+
+    /// Get verification statistics, backed by persistent counters incremented
+    /// at each verification entry point (`verify_claim_batch`, `verify_engineer`,
+    /// `verify_engineer_anonymous`, `is_quorum`, `check_quorum_intersection`).
+    pub fn get_verification_stats(env: Env) -> VerificationStats {
+        let storage = env.storage().instance();
         VerificationStats {
-            total_verifications: 0,
-            successful_verifications: 0,
-            failed_verifications: 0,
+            total_verifications: storage.get(&DataKey::TotalVerificationCount).unwrap_or(0),
+            successful_verifications: storage
+                .get(&DataKey::SuccessfulVerificationCount)
+                .unwrap_or(0),
+            failed_verifications: storage.get(&DataKey::FailedVerificationCount).unwrap_or(0),
         }
     }
 
@@ -24912,7 +24954,6 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_get_verification_stats_initial_zeros() {
         let env = Env::default();
         env.mock_all_auths();
@@ -24926,20 +24967,23 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_verification_stats_increments_on_success() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::ZkVerifierContract;
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, SbtRegistryContract);
         let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_id);
+        zk_client.initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -24949,16 +24993,25 @@ mod feature_tests {
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
 
-        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let toy_vk = zk_verifier::groth16_test_prover::generate_vk(&env, 800, 2);
+        zk_client.set_groth16_verifying_key(&zk_admin, &toy_vk.vk_hash, &toy_vk.vk);
+        let claim_type_value = 1u64; // ClaimType::HasDegree
+        let toy_proof = zk_verifier::groth16_test_prover::generate_proof(
+            &env,
+            &toy_vk,
+            801,
+            &[cred_id, claim_type_value],
+        );
+
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
-            &proof,
-        &None,
+            &toy_proof.proof,
+            &toy_vk.vk_hash,
+            &None,
         );
         assert!(result);
 
@@ -24969,9 +25022,8 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_verification_stats_increments_on_failure() {
-        use ClaimType;
+        use zk_verifier::ZkVerifierContractClient;
 
         let env = Env::default();
         env.mock_all_auths();
@@ -24981,22 +25033,29 @@ mod feature_tests {
         let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id).initialize(&zk_admin, &qp_id);
+
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         // No SBT minted — verification fails
         let proof = Bytes::from_slice(&env, b"valid-proof");
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
-        &None,
+            &vk_hash,
+            &None,
         );
         assert!(!result);
 
@@ -25007,20 +25066,23 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_verification_stats_accumulates_across_calls() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::ZkVerifierContract;
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, SbtRegistryContract);
         let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_id);
+        zk_client.initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -25030,39 +25092,47 @@ mod feature_tests {
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
 
-        let good_proof = Bytes::from_slice(&env, b"valid-proof");
+        let toy_vk = zk_verifier::groth16_test_prover::generate_vk(&env, 800, 2);
+        zk_client.set_groth16_verifying_key(&zk_admin, &toy_vk.vk_hash, &toy_vk.vk);
+        let claim_type_value = 1u64; // ClaimType::HasDegree
+        let good_proof = zk_verifier::groth16_test_prover::generate_proof(
+            &env,
+            &toy_vk,
+            801,
+            &[cred_id, claim_type_value],
+        );
         let bad_proof = Bytes::from_slice(&env, b"");
 
         // 2 successes, 1 failure
         qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
-            &good_proof,
-        &None,
+            &good_proof.proof,
+            &toy_vk.vk_hash,
+            &None,
         );
         qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
-            &ClaimType::HasLicense,
-            &good_proof,
-        &None,
+            &ClaimType::HasDegree,
+            &good_proof.proof,
+            &toy_vk.vk_hash,
+            &None,
         );
         qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &bad_proof,
-        &None,
+            &toy_vk.vk_hash,
+            &None,
         );
 
         let stats = qp.get_verification_stats();
