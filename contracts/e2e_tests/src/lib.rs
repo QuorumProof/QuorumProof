@@ -3,6 +3,41 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::env;
 use std::time::Duration;
+use tokio::time::sleep;
+
+/// Retry a fallible async operation with exponential backoff.
+///
+/// `max_attempts` must be >= 1.  Delays are 1 s, 2 s, 4 s, … up to
+/// `max_delay`.  The last attempt's error is returned when all attempts
+/// are exhausted.
+async fn retry_with_backoff<F, Fut, T>(
+    max_attempts: u32,
+    max_delay: Duration,
+    mut f: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut delay = Duration::from_secs(1);
+    for attempt in 1..=max_attempts {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt == max_attempts {
+                    return Err(e);
+                }
+                eprintln!(
+                    "Attempt {}/{} failed: {}. Retrying in {:?}…",
+                    attempt, max_attempts, e, delay
+                );
+                sleep(delay).await;
+                delay = (delay * 2).min(max_delay);
+            }
+        }
+    }
+    unreachable!()
+}
 
 pub struct StellarE2EClient {
     rpc_url: String,
@@ -115,46 +150,47 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_reachability() {
-        if let Ok(client) = StellarE2EClient::new(Network::Testnet) {
-            match client.health_check().await {
-                Ok(healthy) => {
-                    assert!(healthy, "Testnet should be reachable");
-                }
-                Err(_) => {
-                    eprintln!("Warning: Testnet is not reachable (this may be expected in CI)");
-                }
-            }
-        }
+        let client = StellarE2EClient::new(Network::Testnet)
+            .expect("failed to build HTTP client");
+        // Allow up to 3 attempts for transient network flakiness.
+        let healthy = retry_with_backoff(3, Duration::from_secs(8), || async {
+            client.health_check().await
+        })
+        .await
+        .expect("health_check returned an error after retries");
+        assert!(healthy, "Testnet RPC endpoint is not reachable");
     }
 
     #[tokio::test]
     async fn test_get_current_ledger() {
-        if let Ok(client) = StellarE2EClient::new(Network::Testnet) {
-            match client.get_ledger().await {
-                Ok(_ledger) => {
-                    println!("Successfully retrieved ledger from testnet");
-                }
-                Err(_) => {
-                    eprintln!("Warning: Could not retrieve ledger (this may be expected in CI)");
-                }
-            }
-        }
+        let client = StellarE2EClient::new(Network::Testnet)
+            .expect("failed to build HTTP client");
+        // Retry up to 3 times for transient connectivity issues.
+        let ledger = retry_with_backoff(3, Duration::from_secs(8), || async {
+            client.get_ledger().await
+        })
+        .await
+        .expect("getLatestLedger RPC call failed after retries");
+        assert!(
+            ledger["result"]["sequence"].as_u64().unwrap_or(0) > 0,
+            "ledger sequence must be a positive integer"
+        );
     }
 
     #[tokio::test]
     async fn test_network_passphrase_verification() {
-        if let Ok(client) = StellarE2EClient::new(Network::Testnet) {
-            match client.get_network().await {
-                Ok(passphrase) => {
-                    assert!(
-                        passphrase.contains("Test SDF Network"),
-                        "Passphrase mismatch for testnet"
-                    );
-                }
-                Err(_) => {
-                    eprintln!("Warning: Could not verify network passphrase (this may be expected in CI)");
-                }
-            }
-        }
+        let client = StellarE2EClient::new(Network::Testnet)
+            .expect("failed to build HTTP client");
+        // Retry for transient network errors; passphrase mismatch is a real failure.
+        let passphrase = retry_with_backoff(3, Duration::from_secs(8), || async {
+            client.get_network().await
+        })
+        .await
+        .expect("getNetwork RPC call failed after retries");
+        assert!(
+            passphrase.contains("Test SDF Network"),
+            "Passphrase mismatch for testnet: got '{}'",
+            passphrase
+        );
     }
 }

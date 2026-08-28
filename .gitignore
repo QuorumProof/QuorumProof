@@ -40,8 +40,15 @@ lcov.info
 *.bak.*
 **/*.rs.bak
 
-# Proptest regression files
+# Proptest regression files — excluded by default, but committed for
+# contracts where seeds are part of the test contract.
 **/proptest-regressions/
+!contracts/quorum_proof/proptest-regressions/
+!contracts/quorum_proof/proptest-regressions/**
+!contracts/sbt_registry/proptest-regressions/
+!contracts/sbt_registry/proptest-regressions/**
+!contracts/zk_verifier/proptest-regressions/
+!contracts/zk_verifier/proptest-regressions/**
 
 # Benchmark history / artifacts
 benches/history/*.json
