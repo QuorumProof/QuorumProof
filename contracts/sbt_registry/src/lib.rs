@@ -82,6 +82,9 @@ pub enum ContractError {
     ClawbackNotFound = 26,
     /// Issue #1243: Caller is not the issuer who initiated this clawback.
     UnauthorizedClawback = 27,
+    /// No pending co-owner proposal exists for this SBT (or it names a
+    /// different candidate).
+    CoOwnerProposalNotFound = 28,
 }
 
 #[contracttype]
@@ -160,6 +163,9 @@ pub enum DataKey {
     /// The pending clawback id for an SBT, if any (sbt_id -> clawback_id).
     /// Enforces that only one clawback may be pending per SBT at a time.
     PendingClawbackBySbt(u64),
+    /// A co-owner candidate proposed by an SBT's owner, awaiting the
+    /// candidate's acceptance.
+    CoOwnerProposal(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -1219,27 +1225,112 @@ impl SbtRegistryContract {
 
     // ── Issue #1275: Dual-Ownership (individual + organization) ────────
 
+    /// Propose `candidate` as co-owner of an SBT held by `owner`. This only
+    /// records the proposal — the SBT is left untouched until the candidate
+    /// calls `accept_co_owner`, so an owner cannot name an unwilling party.
+    /// Proposing again replaces any earlier pending proposal.
+    ///
+    /// # Panics
+    /// - "token not found" if `token_id` does not exist.
+    /// - "not the owner" if `owner` does not hold the SBT.
+    /// - `ContractError::InvalidCoOwner` if `candidate == owner`.
+    pub fn propose_co_owner(env: Env, owner: Address, token_id: u64, candidate: Address) {
+        owner.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
+        if candidate == owner {
+            panic_with_error!(&env, ContractError::InvalidCoOwner);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CoOwnerProposal(token_id), &candidate);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("prop_co").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner, candidate));
+    }
+
+    /// Accept a pending co-owner proposal. Requires the candidate's own
+    /// signature, which is what makes co-ownership consensual.
+    ///
+    /// # Panics
+    /// - `ContractError::CoOwnerProposalNotFound` if there is no pending
+    ///   proposal for `candidate` on this SBT.
+    /// - "token not found" if `token_id` does not exist.
+    /// - `ContractError::InvalidCoOwner` if `candidate` is now the owner.
+    pub fn accept_co_owner(env: Env, candidate: Address, token_id: u64) {
+        candidate.require_auth();
+
+        let proposed: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoOwnerProposal(token_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CoOwnerProposalNotFound));
+        if proposed != candidate {
+            panic_with_error!(&env, ContractError::CoOwnerProposalNotFound);
+        }
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CoOwnerProposal(token_id));
+        Self::assign_co_owner(&env, token_id, token, candidate);
+    }
+
+    /// Returns the pending co-owner proposal for an SBT, if any.
+    pub fn get_co_owner_proposal(env: Env, token_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CoOwnerProposal(token_id))
+    }
+
     /// Assign a co-owner (e.g. an organization) to an SBT already held by an
-    /// individual `owner`. Once set, `transfer_ownership_dual` requires
-    /// signatures from both parties. Only the current `owner` may call this
-    /// (the co-owner is added unilaterally by the primary owner, mirroring
-    /// how `set_co_owner`'s counterpart `remove_co_owner` requires both
-    /// parties to undo it).
+    /// individual `owner`, in a single call.
+    ///
+    /// Deprecated in favour of `propose_co_owner` / `accept_co_owner`; it is
+    /// kept for compatibility and now requires the co-owner's signature too,
+    /// so it can no longer be used to name an unwilling party.
     ///
     /// # Panics
     /// - "token not found" if `token_id` does not exist.
     /// - `ContractError::InvalidCoOwner` if `co_owner == owner`.
     pub fn set_co_owner(env: Env, owner: Address, token_id: u64, co_owner: Address) {
         owner.require_auth();
+        co_owner.require_auth();
 
-        let mut token: SoulboundToken = env
+        let token: SoulboundToken = env
             .storage()
             .persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
+
+        Self::assign_co_owner(&env, token_id, token, co_owner);
+    }
+
+    /// Internal helper: write the co-owner onto an already-loaded token,
+    /// emit the `set_co` event and append to the ownership history.
+    fn assign_co_owner(
+        env: &Env,
+        token_id: u64,
+        mut token: SoulboundToken,
+        co_owner: Address,
+    ) {
+        let owner = token.owner.clone();
         if co_owner == owner {
-            panic_with_error!(&env, ContractError::InvalidCoOwner);
+            panic_with_error!(env, ContractError::InvalidCoOwner);
         }
 
         token.co_owner = Some(co_owner.clone());
@@ -1247,12 +1338,12 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::Token(token_id), &token);
 
-        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
-        topics.push_back(symbol_short!("set_co").into_val(&env));
-        topics.push_back(token_id.into_val(&env));
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(env);
+        topics.push_back(symbol_short!("set_co").into_val(env));
+        topics.push_back(token_id.into_val(env));
         env.events().publish(topics, (owner.clone(), co_owner.clone()));
         Self::record_ownership_history(
-            &env,
+            env,
             token_id,
             owner,
             Some(co_owner),
@@ -5638,6 +5729,76 @@ mod tests {
         let (emitted_delegatee, emitted_scope) = <(Address, UsageScope)>::from_val(&env, &data);
         assert_eq!(emitted_delegatee, delegatee);
         assert_eq!(emitted_scope, scope);
+    }
+
+    // ── Issue #1408: consensual co-ownership ─────────────────────────────────
+
+    #[test]
+    fn test_propose_and_accept_co_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.propose_co_owner(&owner, &token_id, &candidate);
+        assert_eq!(client.get_co_owner_proposal(&token_id), Some(candidate.clone()));
+        assert_eq!(client.get_co_owner(&token_id), None);
+
+        client.accept_co_owner(&candidate, &token_id);
+        assert_eq!(client.get_co_owner(&token_id), Some(candidate.clone()));
+        assert_eq!(client.get_co_owner_proposal(&token_id), None);
+
+        let history = client.get_ownership_history(&token_id);
+        let last = history.last().unwrap();
+        assert_eq!(last.event, symbol_short!("set_co"));
+        assert_eq!(last.co_owner, Some(candidate));
+    }
+
+    #[test]
+    fn test_propose_co_owner_without_acceptance_leaves_token_unaffected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.propose_co_owner(&owner, &token_id, &candidate);
+
+        // The candidate never accepts: the SBT keeps no co-owner at all.
+        assert_eq!(client.get_co_owner(&token_id), None);
+        assert_eq!(client.get_co_owner_proposal(&token_id), Some(candidate));
+        assert_eq!(client.get_ownership_history(&token_id).len(), 1); // mint only
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_accept_co_owner_without_proposal_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.accept_co_owner(&candidate, &token_id);
     }
 
     #[test]
