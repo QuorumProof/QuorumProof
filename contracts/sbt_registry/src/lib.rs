@@ -31,6 +31,21 @@ fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
             .all(|(h, n)| h.to_ascii_lowercase() == *n)
 }
 
+/// Issue #1405: shared length/scheme validation for a metadata URI's raw
+/// bytes, used by both `mint()` and `set_sbt_metadata_uri`. Panics if
+/// `uri_bytes` exceeds `MAX_METADATA_URI_LEN` or doesn't start with
+/// `https://`/`ipfs://` (case-insensitive).
+fn validate_metadata_uri(uri_bytes: &[u8]) {
+    if uri_bytes.len() > MAX_METADATA_URI_LEN {
+        panic!("metadata_uri exceeds 256 characters");
+    }
+    let valid_scheme = starts_with_ignore_ascii_case(uri_bytes, b"https://")
+        || starts_with_ignore_ascii_case(uri_bytes, b"ipfs://");
+    if !valid_scheme {
+        panic!("metadata_uri must be HTTPS or IPFS");
+    }
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -561,6 +576,20 @@ impl SbtRegistryContract {
 
         if env.storage().instance().has(&DataKey::Blacklist(owner.clone())) {
             panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+
+        // Issue #1405: validate metadata_uri length/scheme up front, matching
+        // the check set_sbt_metadata_uri already enforces, so an
+        // unbounded or malformed-scheme URI can never be stored at mint time.
+        {
+            let uri_len = metadata_uri.len() as usize;
+            if uri_len > MAX_METADATA_URI_LEN {
+                panic!("metadata_uri exceeds 256 characters");
+            }
+            let mut uri_buf = [0u8; MAX_METADATA_URI_LEN];
+            let uri_slice = &mut uri_buf[..uri_len];
+            metadata_uri.copy_into_slice(uri_slice);
+            validate_metadata_uri(uri_slice);
         }
 
         // Cross-contract: verify credential exists and is not revoked.
@@ -2412,8 +2441,10 @@ impl SbtRegistryContract {
     pub fn set_sbt_metadata_uri(env: Env, issuer: Address, sbt_id: u64, metadata_uri: soroban_sdk::String) {
         issuer.require_auth();
 
-        // Validate URI length. `String::len` is the byte length of the URI
-        // itself; the XDR envelope adds framing that must not count here.
+        // `String::len` is the byte length of the URI itself; the XDR
+        // envelope adds framing that must not count here. The buffer is
+        // sized to MAX_METADATA_URI_LEN, so the length must be checked
+        // before copying into it.
         let uri_len = metadata_uri.len() as usize;
         if uri_len > MAX_METADATA_URI_LEN {
             panic!("metadata_uri exceeds 256 characters");
@@ -2423,13 +2454,7 @@ impl SbtRegistryContract {
         let mut uri_buf = [0u8; MAX_METADATA_URI_LEN];
         let uri_bytes = &mut uri_buf[..uri_len];
         metadata_uri.copy_into_slice(uri_bytes);
-
-        // Check for HTTPS or IPFS scheme (case-insensitive)
-        let valid_scheme = starts_with_ignore_ascii_case(uri_bytes, b"https://")
-            || starts_with_ignore_ascii_case(uri_bytes, b"ipfs://");
-        if !valid_scheme {
-            panic!("metadata_uri must be HTTPS or IPFS");
-        }
+        validate_metadata_uri(uri_bytes);
 
         // Get the SBT to verify it exists
         let sbt: SoulboundToken = env
@@ -6193,5 +6218,43 @@ mod tests {
 
         let not_admin = Address::generate(&env);
         client.remove_holder_from_blacklist(&not_admin, &holder);
+    }
+
+    // --- Issue #1405: mint() validates metadata_uri length/scheme ---
+
+    #[test]
+    #[should_panic(expected = "metadata_uri exceeds 256 characters")]
+    fn test_mint_rejects_oversized_metadata_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+
+        let mut long_uri = std::vec::Vec::new();
+        long_uri.extend_from_slice(b"ipfs://");
+        long_uri.resize(300, b'a');
+        let uri = Bytes::from_slice(&env, &long_uri);
+
+        client.mint(&owner, &cred_id, &uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "metadata_uri must be HTTPS or IPFS")]
+    fn test_mint_rejects_invalid_scheme_metadata_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+
+        let uri = Bytes::from_slice(&env, b"ftp://example.com/meta.json");
+        client.mint(&owner, &cred_id, &uri);
     }
 }
