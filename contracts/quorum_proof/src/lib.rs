@@ -17,6 +17,7 @@ use soroban_sdk::xdr::ToXdr;
 mod rbac;
 mod key_escrow;
 mod slice_enhancements;
+mod did;
 pub mod bbs_plus_features;
 pub mod time_lock_attestation;
 pub mod upgrade_history;
@@ -909,6 +910,13 @@ pub enum DataKey {
     SuspensionReason(u64),
     /// Number of migrations still pending, surfaced by the health check.
     PendingMigrationCount,
+    /// Issue #1389: Total number of verification calls made (across all
+    /// verification entry points), regardless of outcome.
+    TotalVerificationCount,
+    /// Issue #1389: Number of verification calls that succeeded.
+    SuccessfulVerificationCount,
+    /// Issue #1389: Number of verification calls that failed.
+    FailedVerificationCount,
 }
 
 #[contracttype]
@@ -985,6 +993,10 @@ pub enum DataKey2 {
     ChallengeExtended(u64),
     /// Task #1225: Holder key rotation log (credential_id -> Vec<KeyRotationRecord>).
     KeyRotationHistory(u64),
+    /// Issue #1388: Commitment recorded by `create_disclosure_proof`, keyed by the
+    /// proof bytes themselves, so `verify_disclosure` can bind a proof back to the
+    /// exact (credential_id, fields_to_reveal) it was created for.
+    DisclosureProof(soroban_sdk::Bytes),
 }
 
 /// Storage keys for features added in later iterations.
@@ -2726,6 +2738,17 @@ pub struct IssuerQuotaUsage {
     pub window_start: u64,
 }
 
+/// Issue #1388: Commitment recorded when a disclosure proof is created,
+/// binding the proof bytes to the exact credential and fields it was issued
+/// for. `verify_disclosure` looks this up by the caller-supplied proof and
+/// rejects anything that doesn't match a genuine commitment.
+#[contracttype]
+#[derive(Clone)]
+pub struct DisclosureCommitment {
+    pub credential_id: u64,
+    pub fields_to_reveal: Vec<u32>,
+}
+
 /// Verification statistics for the contract
 #[contracttype]
 #[derive(Clone)]
@@ -2868,93 +2891,19 @@ impl QuorumProofContract {
         key_type: DidKeyType,
         public_key: soroban_sdk::Bytes,
     ) {
-        address.require_auth();
-
-        assert!(!did.is_empty(), "DID string cannot be empty");
-
-        // Ensure no DID already exists for this address
-        assert!(
-            !env.storage().instance().has(&DataKey7::DidByAddress(address.clone())),
-            "DID already registered for this address"
-        );
-
-        // Ensure the DID is not already registered
-        let did_bytes = {
-    let mut buf = [0u8; 256];
-    let len = did.clone().len() as usize;
-    did.clone().copy_into_slice(&mut buf[..len]);
-    soroban_sdk::Bytes::from_slice(&env, &buf[..len])
-};
-        assert!(
-            !env.storage().instance().has(&DataKey7::DidDocument(did_bytes.clone())),
-            "DID string already registered"
-        );
-
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey7::DidCount)
-            .unwrap_or(0u64);
-
-        let now = env.ledger().timestamp();
-        let doc = DidDocument {
-            did: did.clone(),
-            address: address.clone(),
-            method: soroban_sdk::String::from_str(&env, "stellar"),
-            key_type,
-            public_key,
-            active: true,
-            created_at: now,
-            updated_at: now,
-        };
-
-        env.storage().instance().set(&DataKey7::DidDocument(did_bytes.clone()), &doc);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        env.storage().instance().set(&DataKey7::DidByAddress(address.clone()), &did_bytes);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        env.storage().instance().set(&DataKey7::DidCount, &(count + 1));
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        let event_data = DidRegisteredEventData {
-            did: did.clone(),
-            address,
-            method: soroban_sdk::String::from_str(&env, "stellar"),
-        };
-        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_REGISTERED);
-        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
+        crate::did::register_did(&env, address, did, key_type, public_key);
     }
 
     /// Resolve a W3C DID document by its DID string.
     /// Returns `None` if the DID is not registered.
     pub fn resolve_did(env: Env, did: soroban_sdk::String) -> Option<DidDocument> {
-        let did_bytes = {
-    let mut buf = [0u8; 256];
-    let len = did.len() as usize;
-    did.copy_into_slice(&mut buf[..len]);
-    soroban_sdk::Bytes::from_slice(&env, &buf[..len])
-};
-        env.storage()
-            .instance()
-            .get(&DataKey7::DidDocument(did_bytes))
+        crate::did::resolve_did(&env, did)
     }
 
     /// Look up the DID string registered for a Stellar address.
     /// Returns `None` if no DID is registered for the address.
     pub fn get_did_for_address(env: Env, address: Address) -> Option<soroban_sdk::String> {
-        let did_bytes: Option<soroban_sdk::Bytes> = env
-            .storage()
-            .instance()
-            .get(&DataKey7::DidByAddress(address));
-        did_bytes.map(|b| {
-            let mut buf = [0u8; 256];
-            let len = b.len() as usize;
-            b.copy_into_slice(&mut buf[..len]);
-            soroban_sdk::String::from_bytes(&env, &buf[..len])
-        })
+        crate::did::get_did_for_address(&env, address)
     }
 
     /// Update the public key and key type for an existing DID.
@@ -2965,76 +2914,18 @@ impl QuorumProofContract {
         new_key_type: DidKeyType,
         new_public_key: soroban_sdk::Bytes,
     ) {
-        address.require_auth();
-
-        let did_bytes: soroban_sdk::Bytes = env
-            .storage()
-            .instance()
-            .get(&DataKey7::DidByAddress(address.clone()))
-            .expect("no DID registered for this address");
-
-        let mut doc: DidDocument = env
-            .storage()
-            .instance()
-            .get(&DataKey7::DidDocument(did_bytes.clone()))
-            .expect("DID document not found");
-
-        doc.key_type = new_key_type;
-        doc.public_key = new_public_key;
-        doc.updated_at = env.ledger().timestamp();
-
-        env.storage().instance().set(&DataKey7::DidDocument(did_bytes), &doc);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        let event_data = DidUpdatedEventData {
-            did: doc.did.clone(),
-            address,
-        };
-        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_UPDATED);
-        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
+        crate::did::update_did(&env, address, new_key_type, new_public_key);
     }
 
     /// Deactivate a DID document. The DID entry is marked inactive but
     /// remains on-chain for resolution and audit purposes.
     pub fn deactivate_did(env: Env, address: Address) {
-        address.require_auth();
-
-        let did_bytes: soroban_sdk::Bytes = env
-            .storage()
-            .instance()
-            .get(&DataKey7::DidByAddress(address.clone()))
-            .expect("no DID registered for this address");
-
-        let mut doc: DidDocument = env
-            .storage()
-            .instance()
-            .get(&DataKey7::DidDocument(did_bytes.clone()))
-            .expect("DID document not found");
-
-        doc.active = false;
-        doc.updated_at = env.ledger().timestamp();
-
-        env.storage().instance().set(&DataKey7::DidDocument(did_bytes), &doc);
-        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
-
-        let event_data = DidDeactivatedEventData {
-            did: doc.did.clone(),
-            address,
-        };
-        let topic = soroban_sdk::String::from_str(&env, TOPIC_DID_DEACTIVATED);
-        let mut topics: Vec<soroban_sdk::String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
+        crate::did::deactivate_did(&env, address);
     }
 
     /// Return the total number of registered DIDs.
     pub fn get_did_count(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&DataKey7::DidCount)
-            .unwrap_or(0u64)
+        crate::did::get_did_count(&env)
     }
 
     /// Issue a credential to a DID-identified subject.
@@ -11140,7 +11031,9 @@ impl QuorumProofContract {
 
     /// Public interface to is_quorum for testing and diagnostics
     pub fn is_quorum(env: Env, slice_id: u64, candidates: Vec<Address>) -> bool {
-        Self::is_quorum_impl(&env, slice_id, &candidates)
+        let result = Self::is_quorum_impl(&env, slice_id, &candidates);
+        Self::record_verification(&env, result);
+        result
     }
 
     /// Helper: Load required weight for a nested slice node (handles both absolute and percentage)
@@ -11288,6 +11181,7 @@ impl QuorumProofContract {
             safe_nodes.clone(),
         );
 
+        Self::record_verification(&env, true);
         report
     }
 
@@ -11585,6 +11479,7 @@ impl QuorumProofContract {
             );
             let result: bool = env
                 .invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args);
+            Self::record_verification(&env, result);
             results.push_back(result);
         }
         results
@@ -11747,6 +11642,7 @@ impl QuorumProofContract {
         let caller = verifier.unwrap_or_else(|| subject.clone());
         // Check if the current caller (subject or delegate) is authorized for the requested subject.
         if !Self::is_authorized_verifier(&env, caller, sbt_registry_id, credential_id, subject.clone()) {
+            Self::record_verification(&env, false);
             return false;
         }
 
@@ -11760,7 +11656,10 @@ impl QuorumProofContract {
                 vk_hash.into_val(&env),
             ],
         );
-        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args)
+        let result: bool =
+            env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_groth16_proof"), args);
+        Self::record_verification(&env, result);
+        result
     }
 
     /// Encode credential_id and claim_type as public inputs for ZK proof verification.
@@ -11903,7 +11802,10 @@ impl QuorumProofContract {
                 proof.into_val(&env),
             ],
         );
-        env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim_anonymous"), args)
+        let result: bool =
+            env.invoke_contract(&zk_verifier_id, &Symbol::new(&env, "verify_claim_anonymous"), args);
+        Self::record_verification(&env, result);
+        result
     }
 
     /// Register a human-readable label for a credential type with optional parent type.
@@ -13130,8 +13032,15 @@ impl QuorumProofContract {
     /// Proof bytes that can be verified by `verify_disclosure`.
     ///
     /// # Note
-    /// This is a simplified stub implementation. Real ZK proof generation
-    /// would require integration with a zkSNARK/zkSTARK library.
+    /// Issue #1388: This is still a simplified commitment scheme, not a real
+    /// ZK proof — it does not hide `fields_to_reveal` from the chain, and
+    /// like `zk_verifier`'s Groth16 stub paths it is tracked as known-stub
+    /// surface in `contracts/quorum_proof/API.md`. What it does provide: the
+    /// returned proof is a commitment bound to this exact
+    /// (credential_id, fields_to_reveal) pair, recorded on-chain so
+    /// `verify_disclosure` can reject any proof that wasn't produced for the
+    /// fields it claims to disclose. Real ZK proof generation would still
+    /// require integration with a zkSNARK/zkSTARK library.
     pub fn create_disclosure_proof(
         env: Env,
         holder: Address,
@@ -13153,26 +13062,37 @@ impl QuorumProofContract {
             "only the credential holder can create disclosure proofs"
         );
 
-        // Simplified proof: hash of (credential_id + fields_to_reveal + timestamp)
+        // Commitment: hash of (credential_id + fields_to_reveal + timestamp)
         let now = env.ledger().timestamp();
         let mut proof_data = soroban_sdk::Bytes::new(&env);
-        
+
         // Add credential ID
         let id_bytes = credential_id.to_be_bytes();
         proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &id_bytes));
-        
+
         // Add fields to reveal
         for field in fields_to_reveal.iter() {
             let field_bytes = field.to_be_bytes();
             proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &field_bytes));
         }
-        
+
         // Add timestamp
         let timestamp_bytes = now.to_be_bytes();
         proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &timestamp_bytes));
-        
-        // Return hash as "proof"
-        env.crypto().sha256(&proof_data).into()
+
+        let proof: soroban_sdk::Bytes = env.crypto().sha256(&proof_data).into();
+
+        // Record the commitment so verify_disclosure can bind this exact
+        // proof back to the (credential_id, fields_to_reveal) it was issued for.
+        env.storage().instance().set(
+            &DataKey2::DisclosureProof(proof.clone()),
+            &DisclosureCommitment {
+                credential_id,
+                fields_to_reveal,
+            },
+        );
+
+        proof
     }
 
     /// Verify a disclosure proof (Task #1224)
@@ -13185,11 +13105,15 @@ impl QuorumProofContract {
     /// - `allowed_fields`: Fields that should be revealed in the proof.
     ///
     /// # Returns
-    /// `true` if proof is valid and reveals only allowed fields.
+    /// `true` if `proof` matches a commitment previously recorded by
+    /// `create_disclosure_proof` for this exact `credential_id` and
+    /// `allowed_fields`.
     ///
     /// # Note
-    /// This is a simplified stub implementation. Real ZK verification
-    /// would require integration with a zkSNARK/zkSTARK library.
+    /// Issue #1388: This binds the proof to a recorded commitment rather than
+    /// only checking non-emptiness, but it is still not a real ZK proof — see
+    /// `create_disclosure_proof` and `contracts/quorum_proof/API.md` for the
+    /// tracked stub surface.
     pub fn verify_disclosure(
         env: Env,
         proof: soroban_sdk::Bytes,
@@ -13203,9 +13127,27 @@ impl QuorumProofContract {
             return false;
         }
 
-        // Simplified verification: check if proof is non-empty
-        // In a real implementation, this would verify ZK proofs
-        !proof.is_empty()
+        let commitment: DisclosureCommitment = match env
+            .storage()
+            .instance()
+            .get(&DataKey2::DisclosureProof(proof))
+        {
+            Some(c) => c,
+            None => return false,
+        };
+
+        if commitment.credential_id != credential_id {
+            return false;
+        }
+
+        if commitment.fields_to_reveal.len() != allowed_fields.len() {
+            return false;
+        }
+        commitment
+            .fields_to_reveal
+            .iter()
+            .zip(allowed_fields.iter())
+            .all(|(a, b)| a == b)
     }
 
     /// Privacy guarantees documentation (Task #1224)
@@ -13213,12 +13155,16 @@ impl QuorumProofContract {
     /// Returns documentation about the privacy guarantees provided
     /// by the disclosure proof system.
     pub fn privacy_guarantees(env: Env) -> soroban_sdk::String {
-        soroban_sdk::String::from_str(&env, 
-            "Privacy Masking (Task #1224) provides selective field disclosure:\n\
-            - Credential holders can reveal specific fields while keeping others private\n\
-            - Zero-knowledge proofs ensure only revealed fields are disclosed\n\
-            - Verifiers can confirm field values without seeing the full credential\n\
-            - Protects sensitive information while enabling necessary verification")
+        soroban_sdk::String::from_str(&env,
+            "Privacy Masking (Task #1224) provides selective field disclosure, backed by an on-chain\n\
+            commitment rather than a real ZK proof (see contracts/quorum_proof/API.md for tracked stubs):\n\
+            - Credential holders create a commitment binding a proof to specific fields to reveal\n\
+            - verify_disclosure rejects any proof that does not match a recorded commitment for the\n\
+              exact credential_id and fields claimed\n\
+            - fields_to_reveal are NOT hidden from the chain by this scheme; real zero-knowledge\n\
+              selective disclosure requires zkSNARK/zkSTARK integration, tracked alongside the\n\
+              zk_verifier stub paths\n\
+            - Do not rely on this for confidentiality of which fields were disclosed")
     }
 
     // ── Key Rotation (Task #1225) ───────────────────────────────────────────────
@@ -16156,12 +16102,36 @@ impl QuorumProofContract {
         env.events().publish(topics, (credential_id, from, to));
     }
 
-    /// Get verification statistics (stub — returns zeroed stats).
-    pub fn get_verification_stats(_env: Env) -> VerificationStats {
+    /// Issue #1389: Record the outcome of a verification call in the
+    /// persistent counters backing `get_verification_stats`.
+    fn record_verification(env: &Env, success: bool) {
+        let storage = env.storage().instance();
+
+        let total: u64 = storage.get(&DataKey::TotalVerificationCount).unwrap_or(0);
+        storage.set(&DataKey::TotalVerificationCount, &(total + 1));
+
+        if success {
+            let successful: u64 = storage
+                .get(&DataKey::SuccessfulVerificationCount)
+                .unwrap_or(0);
+            storage.set(&DataKey::SuccessfulVerificationCount, &(successful + 1));
+        } else {
+            let failed: u64 = storage.get(&DataKey::FailedVerificationCount).unwrap_or(0);
+            storage.set(&DataKey::FailedVerificationCount, &(failed + 1));
+        }
+    }
+
+    /// Get verification statistics, backed by persistent counters incremented
+    /// at each verification entry point (`verify_claim_batch`, `verify_engineer`,
+    /// `verify_engineer_anonymous`, `is_quorum`, `check_quorum_intersection`).
+    pub fn get_verification_stats(env: Env) -> VerificationStats {
+        let storage = env.storage().instance();
         VerificationStats {
-            total_verifications: 0,
-            successful_verifications: 0,
-            failed_verifications: 0,
+            total_verifications: storage.get(&DataKey::TotalVerificationCount).unwrap_or(0),
+            successful_verifications: storage
+                .get(&DataKey::SuccessfulVerificationCount)
+                .unwrap_or(0),
+            failed_verifications: storage.get(&DataKey::FailedVerificationCount).unwrap_or(0),
         }
     }
 
@@ -24912,7 +24882,6 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_get_verification_stats_initial_zeros() {
         let env = Env::default();
         env.mock_all_auths();
@@ -24926,20 +24895,23 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_verification_stats_increments_on_success() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::ZkVerifierContract;
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, SbtRegistryContract);
         let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_id);
+        zk_client.initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -24949,16 +24921,25 @@ mod feature_tests {
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
 
-        let proof = Bytes::from_slice(&env, b"valid-proof");
+        let toy_vk = zk_verifier::groth16_test_prover::generate_vk(&env, 800, 2);
+        zk_client.set_groth16_verifying_key(&zk_admin, &toy_vk.vk_hash, &toy_vk.vk);
+        let claim_type_value = 1u64; // ClaimType::HasDegree
+        let toy_proof = zk_verifier::groth16_test_prover::generate_proof(
+            &env,
+            &toy_vk,
+            801,
+            &[cred_id, claim_type_value],
+        );
+
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
-            &proof,
-        &None,
+            &toy_proof.proof,
+            &toy_vk.vk_hash,
+            &None,
         );
         assert!(result);
 
@@ -24969,9 +24950,8 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_verification_stats_increments_on_failure() {
-        use ClaimType;
+        use zk_verifier::ZkVerifierContractClient;
 
         let env = Env::default();
         env.mock_all_auths();
@@ -24981,22 +24961,29 @@ mod feature_tests {
         let zk_id = env.register_contract(None, zk_verifier::ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
+        let zk_admin = Address::generate(&env);
+        ZkVerifierContractClient::new(&env, &zk_id).initialize(&zk_admin);
+        sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id).initialize(&zk_admin, &qp_id);
+
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
         let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
         let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        ZkVerifierContractClient::new(&env, &zk_id).set_verifying_key(&zk_admin, &vk_hash);
 
         // No SBT minted — verification fails
         let proof = Bytes::from_slice(&env, b"valid-proof");
         let result = qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &proof,
-        &None,
+            &vk_hash,
+            &None,
         );
         assert!(!result);
 
@@ -25007,20 +24994,23 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_verification_stats_accumulates_across_calls() {
-        use sbt_registry::SbtRegistryContract;
-        use zk_verifier::ZkVerifierContract;
+        use sbt_registry::{SbtRegistryContract, SbtRegistryContractClient};
+        use zk_verifier::{ZkVerifierContract, ZkVerifierContractClient};
 
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         let qp_id = env.register_contract(None, QuorumProofContract);
         let sbt_id = env.register_contract(None, SbtRegistryContract);
         let zk_id = env.register_contract(None, ZkVerifierContract);
 
         let qp = QuorumProofContractClient::new(&env, &qp_id);
-        let sbt = sbt_registry::SbtRegistryContractClient::new(&env, &sbt_id);
+        let sbt = SbtRegistryContractClient::new(&env, &sbt_id);
+        let zk_admin = Address::generate(&env);
+        let zk_client = ZkVerifierContractClient::new(&env, &zk_id);
+        zk_client.initialize(&zk_admin);
+        sbt.initialize(&zk_admin, &qp_id);
 
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -25030,45 +25020,110 @@ mod feature_tests {
         let sbt_uri = Bytes::from_slice(&env, b"ipfs://QmSbt");
         sbt.mint(&subject, &cred_id, &sbt_uri);
 
-        let good_proof = Bytes::from_slice(&env, b"valid-proof");
+        let toy_vk = zk_verifier::groth16_test_prover::generate_vk(&env, 800, 2);
+        zk_client.set_groth16_verifying_key(&zk_admin, &toy_vk.vk_hash, &toy_vk.vk);
+        let claim_type_value = 1u64; // ClaimType::HasDegree
+        let good_proof = zk_verifier::groth16_test_prover::generate_proof(
+            &env,
+            &toy_vk,
+            801,
+            &[cred_id, claim_type_value],
+        );
         let bad_proof = Bytes::from_slice(&env, b"");
 
         // 2 successes, 1 failure
         qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
-            &good_proof,
-        &None,
+            &good_proof.proof,
+            &toy_vk.vk_hash,
+            &None,
         );
         qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
-            &ClaimType::HasLicense,
-            &good_proof,
-        &None,
+            &ClaimType::HasDegree,
+            &good_proof.proof,
+            &toy_vk.vk_hash,
+            &None,
         );
         qp.verify_engineer(
             &sbt_id,
             &zk_id,
-            &issuer,
             &subject,
             &cred_id,
             &ClaimType::HasDegree,
             &bad_proof,
-        &None,
+            &toy_vk.vk_hash,
+            &None,
         );
 
         let stats = qp.get_verification_stats();
         assert_eq!(stats.total_verifications, 3);
         assert_eq!(stats.successful_verifications, 2);
         assert_eq!(stats.failed_verifications, 1);
+    }
+
+    #[test]
+    fn test_verify_disclosure_accepts_matching_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let qp = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let fields = vec![&env, 1u32, 2u32];
+        let proof = qp.create_disclosure_proof(&subject, &cred_id, &fields);
+
+        assert!(qp.verify_disclosure(&proof, &cred_id, &fields));
+    }
+
+    #[test]
+    fn test_verify_disclosure_rejects_garbage_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let qp = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let fields = vec![&env, 1u32, 2u32];
+        // Attacker-supplied non-empty garbage proof was never recorded as a commitment.
+        let garbage_proof = Bytes::from_slice(&env, b"totally-not-a-real-proof");
+
+        assert!(!qp.verify_disclosure(&garbage_proof, &cred_id, &fields));
+    }
+
+    #[test]
+    fn test_verify_disclosure_rejects_mismatched_fields() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let qp = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let fields = vec![&env, 1u32, 2u32];
+        let other_fields = vec![&env, 3u32];
+        let proof = qp.create_disclosure_proof(&subject, &cred_id, &fields);
+
+        // Same proof, but claiming to disclose different fields than it committed to.
+        assert!(!qp.verify_disclosure(&proof, &cred_id, &other_fields));
     }
 
     #[test]

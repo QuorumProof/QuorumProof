@@ -44,6 +44,11 @@ pub struct ContractStateMetrics {
     /// code) — a monotonically-increasing proxy operators can chart to spot
     /// abnormal growth or a stalled counter.
     pub storage_entries_estimate: u64,
+    /// Total verification calls made across all verification entry points
+    /// (`verify_claim_batch`, `verify_engineer`, `verify_engineer_anonymous`,
+    /// `is_quorum`, `check_quorum_intersection`). Mirrors
+    /// `get_verification_stats().total_verifications`.
+    pub verifications_total: u64,
 }
 
 /// Assemble the current `ContractStateMetrics` snapshot from instance storage.
@@ -61,6 +66,9 @@ pub fn collect(env: &Env) -> ContractStateMetrics {
         .unwrap_or(0u64);
     let paused: bool = storage.get(&DataKey::Paused).unwrap_or(false);
     let state_version: u32 = storage.get(&DataKey::StateVersion).unwrap_or(0u32);
+    let verifications_total: u64 = storage
+        .get(&DataKey::TotalVerificationCount)
+        .unwrap_or(0u64);
 
     let credentials_active = credentials_issued_total.saturating_sub(credentials_revoked_total);
     let storage_entries_estimate =
@@ -75,5 +83,6 @@ pub fn collect(env: &Env) -> ContractStateMetrics {
         paused,
         state_version,
         storage_entries_estimate,
+        verifications_total,
     }
 }
