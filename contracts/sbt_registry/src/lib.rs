@@ -1051,6 +1051,13 @@ impl SbtRegistryContract {
             .expect("not initialized");
         assert!(caller == qp_id || caller == admin, "unauthorized");
 
+        // Issue #1403: recovery moves the SBT to a new holder address, so it
+        // must honor the blacklist the same way mint() does — recovery is not
+        // meant to be a way around a blacklist entry, only around lost keys.
+        if env.storage().instance().has(&DataKey::Blacklist(new_owner.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+
         let mut token: SoulboundToken = env
             .storage()
             .persistent()
@@ -1116,6 +1123,12 @@ impl SbtRegistryContract {
             .get(&DataKey::Admin)
             .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
+
+        // Issue #1403: mirror mint()'s blacklist check so a blacklisted
+        // address cannot regain an SBT via admin transfer.
+        if env.storage().instance().has(&DataKey::Blacklist(new_owner.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
 
         let mut token: SoulboundToken = env
             .storage()
@@ -1959,6 +1972,15 @@ impl SbtRegistryContract {
 
         for i in 0..entries.len() {
             let entry = entries.get(i).unwrap();
+
+            // Issue #1403: mirror mint()'s blacklist check for each entry's owner.
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::Blacklist(entry.owner.clone()))
+            {
+                panic_with_error!(&env, ContractError::HolderBlacklisted);
+            }
 
             // Requirement 1.3 / 1.4: verify credential is not revoked via QuorumProof.
             // is_revoked panics with CredentialNotFound if the credential doesn't exist.
@@ -3102,6 +3124,16 @@ impl SbtRegistryContract {
         assert!(delegation.attestor == attestor, "not authorized attestor");
         assert!(!delegation.executed, "delegation already executed");
         assert!(!proof.is_empty(), "proof required");
+
+        // Issue #1403: mirror mint()'s blacklist check on the delegation's
+        // target holder.
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::Blacklist(delegation.new_holder.clone()))
+        {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
 
         let mut token: SoulboundToken = env
             .storage()
@@ -6014,5 +6046,97 @@ mod tests {
 
         let entries: Vec<BatchTransferEntry> = Vec::new(&env);
         client.batch_transfer(&admin, &entries);
+    }
+
+    // --- Issue #1403: blacklist enforcement on all owner-assigning paths ---
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_admin_transfer_sbt_rejects_blacklisted_new_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        client.admin_transfer_sbt(&admin, &token_id, &blacklisted);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_recover_sbt_rejects_blacklisted_new_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        client.recover_sbt(&admin, &token_id, &blacklisted);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_transfer_sbt_via_attestor_rejects_blacklisted_new_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let blacklisted = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+        client.delegate_sbt_transfer(&owner, &token_id, &attestor, &blacklisted, &reason);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_blacklisted_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        entries.push_back(BatchMintEntry {
+            owner: blacklisted,
+            credential_id: cred_id,
+            metadata_uri: uri,
+        });
+
+        client.batch_mint(&entries);
     }
 }
