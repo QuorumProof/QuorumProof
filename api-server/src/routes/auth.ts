@@ -58,12 +58,12 @@ function loadUserCredentials(): UserCredential[] {
   return [
     {
       userId: 'admin',
-      passwordHash: '3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b', // sha256("changeme")
+      passwordHash: '057ba03d6c44104863dc7361fe4578965d1887360f90a0895882e58a6248fc86', // sha256("changeme")
       role: 'admin',
     },
     {
       userId: 'user1',
-      passwordHash: '3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b',
+      passwordHash: '057ba03d6c44104863dc7361fe4578965d1887360f90a0895882e58a6248fc86',
       role: 'user',
     },
   ];
