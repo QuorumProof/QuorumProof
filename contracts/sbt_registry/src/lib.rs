@@ -2318,6 +2318,22 @@ impl SbtRegistryContract {
         env.storage().instance().has(&DataKey::Blacklist(holder))
     }
 
+    /// Issue #1404: remove a holder from the blacklist. Admin-only.
+    /// Reverses `add_holder_to_blacklist`, allowing a previously blacklisted
+    /// address to mint again.
+    pub fn remove_holder_from_blacklist(env: Env, admin: Address, holder: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().remove(&DataKey::Blacklist(holder.clone()));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("unblcklst").into_val(&env));
+        env.events().publish(topics, (holder, admin));
+    }
+
     /// Update the metadata URI of an SBT. Only the token owner may call this.
     /// Increments the token version on each update.
     pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
@@ -6138,5 +6154,44 @@ mod tests {
         });
 
         client.batch_mint(&entries);
+    }
+
+    // --- Issue #1404: remove_holder_from_blacklist ---
+
+    #[test]
+    fn test_remove_holder_from_blacklist_allows_remint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.add_holder_to_blacklist(&admin, &owner);
+        assert!(client.is_holder_blacklisted(&owner));
+
+        client.remove_holder_from_blacklist(&admin, &owner);
+        assert!(!client.is_holder_blacklisted(&owner));
+
+        // Minting succeeds now that the blacklist entry is gone.
+        let token_id = client.mint(&owner, &cred_id, &uri);
+        assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_remove_holder_from_blacklist_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let holder = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &holder);
+
+        let not_admin = Address::generate(&env);
+        client.remove_holder_from_blacklist(&not_admin, &holder);
     }
 }
