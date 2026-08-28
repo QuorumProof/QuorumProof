@@ -125,6 +125,40 @@ jobs:
       - run: npm ci
       - run: npm test -- tests/chaos.test.ts
 
+  # Issue #3 follow-up: proves monitoring/prometheus/prometheus.yml's scrape
+  # job for api-server's /metrics/events route actually lets alerts.yml's
+  # critical-event rules see data, by running a real `prometheus` binary
+  # against the real alerts.yml. See api-server/tests/criticalEventPrometheusIntegration.test.ts.
+  monitoring-integration:
+    runs-on: ubuntu-latest
+    env:
+      PROMETHEUS_VERSION: "2.55.1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: api-server/package-lock.json
+
+      - name: Install prometheus/promtool
+        run: |
+          curl -sSL -o /tmp/prometheus.tar.gz "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          tar xzf /tmp/prometheus.tar.gz -C /tmp
+          echo "PROMETHEUS_BIN=/tmp/prometheus-${PROMETHEUS_VERSION}.linux-amd64/prometheus" >> "$GITHUB_ENV"
+          echo "PROMTOOL_BIN=/tmp/prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" >> "$GITHUB_ENV"
+
+      - name: promtool check config/rules
+        run: |
+          "$PROMTOOL_BIN" check config monitoring/prometheus/prometheus.yml
+          "$PROMTOOL_BIN" check rules monitoring/prometheus/alerts.yml
+
+      - working-directory: api-server
+        run: npm ci
+      - name: Critical-event metrics + Prometheus scrape/alert tests
+        working-directory: api-server
+        run: npm test -- criticalEventMetricNames.test.ts criticalEventPrometheusIntegration.test.ts
+
   security:
     runs-on: ubuntu-latest
     steps:
