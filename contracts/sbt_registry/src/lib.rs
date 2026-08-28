@@ -82,6 +82,8 @@ pub enum ContractError {
     ClawbackNotFound = 26,
     /// Issue #1243: Caller is not the issuer who initiated this clawback.
     UnauthorizedClawback = 27,
+    /// Issue #1402: `entries` is empty or exceeds `MAX_BATCH_SIZE`.
+    BatchTooLarge = 28,
 }
 
 #[contracttype]
@@ -1923,9 +1925,10 @@ impl SbtRegistryContract {
     /// Mint multiple SBTs in a single atomic transaction.
     /// Returns the newly assigned token IDs in input order.
     pub fn batch_mint(env: Env, entries: Vec<BatchMintEntry>) -> Vec<u64> {
-        // Requirement 1.10: empty batch returns immediately with no state changes.
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE
+        // before any validation or state changes.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         // ── Validation phase ────────────────────────────────────────────────
@@ -2092,8 +2095,9 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics if any token doesn't exist or if caller is not the holder.
     pub fn batch_burn(env: Env, entries: Vec<BatchBurnEntry>) -> Vec<u64> {
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         // Require auth from each distinct caller
@@ -2194,8 +2198,9 @@ impl SbtRegistryContract {
             .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
 
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         let mut result_ids: Vec<u64> = Vec::new(&env);
@@ -5924,5 +5929,90 @@ mod tests {
         // A verifier only needs commitment + proof; verification succeeds
         // without ever supplying or learning `owner`.
         assert!(client.verify_sbt_commitment(&commitment, &proof));
+    }
+
+    // --- Issue #1402: batch size enforcement ---
+
+    #[test]
+    fn test_batch_mint_accepts_exactly_max_batch_size() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        for _ in 0..client.get_max_batch_size() {
+            entries.push_back(BatchMintEntry {
+                owner: Address::generate(&env),
+                credential_id: cred_id,
+                metadata_uri: uri.clone(),
+            });
+        }
+
+        let result = client.batch_mint(&entries);
+        assert_eq!(result.len(), client.get_max_batch_size());
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_over_max_batch_size() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        for _ in 0..(client.get_max_batch_size() + 1) {
+            entries.push_back(BatchMintEntry {
+                owner: Address::generate(&env),
+                credential_id: cred_id,
+                metadata_uri: uri.clone(),
+            });
+        }
+
+        client.batch_mint(&entries);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_empty_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let entries: Vec<BatchMintEntry> = Vec::new(&env);
+        client.batch_mint(&entries);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_burn_rejects_empty_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let entries: Vec<BatchBurnEntry> = Vec::new(&env);
+        client.batch_burn(&entries);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_transfer_rejects_empty_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let entries: Vec<BatchTransferEntry> = Vec::new(&env);
+        client.batch_transfer(&admin, &entries);
     }
 }
