@@ -23,6 +23,11 @@ This applies the Stellar whitepaper's "individual trust decisions" model to a hi
 > It performs **no cryptographic verification** and provides **no privacy guarantees**.
 > It is admin-gated to limit exposure, but the gate is not a substitute for real ZK logic.
 > Real proof verification (Groth16/PLONK) is tracked in [#ZK-IMPL](https://github.com/cryptonautt/QuorumProof/issues) and targeted for v1.1.
+>
+> **`create_disclosure_proof` / `verify_disclosure` are also stub surfaces.** They provide an
+> on-chain commitment binding a proof to a specific `(credential_id, fields_to_reveal)` pair, but
+> `fields_to_reveal` is not hidden from the chain and no zero-knowledge property is provided. Real
+> selective-disclosure ZK proofs are tracked alongside the item above.
 
 ## 🚀 Features
 

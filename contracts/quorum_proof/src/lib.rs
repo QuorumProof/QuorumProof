@@ -992,6 +992,10 @@ pub enum DataKey2 {
     ChallengeExtended(u64),
     /// Task #1225: Holder key rotation log (credential_id -> Vec<KeyRotationRecord>).
     KeyRotationHistory(u64),
+    /// Issue #1388: Commitment recorded by `create_disclosure_proof`, keyed by the
+    /// proof bytes themselves, so `verify_disclosure` can bind a proof back to the
+    /// exact (credential_id, fields_to_reveal) it was created for.
+    DisclosureProof(soroban_sdk::Bytes),
 }
 
 /// Storage keys for features added in later iterations.
@@ -2731,6 +2735,17 @@ pub struct IssuerQuota {
 pub struct IssuerQuotaUsage {
     pub issued_count: u32,
     pub window_start: u64,
+}
+
+/// Issue #1388: Commitment recorded when a disclosure proof is created,
+/// binding the proof bytes to the exact credential and fields it was issued
+/// for. `verify_disclosure` looks this up by the caller-supplied proof and
+/// rejects anything that doesn't match a genuine commitment.
+#[contracttype]
+#[derive(Clone)]
+pub struct DisclosureCommitment {
+    pub credential_id: u64,
+    pub fields_to_reveal: Vec<u32>,
 }
 
 /// Verification statistics for the contract
@@ -13148,8 +13163,15 @@ impl QuorumProofContract {
     /// Proof bytes that can be verified by `verify_disclosure`.
     ///
     /// # Note
-    /// This is a simplified stub implementation. Real ZK proof generation
-    /// would require integration with a zkSNARK/zkSTARK library.
+    /// Issue #1388: This is still a simplified commitment scheme, not a real
+    /// ZK proof — it does not hide `fields_to_reveal` from the chain, and
+    /// like `zk_verifier`'s Groth16 stub paths it is tracked as known-stub
+    /// surface in `contracts/quorum_proof/API.md`. What it does provide: the
+    /// returned proof is a commitment bound to this exact
+    /// (credential_id, fields_to_reveal) pair, recorded on-chain so
+    /// `verify_disclosure` can reject any proof that wasn't produced for the
+    /// fields it claims to disclose. Real ZK proof generation would still
+    /// require integration with a zkSNARK/zkSTARK library.
     pub fn create_disclosure_proof(
         env: Env,
         holder: Address,
@@ -13171,26 +13193,37 @@ impl QuorumProofContract {
             "only the credential holder can create disclosure proofs"
         );
 
-        // Simplified proof: hash of (credential_id + fields_to_reveal + timestamp)
+        // Commitment: hash of (credential_id + fields_to_reveal + timestamp)
         let now = env.ledger().timestamp();
         let mut proof_data = soroban_sdk::Bytes::new(&env);
-        
+
         // Add credential ID
         let id_bytes = credential_id.to_be_bytes();
         proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &id_bytes));
-        
+
         // Add fields to reveal
         for field in fields_to_reveal.iter() {
             let field_bytes = field.to_be_bytes();
             proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &field_bytes));
         }
-        
+
         // Add timestamp
         let timestamp_bytes = now.to_be_bytes();
         proof_data.append(&soroban_sdk::Bytes::from_slice(&env, &timestamp_bytes));
-        
-        // Return hash as "proof"
-        env.crypto().sha256(&proof_data).into()
+
+        let proof: soroban_sdk::Bytes = env.crypto().sha256(&proof_data).into();
+
+        // Record the commitment so verify_disclosure can bind this exact
+        // proof back to the (credential_id, fields_to_reveal) it was issued for.
+        env.storage().instance().set(
+            &DataKey2::DisclosureProof(proof.clone()),
+            &DisclosureCommitment {
+                credential_id,
+                fields_to_reveal,
+            },
+        );
+
+        proof
     }
 
     /// Verify a disclosure proof (Task #1224)
@@ -13203,11 +13236,15 @@ impl QuorumProofContract {
     /// - `allowed_fields`: Fields that should be revealed in the proof.
     ///
     /// # Returns
-    /// `true` if proof is valid and reveals only allowed fields.
+    /// `true` if `proof` matches a commitment previously recorded by
+    /// `create_disclosure_proof` for this exact `credential_id` and
+    /// `allowed_fields`.
     ///
     /// # Note
-    /// This is a simplified stub implementation. Real ZK verification
-    /// would require integration with a zkSNARK/zkSTARK library.
+    /// Issue #1388: This binds the proof to a recorded commitment rather than
+    /// only checking non-emptiness, but it is still not a real ZK proof — see
+    /// `create_disclosure_proof` and `contracts/quorum_proof/API.md` for the
+    /// tracked stub surface.
     pub fn verify_disclosure(
         env: Env,
         proof: soroban_sdk::Bytes,
@@ -13221,9 +13258,27 @@ impl QuorumProofContract {
             return false;
         }
 
-        // Simplified verification: check if proof is non-empty
-        // In a real implementation, this would verify ZK proofs
-        !proof.is_empty()
+        let commitment: DisclosureCommitment = match env
+            .storage()
+            .instance()
+            .get(&DataKey2::DisclosureProof(proof))
+        {
+            Some(c) => c,
+            None => return false,
+        };
+
+        if commitment.credential_id != credential_id {
+            return false;
+        }
+
+        if commitment.fields_to_reveal.len() != allowed_fields.len() {
+            return false;
+        }
+        commitment
+            .fields_to_reveal
+            .iter()
+            .zip(allowed_fields.iter())
+            .all(|(a, b)| a == b)
     }
 
     /// Privacy guarantees documentation (Task #1224)
@@ -13231,12 +13286,16 @@ impl QuorumProofContract {
     /// Returns documentation about the privacy guarantees provided
     /// by the disclosure proof system.
     pub fn privacy_guarantees(env: Env) -> soroban_sdk::String {
-        soroban_sdk::String::from_str(&env, 
-            "Privacy Masking (Task #1224) provides selective field disclosure:\n\
-            - Credential holders can reveal specific fields while keeping others private\n\
-            - Zero-knowledge proofs ensure only revealed fields are disclosed\n\
-            - Verifiers can confirm field values without seeing the full credential\n\
-            - Protects sensitive information while enabling necessary verification")
+        soroban_sdk::String::from_str(&env,
+            "Privacy Masking (Task #1224) provides selective field disclosure, backed by an on-chain\n\
+            commitment rather than a real ZK proof (see contracts/quorum_proof/API.md for tracked stubs):\n\
+            - Credential holders create a commitment binding a proof to specific fields to reveal\n\
+            - verify_disclosure rejects any proof that does not match a recorded commitment for the\n\
+              exact credential_id and fields claimed\n\
+            - fields_to_reveal are NOT hidden from the chain by this scheme; real zero-knowledge\n\
+              selective disclosure requires zkSNARK/zkSTARK integration, tracked alongside the\n\
+              zk_verifier stub paths\n\
+            - Do not rely on this for confidentiality of which fields were disclosed")
     }
 
     // ── Key Rotation (Task #1225) ───────────────────────────────────────────────
@@ -25139,6 +25198,63 @@ mod feature_tests {
         assert_eq!(stats.total_verifications, 3);
         assert_eq!(stats.successful_verifications, 2);
         assert_eq!(stats.failed_verifications, 1);
+    }
+
+    #[test]
+    fn test_verify_disclosure_accepts_matching_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let qp = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let fields = vec![&env, 1u32, 2u32];
+        let proof = qp.create_disclosure_proof(&subject, &cred_id, &fields);
+
+        assert!(qp.verify_disclosure(&proof, &cred_id, &fields));
+    }
+
+    #[test]
+    fn test_verify_disclosure_rejects_garbage_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let qp = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let fields = vec![&env, 1u32, 2u32];
+        // Attacker-supplied non-empty garbage proof was never recorded as a commitment.
+        let garbage_proof = Bytes::from_slice(&env, b"totally-not-a-real-proof");
+
+        assert!(!qp.verify_disclosure(&garbage_proof, &cred_id, &fields));
+    }
+
+    #[test]
+    fn test_verify_disclosure_rejects_mismatched_fields() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let qp = QuorumProofContractClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"ipfs://QmTest");
+        let cred_id = qp.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let fields = vec![&env, 1u32, 2u32];
+        let other_fields = vec![&env, 3u32];
+        let proof = qp.create_disclosure_proof(&subject, &cred_id, &fields);
+
+        // Same proof, but claiming to disclose different fields than it committed to.
+        assert!(!qp.verify_disclosure(&proof, &cred_id, &other_fields));
     }
 
     #[test]
