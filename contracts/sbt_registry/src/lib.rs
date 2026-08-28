@@ -792,12 +792,17 @@ impl SbtRegistryContract {
 
         let delegation = Delegation {
             token_id,
-            delegatee,
+            delegatee: delegatee.clone(),
             expires_at,
         };
         env.storage()
             .instance()
             .set(&DataKey::Delegation(token_id), &delegation);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("delegate").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (delegatee, expires_at));
     }
 
     /// Revoke an active delegation for a specific SBT. Only the token owner may call this.
@@ -809,9 +814,20 @@ impl SbtRegistryContract {
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
+
+        let delegatee: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<_, Delegation>(&DataKey::Delegation(token_id))
+            .map(|delegation| delegation.delegatee);
         env.storage()
             .instance()
             .remove(&DataKey::Delegation(token_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("undeleg").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, delegatee);
     }
 
     /// Retrieve delegation details for a token.
@@ -860,12 +876,17 @@ impl SbtRegistryContract {
         let delegation = ScopedDelegation {
             token_id: sbt_id,
             delegatee: delegatee.clone(),
-            scope,
+            scope: scope.clone(),
         };
 
         env.storage()
             .instance()
-            .set(&DataKey::UsageDelegation(sbt_id, delegatee), &delegation);
+            .set(&DataKey::UsageDelegation(sbt_id, delegatee.clone()), &delegation);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("deleg_use").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (delegatee, scope));
     }
 
     /// Verify a delegated SBT specifically for DeFi protocol usages.
@@ -5523,6 +5544,100 @@ mod tests {
 
         env.ledger().set_timestamp(expires_at + 1);
         assert!(!client.verify_delegated_governance(&token_id, &delegatee));
+    }
+
+    /// Find the last emitted event whose first topic is `name`.
+    fn find_event(
+        env: &Env,
+        name: &str,
+    ) -> Option<(Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
+        env.events()
+            .all()
+            .iter()
+            .filter(|(_, topics, _)| {
+                topics
+                    .get(0)
+                    .and_then(|v| Symbol::try_from_val(env, &v).ok())
+                    .map(|s| s == Symbol::new(env, name))
+                    .unwrap_or(false)
+            })
+            .last()
+            .map(|(_, topics, data)| (topics, data))
+    }
+
+    #[test]
+    fn test_delegate_sbt_rights_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+
+        let (topics, data) = find_event(&env, "delegate").expect("delegate event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        let (emitted_delegatee, emitted_expiry) = <(Address, u64)>::from_val(&env, &data);
+        assert_eq!(emitted_delegatee, delegatee);
+        assert_eq!(emitted_expiry, expires_at);
+    }
+
+    #[test]
+    fn test_revoke_sbt_delegation_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+        client.revoke_sbt_delegation(&owner, &token_id);
+
+        let (topics, data) = find_event(&env, "undeleg").expect("undeleg event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        assert_eq!(
+            <Option<Address>>::from_val(&env, &data),
+            Some(delegatee)
+        );
+    }
+
+    #[test]
+    fn test_delegate_sbt_usage_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::GovernanceVoting(expires_at);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
+
+        let (topics, data) = find_event(&env, "deleg_use").expect("deleg_use event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        let (emitted_delegatee, emitted_scope) = <(Address, UsageScope)>::from_val(&env, &data);
+        assert_eq!(emitted_delegatee, delegatee);
+        assert_eq!(emitted_scope, scope);
     }
 
     #[test]
