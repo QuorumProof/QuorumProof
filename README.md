@@ -107,6 +107,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 - [Threat Model & Security](docs/threat-model.md)
 - [Error Code Reference](docs/error-codes.md)
 - [Integration Patterns Guide](docs/integration-patterns-guide.md)
+- [Quorum Slice Trust Model Guide](docs/quorum-slice-guide.md)
 - [Issuer Security Checklist](docs/issuer-security-checklist.md)
 - [Troubleshooting Guide](docs/troubleshooting-guide.md)
 - [Backup System](docs/backup-system.md)
