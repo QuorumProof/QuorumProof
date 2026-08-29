@@ -95,6 +95,7 @@ pub enum DataKey {
     Delegation(u64),
     UsageDelegation(u64, Address),
     Admin,
+    Paused,
     QuorumProofId,
     RecoveryRequest(u64),
     RecoveryRequestCount,
@@ -557,6 +558,10 @@ impl SbtRegistryContract {
     pub fn mint(env: Env, owner: Address, credential_id: u64, metadata_uri: Bytes) -> u64 {
         owner.require_auth();
 
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
+
         if env.storage().instance().has(&DataKey::Blacklist(owner.clone())) {
             panic_with_error!(&env, ContractError::HolderBlacklisted);
         }
@@ -977,6 +982,10 @@ impl SbtRegistryContract {
     pub fn burn_sbt(env: Env, holder: Address, sbt_id: u64, proof_of_residency: Bytes) {
         holder.require_auth();
 
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
+
         // Validate proof is non-empty (stub: any non-empty bytes accepted).
         if proof_of_residency.is_empty() {
             panic_with_error!(&env, ContractError::InvalidProof);
@@ -1258,6 +1267,10 @@ impl SbtRegistryContract {
     /// # Panics
     /// - "token not found" if `token_id` does not exist.
     pub fn transfer_ownership_dual(env: Env, token_id: u64, new_owner: Address) {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
+
         let mut token: SoulboundToken = env
             .storage()
             .persistent()
@@ -1375,6 +1388,41 @@ impl SbtRegistryContract {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Emergency pause: prevents all state-changing operations (mint, burn, etc.).
+    /// Only the admin may call this. Allows reads to continue.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(16_384, 524_288);
+    }
+
+    /// Resume normal operation after pause. Only the admin may call this.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(16_384, 524_288);
+    }
+
+    /// Check if the contract is paused. Returns true if paused, false otherwise.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     // ── SBT Holder Recovery ──────────────────────────────────────
@@ -3086,6 +3134,10 @@ impl SbtRegistryContract {
         sbt_id: u64,
         proof: Bytes,
     ) {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
+
         attestor.require_auth();
 
         let delegation: AttestorDelegationRecord = env
@@ -5180,6 +5232,40 @@ mod tests {
         let verifier = Address::generate(&env);
         client.track_credential_access(&cred_id, &verifier);
     }
+
+    #[test]
+    fn test_pause_blocks_mint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, SoulboundTokenContract);
+        let client = SoulboundTokenContractClient::new(&env, &contract_id);
+        let qp_id = Address::generate(&env);
+        client.initialize(&admin, &qp_id);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+
+        // Pause the contract
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        // Create a credential in quorum_proof (mocked)
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = 1u64;
+
+        // Attempt to mint should fail when paused
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.mint(&owner, &cred_id, &uri)
+        }));
+        assert!(result.is_err(), "mint should fail when paused");
+
+        // Unpause and retry
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+}
 
     #[test]
     #[should_panic(expected = "credential is revoked")]

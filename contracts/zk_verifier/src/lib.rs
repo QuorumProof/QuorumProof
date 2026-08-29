@@ -953,6 +953,10 @@ impl ZkVerifierContract {
         _claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
+
         admin.require_auth();
         let stored_admin: Address = env.storage().instance()
             .get(&DataKey::Admin)
@@ -1153,6 +1157,41 @@ impl ZkVerifierContract {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Emergency pause: prevents all proof verification operations.
+    /// Only the admin may call this. Allows key rotation and reads to continue.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(16_384, 524_288);
+    }
+
+    /// Resume normal operation after pause. Only the admin may call this.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(16_384, 524_288);
+    }
+
+    /// Check if the contract is paused. Returns true if paused, false otherwise.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     // ===== Issue #381: Metadata Encryption =====
@@ -1424,6 +1463,9 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
     }
 
@@ -1716,6 +1758,9 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
     }
 
@@ -2075,6 +2120,7 @@ impl ZkVerifierContract {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    Paused,
     CacheInvalidated(u64),
     ProofMetadata(u64, ClaimType),
     Revocation(u64),
