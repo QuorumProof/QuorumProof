@@ -83,6 +83,7 @@ Thumbs.db
 
 # Misc
 .env
+*.env.local
 dist/
 dashboard/dist/
 frontend/dist/
