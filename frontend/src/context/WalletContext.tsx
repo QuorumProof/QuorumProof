@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { STELLAR_NETWORK } from '../config/env';
 import type { WalletType } from '../wallets/types';
-import { detectAvailableWallets } from '../wallets/registry';
+import { detectAvailableWallets, getWalletAdapter } from '../wallets/registry';
 import { isConnected, isAllowed, setAllowed, getAddress } from '@stellar/freighter-api';
 import type { WalletState } from './WalletContextValue';
 import { WalletContext } from './WalletContextValue';
@@ -12,6 +12,8 @@ const STORAGE_KEY = 'quorum-proof-wallets';
 interface PersistedWalletState {
   wallets: string[];
   walletTypes: WalletType[];
+  /** BIP-44 account indices parallel to `wallets` (hardware wallets). */
+  accountIndices: number[];
   activeIndex: number;
 }
 
@@ -24,6 +26,7 @@ function loadPersistedState(): PersistedWalletState | null {
       return {
         ...parsed,
         walletTypes: Array.isArray(parsed.walletTypes) ? parsed.walletTypes : [],
+        accountIndices: Array.isArray(parsed.accountIndices) ? parsed.accountIndices : [],
       };
     }
     return null;
@@ -32,9 +35,17 @@ function loadPersistedState(): PersistedWalletState | null {
   }
 }
 
-function savePersistedState(wallets: string[], walletTypes: WalletType[], activeIndex: number): void {
+function savePersistedState(
+  wallets: string[],
+  walletTypes: WalletType[],
+  accountIndices: number[],
+  activeIndex: number,
+): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ wallets, walletTypes, activeIndex }));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ wallets, walletTypes, accountIndices, activeIndex }),
+    );
   } catch (err) {
     console.error('Failed to persist wallet state:', err);
   }
@@ -59,6 +70,10 @@ export function WalletProvider({ children }: WalletProviderProps) {
     const persisted = loadPersistedState();
     return persisted ? persisted.walletTypes : [];
   });
+  const [accountIndices, setAccountIndices] = useState<number[]>(() => {
+    const persisted = loadPersistedState();
+    return persisted ? persisted.accountIndices : [];
+  });
   const [activeIndex, setActiveIndex] = useState<number>(() => {
     const persisted = loadPersistedState();
     return persisted ? persisted.activeIndex : 0;
@@ -70,10 +85,12 @@ export function WalletProvider({ children }: WalletProviderProps) {
 
   const address = wallets.length > 0 ? wallets[activeIndex] ?? wallets[0] : null;
   const walletType = walletTypes.length > 0 ? walletTypes[activeIndex] ?? walletTypes[0] ?? null : null;
+  /** Account index for the currently active wallet (0 for Freighter). */
+  const accountIndex = accountIndices.length > 0 ? accountIndices[activeIndex] ?? 0 : 0;
 
   useEffect(() => {
-    savePersistedState(wallets, walletTypes, activeIndex);
-  }, [wallets, walletTypes, activeIndex]);
+    savePersistedState(wallets, walletTypes, accountIndices, activeIndex);
+  }, [wallets, walletTypes, accountIndices, activeIndex]);
 
   useEffect(() => {
     const init = async () => {
@@ -82,7 +99,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
         // Detect available wallets
         const detected = await detectAvailableWallets();
         setAvailableWallets(detected);
-        
+
         const connResult = await isConnected();
         const freighterConnected = connResult.isConnected;
         setHasFreighter(freighterConnected);
@@ -95,16 +112,15 @@ export function WalletProvider({ children }: WalletProviderProps) {
               if (persisted && persisted.wallets.includes(result.address)) {
                 setWallets(persisted.wallets);
                 setWalletTypes(persisted.wallets.map((_, i) => persisted.walletTypes[i] ?? 'freighter'));
+                setAccountIndices(persisted.wallets.map((_, i) => persisted.accountIndices[i] ?? 0));
                 setActiveIndex(persisted.activeIndex);
               } else {
                 setWallets(prev => {
                   if (prev.includes(result.address)) return prev;
                   return [result.address, ...prev];
                 });
-                setWalletTypes(prev => {
-                  if (wallets.includes(result.address)) return prev;
-                  return ['freighter', ...prev];
-                });
+                setWalletTypes(prev => ['freighter', ...prev]);
+                setAccountIndices(prev => [0, ...prev]);
                 setActiveIndex(0);
               }
             }
@@ -121,7 +137,11 @@ export function WalletProvider({ children }: WalletProviderProps) {
     init();
   }, []);
 
-  const connect = useCallback(async (type?: WalletType) => {
+  /**
+   * Connect a wallet of `type`, optionally specifying a BIP-44 `accountIndex`
+   * for hardware wallets (Ledger / Trezor).
+   */
+  const connect = useCallback(async (type?: WalletType, hwAccountIndex: number = 0) => {
     const walletToUse = type || (availableWallets.includes('freighter') ? 'freighter' : availableWallets[0]);
 
     if (!walletToUse) {
@@ -131,22 +151,35 @@ export function WalletProvider({ children }: WalletProviderProps) {
 
     try {
       setError(null);
-      await setAllowed();
-      const result = await getAddress();
-      if (result.address) {
-        setWallets(prev => {
-          const existing = prev.findIndex(w => w === result.address);
-          if (existing >= 0) {
-            setActiveIndex(existing);
-            setWalletTypes(types => types.map((t, i) => (i === existing ? walletToUse : t)));
-            return prev;
-          }
-          const newWallets = [...prev, result.address];
-          setActiveIndex(newWallets.length - 1);
-          setWalletTypes(types => [...types, walletToUse]);
-          return newWallets;
-        });
+
+      let connectedAddress: string;
+
+      if (walletToUse === 'freighter') {
+        await setAllowed();
+        const result = await getAddress();
+        if (!result.address) throw new Error('Failed to get address from Freighter');
+        connectedAddress = result.address;
+        hwAccountIndex = 0; // Freighter always uses account 0
+      } else {
+        // Hardware wallet — delegate to the adapter
+        const adapter = getWalletAdapter(walletToUse);
+        connectedAddress = await adapter.connect(hwAccountIndex);
       }
+
+      setWallets(prev => {
+        const existing = prev.findIndex(w => w === connectedAddress);
+        if (existing >= 0) {
+          setActiveIndex(existing);
+          setWalletTypes(types => types.map((t, i) => (i === existing ? walletToUse : t)));
+          setAccountIndices(indices => indices.map((idx, i) => (i === existing ? hwAccountIndex : idx)));
+          return prev;
+        }
+        const newWallets = [...prev, connectedAddress];
+        setActiveIndex(newWallets.length - 1);
+        setWalletTypes(types => [...types, walletToUse]);
+        setAccountIndices(indices => [...indices, hwAccountIndex]);
+        return newWallets;
+      });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect wallet';
       setError(errorMsg);
@@ -161,6 +194,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
       return next;
     });
     setWalletTypes(prev => prev.filter((_, i) => i !== activeIndex));
+    setAccountIndices(prev => prev.filter((_, i) => i !== activeIndex));
     setActiveIndex(() => {
       const newLength = wallets.length - 1;
       if (newLength <= 0) return 0;
@@ -180,6 +214,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     address,
     wallets,
     walletType,
+    accountIndex,
     activeIndex,
     isConnected: wallets.length > 0,
     hasFreighter,
