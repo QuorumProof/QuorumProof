@@ -126,3 +126,17 @@ FILES_CHANGED.txt
 TASK_IMPLEMENTATIONS.md
 IMPLEMENTATION_SUMMARY.md
 VERIFICATION_CHECKLIST.md
+
+# Test runner output
+test-results/
+playwright-report/
+
+# Vitest cache
+.vitest-cache/
+
+# Additional editor/IDE directories (settings.json already excluded above)
+.vscode/launch.json
+.vscode/tasks.json
+
+# Temporary build/debug files
+*.temp
