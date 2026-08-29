@@ -72,6 +72,12 @@ STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 CONTRACT_QUORUM_PROOF=<your-contract-id>
 CONTRACT_SBT_REGISTRY=<your-contract-id>
 CONTRACT_ZK_VERIFIER=<your-contract-id>
+# contracts/bbs_plus_v1 (BBS+ selective-disclosure crypto core) is a Rust
+# library crate that other contract crates link in — not a standalone
+# deployed contract — so there is no address to set. It appears as an
+# in-scope component in SECURITY.md because it is cryptographic code in this
+# repo, not because it is separately deployed.
+# CONTRACT_BBS_PLUS_V1=
 
 # Frontend configuration
 VITE_STELLAR_NETWORK=testnet
@@ -101,6 +107,7 @@ Follow the step-by-step guide in `demo/demo-script.md`
 
 ## 📖 Documentation
 
+- [Documentation Index](docs/README.md) — all `docs/` guides grouped by topic (start here)
 - [Architecture Overview](docs/architecture.md)
 - [Trust Slice Model](docs/trust-slices.md)
 - [ZK Verification Design](docs/zk-verification.md)

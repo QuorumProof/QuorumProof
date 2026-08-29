@@ -159,6 +159,15 @@ jobs:
         working-directory: api-server
         run: npm test -- criticalEventMetricNames.test.ts criticalEventPrometheusIntegration.test.ts
 
+  # Issue #1498: every docs/*.md must be linked from docs/README.md so the
+  # documentation directory stays discoverable and docs don't get duplicated.
+  docs-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check docs index is complete
+        run: ./scripts/check_docs_index.sh
+
   security:
     runs-on: ubuntu-latest
     steps:
