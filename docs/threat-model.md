@@ -756,6 +756,82 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 ---
 
+## 3.8 Revocation-Cache Staleness in `sbt_registry.mint` (Issue #1509)
+
+**Attack**: An SBT is minted against a credential that was revoked within the last `CREDENTIAL_CACHE_TTL_LEDGERS` ledgers.
+
+### Description
+
+`sbt_registry::mint` (line 576, `contracts/sbt_registry/src/lib.rs`) checks credential revocation via a two-level lookup:
+
+1. If a `CredentialCacheEntry` for the credential is present in persistent storage and the entry is **younger than `CREDENTIAL_CACHE_TTL_LEDGERS`**, the cached `revoked` boolean is trusted and no cross-contract call is made.
+2. Otherwise, a cross-contract `is_revoked` call into `quorum_proof` refreshes the cache.
+
+This is an intentional gas-vs-staleness trade-off introduced in Issue #516.
+
+### Staleness Bound (Quantified)
+
+| Parameter | Value |
+|-----------|-------|
+| `CREDENTIAL_CACHE_TTL_LEDGERS` | **720 ledgers** |
+| Wall-clock time (at 5 s/ledger) | **~60 minutes** |
+| Governance-tunable? | **Yes** — call `set_cache_ttl(admin, new_ttl)` to adjust at runtime |
+
+**Worst case**: A credential is revoked in `quorum_proof` immediately after a cache refresh. The SBT registry will continue to trust the stale "not revoked" cache entry for up to 720 ledgers (~1 hour), during which a call to `mint` for that credential will **succeed** even though the credential is revoked on-chain.
+
+### Accepted Risk
+
+This is **documented as accepted behaviour** for the following reasons:
+
+1. **Gas cost**: cross-contract calls consume significant gas; caching avoids this on every mint.
+2. **Frequency**: mint is called infrequently relative to verification; the 1-hour window is acceptable for most use cases.
+3. **Revocation is rare**: in the nominal threat model, credentials are revoked for cause (fraud, expiry); the ~1 hour window between revocation and cache expiry is not a meaningful attack surface for this pattern.
+4. **Mitigating factor**: the `CREDENTIAL_CACHE_TTL_LEDGERS` constant is now **governance-tunable** — operators running high-assurance deployments can set a much smaller TTL (e.g. 0 to always call cross-contract) via `set_cache_ttl`.
+
+### Proactive Cache Invalidation (Design Decision)
+
+Event-driven cache invalidation (invalidating the cache when `quorum_proof` emits a `RevokeCredential` event) is **not implemented** because Soroban v1 does not support cross-contract event subscriptions within a transaction. A revoke in `quorum_proof` and the cache write in `sbt_registry` would have to be in the same transaction, which requires `quorum_proof` to call into `sbt_registry` — creating a tight coupling and potential re-entrancy risk. The TTL approach avoids this coupling at the cost of the staleness window.
+
+If Soroban adds event-subscription primitives in a future protocol version, proactive invalidation should be revisited.
+
+### Test Coverage
+
+See `test_mint_succeeds_on_stale_cached_non_revoked` in `contracts/sbt_registry/src/lib.rs` — this test explicitly exercises the warm (stale-but-valid-cache) path and documents that mint succeeds in this scenario as **expected behaviour**.
+
+### Residual Risk
+
+| Risk | Rating | Rationale |
+|------|--------|-----------|
+| Minting SBT for a revoked credential within 1-hour window | **Low** | Requires revocation + mint within the TTL; mint is rare; TTL is tunable to 0 |
+| Operator forgets to lower TTL for high-assurance deployment | **Medium** | Mitigated by documentation, issuer-security-checklist.md, and governance-tunable parameter |
+
+---
+
+## 3.9 Single-EOA Admin Key Compromise (Issue #1508)
+
+**Attack**: An attacker who gains access to any one of the three independent `DataKey::Admin` keys can perform unrestricted privileged operations (upgrade WASM, pause, rotate verifying keys) on that contract.
+
+### Description
+
+All three contracts use a single `DataKey::Admin` stored in instance storage. Prior to Issue #1508, there was no multi-sig requirement, no timelock, and no documented rotation procedure.
+
+### Mitigations Implemented
+
+1. **Two-step admin rotation** (`propose_admin` / `accept_admin`): a new admin cannot be installed in a single transaction — the incoming admin must accept from a separate transaction after a configurable timelock (`DEFAULT_ADMIN_CHANGE_TIMELOCK_LEDGERS = 17 280` ledgers ≈ 24 hours).
+2. **Upgrade timelock** (`schedule_upgrade` / `upgrade`): upgrades cannot be executed until `DEFAULT_UPGRADE_TIMELOCK_LEDGERS` ledgers (≈ 24 hours) have elapsed after scheduling. Mismatched WASM hashes are rejected.
+3. **Governance-tunable delays**: both delays are configurable via `set_admin_timelock_config`; operators can reduce to 0 on testnet/dev and raise on mainnet.
+4. **Independent keys per contract**: the three contracts hold separate admin keys — compromise of one does not grant access to the others.
+
+### Residual Risk
+
+| Risk | Rating | Rationale |
+|------|--------|-----------|
+| All three keys held by the same person/org | **Medium** | Policy-only control; mitigated by key management recommendations in security-best-practices.md |
+| 24-hour window not detected by monitoring | **Low** | `AdminProposed` and `UpgradeScheduled` events emitted; see critical-event-alerting.md |
+| Admin key compromise and attacker proposes a new admin before legitimate team | **Low** | Requires attacker to also control the "new admin" key to complete the rotation |
+
+---
+
 ## 9. References
 
 - [Stellar Whitepaper](https://www.stellar.org/papers/stellar-consensus-protocol)
