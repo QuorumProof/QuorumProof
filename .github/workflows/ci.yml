@@ -105,6 +105,11 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+      # Issue #1449: enforce coverage thresholds so newly added pages cannot
+      # ship without a test file.  The thresholds are defined in vite.config.ts
+      # (lines: 70, functions: 70, branches: 65, statements: 70).
+      - name: Check test coverage thresholds
+        run: npm run test:coverage
       - run: npm run build
 
   # Issue #1003: chaos test scenarios (network delay, packet loss, sustained
