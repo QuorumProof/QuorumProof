@@ -19,6 +19,10 @@ const MAX_BATCH_SIZE: u32 = 1000;
 /// Issue #989: maximum accepted length of an SBT metadata URI, in bytes.
 const MAX_METADATA_URI_LEN: usize = 256;
 
+// ── Issue #1511: Governance audit trail for cross-contract address repointing ──
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
+const TOPIC_CONTRACT_ADDRESS_UPDATED: &str = "ContractAddressUpdated";
+
 /// ASCII-case-insensitive prefix test.
 ///
 /// `soroban_sdk::String` exposes no `to_lowercase`/`starts_with`, and the
@@ -460,6 +464,30 @@ pub struct BurnEvent {
     pub holder: Address,
     /// Ledger timestamp when the burn occurred.
     pub timestamp: u64,
+}
+
+// ── Issue #1511: Governance event structs ────────────────────────────────────
+
+/// Emitted when the contract admin is transferred to a new address.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminTransferredEventData {
+    /// The previous admin address.
+    pub old_admin: Address,
+    /// The new admin address.
+    pub new_admin: Address,
+}
+
+/// Emitted when a cross-contract address (quorum_proof) is repointed.
+#[contracttype]
+#[derive(Clone)]
+pub struct ContractAddressUpdatedEventData {
+    /// Label identifying which contract was updated (e.g. "quorum_proof").
+    pub contract_name: soroban_sdk::String,
+    /// The previous contract address.
+    pub old_address: Address,
+    /// The new contract address.
+    pub new_address: Address,
 }
 
 /// An encoded attribute attached to an SBT (e.g. `specialization: mechanical
@@ -951,6 +979,93 @@ impl SbtRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::QuorumProofId, &quorum_proof_id);
+    }
+
+    // ── Issue #1511: Governance — admin transfer & cross-contract address repointing ──
+
+    /// Transfer contract admin to a new address, emitting an `AdminTransferred` event.
+    ///
+    /// Provides an auditable trail for every admin key rotation. The caller
+    /// must be the current admin and must authorize the call.
+    ///
+    /// # Parameters
+    /// - `admin`: The current admin address (must authorize).
+    /// - `new_admin`: The address to become the new admin.
+    ///
+    /// # Panics
+    /// - If the contract is not initialized (no admin stored).
+    /// - If `admin` does not match the stored admin.
+    pub fn update_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = AdminTransferredEventData {
+            old_admin: stored,
+            new_admin,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_ADMIN_TRANSFERRED);
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Repoint the quorum_proof contract address, emitting a `ContractAddressUpdated` event.
+    ///
+    /// When the quorum_proof contract is redeployed, this allows updating the stored
+    /// address so cross-contract credential verification calls route to the new contract.
+    ///
+    /// # Parameters
+    /// - `admin`: The current admin address (must authorize).
+    /// - `new_address`: The new quorum_proof contract address.
+    ///
+    /// # Panics
+    /// - If the contract is not initialized.
+    /// - If `admin` does not match the stored admin.
+    pub fn update_quorum_proof_id(env: Env, admin: Address, new_address: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        let old_address: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("quorum_proof_id not set");
+
+        env.storage()
+            .instance()
+            .set(&DataKey::QuorumProofId, &new_address);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = ContractAddressUpdatedEventData {
+            contract_name: soroban_sdk::String::from_str(&env, "quorum_proof"),
+            old_address,
+            new_address,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_CONTRACT_ADDRESS_UPDATED);
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get the currently stored quorum_proof address.
+    pub fn get_quorum_proof_id(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::QuorumProofId)
+            .expect("quorum_proof_id not set")
     }
 
     /// Burn a soulbound token. Callable by the token holder only.
@@ -5924,5 +6039,159 @@ mod tests {
         // A verifier only needs commitment + proof; verification succeeds
         // without ever supplying or learning `owner`.
         assert!(client.verify_sbt_commitment(&commitment, &proof));
+    }
+}
+
+/// Tests for Issue #1511: Audit governance and event trail for repointing
+/// cross-contract addresses in the sbt_registry contract.
+#[cfg(test)]
+mod tests_governance_1511 {
+    use super::*;
+    use super::mock_quorum_proof::{QuorumProofContract, QuorumProofContractClient};
+    use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::{Address, Env};
+
+    fn setup_with_qp(
+        env: &Env,
+    ) -> (
+        SbtRegistryContractClient,
+        Address,
+        QuorumProofContractClient,
+        Address,
+    ) {
+        let qp_id = env.register_contract(None, QuorumProofContract);
+        let qp_client = QuorumProofContractClient::new(env, &qp_id);
+        let admin = Address::generate(env);
+        qp_client.initialize(&admin);
+
+        let sbt_id = env.register_contract(None, SbtRegistryContract);
+        let sbt_client = SbtRegistryContractClient::new(env, &sbt_id);
+        sbt_client.initialize(&admin, &qp_id);
+
+        (sbt_client, admin, qp_client, qp_id)
+    }
+
+    // ── update_admin ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_admin_transfers_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
+
+        // Old admin should no longer be authorized — new admin can call update_admin again.
+        let third_admin = Address::generate(&env);
+        client.update_admin(&new_admin, &third_admin);
+    }
+
+    #[test]
+    fn test_update_admin_emits_admin_transferred_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
+
+        let events = env.events().all();
+        let found = events.iter().any(|e| {
+            let event_str = std::format!("{:?}", e);
+            event_str.contains("AdminTransferred")
+        });
+        assert!(found, "AdminTransferred event not emitted");
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_update_admin_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.update_admin(&attacker, &new_admin);
+    }
+
+    // ── update_quorum_proof_id ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_quorum_proof_id_stores_new_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _old_qp_id) = setup_with_qp(&env);
+
+        let new_qp_id = env.register_contract(None, QuorumProofContract);
+        QuorumProofContractClient::new(&env, &new_qp_id).initialize(&admin);
+
+        client.update_quorum_proof_id(&admin, &new_qp_id);
+
+        assert_eq!(client.get_quorum_proof_id(), new_qp_id);
+    }
+
+    #[test]
+    fn test_update_quorum_proof_id_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _old_qp_id) = setup_with_qp(&env);
+
+        let new_qp_id = env.register_contract(None, QuorumProofContract);
+        QuorumProofContractClient::new(&env, &new_qp_id).initialize(&admin);
+
+        client.update_quorum_proof_id(&admin, &new_qp_id);
+
+        let events = env.events().all();
+        let found = events.iter().any(|e| {
+            let event_str = std::format!("{:?}", e);
+            event_str.contains("ContractAddressUpdated")
+        });
+        assert!(found, "ContractAddressUpdated event not emitted");
+    }
+
+    #[test]
+    fn test_update_quorum_proof_id_can_repoint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _old_qp_id) = setup_with_qp(&env);
+
+        let qp_v2 = env.register_contract(None, QuorumProofContract);
+        QuorumProofContractClient::new(&env, &qp_v2).initialize(&admin);
+        client.update_quorum_proof_id(&admin, &qp_v2);
+        assert_eq!(client.get_quorum_proof_id(), qp_v2);
+
+        let qp_v3 = env.register_contract(None, QuorumProofContract);
+        QuorumProofContractClient::new(&env, &qp_v3).initialize(&admin);
+        client.update_quorum_proof_id(&admin, &qp_v3);
+        assert_eq!(client.get_quorum_proof_id(), qp_v3);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_update_quorum_proof_id_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let attacker = Address::generate(&env);
+        let new_qp = Address::generate(&env);
+        client.update_quorum_proof_id(&attacker, &new_qp);
+    }
+
+    // ── get_quorum_proof_id returns the initial value ──────────────────────────
+
+    #[test]
+    fn test_get_quorum_proof_id_returns_initialized_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_client, _admin, _qp_client, qp_id) = setup_with_qp(&env);
+        // The client was initialized with qp_id — verify it's stored correctly.
+        let (client2, admin2, _qp2, qp_id2) = setup_with_qp(&env);
+        assert_eq!(client2.get_quorum_proof_id(), qp_id2);
+        // Silence unused var warning
+        let _ = qp_id;
+        let _ = admin2;
     }
 }

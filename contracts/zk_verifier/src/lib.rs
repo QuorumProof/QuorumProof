@@ -5,6 +5,9 @@ use soroban_sdk::xdr::ToXdr;
 // For range proof hashing
 use sha2::{Sha256, Digest};
 
+// ── Issue #1511: Governance audit trail for admin and cross-contract address repointing ──
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
+
 mod plonk;
 mod groth16;
 // `test` so this crate's own `mod tests` can use it; `testutils` so downstream
@@ -534,6 +537,18 @@ pub struct CacheEntry {
     pub ttl: u32,
 }
 
+// ── Issue #1511: Governance event struct ─────────────────────────────────────
+
+/// Emitted when the contract admin is transferred to a new address.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminTransferredEventData {
+    /// The previous admin address.
+    pub old_admin: Address,
+    /// The new admin address.
+    pub new_admin: Address,
+}
+
 /// Proof metadata with encryption and compression support.
 #[contracttype]
 #[derive(Clone)]
@@ -970,6 +985,41 @@ impl ZkVerifierContract {
     pub fn initialize(env: Env, admin: Address) {
         assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
         env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    // ── Issue #1511: Governance — admin transfer ─────────────────────────────
+
+    /// Transfer contract admin to a new address, emitting an `AdminTransferred` event.
+    ///
+    /// Provides an auditable trail for every admin key rotation. The caller
+    /// must be the current admin and must authorize the call.
+    ///
+    /// # Parameters
+    /// - `admin`: The current admin address (must authorize).
+    /// - `new_admin`: The address to become the new admin.
+    ///
+    /// # Panics
+    /// - If the contract is not initialized (no admin stored).
+    /// - If `admin` does not match the stored admin.
+    pub fn update_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        let event_data = AdminTransferredEventData {
+            old_admin: stored,
+            new_admin,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_ADMIN_TRANSFERRED);
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
     }
 
     /// Verify a ZK proof with caching and TTL support.
@@ -4909,5 +4959,99 @@ mod tests {
 
         let session_id = make_session_id(&env, 0xFF);
         assert!(!client.is_mpc_session_approved(&session_id));
+    }
+}
+
+/// Tests for Issue #1511: Audit governance and event trail for admin repointing
+/// in the zk_verifier contract.
+#[cfg(test)]
+mod tests_governance_1511 {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::{Address, Env};
+
+    fn setup(env: &Env) -> (ZkVerifierContractClient, Address) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let admin = Address::generate(env);
+        let client = ZkVerifierContractClient::new(env, &contract_id);
+        client.initialize(&admin);
+        (client, admin)
+    }
+
+    // ── update_admin ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_admin_transfers_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
+
+        // New admin should be able to perform admin actions (e.g. set_verifying_key).
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        client.set_verifying_key(&new_admin, &vk_hash);
+    }
+
+    #[test]
+    fn test_update_admin_emits_admin_transferred_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
+
+        let events = env.events().all();
+        let found = events.iter().any(|e| {
+            let event_str = std::format!("{:?}", e);
+            event_str.contains("AdminTransferred")
+        });
+        assert!(found, "AdminTransferred event not emitted");
+    }
+
+    #[test]
+    fn test_update_admin_can_chain_transfers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let admin_v2 = Address::generate(&env);
+        let admin_v3 = Address::generate(&env);
+
+        client.update_admin(&admin, &admin_v2);
+        // admin_v2 can now transfer to admin_v3
+        client.update_admin(&admin_v2, &admin_v3);
+
+        // admin_v3 can set verifying key
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[2u8; 32]);
+        client.set_verifying_key(&admin_v3, &vk_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_update_admin_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.update_admin(&attacker, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "not initialized")]
+    fn test_update_admin_panics_if_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        // initialize() was NOT called
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
     }
 }
