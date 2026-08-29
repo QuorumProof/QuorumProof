@@ -366,3 +366,143 @@ This table consolidates the individual drills already defined in §4 into a sing
 | Full DR Tabletop Exercise (all roles, simulated incident end-to-end using §5 role assignments and §6 communication cadence) | Quarterly | New — run alongside the quarterly drills above | Incident Commander |
 
 The Incident Commander is responsible for scheduling the quarterly batch (Key Recovery, RPC Failover, Emergency Pause, API Secret Rotation, and the Tabletop Exercise together) at the start of each calendar quarter and confirming completion against the §4.7 checklist before quarter-end.
+
+---
+
+## 8. Admin Key Rotation Runbook (Issue #1508)
+
+This runbook covers the step-by-step procedure for rotating the admin key on any or all of the three core contracts (`quorum_proof`, `sbt_registry`, `zk_verifier`).
+
+### 8.1 Pre-Rotation Checklist
+
+Before starting a key rotation:
+
+- [ ] New admin key has been generated on an HSM or hardware wallet — **never rotate to a hot key**.
+- [ ] New admin key has been tested to sign and submit a Soroban transaction on testnet.
+- [ ] Rotation has been announced to on-call team with a maintenance window (allow at least 30 minutes).
+- [ ] Monitoring is active — watch for `AdminProposed` events on-chain.
+- [ ] The `admin_change_delay_ledgers` value has been confirmed (default: 17 280 ledgers ≈ 24 hours).
+
+### 8.2 Rotation Steps
+
+#### Step 1 — Propose the new admin
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ADDRESS> \
+  --source <CURRENT_ADMIN_SECRET_KEY> \
+  --network <testnet|mainnet> \
+  -- propose_admin \
+    --current_admin <CURRENT_ADMIN_ADDRESS> \
+    --new_admin <NEW_ADMIN_ADDRESS>
+```
+
+Repeat for each contract being rotated.  Record the ledger number of each proposal.
+
+#### Step 2 — Verify the proposal is recorded
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ADDRESS> \
+  --source <ANY_ACCOUNT> \
+  --network <testnet|mainnet> \
+  -- get_storage_value \   # or use soroban-sdk storage read tooling
+    --key PendingAdmin
+```
+
+Confirm `PendingAdmin` == `NEW_ADMIN_ADDRESS` and `PendingAdminProposedAt` is the expected ledger.
+
+#### Step 3 — Wait for the timelock window
+
+Calculate the earliest acceptance ledger:
+
+```
+earliest_accept_ledger = PendingAdminProposedAt + admin_change_delay_ledgers
+```
+
+At 5 s/ledger, 17 280 ledgers ≈ 24 hours.  Do **not** proceed before this ledger.
+
+#### Step 4 — Accept the admin proposal
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ADDRESS> \
+  --source <NEW_ADMIN_SECRET_KEY> \
+  --network <testnet|mainnet> \
+  -- accept_admin \
+    --new_admin <NEW_ADMIN_ADDRESS>
+```
+
+Repeat for each contract.
+
+#### Step 5 — Verify the admin change took effect
+
+```bash
+# Smoke-test: call any admin-gated read-only function with the new key.
+stellar contract invoke \
+  --id <CONTRACT_ADDRESS> \
+  --source <NEW_ADMIN_SECRET_KEY> \
+  --network <testnet|mainnet> \
+  -- is_paused
+```
+
+If the call succeeds, the admin has been updated.
+
+#### Step 6 — Revoke / archive the old admin key
+
+1. Remove the old key from `.env` and all GitHub/CI secrets (`STELLAR_SECRET_KEY`, etc.).
+2. If the key was stored in a password manager, delete the entry and notify the key custodian.
+3. Log the rotation event in the team's audit trail with: date, who initiated, who accepted, reason.
+
+### 8.3 Emergency Admin Rotation (Key Compromise)
+
+If the current admin key is suspected to have been compromised:
+
+1. **Alert**: immediately notify the incident commander and on-call team.
+2. **Pause**: if possible, call `emergency_pause` from the compromised key (attacker may beat you to it — skip if key is clearly burned).
+3. **Rotate**: follow Steps 1–6 above as fast as possible.  Use `set_admin_timelock_config` to set `admin_change_delay_ledgers = 0` on testnet-equivalent if you need to rehearse without delay.  On mainnet, the 24-hour window is intentional — a compromised key still cannot complete the rotation alone, because the new admin must accept from a separate key.
+4. **Post-incident**: restore the default timelock (`17 280`) after the rotation is confirmed.
+
+> **Key insight**: because the new admin must call `accept_admin` from a separate transaction, an attacker with the current admin key alone cannot complete a rotation undetected — the acceptance must come from the new key, which is presumed to be under the operator's control.
+
+### 8.4 Upgrade Scheduling Runbook
+
+Contract upgrades now require a two-step process:
+
+#### Step A — Schedule the upgrade
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ADDRESS> \
+  --source <ADMIN_SECRET_KEY> \
+  --network <testnet|mainnet> \
+  -- schedule_upgrade \
+    --admin <ADMIN_ADDRESS> \
+    --new_wasm_hash <32_BYTE_HEX_HASH>
+```
+
+This emits an `UpgradeScheduled` event.  The `upgrade_delay_ledgers` must elapse before execution.
+
+#### Step B — Execute the upgrade (after timelock)
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ADDRESS> \
+  --source <ADMIN_SECRET_KEY> \
+  --network <testnet|mainnet> \
+  -- upgrade \
+    --admin <ADMIN_ADDRESS> \
+    --new_wasm_hash <32_BYTE_HEX_HASH>
+```
+
+The call will fail if the timelock has not elapsed or if the hash does not match what was scheduled.
+
+### 8.5 DR Testing for Key Rotation
+
+| Drill | Cadence | Expected outcome |
+|-------|---------|-----------------|
+| Testnet admin rotation (full two-step) | Quarterly | `accept_admin` succeeds after 17 280 ledger wait |
+| Zero-delay rotation on local dev network | Before each mainnet rotation | Muscle-memory for the commands |
+| Emergency rotation simulation | Annually | Full incident runbook exercised under time pressure |
+
+Add these drills to the DR Testing Schedule in §7.

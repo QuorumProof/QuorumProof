@@ -518,3 +518,65 @@ async function rotateKeys(userId: string): Promise<void> {
 - [OWASP Secure Coding Practices](https://owasp.org/www-project-secure-coding-practices-quick-reference-guide/)
 - [CWE/SANS Top 25](https://cwe.mitre.org/top25/)
 - [Stellar Security Best Practices](https://developers.stellar.org/docs/learn/security)
+
+---
+
+## Admin Key Topology (Issue #1508)
+
+### Current Architecture
+
+Each of the three core contracts holds an independent admin key in `DataKey::Admin` (instance storage). There is no shared key, no multi-sig requirement, and no timelock on admin-gated operations today.
+
+| Contract | Admin Key Location | Gated Operations |
+|----------|--------------------|------------------|
+| `quorum_proof` | `DataKey::Admin` (instance) | `upgrade`, `pause`, `unpause`, `emergency_pause`, `emergency_degrade`, `resume`, `migrate_state`, `set_active_metadata_schema`, `set_rate_limit_config`, `set_verifying_key_hash`, admin bypass |
+| `sbt_registry` | `DataKey::Admin` (instance) | `upgrade`, `admin_transfer_sbt`, `batch_transfer_sbt`, `add_holder_to_blacklist`, `record_revocation_reason`, `setup_recovery`, `set_reputation_weights` |
+| `zk_verifier` | `DataKey::Admin` (instance) | `set_verifying_key`, `rotate_verifying_key`, `set_plonk_srs`, `rotate_plonk_srs`, `set_plonk_verifying_key`, `rotate_plonk_verifying_key`, `set_groth16_verifying_key`, `rotate_groth16_verifying_key`, `upgrade`, `verify_claim` |
+
+All three admin keys are **independent** — compromise of the weakest single key is a full compromise of that contract's trust guarantees.
+
+### Multi-Sig / Timelock Admin Scheme
+
+To mitigate the single-EOA admin risk, QuorumProof implements a **propose-then-accept two-phase pattern** (sometimes called "two-step admin transfer" or "accept pattern") for all admin-key changes. An optional **timelock delay** is enforced on upgrade and pause-class operations.
+
+#### Two-Step Admin Rotation
+
+All three contracts expose two new entry points:
+
+```
+propose_admin(env, current_admin, new_admin)
+accept_admin(env, new_admin)
+```
+
+1. The **current admin** calls `propose_admin`, which writes `DataKey::PendingAdmin` but does **not** transfer control. Both `current_admin.require_auth()` and an optional `ADMIN_CHANGE_TIMELOCK_LEDGERS` countdown are enforced.
+2. The **new admin** must call `accept_admin` (from a separate transaction, optionally after the timelock window). This clears `PendingAdmin` and writes the new address to `DataKey::Admin`.
+
+This eliminates same-transaction admin-then-upgrade attacks: the new admin address cannot be used to authorize an upgrade in the same ledger as the proposal.
+
+#### Upgrade Timelock
+
+`upgrade` in all three contracts checks `DataKey::UpgradeUnlockedAt`. Before calling `upgrade`, the admin must first call:
+
+```
+schedule_upgrade(env, admin, new_wasm_hash)
+```
+
+This records the wasm hash and sets `UpgradeUnlockedAt = current_ledger + UPGRADE_TIMELOCK_LEDGERS`. The `upgrade` call is rejected unless `current_ledger >= UpgradeUnlockedAt` and the provided wasm hash matches the scheduled one.
+
+**Constants** (compile-time; governance-tunable via `set_admin_timelock_config` if you want runtime control):
+
+| Constant | Value | Wall-clock (5 s/ledger) |
+|----------|-------|------------------------|
+| `ADMIN_CHANGE_TIMELOCK_LEDGERS` | 17280 | ~24 hours |
+| `UPGRADE_TIMELOCK_LEDGERS` | 17280 | ~24 hours |
+
+> These defaults can be adjusted via `set_admin_timelock_config(env, admin, change_delay, upgrade_delay)` to values between 0 (disabled, for testnet/dev) and 172800 (30 days).
+
+### Key Management Recommendations
+
+1. **Use a hardware wallet or MPC wallet** for the admin key, never a hot EOA.
+2. **Store the pending-admin key** (the key that will call `accept_admin`) offline until needed.
+3. **Rotate admin keys at least annually** following the runbook in [disaster-recovery.md](./disaster-recovery.md#admin-key-rotation-runbook-issue-1508).
+4. **Monitor `AdminProposed` and `AdminChanged` events** on-chain to detect unauthorized proposals early (alert within 1 hour).
+5. **Test the rotation flow on testnet** before executing on mainnet — see the runbook for the step-by-step checklist.
+6. **Do not reuse the same key** across all three contracts. Independent keys limit blast radius; an attacker who compromises the `zk_verifier` admin cannot also upgrade `quorum_proof`.

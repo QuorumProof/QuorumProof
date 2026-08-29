@@ -87,6 +87,12 @@ const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
+
+/// Issue #1508: Default admin-change timelock (~24 hours at 5 s/ledger = 17 280 ledgers).
+const DEFAULT_ADMIN_CHANGE_TIMELOCK_LEDGERS: u32 = 17_280;
+
+/// Issue #1508: Default upgrade timelock (~24 hours at 5 s/ledger = 17 280 ledgers).
+const DEFAULT_UPGRADE_TIMELOCK_LEDGERS: u32 = 17_280;
 const DEFAULT_REVOCATION_TIME_LOCK_SECONDS: u64 = 172_800; // 48 hours
 const MAX_REVOCATION_BATCH_SIZE: u32 = 128;
 
@@ -909,6 +915,16 @@ pub enum DataKey {
     SuspensionReason(u64),
     /// Number of migrations still pending, surfaced by the health check.
     PendingMigrationCount,
+    /// Issue #1508: Proposed new admin address awaiting acceptance (two-step admin rotation).
+    PendingAdmin,
+    /// Issue #1508: Ledger number at which `propose_admin` was called.
+    PendingAdminProposedAt,
+    /// Issue #1508: The scheduled WASM hash for a pending upgrade.
+    ScheduledUpgradeHash,
+    /// Issue #1508: The ledger at or after which `upgrade()` may be executed.
+    UpgradeUnlockedAt,
+    /// Issue #1508: Governance-tunable timelock config for admin-change and upgrade delays.
+    AdminTimelockConfig,
 }
 
 #[contracttype]
@@ -2559,6 +2575,19 @@ pub struct AttestationCondition {
 pub struct RateLimitConfig {
     pub max_calls: u32,
     pub window_seconds: u64,
+}
+
+/// Issue #1508: Governance-tunable configuration for admin-change and upgrade
+/// timelocks.  Stored under `DataKey::AdminTimelockConfig`.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminTimelockConfig {
+    /// Ledgers that must pass between `propose_admin` and `accept_admin`.
+    /// Set to 0 to disable the delay (testnet / dev only).
+    pub admin_change_delay_ledgers: u32,
+    /// Ledgers that must pass between `schedule_upgrade` and `upgrade`.
+    /// Set to 0 to disable the delay (testnet / dev only).
+    pub upgrade_delay_ledgers: u32,
 }
 
 // ── Feature (a): Dynamic rate limit adjustment based on network congestion ────
@@ -12486,6 +12515,29 @@ impl QuorumProofContract {
             .get(&DataKey::Admin)
             .expect("not initialized");
         assert!(stored == admin, "unauthorized");
+
+        // Issue #1508: enforce upgrade timelock — schedule_upgrade must have been
+        // called first and the delay window must have elapsed.
+        let unlock_at: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeUnlockedAt)
+            .expect("upgrade not scheduled — call schedule_upgrade first");
+        assert!(
+            env.ledger().sequence() >= unlock_at,
+            "upgrade timelock not yet elapsed"
+        );
+        let scheduled_hash: soroban_sdk::BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ScheduledUpgradeHash)
+            .expect("no scheduled upgrade hash");
+        assert!(scheduled_hash == new_wasm_hash, "wasm hash does not match scheduled upgrade");
+
+        // Clear scheduled state before executing.
+        env.storage().instance().remove(&DataKey::UpgradeUnlockedAt);
+        env.storage().instance().remove(&DataKey::ScheduledUpgradeHash);
+
         Self::validate_upgrade(env.clone(), new_wasm_hash.clone());
         // Issue #874: record the upgrade in the audit log before applying it.
         upgrade_history::record_upgrade(
@@ -12495,6 +12547,142 @@ impl QuorumProofContract {
             false,
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    // ── Issue #1508: Multi-Sig / Timelock Admin Management ──────────────────
+
+    /// Schedule a contract upgrade.  Records `new_wasm_hash` and sets the
+    /// unlock ledger to `current_ledger + upgrade_delay_ledgers`.  The admin
+    /// must call `upgrade` after the timelock elapses with the same hash.
+    ///
+    /// # Panics
+    /// - If `admin` is not authorized.
+    /// - If `admin` does not match the stored admin.
+    pub fn schedule_upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        let config: AdminTimelockConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminTimelockConfig)
+            .unwrap_or(AdminTimelockConfig {
+                admin_change_delay_ledgers: DEFAULT_ADMIN_CHANGE_TIMELOCK_LEDGERS,
+                upgrade_delay_ledgers: DEFAULT_UPGRADE_TIMELOCK_LEDGERS,
+            });
+
+        let unlock_at = env.ledger().sequence().saturating_add(config.upgrade_delay_ledgers);
+        env.storage().instance().set(&DataKey::ScheduledUpgradeHash, &new_wasm_hash);
+        env.storage().instance().set(&DataKey::UpgradeUnlockedAt, &unlock_at);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let topics = (soroban_sdk::Symbol::new(&env, "UpgradeScheduled"),);
+        env.events().publish(topics, (admin, new_wasm_hash, unlock_at));
+    }
+
+    /// Propose a new admin.  The new admin must accept via `accept_admin`
+    /// after `admin_change_delay_ledgers` ledgers have elapsed.
+    ///
+    /// # Panics
+    /// - If `current_admin` is not authorized.
+    /// - If `current_admin` does not match the stored admin.
+    pub fn propose_admin(env: Env, current_admin: Address, new_admin: Address) {
+        current_admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == current_admin, "unauthorized");
+
+        let proposed_at = env.ledger().sequence();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage().instance().set(&DataKey::PendingAdminProposedAt, &proposed_at);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let topics = (soroban_sdk::Symbol::new(&env, "AdminProposed"),);
+        env.events().publish(topics, (current_admin, new_admin, proposed_at));
+    }
+
+    /// Accept a pending admin proposal.  Must be called by the proposed new
+    /// admin after `admin_change_delay_ledgers` ledgers have elapsed since
+    /// `propose_admin` was called.
+    ///
+    /// # Panics
+    /// - If `new_admin` is not authorized.
+    /// - If there is no pending admin proposal.
+    /// - If `new_admin` does not match the pending proposal.
+    /// - If the timelock has not yet elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .expect("no pending admin proposal");
+        assert!(pending == new_admin, "caller is not the proposed admin");
+
+        let proposed_at: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminProposedAt)
+            .expect("missing proposal ledger");
+
+        let config: AdminTimelockConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminTimelockConfig)
+            .unwrap_or(AdminTimelockConfig {
+                admin_change_delay_ledgers: DEFAULT_ADMIN_CHANGE_TIMELOCK_LEDGERS,
+                upgrade_delay_ledgers: DEFAULT_UPGRADE_TIMELOCK_LEDGERS,
+            });
+
+        assert!(
+            env.ledger().sequence() >= proposed_at.saturating_add(config.admin_change_delay_ledgers),
+            "admin change timelock not yet elapsed"
+        );
+
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().remove(&DataKey::PendingAdminProposedAt);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let topics = (soroban_sdk::Symbol::new(&env, "AdminChanged"),);
+        env.events().publish(topics, (old_admin, new_admin));
+    }
+
+    /// Update the admin-change and upgrade timelock delays.
+    ///
+    /// # Panics
+    /// - If `admin` is not authorized.
+    /// - If `admin` does not match the stored admin.
+    pub fn set_admin_timelock_config(
+        env: Env,
+        admin: Address,
+        admin_change_delay_ledgers: u32,
+        upgrade_delay_ledgers: u32,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+
+        let config = AdminTimelockConfig {
+            admin_change_delay_ledgers,
+            upgrade_delay_ledgers,
+        };
+        env.storage().instance().set(&DataKey::AdminTimelockConfig, &config);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
     /// Validate that a new WASM hash is safe to upgrade to.
@@ -28322,6 +28510,80 @@ mod doc_tests {
         // Verify the mechanism is in place by checking the challenge exists
         let challenge = client.get_challenge(&challenge_id);
         assert_eq!(challenge.status, 0u32); // Active status
+    }
+
+    // ── Issue #1508: Admin-Change / Upgrade Timelock Tests ───────────────────
+
+    /// accept_admin called immediately after propose_admin (timelock not elapsed)
+    /// must panic, guarding against same-transaction admin-then-upgrade attacks.
+    #[test]
+    #[should_panic(expected = "admin change timelock not yet elapsed")]
+    fn test_qp_accept_admin_before_timelock_panics() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        // Keep upgrade delay 0, admin-change delay non-zero.
+        client.set_admin_timelock_config(&admin, &17_280u32, &0u32);
+
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        // Same ledger — must panic.
+        client.accept_admin(&new_admin);
+    }
+
+    /// accept_admin with a zero-delay config succeeds immediately.
+    #[test]
+    fn test_qp_accept_admin_zero_delay_succeeds() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        // Disable both timelocks for testability.
+        client.set_admin_timelock_config(&admin, &0u32, &0u32);
+
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        // New admin can now call an admin-gated function (pause).
+        client.pause(&new_admin);
+        assert!(client.is_paused());
+    }
+
+    /// Calling upgrade without schedule_upgrade panics.
+    #[test]
+    #[should_panic(expected = "upgrade not scheduled")]
+    fn test_qp_upgrade_without_schedule_panics() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let fake_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[1u8; 32]);
+        client.upgrade(&admin, &fake_hash);
+    }
+
+    /// schedule_upgrade then upgrade before timelock elapses panics.
+    #[test]
+    #[should_panic(expected = "upgrade timelock not yet elapsed")]
+    fn test_qp_upgrade_before_timelock_panics() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        client.set_admin_timelock_config(&admin, &0u32, &17_280u32);
+
+        let fake_hash = soroban_sdk::BytesN::<32>::from_array(&env, &[1u8; 32]);
+        client.schedule_upgrade(&admin, &fake_hash);
+        // Same ledger as schedule — must panic.
+        client.upgrade(&admin, &fake_hash);
+    }
+
+    /// Proposing admin from a non-admin address panics.
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_qp_propose_admin_non_admin_panics() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+
+        let imposter = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&imposter, &new_admin);
     }
 }
 
