@@ -6223,10 +6223,9 @@ mod tests {
         // Timelock is 0 so accept can happen immediately.
         client.accept_admin(&new_admin);
 
-        // Verify: the new admin can call an admin-only function (set_reputation_weights)
+        // Verify: the new admin can call an admin-only function (set_reputation_config)
         // without panicking; the old admin would no longer be authorised.
-        let new_config = ReputationConfig { token_weight: 2, activity_weight: 1 };
-        client.set_reputation_weights(&new_admin, &new_config);
+        client.set_reputation_config(&new_admin, &2u32, &1u32);
     }
 
     /// A wrong address trying to accept a pending proposal must panic.
