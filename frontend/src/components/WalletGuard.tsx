@@ -1,4 +1,5 @@
-import { ReactNode } from 'react';
+import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useWallet } from '../hooks';
 import { getAllWalletAdapters } from '../wallets/registry';
 
@@ -7,13 +8,14 @@ interface WalletGuardProps {
 }
 
 export function WalletGuard({ children }: WalletGuardProps) {
+  const { t } = useTranslation();
   const { address, isInitializing, connect, availableWallets } = useWallet();
 
   if (isInitializing) {
     return (
       <div className="loading-state">
         <div className="spinner" />
-        <p>Checking wallet…</p>
+        <p>{t('walletGuard.checkingWallet')}</p>
       </div>
     );
   }
@@ -22,17 +24,15 @@ export function WalletGuard({ children }: WalletGuardProps) {
     return (
       <div className="wallet-guard-card">
         <div className="wallet-guard__icon">🔐</div>
-        <h2 className="wallet-guard__title">Wallet Required</h2>
-        <p className="wallet-guard__sub">
-          Install the Freighter browser extension or connect a Ledger/Trezor hardware wallet to use this feature.
-        </p>
+        <h2 className="wallet-guard__title">{t('walletGuard.noWalletTitle')}</h2>
+        <p className="wallet-guard__sub">{t('walletGuard.noWalletMessage')}</p>
         <a
           href="https://freighter.app"
           target="_blank"
           rel="noopener noreferrer"
           className="btn btn--primary"
         >
-          Install Freighter
+          {t('walletGuard.installFreighter')}
         </a>
       </div>
     );
@@ -45,10 +45,8 @@ export function WalletGuard({ children }: WalletGuardProps) {
     return (
       <div className="wallet-guard-card">
         <div className="wallet-guard__icon">🔐</div>
-        <h2 className="wallet-guard__title">Connect Your Stellar Wallet</h2>
-        <p className="wallet-guard__sub">
-          Select a wallet to connect:
-        </p>
+        <h2 className="wallet-guard__title">{t('walletGuard.title')}</h2>
+        <p className="wallet-guard__sub">{t('walletGuard.selectPrompt')}</p>
         <div className="wallet-options">
           {available.map((adapter) => (
             <button

@@ -14,6 +14,7 @@ import { formatDistanceToNow, format } from 'date-fns'
 import clsx from 'clsx'
 import { Credential, CredentialType } from '../types/credential'
 import { Attestor, AttestationThreshold } from '../types/attestor'
+import { truncateId, truncateAddress } from '../lib/truncate'
 import '../styles/attestationPanel.css'
 
 export interface AttestationPanelProps {
@@ -175,14 +176,13 @@ export const AttestationPanel: React.FC<AttestationPanelProps> = ({
         <div className="attestation-panel__detail-item">
           <span className="attestation-panel__detail-label">Credential ID:</span>
           <code className="attestation-panel__detail-value">
-            {credential.id.substring(0, 10)}...{credential.id.substring(-8)}
+            {truncateId(credential.id)}
           </code>
         </div>
         <div className="attestation-panel__detail-item">
           <span className="attestation-panel__detail-label">Subject Address:</span>
           <code className="attestation-panel__detail-value">
-            {credential.subjectAddress.substring(0, 6)}...
-            {credential.subjectAddress.substring(-4)}
+            {truncateAddress(credential.subjectAddress)}
           </code>
         </div>
         <div className="attestation-panel__detail-item">
@@ -215,7 +215,8 @@ export const AttestationPanel: React.FC<AttestationPanelProps> = ({
           <div
             className="attestation-panel__progress-fill"
             style={{ width: `${progressPercentage}%` }}
-            roll="progressbar"
+            role="progressbar"
+            aria-label="Attestation threshold progress"
             aria-valuenow={threshold.signed}
             aria-valuemin={0}
             aria-valuemax={threshold.required}
@@ -245,7 +246,7 @@ export const AttestationPanel: React.FC<AttestationPanelProps> = ({
               )}
             >
               <div className="attestation-panel__attestor-address">
-                {attestor.name || `${attestor.address.substring(0, 6)}...${attestor.address.substring(-4)}`}
+                {attestor.name || truncateAddress(attestor.address)}
               </div>
               <div className="attestation-panel__attestor-status">
                 {attestor.hasSigned ? (

@@ -1,4 +1,5 @@
-import { ReactNode } from 'react';
+import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useWallet } from '../hooks';
 import { getAllWalletAdapters } from '../wallets/registry';
 import type { WalletType } from '../wallets/types';
@@ -11,19 +12,20 @@ interface WalletGateProps {
 
 /** Multi-wallet connection prompt */
 export function WalletGate({ connect, availableWallets: wallets }: WalletGateProps) {
+  const { t } = useTranslation();
   const adapters = getAllWalletAdapters();
   const available = wallets
     ? adapters.filter((a) => wallets.includes(a.type))
     : adapters;
 
   return (
-    <div className="wallet-guard-card" role="region" aria-label="Wallet connection required">
+    <div className="wallet-guard-card" role="region" aria-label={t('walletGate.title')}>
       <div className="wallet-guard__icon">🔐</div>
-      <h2 className="wallet-guard__title">Connect your Stellar wallet to continue</h2>
+      <h2 className="wallet-guard__title">{t('walletGate.title')}</h2>
 
       {available.length > 0 ? (
         <>
-          <p className="wallet-guard__sub">Select a wallet to connect:</p>
+          <p className="wallet-guard__sub">{t('walletGate.selectPrompt')}</p>
           <div className="wallet-options">
             {available.map((adapter) => (
               <button
@@ -38,16 +40,14 @@ export function WalletGate({ connect, availableWallets: wallets }: WalletGatePro
         </>
       ) : (
         <>
-          <p className="wallet-guard__sub">
-            No wallet detected. Install Freighter or connect a Ledger/Trezor hardware wallet.
-          </p>
+          <p className="wallet-guard__sub">{t('walletGate.noWalletMessage')}</p>
           <a
             href="https://freighter.app"
             target="_blank"
             rel="noopener noreferrer"
             className="btn btn--primary"
           >
-            Install Freighter
+            {t('walletGate.installFreighter')}
           </a>
         </>
       )}
@@ -64,13 +64,14 @@ interface WalletGuardProps {
  * Shows an onboarding prompt when no wallet is connected.
  */
 export function WalletGuard({ children }: WalletGuardProps) {
+  const { t } = useTranslation();
   const { address, isInitializing, connect, availableWallets } = useWallet();
 
   if (isInitializing) {
     return (
       <div className="loading-state">
         <div className="spinner" />
-        <p>Checking wallet…</p>
+        <p>{t('walletGuard.checkingWallet')}</p>
       </div>
     );
   }
@@ -78,19 +79,17 @@ export function WalletGuard({ children }: WalletGuardProps) {
   if (!address) {
     if (availableWallets.length === 0) {
       return (
-        <div className="wallet-guard-card" role="region" aria-label="Wallet connection required">
+        <div className="wallet-guard-card" role="region" aria-label={t('walletGuard.noWalletTitle')}>
           <div className="wallet-guard__icon">🔐</div>
-          <h2 className="wallet-guard__title">Wallet Required</h2>
-          <p className="wallet-guard__sub">
-            No wallet detected. Install Freighter or connect a Ledger/Trezor hardware wallet.
-          </p>
+          <h2 className="wallet-guard__title">{t('walletGuard.noWalletTitle')}</h2>
+          <p className="wallet-guard__sub">{t('walletGuard.noWalletMessage')}</p>
           <a
             href="https://freighter.app"
             target="_blank"
             rel="noopener noreferrer"
             className="btn btn--primary"
           >
-            Install Freighter
+            {t('walletGuard.installFreighter')}
           </a>
         </div>
       );
@@ -100,10 +99,10 @@ export function WalletGuard({ children }: WalletGuardProps) {
     const available = adapters.filter((a) => availableWallets.includes(a.type));
 
     return (
-      <div className="wallet-guard-card" role="region" aria-label="Wallet connection required">
+      <div className="wallet-guard-card" role="region" aria-label={t('walletGuard.title')}>
         <div className="wallet-guard__icon">🔐</div>
-        <h2 className="wallet-guard__title">Connect your Stellar wallet to continue</h2>
-        <p className="wallet-guard__sub">Select a wallet to connect:</p>
+        <h2 className="wallet-guard__title">{t('walletGuard.title')}</h2>
+        <p className="wallet-guard__sub">{t('walletGuard.selectPrompt')}</p>
         <div className="wallet-options">
           {available.map((adapter) => (
             <button
