@@ -3,7 +3,8 @@ import {
   Award,
   FileText,
   Briefcase,
-  Trophy,
+  ShieldCheck,
+  BookOpen,
   CheckCircle,
   Clock,
   AlertCircle,
@@ -66,27 +67,28 @@ export const CredentialCard: React.FC<CredentialCardProps> = ({
   const isRevoked = credential.status === 'revoked'
 
   /**
-   * Get icon component based on credential type
+   * Get icon component based on credential type.
+   *
+   * The `satisfies` constraint on CREDENTIAL_ICONS below makes this mapping
+   * exhaustive: adding a new CredentialType without a corresponding entry
+   * here is a compile-time error, not a silent runtime default.
    */
   const getCredentialIcon = (type: CredentialType) => {
-    const iconProps = { width: 24, height: 24 }
     const iconClass = clsx(
       'credential-card__icon',
       `credential-card__icon--${type}`
     )
+    const iconProps = { width: 24, height: 24, className: iconClass, 'aria-hidden': true as const }
 
-    switch (type) {
-      case 'degree':
-        return <Award className={iconClass} aria-hidden="true" {...iconProps} />
-      case 'license':
-        return <FileText className={iconClass} aria-hidden="true" {...iconProps} />
-      case 'employment':
-        return <Briefcase className={iconClass} aria-hidden="true" {...iconProps} />
-      case 'achievement':
-        return <Trophy className={iconClass} aria-hidden="true" {...iconProps} />
-      default:
-        return <Award className={iconClass} aria-hidden="true" {...iconProps} />
-    }
+    const CREDENTIAL_ICONS = {
+      degree:        <Award       {...iconProps} />,
+      license:       <FileText    {...iconProps} />,
+      employment:    <Briefcase   {...iconProps} />,
+      certification: <ShieldCheck {...iconProps} />,
+      research:      <BookOpen    {...iconProps} />,
+    } satisfies Record<CredentialType, React.ReactElement>
+
+    return CREDENTIAL_ICONS[type]
   }
 
   /**

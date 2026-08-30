@@ -3,7 +3,8 @@ import {
   Award,
   FileText,
   Briefcase,
-  Trophy,
+  ShieldCheck,
+  BookOpen,
   CheckCircle,
   Clock,
   AlertCircle,
@@ -127,22 +128,23 @@ export const AttestationPanel: React.FC<AttestationPanelProps> = ({
   }, [isWalletInQuorum, onAttest, credential.id])
 
   /**
-   * Get credential type icon
+   * Get credential type icon.
+   *
+   * The `satisfies` constraint on PANEL_ICONS makes this mapping exhaustive:
+   * adding a new CredentialType without an entry here is a compile-time error.
    */
   const getCredentialIcon = (type: CredentialType) => {
-    const iconProps = { width: 32, height: 32 }
-    switch (type) {
-      case 'degree':
-        return <Award aria-hidden="true" {...iconProps} />
-      case 'license':
-        return <FileText aria-hidden="true" {...iconProps} />
-      case 'employment':
-        return <Briefcase aria-hidden="true" {...iconProps} />
-      case 'achievement':
-        return <Trophy aria-hidden="true" {...iconProps} />
-      default:
-        return <Award aria-hidden="true" {...iconProps} />
-    }
+    const iconProps = { width: 32, height: 32, 'aria-hidden': true as const }
+
+    const PANEL_ICONS = {
+      degree:        <Award       {...iconProps} />,
+      license:       <FileText    {...iconProps} />,
+      employment:    <Briefcase   {...iconProps} />,
+      certification: <ShieldCheck {...iconProps} />,
+      research:      <BookOpen    {...iconProps} />,
+    } satisfies Record<CredentialType, React.ReactElement>
+
+    return PANEL_ICONS[type]
   }
 
   const isThresholdMet = threshold.signed >= threshold.required
