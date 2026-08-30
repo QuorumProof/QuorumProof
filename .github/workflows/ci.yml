@@ -159,6 +159,23 @@ jobs:
         working-directory: api-server
         run: npm test -- criticalEventMetricNames.test.ts criticalEventPrometheusIntegration.test.ts
 
+  # Issue #1485: Run TTSService tests so the service doesn't silently bit-rot.
+  # The test file uses vitest with injected sleep/random — no real network calls.
+  tts-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/tts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: services/tts/package-lock.json
+      - run: npm ci
+      - run: npm test
+
   security:
     runs-on: ubuntu-latest
     steps:
