@@ -16,19 +16,21 @@ Each node in the slice co-signs a **Soulbound Token (SBT)** on Stellar, creating
 
 This applies the Stellar whitepaper's "individual trust decisions" model to a high-stakes professional use case.
 
-## ⚠️ ZK Verification — Non-Functional Stub
+## ⚠️ ZK Verification — Current Status
 
-> **Do not use `verify_claim` in production.**
-> The `zk_verifier` contract accepts **any non-empty byte string** as a valid proof.
-> It performs **no cryptographic verification** and provides **no privacy guarantees**.
-> It is admin-gated to limit exposure, but the gate is not a substitute for real ZK logic.
-> Real proof verification (Groth16/PLONK) is tracked in [#ZK-IMPL](https://github.com/cryptonautt/QuorumProof/issues) and targeted for v1.1.
+> `verify_claim` is not the old "accept any non-empty proof" stub.
+> The current implementation validates proof structure and binds proofs to a registered verifying-key hash, with PLONK using real KZG pairing checks where the SRS and verifying key are configured.
+> See [docs/zk-verification-implementation.md](docs/zk-verification-implementation.md) for the full, current design and limitations.
+>
+> Important limitation: the Groth16 path currently uses a strengthened SHA-256 binding check instead of full BN254 pairing verification because Soroban does not expose native BN254 pairing host functions. That is a real cryptographic check, but it is not equivalent to full pairing-based Groth16 verification on a fully-featured zkVM / EVM host.
+>
+> Treat verification as implementation-specific and configuration-dependent. Do not assume a proof is valid without checking the verifying key, public inputs, and the security assumptions documented in the ZK verification design notes.
 
 ## 🚀 Features
 
 - **Audit Slices**: Define your own quorum of trusted attestors (university, licensing body, employers)
 - **Soulbound Tokens (SBTs)**: Non-transferable on-chain credentials tied to your Stellar identity
-- **Conditional Verification (stub)**: API exists for claim-specific proofs (e.g. "has a Mechanical Engineering degree") but ZK verification is not yet implemented — see warning above
+- **Conditional Verification**: Claim-specific proof verification is implemented via the `zk_verifier` contract, with design details and caveats documented in [docs/zk-verification-implementation.md](docs/zk-verification-implementation.md)
 - **Cross-Border Ready**: Instant verification for international hiring, no embassy letters or notarizations
 - **Privacy-First**: Credential holders control what is revealed and to whom
 - **Trustless**: No central registry — verification is enforced by smart contract logic
@@ -97,13 +99,13 @@ stellar keys generate deployer --network testnet
 
 ### Run Demo
 
-Follow the step-by-step guide in `demo/demo-script.md`
+Follow the step-by-step walkthrough in [demo/demo-script.md](demo/demo-script.md).
 
 ## 📖 Documentation
 
 - [Architecture Overview](docs/architecture.md)
 - [Trust Slice Model](docs/trust-slices.md)
-- [ZK Verification Design](docs/zk-verification.md)
+- [ZK Verification Design](docs/zk-verification-implementation.md)
 - [Threat Model & Security](docs/threat-model.md)
 - [Error Code Reference](docs/error-codes.md)
 - [Integration Patterns Guide](docs/integration-patterns-guide.md)
@@ -186,7 +188,7 @@ cargo test
 ## 🗺️ Roadmap
 
 - **v1.0 (Current)**: Core SBT issuance, quorum slice model, multi-attestor signing
-- **v1.1**: ZK conditional verification (claim-specific proofs)
+- **v1.1**: Continued ZK verification hardening, key management, and proof-format upgrades
 - **v2.0**: Revocation registry, credential expiry, renewal flows
 - **v3.0**: Frontend UI with Stellar wallet integration
 - **v4.0**: Mobile app, integration with national licensing APIs
