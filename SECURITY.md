@@ -116,3 +116,69 @@ not currently run a paid bug bounty program.
 - [Disaster Recovery Procedures](docs/disaster-recovery.md) — what happens
   operationally once a critical issue is confirmed (emergency pause,
   redeployment, credential restoration).
+
+## Software Bill of Materials (SBOM) — Issue #1481
+
+QuorumProof generates a **CycloneDX 1.4 JSON** SBOM for every release and
+every deployment to testnet so that downstream integrators and security
+reviewers have a machine-readable dependency manifest without having to
+reconstruct one from `Cargo.lock`.
+
+### What is generated
+
+| Artifact | Tool | Scope |
+|---|---|---|
+| `rust-workspace.cdx.json` | `cargo-cyclonedx` | All Rust workspace crates (quorum_proof, sbt_registry, zk_verifier, and their transitive Cargo dependencies) |
+| `quorum_proof.cdx.json` | `cargo-cyclonedx` | `quorum_proof` crate only |
+| `sbt_registry.cdx.json` | `cargo-cyclonedx` | `sbt_registry` crate only |
+| `zk_verifier.cdx.json` | `cargo-cyclonedx` | `zk_verifier` crate only |
+| `api-server.cdx.json` | `@cyclonedx/cyclonedx-npm` | api-server Node.js dependencies |
+
+### Where to find SBOMs
+
+- **GitHub Actions artifacts** — Every run of `.github/workflows/sbom.yml`
+  and `.github/workflows/testnet-deploy.yml` uploads the SBOMs as workflow
+  artifacts with 90-day retention.
+- **GitHub Releases** — For tagged releases, the SBOM files are attached
+  directly to the release as downloadable assets.
+- **`sbom/` directory** — CI writes generated files here during the build;
+  the directory is tracked in git so the path always exists.
+
+### Format
+
+Files conform to [CycloneDX specification v1.4](https://cyclonedx.org/specification/overview/)
+in JSON encoding.  They are consumable by:
+
+- [Dependency-Track](https://dependencytrack.org/)
+- [FOSSA](https://fossa.com/)
+- GitHub's dependency graph import
+- `cargo-deny` and `cargo-audit` for advisory cross-referencing
+- Most commercial SCA (Software Composition Analysis) tools
+
+### Generating locally
+
+```bash
+# Install the tool (once)
+cargo install cargo-cyclonedx --locked
+
+# Generate for the whole workspace
+cargo cyclonedx --format json --spec-version 1.4 --all
+
+# Generate for a single crate
+cargo cyclonedx --format json --spec-version 1.4 --package quorum_proof
+
+# api-server (Node.js)
+cd api-server
+npm install --save-dev @cyclonedx/cyclonedx-npm
+npx @cyclonedx/cyclonedx-npm --output-format JSON --spec-version 1.4
+```
+
+### CI integration
+
+SBOM generation is wired into two workflows:
+
+- **`.github/workflows/sbom.yml`** — Dedicated SBOM workflow; runs on push
+  to `main`, on tagged releases, and on workflow dispatch.
+- **`.github/workflows/testnet-deploy.yml`** — SBOM generated immediately
+  after the contract WASM build so the exact artifact deployed to testnet
+  is covered.
