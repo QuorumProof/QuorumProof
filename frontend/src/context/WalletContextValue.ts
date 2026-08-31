@@ -6,15 +6,17 @@ export interface WalletState {
   wallets: string[];
   walletType: WalletType | null;
   activeIndex: number;
+  accountIndex: number;
   isConnected: boolean;
   hasFreighter: boolean;
   isInitializing: boolean;
   network: string;
   error: string | null;
   availableWallets: WalletType[];
-  connect: (type?: WalletType) => Promise<void>;
+  connect: (type?: WalletType, accountIndex?: number) => Promise<void>;
   disconnect: () => void;
   switchWallet: (index: number) => void;
+  setAccountIndexForWallet: (walletIndex: number, accountIndex: number) => void;
 }
 
 export const WalletContext = createContext<WalletState | undefined>(undefined);

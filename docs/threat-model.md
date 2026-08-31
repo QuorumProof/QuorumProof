@@ -6,7 +6,9 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 **Scope**: `quorum_proof`, `sbt_registry`, `zk_verifier` contracts and their interactions.
 
-**Last Updated**: May 29, 2026
+**Last Updated**: August 29, 2026
+
+**Review Cadence**: Reviewed before each major release (see §6 for next review date).
 
 ---
 
@@ -249,6 +251,91 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 - ✅ Pause event is emitted for monitoring
 
 **Residual Risk**: Low. Requires admin compromise (detected by monitoring).
+
+---
+
+## 3.11 Selective Disclosure (BBS+)
+
+BBS+ signatures (`contracts/bbs_plus_v1`) allow a credential holder to derive a presentation proof that reveals only a chosen subset of credential attributes to a verifier while keeping the rest hidden. This capability significantly reduces data exposure per interaction, but it also introduces a new class of attack vectors that do not exist with conventional (all-or-nothing) signature schemes.
+
+**Background**: Each call to `BbsPresentation::create_presentation` re-randomizes the underlying signature commitment, so presentations of the same underlying credential are cryptographically unlinkable to one another. This is a core design goal documented in [ADR-007](adr/adr-007-bbs-plus-selective-disclosure.md) and explained in the [BBS+ Tutorial](bbs-plus-tutorial.md#5-privacy-guarantees). The attack vectors below are the situations where that protection can be circumvented or is insufficient on its own.
+
+---
+
+### 3.11.1 Reveal Correlation Across Verifiers
+
+**Attack**: A single verifier (or colluding verifiers) accumulates multiple partial-disclosure presentations from the same holder over time. Even though each proof is individually unlinkable at the cryptographic layer, the *semantic content* of disclosed attributes can be correlated to reconstruct the full credential or to re-identify the holder.
+
+**Example**: A holder discloses `institution` to Verifier A, `graduation_year` to Verifier B, and `license_number` to Verifier C. If A, B, and C share their logs, the union of three partial disclosures may uniquely identify the holder and reconstruct most of the original credential.
+
+**Preconditions**: Verifier(s) log the disclosed attribute values alongside any external session identifier (IP address, wallet address, request timestamp).
+
+**Impact**: Erosion of selective-disclosure privacy guarantees; credential-holder re-identification without ever receiving the full credential.
+
+**Mitigations**:
+- ✅ Cryptographic unlinkability per presentation — `bbs_plus_v1` re-randomizes the signature commitment, so proof bytes themselves carry no cross-verifier correlation signal (see `contracts/bbs_plus_v1/src/presentation.rs`)
+- ✅ Holders are advised in [BBS+ Tutorial §5](bbs-plus-tutorial.md#5-privacy-guarantees) that metadata outside the proof (IP, wallet address, timing) is a separate correlation channel
+- ⚠️ **Gap**: No protocol-level binding prevents a verifier from logging and sharing the cleartext disclosed values — this is a verifier policy gap, not a cryptographic one
+- 🔄 **Recommended (not yet implemented)**: Verifier data-minimization policy: verifiers SHOULD be contractually required (via issuer terms of service) to discard disclosed attributes after verification completes and to not share them with third parties; document this requirement in the verifier onboarding checklist (see `docs/issuer-security-checklist.md`)
+- 🔄 **Recommended (not yet implemented)**: Per-verifier nonce binding — require verifiers to supply a fresh nonce in each presentation request; the holder embeds it in the proof so the same presentation cannot be replayed to a different verifier even if intercepted
+
+**Residual Risk**: Medium. Cryptographic layer is sound; risk lives entirely in verifier behavior and metadata channels outside the contract's control.
+
+---
+
+### 3.11.2 Replay of a Disclosed Proof
+
+**Attack**: An adversary intercepts or obtains a valid `PresentationProof` (e.g. from a network transcript, a compromised verifier's database, or a holder who inadvertently shares proof bytes) and replays it to a different verifier or in a different context to impersonate the credential holder.
+
+**Preconditions**: The proof was captured after it was generated but before or during transmission to the intended verifier. No verifier-specific binding was embedded in the proof.
+
+**Impact**: Impersonation — a third party uses a stolen proof to pass as the credential holder for a one-time verification check.
+
+**Mitigations**:
+- ✅ Presentations derived by `contracts/bbs_plus_v1` are valid zero-knowledge proofs of issuer signature knowledge; they do not by themselves bind the prover to a specific verifier session — this is a known gap in the base BBS+ IETF draft that is expected to be addressed via a verifier-supplied presentation nonce
+- ⚠️ **Gap: not yet implemented** — the current `verify_presentation` entry point does not enforce that a verifier-supplied nonce was embedded in the proof at derivation time; a captured proof is replayable to any verifier that accepts presentations for the same credential type
+- 🔄 **Recommended (not yet implemented)**: Mandatory verifier nonce flow: the verifier generates a single-use challenge nonce, sends it to the holder, and the holder calls `create_presentation` with the nonce bound into the Fiat-Shamir transcript (via `contracts/bbs_plus_v1/src/transcript.rs`); `verify_presentation` then checks the nonce matches — this is tracked as a follow-up implementation item for `contracts/bbs_plus_v1`
+- 🔄 **Recommended (not yet implemented)**: Short-lived proof TTL — presentations should carry an expiry field so that a captured proof becomes useless after a configurable window (e.g. 5 minutes); this requires a coordinated clock between holder and verifier
+
+**Residual Risk**: Medium (gap not yet implemented). Until nonce binding is enforced in `bbs_plus_v1`, captured presentations are replayable. Operators should deploy the contract in contexts where transport-layer security (TLS) reduces interception risk.
+
+---
+
+### 3.11.3 Verifier Collusion to Reconstruct Full Attributes
+
+**Attack**: Multiple independent verifiers, each receiving a different partial disclosure of the same credential over time, share their received attribute values to jointly reconstruct the full attribute set — effectively undoing the holder's selective disclosure choices.
+
+**Preconditions**: Two or more verifiers that have each received at least one presentation from the same holder, and who collude (or whose databases are compromised together) to pool disclosed values.
+
+**Impact**: Full credential reconstruction without the holder's consent; severe privacy violation equivalent to receiving the full credential upfront.
+
+**Mitigations**:
+- ✅ Cryptographic proof bytes are unlinkable across presentations — verifiers cannot prove to each other that two separate presentations came from the same underlying credential without the holder's cooperation (see `contracts/bbs_plus_v1/src/presentation.rs` re-randomization)
+- ✅ The [BBS+ Tutorial §3.3](bbs-plus-tutorial.md#33-multi-credential-disclosure) notes that cross-credential linking is not automatic and requires an explicit holder-committed pseudonym
+- ⚠️ **Gap**: If a holder discloses the *same* attribute (e.g. `institution` = "Acme Institute") to multiple verifiers, the plaintext value itself is the correlation signal — no cryptographic property prevents semantic join
+- ⚠️ **Gap**: If a holder uses the same wallet address (Stellar account) across all verifier interactions, that address becomes an out-of-band linking identifier irrespective of proof unlinkability
+- 🔄 **Recommended (not yet implemented)**: Holder pseudonym / pairwise DID pattern — use a different Stellar account or a cryptographic pseudonym per verifier relationship so the on-chain address does not serve as a correlation handle; document this pattern in `docs/privacy-guide.md`
+- 🔄 **Recommended (not yet implemented)**: Minimum-disclosure policy enforcement at the application layer — the holder's wallet/SDK should warn when a verifier requests more attributes than the stated purpose requires; track in SDK roadmap
+
+**Residual Risk**: Medium. Cryptographic unlinkability holds at the proof level; correlation via attribute semantics and wallet identity is a deployment and policy concern outside the scope of `bbs_plus_v1` itself.
+
+---
+
+### 3.11.4 Revocation Check Linkability
+
+**Attack**: A holder presents a BBS+ proof and a verifier checks the revocation accumulator (`contracts/bbs_plus_v1/src/accumulator.rs`) using a credential-specific identifier. If the revocation check is done naively (e.g. by querying a public list keyed by credential ID), the verifier — or an observer of the on-chain query — can link the holder's presentation to a specific credential, breaking the unlinkability guarantee that BBS+ provides for the proof itself.
+
+**Preconditions**: Verifier or on-chain observer correlates the revocation lookup with the presentation proof submission.
+
+**Impact**: Re-identification of the credential holder via the revocation channel, even when the BBS+ proof is cryptographically unlinkable.
+
+**Mitigations**:
+- ✅ `contracts/bbs_plus_v1/src/accumulator.rs` implements a cryptographic accumulator supporting non-membership proofs — the holder can prove their credential is not revoked *without* revealing which specific credential is being checked (see [ADR-007 — Implementation Notes](adr/adr-007-bbs-plus-selective-disclosure.md#implementation-notes))
+- ✅ The [BBS+ Tutorial §5](bbs-plus-tutorial.md#5-privacy-guarantees) explicitly documents revocation-check linkability as a known risk and points to the accumulator as the mitigation
+- ⚠️ **Gap**: Integration of the accumulator non-membership proof into the end-to-end `verify_presentation` flow is listed as Phase 1 work in `contracts/bbs_plus_v1/README.md`; until that integration is complete, verifiers that use the accumulator directly may inadvertently reintroduce linkability
+- 🔄 **Recommended (not yet implemented)**: Gate `verify_presentation` on an accumulator non-membership proof being included in the `PresentationProof` structure, so that revocation checking and presentation verification are bundled into a single unlinkable on-chain call
+
+**Residual Risk**: Medium (gap not yet fully integrated). Operators should not deploy separate revocation lookups by credential ID until the accumulator integration is complete.
 
 ---
 
@@ -727,6 +814,10 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 | **SBT Minting Without Attestation** | **Low** | **Medium** | **Application-layer verification** | **⚠️ Partial** |
 | **SBT Metadata Manipulation** | **Low** | **Medium** | **Immutable metadata, verifier diligence** | **⚠️ Partial** |
 | **SBT Burning & Re-minting** | **Low** | **Low** | **Immutable credential, auditable history** | **✅ Mitigated** |
+| **BBS+ Reveal Correlation** | **Medium** | **Medium** | **Cryptographic unlinkability (proof layer); verifier policy gap remains** | **⚠️ Partial** |
+| **BBS+ Proof Replay** | **Medium** | **High** | **Nonce binding not yet enforced in `bbs_plus_v1`** | **⚠️ Gap (planned)** |
+| **BBS+ Verifier Collusion** | **Medium** | **Medium** | **Proof-level unlinkability; wallet-address correlation gap** | **⚠️ Partial** |
+| **BBS+ Revocation Linkability** | **Medium** | **Medium** | **Accumulator non-membership proof exists; end-to-end integration pending** | **⚠️ Partial** |
 
 ---
 
@@ -738,6 +829,8 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 - [ ] Proof generation framework
 - [ ] Mandatory metadata pinning service
 - [ ] Metadata availability monitoring
+- [ ] BBS+ verifier nonce binding (closes replay-of-proof gap — §3.11.2)
+- [ ] BBS+ accumulator non-membership proof integrated into `verify_presentation` (closes revocation linkability gap — §3.11.4)
 
 ### v2.0 (Dispute Resolution & Governance)
 - [ ] Multi-sig admin requirement (2-of-3)
@@ -756,12 +849,127 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 ---
 
+---
+
+## 6. Atomic Saga Operations (Issue #913)
+
+**Feature**: Cross-contract operations use a 3-phase saga pattern (quorum_proof → sbt_registry → zk_verifier) with automatic rollback on failure.
+
+**New Attack Vectors**:
+
+#### 6.1 Partial State Commit (Stuck Saga)
+
+**Attack**: A saga fails partway through (e.g., Phase 2 succeeds but Phase 3 fails) and manual rollback is not triggered, leaving the system in an inconsistent state.
+
+**Vector**:
+- Phase 1 (quorum_proof): Credential issued ✓
+- Phase 2 (sbt_registry): SBT minted ✓
+- Phase 3 (zk_verifier): Proof verification fails ✗
+- Rollback event listener crashes before triggering `initiate_rollback()`
+- SBT exists but was never verified; credential state is changed but SBT was not finalized
+
+**Mitigation**:
+- ✅ Automatic rollback triggered immediately on Phase failure
+- ✅ Manual `initiate_rollback()` available to operators as a safety net
+- ✅ Stuck transactions are detected by monitoring `RollingBack` state
+- ✅ `complete_rollback()` retries failed reverts if the network recovers
+- ✅ Transaction log is immutable; all state changes are auditable
+
+**Residual Risk**: Low. Auto-rollback + manual recovery path prevents indefinite partial commits.
+
+**Recommendation**: Monitor for transactions in `RollingBack` state longer than 24 hours; trigger manual recovery.
+
+---
+
+#### 6.2 Double-Rollback Corruption
+
+**Attack**: A transaction is rolled back twice, causing state to oscillate or corrupt.
+
+**Vector**:
+- Phase 3 fails, triggering auto-rollback (Phase 2 and Phase 1 are reverted)
+- Operator manually calls `initiate_rollback()` again without checking transaction state
+- Revert operations run twice, potentially causing double-deduction or data inconsistency
+
+**Mitigation**:
+- ✅ `initiate_rollback()` checks transaction phase: rejects if already `Committed` or `RolledBack`
+- ✅ Rollback-idempotent operations: reverting an already-reverted state is a no-op
+- ✅ Transaction state machine enforces phase transitions (cannot go from `RolledBack` → `RollingBack`)
+
+**Residual Risk**: Low. State machine and phase checks prevent double-rollback corruption.
+
+**Recommendation**: Test double-rollback scenario in integration tests to confirm rejection.
+
+---
+
+#### 6.3 Coordinated Attack During Rollback
+
+**Attack**: Attacker triggers a credential revocation at the exact moment rollback is in progress, creating a race condition.
+
+**Vector**:
+- Phase 3 fails; `initiate_rollback()` is called
+- Simultaneous: Attacker calls `revoke_credential()` on the same credential in Phase 1 revert
+- Revocation and rollback try to mutate the same credential state concurrently
+- One operation wins; the other's state is lost
+
+**Mitigation**:
+- ✅ Soroban storage layer uses atomic transactions: only one write to a key succeeds
+- ✅ Revocation checks transaction phase: if rollback is in progress, revocation is rejected
+- ✅ Lock-free design uses event-driven coordination: operations are serialized by Soroban's ledger
+
+**Residual Risk**: Low. Soroban's atomic ledger prevents concurrent writes to the same key.
+
+**Recommendation**: Test concurrent saga + revocation scenarios to confirm atomic behavior.
+
+---
+
+## 7. Per-Contract Admin Key Topology
+
+**Feature**: Each contract (quorum_proof, sbt_registry, zk_verifier) has an independent admin key that controls pause/unpause and key rotation.
+
+**Current Topology**:
+- ✅ **quorum_proof**: Admin controls pause, key rotation, slice configuration
+- ✅ **sbt_registry**: Admin controls pause, metadata updates
+- ✅ **zk_verifier**: Admin controls pause, verifying key registration
+
+**Attack Vector: Admin Key Compromise**:
+
+If a single admin key is compromised, an attacker can:
+- Pause a single contract indefinitely (but other contracts remain operational)
+- Rotate verifying keys (but historical proofs still verify against old keys)
+- Revoke credentials or attestations
+
+**Mitigation**:
+- ✅ Each contract can be paused independently: other contracts can continue operating
+- ✅ Admin key rotation is supported on each contract: no key is permanent
+- ✅ Read-only functions remain accessible when paused: verification still works
+- ⚠️ **Partial**: Multi-sig admin enforcement planned for v2.0 to require multiple keys for sensitive operations
+
+**Residual Risk**: Medium (single point of failure per contract).
+
+**Recommendation**: 
+- Use different admin keys for each contract (do not reuse the same key).
+- Consider a 2-of-3 multi-sig admin setup for production: each contract requires approval from 2 of 3 administrators.
+- Implement key rotation annually or upon any staff changes.
+
+---
+
+## 8. Known Limitations & Future Work
+
+1. **No circuit-breaker degraded mode on sbt_registry/zk_verifier**: Pause is binary (on/off). Rate limiting under load is not yet supported. Planned for v2.1.
+2. **Revocation cache staleness**: Credential revocation cache has a 1000-ledger TTL; in rare network partitions, a revoked credential might be accepted as valid for up to ~1 hour. Acceptable for most use cases; critical applications should query the authoritative source.
+3. **Saga rollback auto-recovery**: If rollback fails (network partition), manual operator intervention is required. Planned for v2.2: automatic retry with exponential backoff.
+
+---
+
 ## 9. References
 
 - [Stellar Whitepaper](https://www.stellar.org/papers/stellar-consensus-protocol)
 - [Soroban Documentation](https://developers.stellar.org/docs/learn/soroban)
 - [OWASP Smart Contract Security](https://owasp.org/www-project-smart-contract-security/)
 - [Threat Modeling Guide](https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html)
+- [Atomic Saga Rollback Specification](./saga-rollback-specification.md)
+- [Attestor Key-Custody Guide](./attestor-key-custody-guide.md)
+- [Disaster Recovery Procedures](./disaster-recovery.md)
 
 ---
 
@@ -773,5 +981,5 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 | Contract Author | | | |
 | Compliance Officer | | | |
 
-**Last Reviewed**: May 29, 2026
-**Next Review**: November 29, 2026 (6-month cycle)
+**Last Reviewed**: August 29, 2026
+**Next Review**: February 29, 2027 (6-month cycle)

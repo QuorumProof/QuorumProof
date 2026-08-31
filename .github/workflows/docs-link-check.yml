@@ -1,0 +1,55 @@
+name: Docs Link Check
+
+# Catches dead internal cross-references in docs/ before they land on main.
+# Triggered by PRs that touch docs/ and on every push to main.
+# Only relative (intra-repo) links are checked; external URLs are skipped
+# to avoid flaky failures from transient network issues.
+#
+# See docs/README.md § "Internal Link Checker" for local usage instructions.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs-link-check.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+
+jobs:
+  markdown-link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Check only files inside docs/ (recursive).
+          # --no-progress suppresses the progress bar for clean CI logs.
+          # --include-verbatim checks code-block links too.
+          # --offline skips all http/https URLs — we only care about
+          #   relative internal links here.
+          # --exclude-path lets us skip any vendored or generated sub-dirs.
+          args: >-
+            --offline
+            --no-progress
+            --include-verbatim
+            --base docs
+            --glob-ignore "docs/adr/0000-adr-template.md"
+            "docs/**/*.md"
+          # Fail the step (and therefore the job) if any dead link is found.
+          fail: true
+          # Write the link-check report to a file so it can be uploaded as
+          # a workflow artifact for inspection.
+          output: lychee-report.md
+
+      - name: Upload link-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lychee-link-report
+          path: lychee-report.md
+          retention-days: 14

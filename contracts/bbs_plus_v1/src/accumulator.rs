@@ -45,8 +45,47 @@ use crate::presentation::{BbsPresentation, PresentationProof};
 use crate::primitives::Fr;
 use crate::signature::{BbsSignature, Signature, SigningKey, VerifyingKey};
 
-/// The accumulator manager's key material. `sk` must be kept secret --
-/// anyone holding it can mint witnesses for arbitrary handles.
+/// Maximum number of epochs a witness may age before verifiers MUST reject
+/// it as stale. A witness issued at epoch `e` is valid while
+/// `current_epoch - e <= MAX_WITNESS_EPOCH_AGE`; once the gap exceeds this
+/// bound the holder's credential may have been revoked in a subsequent epoch
+/// and the witness can no longer be trusted.
+///
+/// All callers of [`Witness::verify`] MUST also call [`is_witness_stale`]
+/// and reject stale witnesses even if they still verify cryptographically.
+pub const MAX_WITNESS_EPOCH_AGE: u64 = 2;
+
+/// Returns `true` if `witness_epoch` is too old relative to `current_epoch`.
+///
+/// Callers MUST enforce this check before accepting any witness; a stale
+/// witness may belong to a holder whose credential was revoked in a later epoch.
+///
+/// # Example
+/// ```
+/// // Issued at epoch 1, current epoch is 4 → age 3 > MAX_WITNESS_EPOCH_AGE (2) → stale
+/// assert!(is_witness_stale(1, 4));
+/// // Issued at epoch 3, current epoch is 4 → age 1 ≤ 2 → fresh
+/// assert!(!is_witness_stale(3, 4));
+/// ```
+pub fn is_witness_stale(witness_epoch: u64, current_epoch: u64) -> bool {
+    current_epoch.saturating_sub(witness_epoch) > MAX_WITNESS_EPOCH_AGE
+}
+
+/// Event emitted on every [`AccumulatorEpoch::rebuild`] call.
+///
+/// Indexers and verifiers MUST listen for this event to track the current
+/// epoch and enforce [`MAX_WITNESS_EPOCH_AGE`]. A verifier that doesn't
+/// track epoch rollovers cannot distinguish a fresh witness from a stale one
+/// and may accept witnesses belonging to revoked holders.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpochRolloverEvent {
+    /// The epoch number after this rollover.
+    pub new_epoch: u64,
+    /// Number of active handles that received fresh witnesses in this epoch.
+    pub active_count: usize,
+}
+
+
 pub struct AccumulatorKey {
     sk: SigningKey,
     pub vk: VerifyingKey,
@@ -180,6 +219,26 @@ impl AccumulatorEpoch {
         }
         Ok(out)
     }
+
+    /// Advance to a new epoch by re-issuing witnesses for all still-active
+    /// handles. Returns both the fresh witness map and an [`EpochRolloverEvent`]
+    /// that callers MUST emit on-chain (or log durably) so that indexers and
+    /// verifiers can track epoch freshness.
+    ///
+    /// Verifiers receiving a witness MUST call [`is_witness_stale`] against
+    /// the current epoch before trusting the witness, even if it passes
+    /// [`Witness::verify`] cryptographically.
+    pub fn rebuild(
+        &self,
+        key: &AccumulatorKey,
+    ) -> BbsResult<(BTreeMap<[u8; 32], Witness>, EpochRolloverEvent)> {
+        let witnesses = self.reissue_all(key)?;
+        let event = EpochRolloverEvent {
+            new_epoch: self.epoch,
+            active_count: witnesses.len(),
+        };
+        Ok((witnesses, event))
+    }
 }
 
 #[cfg(test)]
@@ -281,5 +340,71 @@ mod tests {
         assert_eq!(witnesses.len(), 1);
         let w = witnesses.get(&h2.to_bytes()).unwrap();
         assert!(w.verify(&key.vk, &h2).unwrap());
+    }
+
+    // ── Issue #1421: Epoch staleness and on-chain signaling ──────────────
+
+    #[test]
+    fn test_stale_witness_rejected_by_epoch_check() {
+        // Epoch age = 3 (> MAX_WITNESS_EPOCH_AGE = 2) → stale
+        assert!(
+            is_witness_stale(1, 4),
+            "Witness from epoch 1 should be stale when current epoch is 4"
+        );
+        // Epoch age = 1 (≤ 2) → fresh
+        assert!(
+            !is_witness_stale(3, 4),
+            "Witness from epoch 3 should be fresh when current epoch is 4"
+        );
+        // Boundary: exactly at MAX_WITNESS_EPOCH_AGE → still valid
+        assert!(
+            !is_witness_stale(2, 4),
+            "Witness from epoch 2 should be fresh when current epoch is 4 (boundary)"
+        );
+        // Same epoch → fresh
+        assert!(
+            !is_witness_stale(5, 5),
+            "Witness from same epoch should always be fresh"
+        );
+        // Overflow safety: witness_epoch > current_epoch → not stale (saturating_sub returns 0)
+        assert!(
+            !is_witness_stale(10, 5),
+            "Future-epoch witness should not be considered stale"
+        );
+    }
+
+    #[test]
+    fn test_rebuild_emits_epoch_rollover_event() {
+        let mut r = rng();
+        let key = AccumulatorKey::generate(&mut r, b"acc-ctx").unwrap();
+        let mut epoch = AccumulatorEpoch::new(5);
+
+        let h1 = Fr::from_u64(1);
+        let h2 = Fr::from_u64(2);
+        epoch.add_active(h1);
+        epoch.add_active(h2);
+        epoch.revoke(&h1); // h1 revoked, only h2 active
+
+        let (witnesses, event) = epoch.rebuild(&key).unwrap();
+
+        assert_eq!(event.new_epoch, 5, "Event must reflect current epoch number");
+        assert_eq!(event.active_count, 1, "Only one handle active after revocation");
+        assert_eq!(witnesses.len(), 1, "Only one witness reissued");
+        assert!(witnesses.contains_key(&h2.to_bytes()), "h2 must have a fresh witness");
+
+        // Revoked h1 must not have received a new witness
+        assert!(!witnesses.contains_key(&h1.to_bytes()), "Revoked h1 must not have a witness");
+    }
+
+    #[test]
+    fn test_two_epoch_old_witness_fails_staleness_check() {
+        // Simulate a verifier checking a witness that is 3 epochs old
+        let witness_epoch = 1u64;
+        let current_epoch = 4u64; // age = 3 > MAX_WITNESS_EPOCH_AGE
+
+        assert!(
+            is_witness_stale(witness_epoch, current_epoch),
+            "A 3-epoch-old witness must be rejected by the staleness rule"
+        );
     }
 }

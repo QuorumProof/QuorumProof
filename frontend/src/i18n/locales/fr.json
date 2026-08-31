@@ -1,0 +1,111 @@
+{
+  "nav": {
+    "dashboard": "Tableau de bord",
+    "verify": "Vérifier",
+    "sliceBuilder": "Constructeur de Quorum",
+    "recover": "Récupérer",
+    "help": "Aide",
+    "connectWallet": "Connecter le portefeuille",
+    "disconnect": "Déconnecter",
+    "connecting": "Connexion…"
+  },
+  "walletGate": {
+    "title": "Connectez votre portefeuille Stellar pour continuer",
+    "selectPrompt": "Sélectionnez un portefeuille :",
+    "noWalletTitle": "Portefeuille requis",
+    "noWalletMessage": "Aucun portefeuille détecté. Installez Freighter ou connectez un portefeuille matériel Ledger/Trezor.",
+    "installFreighter": "Installer Freighter"
+  },
+  "walletGuard": {
+    "checkingWallet": "Vérification du portefeuille…",
+    "title": "Connectez votre portefeuille Stellar",
+    "selectPrompt": "Sélectionnez un portefeuille :",
+    "noWalletTitle": "Portefeuille requis",
+    "noWalletMessage": "Installez l'extension Freighter ou connectez un portefeuille matériel pour utiliser cette fonctionnalité.",
+    "installFreighter": "Installer Freighter"
+  },
+  "issueCredential": {
+    "formLabel": "Formulaire d'émission de justificatif",
+    "subjectLabel": "Adresse Stellar du sujet",
+    "subjectPlaceholder": "GABC…XYZ",
+    "typeLabel": "Type de justificatif",
+    "metaLabel": "Hash des métadonnées",
+    "metaPlaceholder": "ex. QmXoypiz… ou sha256:abc123…",
+    "metaHint": "Un CID IPFS ou un hash SHA-256 pointant vers le document de justificatif hors chaîne.",
+    "submitButton": "Émettre le justificatif",
+    "submitting": "Émission…",
+    "successTitle": "Justificatif émis",
+    "successSub": "Le justificatif #{{credentialId}} a été émis sur la chaîne.",
+    "viewCredential": "Voir le justificatif →",
+    "issueAnother": "Émettre un autre",
+    "txPending": "Transaction en attente…",
+    "txConfirmed": "Transaction confirmée — justificatif émis.",
+    "txFailed": "Transaction échouée : {{message}}",
+    "errorTitle": "Transaction échouée",
+    "errSubjectRequired": "L'adresse du sujet est obligatoire.",
+    "errSubjectInvalid": "Doit être une adresse Stellar valide (commence par G, 56 caractères).",
+    "errTypeRequired": "Veuillez sélectionner un type de justificatif.",
+    "errMetaRequired": "Le hash des métadonnées est obligatoire.",
+    "errMetaTooShort": "Le hash des métadonnées doit comporter au moins 4 caractères.",
+    "credentialTypes": {
+      "degree": "🎓 Diplôme",
+      "license": "🏛️ Licence",
+      "employment": "💼 Emploi"
+    }
+  },
+  "verify": {
+    "pageTitle": "Vérifier le justificatif",
+    "inputLabel": "ID du justificatif",
+    "inputPlaceholder": "Entrez l'ID du justificatif",
+    "verifyButton": "Vérifier",
+    "verifying": "Vérification…",
+    "resultValid": "Le justificatif est valide",
+    "resultInvalid": "Le justificatif n'est pas valide",
+    "resultNotFound": "Justificatif introuvable"
+  },
+  "quorumSlice": {
+    "pageTitle": "Constructeur de Quorum",
+    "addMember": "Ajouter un membre",
+    "removeMember": "Supprimer un membre",
+    "threshold": "Seuil",
+    "members": "Membres",
+    "save": "Enregistrer",
+    "saving": "Enregistrement…",
+    "saved": "Enregistré"
+  },
+  "notifications": {
+    "panelTitle": "Notifications",
+    "markAllRead": "Tout marquer comme lu",
+    "clearAll": "Tout effacer",
+    "empty": "Aucune notification",
+    "bellLabel": "Notifications",
+    "bellLabelUnread": "Notifications, {{count}} non lues",
+    "badgeLabel_one": "{{count}} notification non lue",
+    "badgeLabel_other": "{{count}} notifications non lues",
+    "dismissLabel": "Ignorer la notification : {{title}}",
+    "typeSuccess": "Succès",
+    "typeError": "Erreur",
+    "typeWarning": "Avertissement",
+    "typeInfo": "Information"
+  },
+  "languageSwitcher": {
+    "label": "Langue",
+    "en": "English",
+    "es": "Español",
+    "fr": "Français",
+    "zh": "中文",
+    "ar": "العربية"
+  },
+  "common": {
+    "loading": "Chargement…",
+    "error": "Une erreur est survenue.",
+    "retry": "Réessayer",
+    "cancel": "Annuler",
+    "confirm": "Confirmer",
+    "close": "Fermer",
+    "save": "Enregistrer",
+    "delete": "Supprimer",
+    "edit": "Modifier",
+    "back": "Retour"
+  }
+}

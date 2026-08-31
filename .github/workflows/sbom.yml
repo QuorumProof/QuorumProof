@@ -1,0 +1,137 @@
+# .github/workflows/sbom.yml
+#
+# Software Bill of Materials (SBOM) generation — Issue #1481.
+#
+# Generates a CycloneDX SBOM for the Rust workspace (contract crates) and
+# the api-server Node.js package on every tagged release and on every push
+# to main, attaching the artifacts to the workflow run.
+#
+# Format: CycloneDX 1.4 JSON (machine-readable; consumable by Dependency-Track,
+# FOSSA, GitHub's dependency graph, and most security scanners).
+#
+# See SECURITY.md § "Software Bill of Materials (SBOM)" for the location and
+# format documentation.
+
+name: SBOM Generation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "contracts/**/Cargo.toml"
+      - "api-server/package.json"
+      - "api-server/package-lock.json"
+      - ".github/workflows/sbom.yml"
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Rust / Soroban contract SBOM ────────────────────────────────────────────
+  rust-sbom:
+    name: Generate Rust SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      # Generate one SBOM for the entire Rust workspace.
+      # This covers quorum_proof, sbt_registry, zk_verifier, and their
+      # transitive Cargo dependencies.
+      - name: Generate workspace SBOM
+        run: |
+          cargo cyclonedx \
+            --format json \
+            --output-cdx \
+            --spec-version 1.4 \
+            --all \
+            --output-file sbom/rust-workspace.cdx.json
+        # cargo-cyclonedx writes to <crate>/bom.json by default when --output-file
+        # is not supported; create the directory beforehand and adjust if needed.
+        continue-on-error: false
+
+      # Produce individual SBOMs for the three contract crates so that
+      # downstream integrators can consume a crate-scoped manifest.
+      - name: Generate per-crate SBOMs
+        run: |
+          mkdir -p sbom
+          for pkg in quorum_proof sbt_registry zk_verifier; do
+            cargo cyclonedx \
+              --format json \
+              --output-cdx \
+              --spec-version 1.4 \
+              --package "$pkg" \
+              --output-file "sbom/${pkg}.cdx.json" || \
+            echo "Warning: SBOM generation for $pkg exited non-zero; see above."
+          done
+
+      - name: Upload Rust SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-rust-${{ github.run_number }}
+          path: sbom/*.cdx.json
+          retention-days: 90
+
+      # Attach SBOM to GitHub Release when triggered by a release event.
+      - name: Attach SBOM to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sbom/*.cdx.json
+
+  # ── api-server (Node.js) SBOM ────────────────────────────────────────────────
+  node-sbom:
+    name: Generate api-server SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: api-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: api-server/package-lock.json
+
+      - run: npm ci
+
+      - name: Install @cyclonedx/cyclonedx-npm
+        run: npm install --save-dev @cyclonedx/cyclonedx-npm@latest
+
+      - name: Generate api-server SBOM
+        run: |
+          mkdir -p ../sbom
+          npx @cyclonedx/cyclonedx-npm \
+            --output-format JSON \
+            --spec-version 1.4 \
+            --output-file ../sbom/api-server.cdx.json
+
+      - name: Upload api-server SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-api-server-${{ github.run_number }}
+          path: sbom/api-server.cdx.json
+          retention-days: 90
+
+      - name: Attach api-server SBOM to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sbom/api-server.cdx.json

@@ -1,0 +1,169 @@
+{
+  "title": "Critical On-Chain Events",
+  "uid": "qp-critical-events",
+  "schemaVersion": 38,
+  "refresh": "30s",
+  "description": "Pre-incident trend view for quorumproof_critical_events_total by category and alert-dispatch failure rate. Use this dashboard to watch for emerging patterns before PagerDuty fires. See docs/critical-event-alerting.md for alert interpretation.",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Critical Events Rate by Category",
+      "description": "Rate of on-chain critical events per second, broken out by category (revocation, dispute, upgrade). A rising revocation rate or any dispute/upgrade spike warrants immediate investigation.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(quorumproof_critical_events_total[5m])",
+          "legendFormat": "{{category}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2
+          }
+        }
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 }
+    },
+    {
+      "id": 2,
+      "title": "Revocation Events (15m window)",
+      "description": "Matches the RevocationSpike alert threshold (>10 in 15m). Crossing the dashed threshold line means an alert is in flight.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "increase(quorumproof_critical_events_total{category=\"revocation\"}[15m])",
+          "legendFormat": "revocations (15m increase)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "dashed" }
+          }
+        }
+      },
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 }
+    },
+    {
+      "id": 3,
+      "title": "Dispute & Upgrade Events (5m window)",
+      "description": "Any non-zero value here fires DisputeRaised or ContractUpgradeDetected immediately. A zero graph means no such events occurred in the selected time range.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "increase(quorumproof_critical_events_total{category=\"dispute\"}[5m])",
+          "legendFormat": "disputes (5m increase)"
+        },
+        {
+          "expr": "increase(quorumproof_critical_events_total{category=\"upgrade\"}[5m])",
+          "legendFormat": "upgrades (5m increase)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "dashed" }
+          }
+        }
+      },
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 }
+    },
+    {
+      "id": 4,
+      "title": "Total Critical Events (cumulative)",
+      "description": "Cumulative counters by category. Useful for audit trail — compare against GET /events/critical/recent.",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum by (category) (quorumproof_critical_events_total)",
+          "legendFormat": "{{category}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "horizontal"
+      },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 6 }
+    },
+    {
+      "id": 5,
+      "title": "Alert Dispatch Failure Rate",
+      "description": "Rate of failures when dispatching critical-event alerts to Slack/PagerDuty. A non-zero value fires CriticalEventAlertingDegraded. If this is non-zero, assume the absence of other alerts does NOT mean no events occurred — check GET /events/critical/recent directly.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(quorumproof_critical_event_alert_failures_total[5m])",
+          "legendFormat": "dispatch failures/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 0.001 }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": { "mode": "area" }
+          }
+        }
+      },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 6 }
+    },
+    {
+      "id": 6,
+      "title": "Alert Dispatch Failures (15m window)",
+      "description": "Matches the CriticalEventAlertingDegraded alert threshold. Any value >0 means at least one event notification failed to reach every configured channel.",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "increase(quorumproof_critical_event_alert_failures_total[15m])",
+          "legendFormat": "failures (15m)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "OK", "color": "green" } } }
+          ]
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background"
+      },
+      "gridPos": { "x": 0, "y": 22, "w": 6, "h": 4 }
+    }
+  ]
+}

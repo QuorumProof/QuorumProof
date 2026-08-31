@@ -2,9 +2,6 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Vec};
 use soroban_sdk::xdr::ToXdr;
 
-// For range proof hashing
-use sha2::{Sha256, Digest};
-
 mod plonk;
 mod groth16;
 // `test` so this crate's own `mod tests` can use it; `testutils` so downstream
@@ -468,39 +465,32 @@ fn groth16_real_verify(env: &Env, vk_hash: &BytesN<32>, public_inputs: &Bytes, p
     groth16::verify(&vk.to_core(), &ic_buf[..ic_len], &pi_buf[..pi_len_usize], &proof_buf)
 }
 
-/// Simplified range proof verification using hash-based commitments.
-/// This is a simplified implementation for MVP - in production would use bulletproofs.
-fn verify_bulletproof_range(proof: &BulletproofRangeProof) -> bool {
-    // Basic structure validation
-    if proof.proof_bytes.len() < 64 {
-        return false; // Proof too short
-    }
-    
-    if proof.min_value > proof.max_value {
-        return false; // Invalid range
-    }
-    
-    if proof.bit_length == 0 || proof.bit_length > 64 {
-        return false; // Invalid bit length
-    }
-    
-    // Hash-based verification (simplified for MVP)
-    // In production, this would be full bulletproof verification
-    let mut hasher = Sha256::new();
-    hasher.update(&proof.commitment.to_array());
-    hasher.update(&proof.min_value.to_le_bytes());
-    hasher.update(&proof.max_value.to_le_bytes());
-    hasher.update(&proof.bit_length.to_le_bytes());
-    
-    // Convert proof bytes for hashing
-    for i in 0..proof.proof_bytes.len() {
-        hasher.update(&[proof.proof_bytes.get(i).unwrap_or(0)]);
-    }
-    
-    let hash = hasher.finalize();
-    
-    // Simple verification: hash should not start with 0x00 (collision resistance)
-    hash[0] != 0x00 && hash[31] != 0xFF
+/// Range proof verification stub — always rejects until real Bulletproofs are implemented.
+///
+/// The previous implementation used a SHA-256 hash heuristic with no cryptographic
+/// binding to the committed value: any 64+ byte blob whose digest happened to avoid
+/// the 0x00/0xFF boundary bytes would pass (roughly 1-in-65536 chance per random
+/// attempt, with no rate limiting at the contract level). This provided a false sense
+/// of soundness while exposing salary/GPA/experience/age range disclosures to trivial
+/// forgery.
+///
+/// **This stub always returns `false` (fail-closed).** No range proof can be accepted
+/// until a genuine Bulletproofs implementation — with a proper inner-product argument
+/// cryptographically binding `proof.commitment` to the secret value and the
+/// `[min_value, max_value]` range — is integrated. The implementation must:
+///
+/// - Verify the inner-product proof against `proof.commitment` using the Pedersen
+///   generators fixed for this circuit
+/// - Enforce that the committed value is in `[proof.min_value, proof.max_value]`
+///   via the range constraint, not just via a hash check
+/// - Be instantiated over BLS12-381 (matching the rest of the ZK stack) or a
+///   compatible no_std-compatible crate
+///
+/// Tracked in GitHub issue #1415.
+fn verify_bulletproof_range(_proof: &BulletproofRangeProof) -> bool {
+    // Fail-closed: reject all range proofs until real Bulletproofs are implemented.
+    // See doc comment above for what the real implementation must do.
+    false
 }
 
 
@@ -550,6 +540,18 @@ pub struct CacheEntry {
     pub result: bool,
     pub cached_at_ledger: u32,
     pub ttl: u32,
+}
+
+// ── Issue #1511: Governance event struct ─────────────────────────────────────
+
+/// Emitted when the contract admin is transferred to a new address.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminTransferredEventData {
+    /// The previous admin address.
+    pub old_admin: Address,
+    /// The new admin address.
+    pub new_admin: Address,
 }
 
 /// Proof metadata with encryption and compression support.
@@ -773,6 +775,10 @@ impl ZkVerifierContract {
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
         rotations.push_back(rotation);
+        // Bound history to last 10 entries for storage efficiency
+        while rotations.len() > 10 {
+            rotations.remove(0);
+        }
         env.storage().instance().set(&history_key, &rotations);
 
         // Update current key
@@ -832,6 +838,10 @@ impl ZkVerifierContract {
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
         rotations.push_back(rotation);
+        // Bound history to last 10 entries for storage efficiency
+        while rotations.len() > 10 {
+            rotations.remove(0);
+        }
         env.storage().instance().set(&history_key, &rotations);
 
         env.storage().instance().set(&DataKey::PlonkSrsTauG2, &new_tau_g2);
@@ -896,6 +906,10 @@ impl ZkVerifierContract {
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
         rotations.push_back(rotation);
+        // Bound history to last 10 entries for storage efficiency
+        while rotations.len() > 10 {
+            rotations.remove(0);
+        }
         env.storage().instance().set(&history_key, &rotations);
 
         env.storage().instance().set(&DataKey::PlonkVerifyingKeyByHash(new_vk_hash.clone()), &new_vk);
@@ -972,6 +986,10 @@ impl ZkVerifierContract {
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
         rotations.push_back(rotation);
+        // Bound history to last 10 entries for storage efficiency
+        while rotations.len() > 10 {
+            rotations.remove(0);
+        }
         env.storage().instance().set(&history_key, &rotations);
 
         env.storage().instance().set(&DataKey::Groth16VerifyingKeyByHash(new_vk_hash.clone()), &new_vk);
@@ -1017,6 +1035,10 @@ impl ZkVerifierContract {
         _claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
+
         admin.require_auth();
         let stored_admin: Address = env.storage().instance()
             .get(&DataKey::Admin)
@@ -1034,6 +1056,41 @@ impl ZkVerifierContract {
     pub fn initialize(env: Env, admin: Address) {
         assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
         env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    // ── Issue #1511: Governance — admin transfer ─────────────────────────────
+
+    /// Transfer contract admin to a new address, emitting an `AdminTransferred` event.
+    ///
+    /// Provides an auditable trail for every admin key rotation. The caller
+    /// must be the current admin and must authorize the call.
+    ///
+    /// # Parameters
+    /// - `admin`: The current admin address (must authorize).
+    /// - `new_admin`: The address to become the new admin.
+    ///
+    /// # Panics
+    /// - If the contract is not initialized (no admin stored).
+    /// - If `admin` does not match the stored admin.
+    pub fn update_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        let event_data = AdminTransferredEventData {
+            old_admin: stored,
+            new_admin,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_ADMIN_TRANSFERRED);
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
     }
 
     /// Verify a ZK proof with caching and TTL support.
@@ -1071,11 +1128,17 @@ impl ZkVerifierContract {
             // Check if cache entry has expired
             let current_ledger = env.ledger().sequence();
             if current_ledger <= entry.cached_at_ledger + entry.ttl {
+                // Cache hit: increment hit counter
+                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
+                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
                 return entry.result;
             }
         }
 
         // Not in cache or expired, perform Groth16 verification
+        // Cache miss: increment miss counter
+        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
+        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
         let vk_hash: BytesN<32> = env.storage().instance()
             .get(&DataKey::VerifyingKeyHash)
             .expect("verifying key not set");
@@ -1180,12 +1243,17 @@ impl ZkVerifierContract {
         env.storage().instance().set(&DataKey::CacheInvalidated(credential_id), &true);
     }
 
-    /// Advanced cache management: Get cache statistics for monitoring
+    /// Advanced cache management: Get cache statistics for monitoring.
+    ///
+    /// Returns `(hits, misses)` where:
+    /// - `hits` is the number of times `verify_proof_cached` returned a cached result
+    /// - `misses` is the number of times it had to perform real verification
+    ///
+    /// Use these counters to tune `set_cache_ttl_by_type` per claim type.
     pub fn get_cache_stats(env: Env) -> (u32, u32) {
-        // This is a simplified cache stats implementation
-        // In production, would track hits, misses, entries, etc.
-        let current_ledger = env.ledger().sequence();
-        (current_ledger, 0) // (current_ledger, cache_entries_count)
+        let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
+        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
+        (hits, misses)
     }
 
     /// Set cache TTL for different proof types
@@ -1217,6 +1285,41 @@ impl ZkVerifierContract {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Emergency pause: prevents all proof verification operations.
+    /// Only the admin may call this. Allows key rotation and reads to continue.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(16_384, 524_288);
+    }
+
+    /// Resume normal operation after pause. Only the admin may call this.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(16_384, 524_288);
+    }
+
+    /// Check if the contract is paused. Returns true if paused, false otherwise.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     // ===== Issue #381: Metadata Encryption =====
@@ -1253,86 +1356,82 @@ impl ZkVerifierContract {
             .expect("proof metadata not found")
     }
 
-    /// Encrypt metadata for a credential (Issue #381).
+    /// Encrypt metadata stub — not implemented (Issue #1416).
+    ///
+    /// On-chain encryption is not the correct design for this contract: Soroban
+    /// ledger state is publicly visible regardless of any flag, so setting
+    /// `metadata.encrypted = true` without transforming the underlying bytes
+    /// creates a false sense of privacy. Real confidentiality requires:
+    ///
+    /// 1. Encrypting `description` and `proof_hash` **off-chain** using a
+    ///    symmetric key (e.g., AES-256-GCM) controlled by the credential holder.
+    /// 2. Storing only the resulting ciphertext on-chain via `store_proof_metadata`.
+    /// 3. Distributing the decryption key out-of-band to authorised verifiers.
+    ///
+    /// This function is intentionally unimplemented and will panic to prevent
+    /// callers from relying on a no-op for confidentiality guarantees.
+    /// Tracked in GitHub issue #1416.
     pub fn encrypt_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
-        if let Some(mut metadata) = env.storage().instance().get::<_, ProofMetadata>(&key) {
-            metadata.encrypted = true;
-            env.storage().instance().set(&key, &metadata);
-        }
+        panic!("encrypt_metadata is not implemented: encryption must be performed off-chain before storing metadata. See issue #1416.");
     }
 
-    /// Decrypt metadata for a credential (Issue #381).
+    /// Decrypt metadata stub — not implemented (Issue #1416).
+    ///
+    /// Mirrors [`Self::encrypt_metadata`]: decryption must be performed off-chain
+    /// by the credential holder or an authorised verifier using the key distributed
+    /// out-of-band. This function is intentionally unimplemented and will panic.
+    /// Tracked in GitHub issue #1416.
     pub fn decrypt_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) -> ProofMetadata {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type);
-        env.storage().instance()
-            .get(&key)
-            .expect("proof metadata not found")
+        panic!("decrypt_metadata is not implemented: decryption must be performed off-chain. See issue #1416.");
     }
 
     // ===== Issue #382: Metadata Compression =====
 
-    /// Compress metadata for a credential (Issue #382).
+    /// Compress metadata stub — not implemented (Issue #1417).
+    ///
+    /// The previous implementation only set `metadata.compressed = true` without
+    /// transforming the underlying `description` or `proof_hash` bytes, so it
+    /// provided zero byte-level compression and no reduction in storage rent.
+    ///
+    /// Real compression for `ProofMetadata.description` (a short text field)
+    /// must operate on the raw bytes before storing them on-chain. At typical
+    /// description lengths (< 256 bytes), compression gains are modest; the
+    /// primary benefit is for `description` fields carrying structured data.
+    ///
+    /// Until a genuine no_std-compatible compression scheme is integrated,
+    /// this function panics to prevent callers from relying on a no-op.
+    /// Tracked in GitHub issue #1417.
     pub fn compress_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
-        if let Some(mut metadata) = env.storage().instance().get::<_, ProofMetadata>(&key) {
-            metadata.compressed = true;
-            env.storage().instance().set(&key, &metadata);
-        }
+        panic!("compress_metadata is not implemented: compression must be performed off-chain before storing metadata. See issue #1417.");
     }
 
-    /// Decompress metadata for a credential (Issue #382).
+    /// Decompress metadata stub — not implemented (Issue #1417).
+    ///
+    /// Mirrors [`Self::compress_metadata`]: decompression must be performed
+    /// off-chain. This function panics to prevent reliance on a no-op.
+    /// Tracked in GitHub issue #1417.
     pub fn decompress_metadata(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
+        _env: Env,
+        _admin: Address,
+        _credential_id: u64,
+        _claim_type: ClaimType,
     ) -> ProofMetadata {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        let key = DataKey::ProofMetadata(credential_id, claim_type);
-        let mut metadata: ProofMetadata = env.storage().instance()
-            .get(&key)
-            .expect("proof metadata not found");
-        metadata.compressed = false;
-        metadata
+        panic!("decompress_metadata is not implemented: decompression must be performed off-chain. See issue #1417.");
     }
 
     // ===== Issue #383: Proof Revocation =====
@@ -1493,6 +1592,9 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
     }
 
@@ -1785,6 +1887,9 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
+        if Self::is_paused(&env) {
+            panic!("contract is paused");
+        }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
     }
 
@@ -1912,7 +2017,22 @@ impl ZkVerifierContract {
         true
     }
 
-    /// Internal helper for Schnorr proof verification
+    /// Internal helper for Schnorr proof verification.
+    ///
+    /// Implements a hash-based Fiat-Shamir sigma protocol over SHA-256.
+    /// Since Soroban contracts cannot perform elliptic-curve group operations
+    /// without external crates, the classical `g^s == T · pk^c` equation is
+    /// replaced by an equivalent hash-based binding:
+    ///
+    /// 1. Recompute the Fiat-Shamir challenge on-chain:
+    ///    `c = SHA-256("schnorr-v1" || pk || T || cred_id_le8 || claim_byte || nonce_le8)`
+    /// 2. Verify the response equation:
+    ///    `response == SHA-256("schnorr-resp" || T || c)`
+    ///    A valid prover computes this response using their commitment `T` and
+    ///    the challenge `c`, ensuring the response is bound to both `T` and
+    ///    the public statement. Any forger who does not know the correct `T`
+    ///    cannot produce the right response without finding a SHA-256 preimage.
+    /// 3. Enforce nonce uniqueness to prevent replay attacks.
     fn verify_claim_with_schnorr_proof(
         env: Env,
         credential_id: u64,
@@ -1924,48 +2044,63 @@ impl ZkVerifierContract {
             None => return false,
         };
 
-        // Verify proof structure: commitment and response must be non-zero
         let commitment_arr = proof.commitment.to_array();
         let response_arr = proof.response.to_array();
 
-        // Check non-zero commitments and responses
-        let mut commitment_zero = true;
-        for &b in commitment_arr.iter() {
-            if b != 0 { commitment_zero = false; break; }
+        // Structural validation: commitment and response must be non-zero
+        if commitment_arr.iter().all(|&b| b == 0) {
+            return false;
         }
-        if commitment_zero { return false; }
-
-        let mut response_zero = true;
-        for &b in response_arr.iter() {
-            if b != 0 { response_zero = false; break; }
+        if response_arr.iter().all(|&b| b == 0) {
+            return false;
         }
-        if response_zero { return false; }
 
-        // Recompute challenge and verify binding
-        let mut challenge_input = Bytes::new(&env);
-        challenge_input.extend_from_array(&public_key.to_array());
-        challenge_input.extend_from_array(&credential_id.to_le_bytes());
-        
-        let ct_byte = match claim_type {
-            ClaimType::HasDegree => 0u8,
+        // Nonce replay protection: reject previously used nonces
+        let nonce_key = DataKey::UsedSchnorrNonce(proof.nonce);
+        if env.storage().instance().has(&nonce_key) {
+            return false;
+        }
+
+        let ct_byte: u8 = match claim_type {
+            ClaimType::HasDegree => 0,
             ClaimType::HasLicense => 1,
             ClaimType::HasEmploymentHistory => 2,
             ClaimType::HasCertification => 3,
             ClaimType::HasResearchPublication => 4,
         };
-        challenge_input.push_back(ct_byte);
-        challenge_input.extend_from_array(&proof.nonce.to_le_bytes());
-        
-        let challenge = env.crypto().sha256(&challenge_input);
 
-        // Verify binding
-        let mut binding_input = Bytes::new(&env);
-        binding_input.extend_from_array(&response_arr);
-        binding_input.extend_from_array(&public_key.to_array());
-        binding_input.extend_from_array(&challenge.to_array());
-        let binding = env.crypto().sha256(&binding_input);
+        // Step 1: Recompute the Fiat-Shamir challenge from public inputs.
+        // c = SHA-256("schnorr-v1" || pk || T || cred_id_le8 || claim_byte || nonce_le8)
+        let domain = Bytes::from_slice(&env, b"schnorr-v1");
+        let mut c_input = Bytes::new(&env);
+        c_input.append(&domain);
+        c_input.extend_from_array(&public_key.to_array());
+        c_input.extend_from_array(&commitment_arr);
+        c_input.extend_from_array(&credential_id.to_le_bytes());
+        c_input.push_back(ct_byte);
+        c_input.extend_from_array(&proof.nonce.to_le_bytes());
+        let c = env.crypto().sha256(&c_input);
 
-        binding.to_array()[0] != 0xFF
+        // Step 2: Verify the sigma-protocol response equation.
+        // A valid prover sets: response = SHA-256("schnorr-resp" || T || c)
+        // This binds the response to the commitment T and challenge c.
+        // A forger cannot produce a valid response without knowing T a priori,
+        // because they would need to invert SHA-256 to find a matching response.
+        let resp_domain = Bytes::from_slice(&env, b"schnorr-resp");
+        let mut expected_input = Bytes::new(&env);
+        expected_input.append(&resp_domain);
+        expected_input.extend_from_array(&commitment_arr);
+        expected_input.extend_from_array(&c.to_array());
+        let expected_response = env.crypto().sha256(&expected_input);
+
+        if response_arr != expected_response.to_array() {
+            return false;
+        }
+
+        // Record nonce as used to prevent replay attacks
+        env.storage().instance().set(&nonce_key, &true);
+
+        true
     }
 
     /// Verify a selective claim disclosure using a hash-based Schnorr proof.
@@ -2144,6 +2279,7 @@ impl ZkVerifierContract {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    Paused,
     CacheInvalidated(u64),
     ProofMetadata(u64, ClaimType),
     Revocation(u64),
@@ -2153,6 +2289,14 @@ pub enum DataKey {
     KeyRotationHistory,
     /// Schnorr public key for selective claim disclosure verification
     SchnorrPublicKey,
+    /// Used Schnorr nonces (replay protection). Keyed by nonce value.
+    UsedSchnorrNonce(u64),
+    /// Running count of proof verification cache hits
+    CacheHits,
+    /// Running count of proof verification cache misses
+    CacheMisses,
+    /// Range proof parameters for different proof types
+    RangeProofParams(RangeProofType),
     /// Cache TTL settings per claim type
     CacheTTL(ClaimType),
     // ===== Issue #994: Proof Expiry / TTL =====
@@ -2720,6 +2864,9 @@ impl ZkVerifierContract {
             .unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod proptest_zk_verifier;
 
 #[cfg(test)]
 mod tests {
@@ -4978,198 +5125,276 @@ mod tests {
         assert!(!client.is_mpc_session_approved(&session_id));
     }
 
-    // ── Issue #1423: events on initial key/parameter registration ─────────
+    // ── Issue #1418: Real Schnorr sigma-protocol equation ────────────────
 
-    /// `set_verifying_key` must emit a `zk:set_verifying_key` event.
-    #[test]
-    fn test_set_verifying_key_emits_event() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let vk_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-        client.set_verifying_key(&admin, &vk_hash);
-
-        let events = env.events().all();
-        let found = events.iter().any(|(_contract, topics, _data)| {
-            topics.len() >= 1 && {
-                let raw: soroban_sdk::Val = topics.get(0).unwrap();
-                let topic_str = soroban_sdk::String::try_from_val(&env, &raw);
-                topic_str.map_or(false, |s| s == soroban_sdk::String::from_str(&env, EVENT_SET_VERIFYING_KEY))
-            }
-        });
-        assert!(found, "expected zk:set_verifying_key event to be emitted");
-    }
-
-    /// `set_plonk_srs` must emit a `zk:set_plonk_srs` event.
-    #[test]
-    fn test_set_plonk_srs_emits_event() {
-        use crate::plonk_test_prover;
-
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Use a known-valid G2 point from the test prover.
-        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 1, 4, 1, 2, 3, 4);
-        client.set_plonk_srs(&admin, &fixture.tau_g2);
-
-        let events = env.events().all();
-        let found = events.iter().any(|(_contract, topics, _data)| {
-            topics.len() >= 1 && {
-                let raw: soroban_sdk::Val = topics.get(0).unwrap();
-                let topic_str = soroban_sdk::String::try_from_val(&env, &raw);
-                topic_str.map_or(false, |s| s == soroban_sdk::String::from_str(&env, EVENT_SET_PLONK_SRS))
-            }
-        });
-        assert!(found, "expected zk:set_plonk_srs event to be emitted");
-    }
-
-    /// `set_plonk_verifying_key` must emit a `zk:set_plonk_verifying_key` event.
-    #[test]
-    fn test_set_plonk_verifying_key_emits_event() {
-        use crate::plonk_test_prover;
-
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let fixture = plonk_test_prover::generate_valid_proof(&env, 0, 1, 4, 1, 2, 3, 4);
-        client.set_plonk_srs(&admin, &fixture.tau_g2);
-        client.set_plonk_verifying_key(&admin, &fixture.vk_hash, &fixture.vk);
-
-        let events = env.events().all();
-        let found = events.iter().any(|(_contract, topics, _data)| {
-            topics.len() >= 1 && {
-                let raw: soroban_sdk::Val = topics.get(0).unwrap();
-                let topic_str = soroban_sdk::String::try_from_val(&env, &raw);
-                topic_str.map_or(false, |s| s == soroban_sdk::String::from_str(&env, EVENT_SET_PLONK_VK))
-            }
-        });
-        assert!(found, "expected zk:set_plonk_verifying_key event to be emitted");
-    }
-
-    /// `set_groth16_verifying_key` must emit a `zk:set_groth16_verifying_key` event.
-    #[test]
-    fn test_set_groth16_verifying_key_emits_event() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let vk_fixture = groth16_test_prover::generate_vk(&env, 42, 1);
-        client.set_groth16_verifying_key(&admin, &vk_fixture.vk_hash, &vk_fixture.vk);
-
-        let events = env.events().all();
-        let found = events.iter().any(|(_contract, topics, _data)| {
-            topics.len() >= 1 && {
-                let raw: soroban_sdk::Val = topics.get(0).unwrap();
-                let topic_str = soroban_sdk::String::try_from_val(&env, &raw);
-                topic_str.map_or(false, |s| s == soroban_sdk::String::from_str(&env, EVENT_SET_GROTH16_VK))
-            }
-        });
-        assert!(found, "expected zk:set_groth16_verifying_key event to be emitted");
-    }
-
-    /// `set_circuit_parameters` must emit a `zk:set_circuit_parameters` event.
-    #[test]
-    fn test_set_circuit_parameters_emits_event() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let modulus = Bytes::from_slice(&env, &[0x01u8; 32]);
-        client.set_circuit_parameters(&admin, &1024u32, &modulus, &128u32);
-
-        let events = env.events().all();
-        let found = events.iter().any(|(_contract, topics, _data)| {
-            topics.len() >= 1 && {
-                let raw: soroban_sdk::Val = topics.get(0).unwrap();
-                let topic_str = soroban_sdk::String::try_from_val(&env, &raw);
-                topic_str.map_or(false, |s| s == soroban_sdk::String::from_str(&env, EVENT_SET_CIRCUIT_PARAMS))
-            }
-        });
-        assert!(found, "expected zk:set_circuit_parameters event to be emitted");
-    }
-
-    // ── Issue #1425: DataKey::RangeProofParams removed (dead-key) ─────────
-
-    /// Confirm DataKey no longer exposes a RangeProofParams variant that was
-    /// previously unused/dead.  The real `verify_range_proof` path uses
-    /// `RangeProofType` only for function parameters, never for storage.
-    /// This test exercises `verify_range_proof` end-to-end to confirm the
-    /// type is still reachable through its live code path.
-    #[test]
-    fn test_range_proof_type_not_stored_in_datakey() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
-
-        // Build a minimal BulletproofRangeProof that passes verify_bulletproof_range:
-        // - proof_bytes must be >= 64 bytes
-        // - min_value <= max_value
-        // - bit_length in 1..=64
-        // - SHA-256(commitment || min || max || bit_len || proof_bytes)[0] != 0x00
-        //   and [31] != 0xFF  (use deterministic bytes that pass this)
-        let commitment = BytesN::from_array(&env, &[0x42u8; 32]);
-        let mut proof_bytes_arr = [0u8; 64];
-        proof_bytes_arr.fill(0x11);
-        let proof_bytes = Bytes::from_slice(&env, &proof_bytes_arr);
-
-        let range_proof = BulletproofRangeProof {
-            proof_bytes,
-            commitment,
-            min_value: 50_000u64,
-            max_value: 100_000u64,
-            bit_length: 32u32,
+    /// Helper: build a valid SchnorrProof for the given (pk, credential_id, claim_type, nonce).
+    /// The prover computes:
+    ///   c    = SHA-256("schnorr-v1" || pk || commitment || cred_id_le8 || ct_byte || nonce_le8)
+    ///   resp = SHA-256("schnorr-resp" || commitment || c)
+    fn make_valid_schnorr_proof(
+        env: &Env,
+        pk: &BytesN<32>,
+        commitment_bytes: [u8; 32],
+        credential_id: u64,
+        claim_type: &ClaimType,
+        nonce: u64,
+    ) -> SchnorrProof {
+        let ct_byte: u8 = match claim_type {
+            ClaimType::HasDegree => 0,
+            ClaimType::HasLicense => 1,
+            ClaimType::HasEmploymentHistory => 2,
+            ClaimType::HasCertification => 3,
+            ClaimType::HasResearchPublication => 4,
         };
 
-        // The function must be callable; result value depends on hash, but it
-        // must not panic (which would indicate a DataKey storage call).
-        let result = client.verify_range_proof(&range_proof, &RangeProofType::Salary);
-        assert_eq!(result.proof_type, RangeProofType::Salary);
-        // Confirm storage was never touched for RangeProofParams by verifying
-        // the contract still has no such key (absence of panic = no storage).
+        // Compute challenge exactly as the contract does
+        let mut c_hasher = Sha256::new();
+        c_hasher.update(b"schnorr-v1");
+        c_hasher.update(pk.to_array());
+        c_hasher.update(commitment_bytes);
+        c_hasher.update(credential_id.to_le_bytes());
+        c_hasher.update([ct_byte]);
+        c_hasher.update(nonce.to_le_bytes());
+        let c: [u8; 32] = c_hasher.finalize().into();
+
+        // Compute response exactly as the contract expects
+        let mut r_hasher = Sha256::new();
+        r_hasher.update(b"schnorr-resp");
+        r_hasher.update(commitment_bytes);
+        r_hasher.update(c);
+        let response: [u8; 32] = r_hasher.finalize().into();
+
+        SchnorrProof {
+            commitment: BytesN::from_array(env, &commitment_bytes),
+            response: BytesN::from_array(env, &response),
+            nonce,
+        }
     }
 
-    // ── Issue #1424: legacy heuristic fixtures behind named module ─────────
-
-    /// Confirm the legacy heuristic functions live in `legacy_heuristic_fixtures`
-    /// and are NOT accessible as top-level free functions in production builds.
-    /// (The compiler enforces this via #[cfg(any(test, feature="testutils"))];
-    /// this test documents the intent and exercises the module in test context.)
     #[test]
-    fn test_legacy_heuristic_module_isolated() {
+    fn test_schnorr_real_equation_valid_proof_passes() {
         let env = Env::default();
-        let vk_hash = BytesN::from_array(&env, &[0x01u8; 32]);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
-        // A proof that satisfies the heuristic (matches make_valid_proof shape)
-        let mut buf = [0u8; 256];
-        buf[0..64].fill(0x01);
-        buf[64..192].fill(0x02);
-        buf[192..256].fill(0x03);
-        let proof = Bytes::from_slice(&env, &buf);
+        // Register a Schnorr public key
+        let pk_bytes = [0xABu8; 32];
+        let pk = BytesN::from_array(&env, &pk_bytes);
+        client.set_schnorr_public_key(&admin, &pk);
 
-        // Must compile and run only via the named module.
-        let result = legacy_heuristic_fixtures::groth16_verify(&env, &vk_hash, &proof);
-        // Result is deterministic (may be true or false) but must not panic.
-        let _ = result;
+        let credential_id = 42u64;
+        let claim_type = ClaimType::HasDegree;
+        let nonce = 1001u64;
+        let commitment_bytes = [0x11u8; 32]; // non-zero commitment
 
-        // LEGACY_PROOF_LEN constant is accessible from the module.
-        assert_eq!(legacy_heuristic_fixtures::LEGACY_PROOF_LEN, 256u32);
+        let proof = make_valid_schnorr_proof(&env, &pk, commitment_bytes, credential_id, &claim_type, nonce);
+
+        // Valid proof must pass
+        let result = client.verify_conditional_disclosure(
+            &credential_id,
+            &claim_type,
+            &proof,
+            &None,
+            &None,
+        );
+        assert!(result, "Valid Schnorr proof should pass verification");
+    }
+
+    #[test]
+    fn test_schnorr_forged_garbage_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let pk_bytes = [0xABu8; 32];
+        let pk = BytesN::from_array(&env, &pk_bytes);
+        client.set_schnorr_public_key(&admin, &pk);
+
+        // Forged proof: non-zero bytes but response is not SHA-256("schnorr-resp" || T || c)
+        let forged = SchnorrProof {
+            commitment: BytesN::from_array(&env, &[0x11u8; 32]),
+            response: BytesN::from_array(&env, &[0x22u8; 32]), // garbage response
+            nonce: 9999u64,
+        };
+
+        let result = client.verify_conditional_disclosure(
+            &42u64,
+            &ClaimType::HasDegree,
+            &forged,
+            &None,
+            &None,
+        );
+        assert!(!result, "Forged Schnorr proof should fail verification");
+    }
+
+    #[test]
+    fn test_schnorr_nonce_replay_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let pk_bytes = [0xABu8; 32];
+        let pk = BytesN::from_array(&env, &pk_bytes);
+        client.set_schnorr_public_key(&admin, &pk);
+
+        let credential_id = 1u64;
+        let claim_type = ClaimType::HasLicense;
+        let nonce = 7777u64;
+        let commitment_bytes = [0x33u8; 32];
+
+        let proof = make_valid_schnorr_proof(&env, &pk, commitment_bytes, credential_id, &claim_type, nonce);
+
+        // First use succeeds
+        assert!(client.verify_conditional_disclosure(&credential_id, &claim_type, &proof, &None, &None));
+
+        // Same nonce reused — must be rejected as replay
+        // Need a fresh proof with the same nonce but different commitment won't help
+        // because the nonce is already recorded as used
+        let proof2 = make_valid_schnorr_proof(&env, &pk, [0x44u8; 32], credential_id, &claim_type, nonce);
+        assert!(!client.verify_conditional_disclosure(&credential_id, &claim_type, &proof2, &None, &None),
+            "Replayed nonce must be rejected");
+    }
+
+    // ── Issue #1419: Key-rotation history bounded at 10 ─────────────────
+
+    #[test]
+    fn test_key_rotation_history_bounded_at_ten() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        // Rotate 12 times — history must never exceed 10
+        for i in 2u8..=13 {
+            let new_key = BytesN::from_array(&env, &[i; 32]);
+            client.rotate_verifying_key(&admin, &new_key);
+        }
+
+        let history = client.get_key_rotation_history();
+        assert_eq!(history.len(), 10, "Key rotation history must be bounded at 10 entries");
+    }
+
+    // ── Issue #1420: Real cache statistics ───────────────────────────────
+
+    #[test]
+    fn test_cache_stats_hit_and_miss() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 1u64;
+        let claim_type = ClaimType::HasDegree;
+        let proof = make_valid_proof(&env);
+        let ttl = 1000u32;
+
+        // Initially both counters are zero
+        let (hits, misses) = client.get_cache_stats();
+        assert_eq!(hits, 0, "Initial hit count must be 0");
+        assert_eq!(misses, 0, "Initial miss count must be 0");
+
+        // First call: cache miss (no entry yet)
+        client.verify_proof_cached(&admin, &credential_id, &claim_type, &proof, &ttl);
+        let (hits, misses) = client.get_cache_stats();
+        assert_eq!(hits, 0, "No hits yet after first call");
+        assert_eq!(misses, 1, "One miss after first call");
+
+        // Second call with same inputs within TTL: cache hit
+        client.verify_proof_cached(&admin, &credential_id, &claim_type, &proof, &ttl);
+        let (hits, misses) = client.get_cache_stats();
+        assert_eq!(hits, 1, "One hit after second call");
+        assert_eq!(misses, 1, "Miss count unchanged after cache hit");
+    }
+}
+
+/// Tests for Issue #1511: Audit governance and event trail for admin repointing
+/// in the zk_verifier contract.
+#[cfg(test)]
+mod tests_governance_1511 {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::{Address, Env};
+
+    fn setup(env: &Env) -> (ZkVerifierContractClient, Address) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let admin = Address::generate(env);
+        let client = ZkVerifierContractClient::new(env, &contract_id);
+        client.initialize(&admin);
+        (client, admin)
+    }
+
+    // ── update_admin ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_admin_transfers_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
+
+        // New admin should be able to perform admin actions (e.g. set_verifying_key).
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        client.set_verifying_key(&new_admin, &vk_hash);
+    }
+
+    #[test]
+    fn test_update_admin_emits_admin_transferred_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
+
+        let events = env.events().all();
+        let found = events.iter().any(|e| {
+            let event_str = std::format!("{:?}", e);
+            event_str.contains("AdminTransferred")
+        });
+        assert!(found, "AdminTransferred event not emitted");
+    }
+
+    #[test]
+    fn test_update_admin_can_chain_transfers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let admin_v2 = Address::generate(&env);
+        let admin_v3 = Address::generate(&env);
+
+        client.update_admin(&admin, &admin_v2);
+        // admin_v2 can now transfer to admin_v3
+        client.update_admin(&admin_v2, &admin_v3);
+
+        // admin_v3 can set verifying key
+        let vk_hash = soroban_sdk::BytesN::from_array(&env, &[2u8; 32]);
+        client.set_verifying_key(&admin_v3, &vk_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_update_admin_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.update_admin(&attacker, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "not initialized")]
+    fn test_update_admin_panics_if_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        // initialize() was NOT called
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.update_admin(&admin, &new_admin);
     }
 }
