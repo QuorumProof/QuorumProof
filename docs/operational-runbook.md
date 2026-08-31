@@ -700,3 +700,20 @@ stellar transaction info $TX_HASH
 
 **Last Updated**: May 29, 2026
 **Next Review**: November 29, 2026
+
+## WS Message Drops {#ws-message-drops}
+
+### Alert: SustainedWsMessageDrops
+
+**Meaning:** The `quorumproof_ws_messages_dropped_total` counter is growing faster than 0.1 drops/s sustained for 2+ minutes. This means one or more WebSocket clients are consuming messages slower than the server is producing them, causing the per-connection send queue (`api-server/src/ws/connectionQueue.ts`) to overflow and drop the oldest queued messages. A push-based alert is also dispatched via `alertChannels.ts` when the in-process drop window counter reaches `WS_DROP_ALERT_THRESHOLD` (default: 10) within a `WS_DROP_ALERT_WINDOW_SECONDS` (default: 60s) window.
+
+**Impact:** Affected clients will miss real-time events. They should reconcile on reconnect via REST (see `useRealtimeUpdates.ts` which performs a full fetch on reconnect).
+
+**Recommended operator response:**
+
+1. Identify the affected instance: check `quorumproof_ws_connections{instance=...}` and `quorumproof_ws_messages_dropped_total{instance=...}` to pinpoint which replica is dropping.
+2. Inspect client connectivity: are specific clients on slow networks, in tight receive loops, or experiencing high CPU load on their side?
+3. If drops are concentrated on one client, consider terminating that WebSocket connection (the client will reconnect and reconcile via REST).
+4. If drops are systemic across many connections, check server CPU and memory — an overloaded server may be unable to drain queues fast enough.
+5. Tune queue limits for bursty workloads: increase `WS_SEND_QUEUE_MAX_MESSAGES` (default: 200) and/or `WS_SEND_QUEUE_MAX_BYTES` (default: 1 MiB) at the cost of higher memory usage per connection.
+6. Tune alert sensitivity via `WS_DROP_ALERT_THRESHOLD` (drops per window before alerting) and `WS_DROP_ALERT_WINDOW_SECONDS` (observation window length).

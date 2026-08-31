@@ -7,7 +7,7 @@ const router = Router();
 // GET /api/tracing/trace/:traceId - Get trace by ID
 router.get('/trace/:traceId', (req: Request, res: Response) => {
   try {
-    const { traceId } = req.params;
+    const traceId = String(req.params.traceId);
 
     const trace = distributedTracer.getTrace(traceId);
 
@@ -34,7 +34,8 @@ router.get('/trace/:traceId', (req: Request, res: Response) => {
 // GET /api/tracing/span/:traceId/:spanId - Get specific span
 router.get('/span/:traceId/:spanId', (req: Request, res: Response) => {
   try {
-    const { traceId, spanId } = req.params;
+    const traceId = String(req.params.traceId);
+    const spanId = String(req.params.spanId);
 
     const span = distributedTracer.getSpan(traceId, spanId);
 
@@ -57,7 +58,7 @@ router.get('/span/:traceId/:spanId', (req: Request, res: Response) => {
 // GET /api/tracing/jaeger/:traceId - Export trace in Jaeger format
 router.get('/jaeger/:traceId', (req: Request, res: Response) => {
   try {
-    const { traceId } = req.params;
+    const traceId = String(req.params.traceId);
 
     const jaegerTrace = distributedTracer.exportToJaeger(traceId);
 
