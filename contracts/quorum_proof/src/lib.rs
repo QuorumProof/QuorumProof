@@ -36,6 +36,8 @@ mod bbs_plus_tests;
 mod upgrade_safety_tests;
 #[cfg(test)]
 mod formal_verification_invariants;
+#[cfg(test)]
+mod tests_governance_1511;
 
 const TOPIC_ISSUE: &str = "CredentialIssued";
 const TOPIC_REVOKE: &str = "RevokeCredential";
@@ -121,6 +123,10 @@ const TOPIC_ROLE_GRANTED: &str = "RoleGranted";
 const TOPIC_ROLE_REVOKED: &str = "RoleRevoked";
 const TOPIC_ROLE_DELEGATED: &str = "RoleDelegated";
 const TOPIC_ROLE_DELEGATION_REVOKED: &str = "RoleDelegationRevoked";
+
+// ── Issue #1511: Governance audit trail for cross-contract address repointing ──
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
+const TOPIC_CONTRACT_ADDRESS_UPDATED: &str = "ContractAddressUpdated";
 
 #[contracttype]
 #[derive(Clone)]
@@ -912,6 +918,10 @@ pub enum DataKey {
     SuspensionReason(u64),
     /// Number of migrations still pending, surfaced by the health check.
     PendingMigrationCount,
+    /// Issue #1511: Stored SBT registry contract address for governance repointing.
+    SbtRegistryId,
+    /// Issue #1511: Stored ZK verifier contract address for governance repointing.
+    ZkVerifierId,
 }
 
 #[contracttype]
@@ -1956,6 +1966,30 @@ pub struct AttestorReplacementRecord {
     pub replaced_by: Address,
     /// Caller-supplied justification for the replacement.
     pub reason: String,
+}
+
+// ── Issue #1511: Governance audit trail event structs ────────────────────────
+
+/// Emitted when the contract admin is transferred to a new address.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminTransferredEventData {
+    /// The previous admin address.
+    pub old_admin: Address,
+    /// The new admin address.
+    pub new_admin: Address,
+}
+
+/// Emitted when a cross-contract address (sbt_registry or zk_verifier) is repointed.
+#[contracttype]
+#[derive(Clone)]
+pub struct ContractAddressUpdatedEventData {
+    /// The label identifying which contract was updated (e.g. "sbt_registry", "zk_verifier").
+    pub contract_name: soroban_sdk::String,
+    /// The previous contract address.
+    pub old_address: Address,
+    /// The new contract address.
+    pub new_address: Address,
 }
 
 /// Result of [`check_health`]: a point-in-time contract health summary.
@@ -3665,6 +3699,137 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    // ── Issue #1511: Governance — admin transfer & cross-contract address repointing ──
+
+    /// Transfer contract admin to a new address, emitting an `AdminTransferred` event.
+    ///
+    /// This provides an auditable trail for every admin key rotation. The caller
+    /// must be the current admin and must authorize the call.
+    ///
+    /// # Parameters
+    /// - `admin`: The current admin address (must authorize).
+    /// - `new_admin`: The address to become the new admin.
+    ///
+    /// # Panics
+    /// - If the contract is not initialized (no admin stored).
+    /// - If `admin` does not match the stored admin.
+    pub fn update_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_data = AdminTransferredEventData {
+            old_admin: stored,
+            new_admin,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_ADMIN_TRANSFERRED);
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Store or repoint the SBT registry contract address, emitting a
+    /// `ContractAddressUpdated` event with the old and new addresses.
+    ///
+    /// Useful when the SBT registry is redeployed and cross-contract calls
+    /// must be directed to the new address without redeploying this contract.
+    ///
+    /// # Parameters
+    /// - `admin`: The current admin address (must authorize).
+    /// - `new_address`: The new SBT registry contract address.
+    ///
+    /// # Panics
+    /// - If the contract is not initialized.
+    /// - If `admin` does not match the stored admin.
+    pub fn update_sbt_registry_address(env: Env, admin: Address, new_address: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        let old_address: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SbtRegistryId);
+
+        env.storage().instance().set(&DataKey::SbtRegistryId, &new_address);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Use the new_address as a stand-in for old when first set (no prior value)
+        let old_addr = old_address.unwrap_or(new_address.clone());
+        let event_data = ContractAddressUpdatedEventData {
+            contract_name: soroban_sdk::String::from_str(&env, "sbt_registry"),
+            old_address: old_addr,
+            new_address,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_CONTRACT_ADDRESS_UPDATED);
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Store or repoint the ZK verifier contract address, emitting a
+    /// `ContractAddressUpdated` event with the old and new addresses.
+    ///
+    /// Useful when the ZK verifier is redeployed and cross-contract calls
+    /// must be directed to the new address without redeploying this contract.
+    ///
+    /// # Parameters
+    /// - `admin`: The current admin address (must authorize).
+    /// - `new_address`: The new ZK verifier contract address.
+    ///
+    /// # Panics
+    /// - If the contract is not initialized.
+    /// - If `admin` does not match the stored admin.
+    pub fn update_zk_verifier_address(env: Env, admin: Address, new_address: Address) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+
+        let old_address: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ZkVerifierId);
+
+        env.storage().instance().set(&DataKey::ZkVerifierId, &new_address);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let old_addr = old_address.unwrap_or(new_address.clone());
+        let event_data = ContractAddressUpdatedEventData {
+            contract_name: soroban_sdk::String::from_str(&env, "zk_verifier"),
+            old_address: old_addr,
+            new_address,
+        };
+        let topic = soroban_sdk::String::from_str(&env, TOPIC_CONTRACT_ADDRESS_UPDATED);
+        let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    /// Get the currently stored SBT registry address, if any.
+    pub fn get_sbt_registry_address(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::SbtRegistryId)
+    }
+
+    /// Get the currently stored ZK verifier address, if any.
+    pub fn get_zk_verifier_address(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::ZkVerifierId)
     }
 
     /// Returns true if the contract is currently paused.
