@@ -19,14 +19,16 @@ pub mod groth16_test_prover;
 ///   C  : 64 bytes  (G1 point)
 ///   Total: 256 bytes
 ///
-/// Used only by the structural/hash-binding heuristic path
-/// (`groth16_verify`, `verify_claim`, `verify_proof_cached`,
-/// `verify_claim_anonymous`) that `quorum_proof` calls cross-contract via
-/// `verify_claim`. Retained unchanged so that consumer's existing proof
-/// fixtures keep working. The standalone, permissionless production entry
-/// point — [`ZkVerifierContract::verify_groth16_proof`] — performs genuine
-/// BLS12-381 pairing verification (see [`GROTH16_BLS_PROOF_LEN`] and the
-/// [`groth16`] module) and does not use this constant.
+/// Used by [`ZkVerifierContract::verify_batch_proofs`] (structural validation
+/// step) and by the test-fixtures module (`legacy_heuristic_fixtures`) whose
+/// heuristic path (`verify_claim`, `verify_proof_cached`,
+/// `verify_claim_anonymous`) is compiled in only under
+/// `#[cfg(any(test, feature = "testutils"))]`.
+///
+/// **Do not use this constant to pass proofs to production verification.**
+/// The real, production entry point is [`ZkVerifierContract::verify_groth16_proof`],
+/// which performs genuine BLS12-381 pairing checks (192-byte proofs, see
+/// [`GROTH16_BLS_PROOF_LEN`] and the [`groth16`] module).
 pub const GROTH16_PROOF_LEN: u32 = 256;
 
 /// Real Groth16 proof byte layout (BLS12-381, compressed): `A` (G1, 48) ‖
@@ -167,88 +169,104 @@ fn proof_binding_hash(
     env.crypto().sha256(&binding_input).to_array()
 }
 
-/// Enhanced Groth16 proof verification with improved cryptographic validation.
+/// Structural/hash-binding heuristic Groth16 check.
 ///
-/// This function performs enhanced Groth16 verification including:
-/// 1. Strict proof structure validation (256 bytes)
-/// 2. Point-at-infinity checks for A and C components
-/// 3. Enhanced cryptographic binding with VK hash
-/// 4. Multiple collision resistance checks
+/// Delegates to [`legacy_heuristic_fixtures::groth16_verify`].
 ///
-/// Returns true if the proof passes all enhanced validation checks.
-///
-/// **WARNING: This is a structural/hash-binding heuristic, NOT actual cryptographic
-/// verification. It only checks byte patterns and hash outputs, not elliptic-curve
-/// pairing math. Use only for testing; production verification must use
-/// [`verify_groth16_proof`] which performs real BLS12-381 pairing checks.**
+/// **WARNING: NOT real cryptographic verification. Test-only entry point.**
 #[cfg(any(test, feature = "testutils"))]
 fn groth16_verify(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
-    // 1. Length check
-    if proof.len() != GROTH16_PROOF_LEN {
-        return false;
-    }
-
-    // 2. Enhanced A-point validation (bytes 0-63)
-    let mut a_zero = true;
-    let mut a_valid = true;
-    for i in 0..64 {
-        let byte_val = proof.get(i).unwrap_or(0);
-        if byte_val != 0 {
-            a_zero = false;
-        }
-        // Additional validity check: ensure reasonable byte distribution
-        if i < 32 && byte_val == 0xFF {
-            a_valid = false;
-        }
-    }
-    if a_zero || !a_valid {
-        return false;
-    }
-
-    // 3. Enhanced C-point validation (bytes 192-255)
-    let mut c_zero = true;
-    let mut c_valid = true;
-    for i in 192..256 {
-        let byte_val = proof.get(i).unwrap_or(0);
-        if byte_val != 0 {
-            c_zero = false;
-        }
-        // Additional validity check
-        if i < 224 && byte_val == 0xFF {
-            c_valid = false;
-        }
-    }
-    if c_zero || !c_valid {
-        return false;
-    }
-
-    // 4. Enhanced verifying-key binding with multiple hash checks
-    verify_enhanced_vk_binding(env, vk_hash, proof)
+    legacy_heuristic_fixtures::groth16_verify(env, vk_hash, proof)
 }
 
-/// Enhanced VK binding with multiple collision resistance checks
+/// Enhanced VK binding with multiple collision resistance checks.
+///
+/// Delegates to [`legacy_heuristic_fixtures::verify_enhanced_vk_binding`].
 ///
 /// **WARNING: This is not real cryptographic verification. Use only for testing.**
 #[cfg(any(test, feature = "testutils"))]
 fn verify_enhanced_vk_binding(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
-    // Primary binding: SHA-256(vk_hash || proof_bytes)
-    let mut binding_input = Bytes::new(env);
-    binding_input.extend_from_array(&vk_hash.to_array());
-    binding_input.append(proof);
-    let digest = env.crypto().sha256(&binding_input);
-    
-    if digest.to_array()[0] == 0xFF {
-        return false; // Primary collision check failed
+    legacy_heuristic_fixtures::verify_enhanced_vk_binding(env, vk_hash, proof)
+}
+
+/// Test-fixture module for the legacy BN254-shaped, 256-byte Groth16 heuristic.
+///
+/// # Why this exists
+/// Early versions of this contract shipped a structural/hash-binding heuristic
+/// (not real elliptic-curve pairing math) under the `verify_claim` /
+/// `verify_proof_cached` / `verify_claim_anonymous` entry points so that
+/// in-flight test fixtures from `quorum_proof` kept working while the real
+/// BLS12-381 verifier ([`groth16`] module, 192-byte proofs) was being developed.
+///
+/// # What is here
+/// - `LEGACY_PROOF_LEN` (256) — the BN254-shaped proof length used by the heuristic.
+/// - `groth16_verify` / `verify_enhanced_vk_binding` — hash-binding checks that
+///   stand in for real pairing math.
+///
+/// # Production API (NOT in this module)
+/// - [`ZkVerifierContract::verify_groth16_proof`] — real BLS12-381 pairing,
+///   192-byte ([`GROTH16_BLS_PROOF_LEN`]) proofs, permissionless.
+/// - [`ZkVerifierContract::verify_plonk_proof`] — KZG/PLONK, 624-byte
+///   ([`PLONK_PROOF_LEN`]) proofs.
+///
+/// # Safety
+/// This module is compiled in **only** under `#[cfg(any(test, feature = "testutils"))]`
+/// and **must not** be invoked from any production (non-test) code path.
+#[cfg(any(test, feature = "testutils"))]
+pub(crate) mod legacy_heuristic_fixtures {
+    use soroban_sdk::{Bytes, BytesN, Env};
+
+    /// Legacy BN254-shaped proof length (256 bytes). Test-fixtures use only.
+    pub(crate) const LEGACY_PROOF_LEN: u32 = 256;
+
+    /// Structural/hash-binding heuristic Groth16 check (BN254 layout, 256 bytes).
+    ///
+    /// **NOT real cryptographic verification.** Keeps legacy test fixtures working.
+    pub(crate) fn groth16_verify(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
+        if proof.len() != LEGACY_PROOF_LEN {
+            return false;
+        }
+
+        // A-point validation (bytes 0-63): non-zero, no 0xFF in first 32 bytes
+        let mut a_zero = true;
+        let mut a_valid = true;
+        for i in 0..64 {
+            let byte_val = proof.get(i).unwrap_or(0);
+            if byte_val != 0 { a_zero = false; }
+            if i < 32 && byte_val == 0xFF { a_valid = false; }
+        }
+        if a_zero || !a_valid { return false; }
+
+        // C-point validation (bytes 192-255): non-zero, no 0xFF in bytes 192-223
+        let mut c_zero = true;
+        let mut c_valid = true;
+        for i in 192..256 {
+            let byte_val = proof.get(i).unwrap_or(0);
+            if byte_val != 0 { c_zero = false; }
+            if i < 224 && byte_val == 0xFF { c_valid = false; }
+        }
+        if c_zero || !c_valid { return false; }
+
+        verify_enhanced_vk_binding(env, vk_hash, proof)
     }
-    
-    // Secondary binding: SHA-256(proof_bytes || vk_hash) for additional security
-    let mut secondary_input = Bytes::new(env);
-    secondary_input.append(proof);
-    secondary_input.extend_from_array(&vk_hash.to_array());
-    let secondary_digest = env.crypto().sha256(&secondary_input);
-    
-    // Both checks must pass
-    digest.to_array()[0] != 0xFF && secondary_digest.to_array()[31] != 0x00
+
+    /// Hash-binding collision check used by [`groth16_verify`].
+    ///
+    /// **NOT real cryptographic verification.**
+    pub(crate) fn verify_enhanced_vk_binding(env: &Env, vk_hash: &BytesN<32>, proof: &Bytes) -> bool {
+        let mut binding_input = Bytes::new(env);
+        binding_input.extend_from_array(&vk_hash.to_array());
+        binding_input.append(proof);
+        let digest = env.crypto().sha256(&binding_input);
+        if digest.to_array()[0] == 0xFF { return false; }
+
+        let mut secondary_input = Bytes::new(env);
+        secondary_input.append(proof);
+        secondary_input.extend_from_array(&vk_hash.to_array());
+        let secondary_digest = env.crypto().sha256(&secondary_input);
+
+        digest.to_array()[0] != 0xFF && secondary_digest.to_array()[31] != 0x00
+    }
 }
 
 /// PLONK proof byte layout (BLS12-381, compressed points):
@@ -650,6 +668,28 @@ pub struct SelectiveClaimData {
     pub claim_value_hash: BytesN<32>,
 }
 
+// ── Issue #1423: event topics for initial key/parameter registration ──────
+
+/// Event topic emitted by [`ZkVerifierContract::set_verifying_key`] when the
+/// legacy Groth16 verifying-key hash is first registered.
+pub const EVENT_SET_VERIFYING_KEY: &str = "zk:set_verifying_key";
+
+/// Event topic emitted by [`ZkVerifierContract::set_plonk_srs`] when the
+/// PLONK universal SRS is first registered.
+pub const EVENT_SET_PLONK_SRS: &str = "zk:set_plonk_srs";
+
+/// Event topic emitted by [`ZkVerifierContract::set_plonk_verifying_key`]
+/// when a circuit-specific PLONK verifying key is first registered.
+pub const EVENT_SET_PLONK_VK: &str = "zk:set_plonk_verifying_key";
+
+/// Event topic emitted by [`ZkVerifierContract::set_groth16_verifying_key`]
+/// when a circuit-specific real Groth16 verifying key is first registered.
+pub const EVENT_SET_GROTH16_VK: &str = "zk:set_groth16_verifying_key";
+
+/// Event topic emitted by [`ZkVerifierContract::set_circuit_parameters`]
+/// when circuit parameters are first registered.
+pub const EVENT_SET_CIRCUIT_PARAMS: &str = "zk:set_circuit_parameters";
+
 #[contract]
 pub struct ZkVerifierContract;
 
@@ -690,6 +730,10 @@ impl ZkVerifierContract {
 
     /// Register the SHA-256 hash of the off-chain Groth16 verifying key.
     /// Must be called by the admin before any proof can be verified.
+    ///
+    /// Emits a `zk:set_verifying_key` event (`vk_hash`, `admin`, `ledger`)
+    /// so off-chain indexers can detect the initial registration without
+    /// diffing full storage snapshots.
     pub fn set_verifying_key(env: Env, admin: Address, vk_hash: BytesN<32>) {
         admin.require_auth();
         let stored_admin: Address = env.storage().instance()
@@ -697,6 +741,11 @@ impl ZkVerifierContract {
             .expect("not initialized");
         assert!(stored_admin == admin, "unauthorized");
         env.storage().instance().set(&DataKey::VerifyingKeyHash, &vk_hash);
+        // Emit initial-registration event (issue #1423)
+        env.events().publish(
+            (String::from_str(&env, EVENT_SET_VERIFYING_KEY),),
+            (vk_hash, admin, env.ledger().sequence()),
+        );
     }
 
     /// Rotate verifying key with audit trail.
@@ -756,6 +805,11 @@ impl ZkVerifierContract {
         assert!(stored_admin == admin, "unauthorized");
         assert!(plonk::is_valid_g2(&tau_g2.to_array()), "invalid G2 point for SRS tau");
         env.storage().instance().set(&DataKey::PlonkSrsTauG2, &tau_g2);
+        // Emit initial-registration event (issue #1423)
+        env.events().publish(
+            (String::from_str(&env, EVENT_SET_PLONK_SRS),),
+            (tau_g2, admin, env.ledger().sequence()),
+        );
     }
 
     /// Rotate the universal SRS with audit trail. Records the old and new
@@ -817,6 +871,11 @@ impl ZkVerifierContract {
 
         env.storage().instance().set(&DataKey::PlonkVerifyingKeyByHash(vk_hash.clone()), &vk);
         env.storage().instance().set(&DataKey::PlonkVerifyingKeyHash, &vk_hash);
+        // Emit initial-registration event (issue #1423)
+        env.events().publish(
+            (String::from_str(&env, EVENT_SET_PLONK_VK),),
+            (vk_hash, admin, env.ledger().sequence()),
+        );
     }
 
     /// Rotate the "current" PLONK verifying key with audit trail. Records
@@ -892,6 +951,11 @@ impl ZkVerifierContract {
 
         env.storage().instance().set(&DataKey::Groth16VerifyingKeyByHash(vk_hash.clone()), &vk);
         env.storage().instance().set(&DataKey::Groth16VerifyingKeyHash, &vk_hash);
+        // Emit initial-registration event (issue #1423)
+        env.events().publish(
+            (String::from_str(&env, EVENT_SET_GROTH16_VK),),
+            (vk_hash, admin, env.ledger().sequence()),
+        );
     }
 
     /// Rotate the "current" real Groth16 verifying key with audit trail.
@@ -1433,6 +1497,11 @@ impl ZkVerifierContract {
             security_level,
         };
         env.storage().instance().set(&DataKey::CircuitParams, &params);
+        // Emit initial-registration event (issue #1423)
+        env.events().publish(
+            (String::from_str(&env, EVENT_SET_CIRCUIT_PARAMS),),
+            (params.max_constraints, params.security_level, admin, env.ledger().sequence()),
+        );
     }
 
     /// Get current circuit parameters.
