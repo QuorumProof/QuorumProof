@@ -5,6 +5,23 @@ disputes, contract upgrades — wasn't monitored at all; an operator would
 only find out by manually querying state. This adds an event listener and
 two independent alerting paths so that activity is never silent.
 
+## Dashboard
+
+**[monitoring/grafana/dashboards/critical-events.json](../monitoring/grafana/dashboards/critical-events.json)**
+is the **pre-incident view**: it charts `quorumproof_critical_events_total` by category
+over time, shows the 15-minute revocation window that drives `RevocationSpike`, and
+plots the alert-dispatch failure rate that drives `CriticalEventAlertingDegraded`.
+
+The **alerts in `monitoring/prometheus/alerts.yml`** are the **paging layer**: they fire
+when a threshold is crossed and route to Slack/PagerDuty via Alertmanager. If you are
+being paged, open the dashboard first to understand the trend leading up to the alert,
+then use `GET /events/critical/recent` for per-event detail (topic, ledger, tx hash).
+
+The distinction matters: an operator watching the dashboard can see a revocation count
+trending toward the `RevocationSpike` threshold and investigate before being paged;
+once PagerDuty fires, the dashboard is the context window that explains whether the
+alert was a one-off spike or sustained activity.
+
 ## Architecture
 
 ```
