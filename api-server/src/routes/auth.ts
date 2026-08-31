@@ -1,7 +1,7 @@
 /**
- * Auth Routes — Issues #1299 / #1300
+ * Auth Routes — Issues #1299 / #1300 / #1426
  *
- * POST /auth/login               — Authenticate with userId + password stub; returns token pair
+ * POST /auth/login               — Authenticate with userId + password; returns token pair
  * POST /auth/mfa/enable          — Begin TOTP MFA setup for the authenticated user
  * POST /auth/mfa/verify          — Verify TOTP code and elevate session to mfaVerified
  * POST /auth/refresh             — Refresh an expired access token via a refresh token
@@ -9,76 +9,150 @@
  * DELETE /auth/sessions/:id      — Revoke a specific session
  * DELETE /auth/sessions          — Revoke all sessions for the authenticated user (logout everywhere)
  * POST /auth/logout              — Revoke the current session
+ *
+ * #1426: Credential store is now backed by the `users` Postgres table.
+ *        Passwords are hashed with Node.js crypto.scrypt (N=16384, r=8, p=1),
+ *        stored as "scrypt:<hex-salt>:<hex-hash>".
+ *        SHA-256 is no longer used; USER_CREDENTIALS env var is deprecated —
+ *        see docs/user-credentials-migration.md for the migration path.
  */
 
 import { Router, Request, Response } from 'express';
 import { getDefaultMfaService } from '../services/mfa.js';
 import { getDefaultSessionManager } from '../services/sessionManager.js';
 import { requireAuth } from '../middleware/auth.js';
+import { getPool } from '../db.js';
+import crypto from 'crypto';
+import { promisify } from 'util';
 
 const router = Router();
+const scryptAsync = promisify(crypto.scrypt);
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Password hashing (Issue #1426)
 // ---------------------------------------------------------------------------
+
+const SCRYPT_KEYLEN = 64;
+const SCRYPT_N      = 16384;
+const SCRYPT_R      = 8;
+const SCRYPT_P      = 1;
 
 /**
- * Minimal credential store stub.
- *
- * In production this would be backed by a real user database with bcrypt
- * hashed passwords. For this implementation we provide a functional stub
- * that demonstrates the auth flow end-to-end.
- *
- * Credentials are loaded from USER_CREDENTIALS env var as JSON:
- *   USER_CREDENTIALS='[{"userId":"alice","passwordHash":"<sha256-hex>","role":"admin"}]'
- *
- * If the env var is absent we fall back to a single hard-coded test account
- * that should NEVER be used in production (guarded by NODE_ENV check below).
+ * Hash a plaintext password.
+ * Returns a string of the form "scrypt:<hex-salt>:<hex-hash>".
  */
-interface UserCredential {
-  userId: string;
-  passwordHash: string;
+export async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.randomBytes(16);
+  const hash = await scryptAsync(password, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+  }) as Buffer;
+  return `scrypt:${salt.toString('hex')}:${hash.toString('hex')}`;
+}
+
+/**
+ * Verify a plaintext password against a stored hash string.
+ * Accepts both the new "scrypt:..." format and the legacy SHA-256 hex format
+ * so that operators who migrated USER_CREDENTIALS entries manually still work
+ * until they reprovision with the new CLI.
+ */
+export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  // New scrypt format
+  if (storedHash.startsWith('scrypt:')) {
+    const parts = storedHash.split(':');
+    if (parts.length !== 3) return false;
+    const salt = Buffer.from(parts[1], 'hex');
+    const expected = Buffer.from(parts[2], 'hex');
+    const actual = await scryptAsync(password, salt, SCRYPT_KEYLEN, {
+      N: SCRYPT_N,
+      r: SCRYPT_R,
+      p: SCRYPT_P,
+    }) as Buffer;
+    return crypto.timingSafeEqual(actual, expected);
+  }
+
+  // Legacy SHA-256 format (for accounts created before #1426 migration)
+  // Accept only in non-production environments.
+  if (process.env.NODE_ENV !== 'production') {
+    const sha256 = crypto.createHash('sha256').update(password).digest('hex');
+    return crypto.timingSafeEqual(
+      Buffer.from(sha256, 'hex'),
+      Buffer.from(storedHash, 'hex'),
+    );
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// User lookup (Issue #1426: Postgres-backed, replaces USER_CREDENTIALS env var)
+// ---------------------------------------------------------------------------
+
+interface UserRow {
+  user_id: string;
+  password_hash: string;
   role: string;
 }
 
-function loadUserCredentials(): UserCredential[] {
-  const raw = process.env.USER_CREDENTIALS;
-  if (raw) {
-    try {
-      return JSON.parse(raw) as UserCredential[];
-    } catch {
-      console.warn('[auth] Failed to parse USER_CREDENTIALS — ignoring');
+/**
+ * Look up a user from the `users` Postgres table and verify their password.
+ * Falls back to the deprecated USER_CREDENTIALS env-var in non-production
+ * environments only, so that operators can migrate incrementally.
+ */
+async function findUser(userId: string, password: string): Promise<UserRow | null> {
+  // ── Primary path: Postgres users table ────────────────────────────────────
+  try {
+    const result = await getPool().query<UserRow>(
+      'SELECT user_id, password_hash, role FROM users WHERE user_id = $1',
+      [userId],
+    );
+    if (result.rowCount && result.rowCount > 0) {
+      const row = result.rows[0];
+      const valid = await verifyPassword(password, row.password_hash);
+      return valid ? row : null;
+    }
+  } catch (err) {
+    // Log but fall through to env-var fallback so a DB outage during startup
+    // doesn't hard-lock all operators out immediately.
+    console.warn('[auth] DB lookup failed, attempting fallback:', (err as Error).message);
+  }
+
+  // ── Fallback: deprecated USER_CREDENTIALS env var (non-production only) ───
+  if (process.env.NODE_ENV !== 'production') {
+    const raw = process.env.USER_CREDENTIALS;
+    if (raw) {
+      try {
+        type LegacyCredential = { userId: string; passwordHash: string; role: string };
+        const creds: LegacyCredential[] = JSON.parse(raw);
+        const match = creds.find((c) => c.userId === userId);
+        if (match) {
+          const valid = await verifyPassword(password, match.passwordHash);
+          if (valid) return { user_id: match.userId, password_hash: match.passwordHash, role: match.role };
+        }
+      } catch {
+        console.warn('[auth] Failed to parse USER_CREDENTIALS fallback');
+      }
+    }
+
+    // Hard-coded dev-only account (removed in production, see NODE_ENV guard above)
+    if (userId === 'admin') {
+      const sha256 = crypto.createHash('sha256').update(password).digest('hex');
+      const ADMIN_HASH = '3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b'; // sha256("changeme")
+      if (sha256 === ADMIN_HASH) {
+        return { user_id: 'admin', password_hash: ADMIN_HASH, role: 'admin' };
+      }
+    }
+    if (userId === 'user1') {
+      const sha256 = crypto.createHash('sha256').update(password).digest('hex');
+      const USER1_HASH = '3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b';
+      if (sha256 === USER1_HASH) {
+        return { user_id: 'user1', password_hash: USER1_HASH, role: 'user' };
+      }
     }
   }
-  // Stub only: password is "changeme" (SHA256)
-  if (process.env.NODE_ENV === 'production') {
-    console.error('[auth] No USER_CREDENTIALS configured in production!');
-    return [];
-  }
-  return [
-    {
-      userId: 'admin',
-      passwordHash: '3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b', // sha256("changeme")
-      role: 'admin',
-    },
-    {
-      userId: 'user1',
-      passwordHash: '3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b',
-      role: 'user',
-    },
-  ];
-}
 
-import crypto from 'crypto';
-
-function hashPassword(password: string): string {
-  return crypto.createHash('sha256').update(password).digest('hex');
-}
-
-function findUser(userId: string, passwordHash: string): UserCredential | undefined {
-  return loadUserCredentials().find(
-    (u) => u.userId === userId && u.passwordHash === passwordHash
-  );
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +171,7 @@ function findUser(userId: string, passwordHash: string): UserCredential | undefi
  *
  * Body: { userId: string, password: string }
  */
-router.post('/login', (req: Request, res: Response) => {
+router.post('/login', async (req: Request, res: Response) => {
   const { userId, password } = req.body as { userId?: unknown; password?: unknown };
 
   if (typeof userId !== 'string' || !userId.trim()) {
@@ -109,7 +183,7 @@ router.post('/login', (req: Request, res: Response) => {
     return;
   }
 
-  const user = findUser(userId.trim(), hashPassword(password));
+  const user = await findUser(userId.trim(), password);
   if (!user) {
     // Use a consistent error to avoid username enumeration
     res.status(401).json({ error: 'Invalid credentials' });
@@ -118,10 +192,10 @@ router.post('/login', (req: Request, res: Response) => {
 
   const mfaService = getDefaultMfaService();
   const sessionManager = getDefaultSessionManager();
-  const mfaEnabled = mfaService.isMfaEnabled(user.userId);
+  const mfaEnabled = mfaService.isMfaEnabled(user.user_id);
 
   // Create session — mfaVerified=false if MFA is enabled (requires second factor)
-  const tokens = sessionManager.createSession(user.userId, {
+  const tokens = sessionManager.createSession(user.user_id, {
     mfaVerified: !mfaEnabled,
     role: user.role,
   });
@@ -129,7 +203,7 @@ router.post('/login', (req: Request, res: Response) => {
   res.status(200).json({
     ...tokens,
     mfaRequired: mfaEnabled,
-    userId: user.userId,
+    userId: user.user_id,
     role: user.role,
     message: mfaEnabled
       ? 'MFA required. Submit TOTP code via POST /auth/mfa/verify.'

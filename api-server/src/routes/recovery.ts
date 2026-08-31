@@ -1,35 +1,30 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
+import { getPool } from '../db.js';
 
 const router = Router();
 
-// ---- In-memory store (mirrors the notifications.ts pattern) ----
+// ---- Postgres-backed store (Issue #1429) ----
+// Replaced the in-memory Map/array store with getPool()-backed queries so that
+// in-flight recovery sessions survive API server restarts and work correctly
+// across multiple server instances.  OTP expiry is enforced via the expires_at
+// column; a periodic or on-demand cleanup removes stale rows.
 
-interface RecoveryRequest {
+interface RecoveryRequestRow {
   id: string;
-  credentialId: string;
-  lostWallet: string;
-  newWallet: string;
-  contactType: 'email' | 'phone';
-  contactValue: string;
+  credential_id: string;
+  lost_wallet: string;
+  new_wallet: string;
+  contact_type: 'email' | 'phone';
+  contact_value: string;
   status: 'pending_verification' | 'verified' | 'pending_approval' | 'approved' | 'rejected' | 'executed';
-  createdAt: string;
-  verifiedAt?: string;
-  resolvedAt?: string;
-  resolvedBy?: string;
-  rejectionReason?: string;
+  created_at: string;
+  verified_at?: string | null;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  rejection_reason?: string | null;
   attestors: string[];
 }
-
-interface PendingOtp {
-  requestId: string;
-  code: string;
-  expiresAt: number;
-  attempts: number;
-}
-
-const recoveryRequests = new Map<string, RecoveryRequest>();
-const pendingOtps = new Map<string, PendingOtp>();
 
 function generateId(): string {
   return randomBytes(8).toString('hex');
@@ -39,9 +34,18 @@ function generateOtp(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+/** Delete expired OTP rows (best-effort; does not throw on failure). */
+async function pruneExpiredOtps(): Promise<void> {
+  try {
+    await getPool().query('DELETE FROM recovery_otps WHERE expires_at < now()');
+  } catch {
+    // Non-fatal — the query filter in verify-otp guards correctness.
+  }
+}
+
 // POST /api/recovery/request
 // Body: { credentialId, lostWallet, newWallet, contactType, contactValue }
-router.post('/request', (req: Request, res: Response) => {
+router.post('/request', async (req: Request, res: Response) => {
   const { credentialId, lostWallet, newWallet, contactType, contactValue } = req.body;
 
   if (!credentialId || typeof credentialId !== 'string') {
@@ -71,25 +75,27 @@ router.post('/request', (req: Request, res: Response) => {
 
   const id = generateId();
   const otp = generateOtp();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-  recoveryRequests.set(id, {
-    id,
-    credentialId,
-    lostWallet,
-    newWallet,
-    contactType,
-    contactValue,
-    status: 'pending_verification',
-    createdAt: new Date().toISOString(),
-    attestors: [],
-  });
+  try {
+    const pool = getPool();
+    await pool.query(
+      `INSERT INTO recovery_requests
+         (id, credential_id, lost_wallet, new_wallet, contact_type, contact_value, status, attestors)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending_verification', '{}')`,
+      [id, credentialId, lostWallet, newWallet, contactType, contactValue],
+    );
 
-  pendingOtps.set(id, {
-    requestId: id,
-    code: otp,
-    expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
-    attempts: 0,
-  });
+    await pool.query(
+      `INSERT INTO recovery_otps (request_id, code, expires_at, attempts)
+       VALUES ($1, $2, $3, 0)`,
+      [id, otp, expiresAt],
+    );
+  } catch (err) {
+    console.error('[recovery] DB error creating request:', err);
+    res.status(500).json({ error: 'Failed to create recovery request' });
+    return;
+  }
 
   // Stub: in production, dispatch via SendGrid / Twilio
   if (contactType === 'email') {
@@ -103,7 +109,7 @@ router.post('/request', (req: Request, res: Response) => {
 
 // POST /api/recovery/verify-otp
 // Body: { requestId, code }
-router.post('/verify-otp', (req: Request, res: Response) => {
+router.post('/verify-otp', async (req: Request, res: Response) => {
   const { requestId, code } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -115,49 +121,74 @@ router.post('/verify-otp', (req: Request, res: Response) => {
     return;
   }
 
-  const request = recoveryRequests.get(requestId);
-  if (!request) {
-    res.status(404).json({ error: 'Recovery request not found' });
-    return;
-  }
-  if (request.status !== 'pending_verification') {
-    res.status(409).json({ error: 'Request is not awaiting verification' });
-    return;
-  }
+  try {
+    const pool = getPool();
 
-  const otpRecord = pendingOtps.get(requestId);
-  if (!otpRecord) {
-    res.status(410).json({ error: 'Verification code expired. Please start a new request.' });
-    return;
-  }
-  if (Date.now() > otpRecord.expiresAt) {
-    pendingOtps.delete(requestId);
-    res.status(410).json({ error: 'Verification code expired. Please start a new request.' });
-    return;
-  }
+    const reqResult = await pool.query<RecoveryRequestRow>(
+      'SELECT * FROM recovery_requests WHERE id = $1',
+      [requestId],
+    );
+    if (reqResult.rowCount === 0) {
+      res.status(404).json({ error: 'Recovery request not found' });
+      return;
+    }
+    const request = reqResult.rows[0];
 
-  otpRecord.attempts += 1;
-  if (otpRecord.attempts > 5) {
-    pendingOtps.delete(requestId);
-    res.status(429).json({ error: 'Too many attempts. Please start a new request.' });
-    return;
+    if (request.status !== 'pending_verification') {
+      res.status(409).json({ error: 'Request is not awaiting verification' });
+      return;
+    }
+
+    // Fetch OTP — also filters out expired rows via query
+    const otpResult = await pool.query<{ code: string; expires_at: string; attempts: number }>(
+      'SELECT code, expires_at, attempts FROM recovery_otps WHERE request_id = $1 AND expires_at > now()',
+      [requestId],
+    );
+
+    if (otpResult.rowCount === 0) {
+      // Either already deleted or expired
+      await pool.query('DELETE FROM recovery_otps WHERE request_id = $1', [requestId]);
+      res.status(410).json({ error: 'Verification code expired. Please start a new request.' });
+      return;
+    }
+
+    const otp = otpResult.rows[0];
+    const newAttempts = otp.attempts + 1;
+
+    if (newAttempts > 5) {
+      await pool.query('DELETE FROM recovery_otps WHERE request_id = $1', [requestId]);
+      res.status(429).json({ error: 'Too many attempts. Please start a new request.' });
+      return;
+    }
+
+    if (otp.code !== code.trim()) {
+      await pool.query(
+        'UPDATE recovery_otps SET attempts = $1 WHERE request_id = $2',
+        [newAttempts, requestId],
+      );
+      res.status(400).json({ error: `Invalid code. ${5 - newAttempts} attempt(s) remaining.` });
+      return;
+    }
+
+    // Code is correct — delete OTP and advance status
+    await pool.query('DELETE FROM recovery_otps WHERE request_id = $1', [requestId]);
+    await pool.query(
+      `UPDATE recovery_requests
+       SET status = 'pending_approval', verified_at = now()
+       WHERE id = $1`,
+      [requestId],
+    );
+
+    res.json({ success: true, message: 'Identity verified. Your request is now pending attestor approval.' });
+  } catch (err) {
+    console.error('[recovery] DB error verifying OTP:', err);
+    res.status(500).json({ error: 'Failed to verify OTP' });
   }
-
-  if (otpRecord.code !== code.trim()) {
-    res.status(400).json({ error: `Invalid code. ${5 - otpRecord.attempts} attempt(s) remaining.` });
-    return;
-  }
-
-  pendingOtps.delete(requestId);
-  request.status = 'pending_approval';
-  request.verifiedAt = new Date().toISOString();
-
-  res.json({ success: true, message: 'Identity verified. Your request is now pending attestor approval.' });
 });
 
 // POST /api/recovery/resend-otp
 // Body: { requestId }
-router.post('/resend-otp', (req: Request, res: Response) => {
+router.post('/resend-otp', async (req: Request, res: Response) => {
   const { requestId } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -165,48 +196,74 @@ router.post('/resend-otp', (req: Request, res: Response) => {
     return;
   }
 
-  const request = recoveryRequests.get(requestId);
-  if (!request) {
-    res.status(404).json({ error: 'Recovery request not found' });
-    return;
-  }
-  if (request.status !== 'pending_verification') {
-    res.status(409).json({ error: 'Request is not awaiting verification' });
-    return;
-  }
+  try {
+    const pool = getPool();
 
-  const otp = generateOtp();
-  pendingOtps.set(requestId, {
-    requestId,
-    code: otp,
-    expiresAt: Date.now() + 10 * 60 * 1000,
-    attempts: 0,
-  });
+    const reqResult = await pool.query<RecoveryRequestRow>(
+      'SELECT * FROM recovery_requests WHERE id = $1',
+      [requestId],
+    );
+    if (reqResult.rowCount === 0) {
+      res.status(404).json({ error: 'Recovery request not found' });
+      return;
+    }
+    const request = reqResult.rows[0];
 
-  if (request.contactType === 'email') {
-    console.log(`[recovery] Resent OTP for request ${requestId} → email ${request.contactValue}: ${otp}`);
-  } else {
-    console.log(`[recovery] Resent OTP for request ${requestId} → SMS ${request.contactValue}: ${otp}`);
+    if (request.status !== 'pending_verification') {
+      res.status(409).json({ error: 'Request is not awaiting verification' });
+      return;
+    }
+
+    const otp = generateOtp();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    // Upsert — replace any existing OTP for this request
+    await pool.query(
+      `INSERT INTO recovery_otps (request_id, code, expires_at, attempts)
+       VALUES ($1, $2, $3, 0)
+       ON CONFLICT (request_id) DO UPDATE
+         SET code = EXCLUDED.code,
+             expires_at = EXCLUDED.expires_at,
+             attempts = 0`,
+      [requestId, otp, expiresAt],
+    );
+
+    if (request.contact_type === 'email') {
+      console.log(`[recovery] Resent OTP for request ${requestId} → email ${request.contact_value}: ${otp}`);
+    } else {
+      console.log(`[recovery] Resent OTP for request ${requestId} → SMS ${request.contact_value}: ${otp}`);
+    }
+
+    res.json({ message: `Verification code resent to your ${request.contact_type}` });
+  } catch (err) {
+    console.error('[recovery] DB error resending OTP:', err);
+    res.status(500).json({ error: 'Failed to resend OTP' });
   }
-
-  res.json({ message: `Verification code resent to your ${request.contactType}` });
 });
 
 // GET /api/recovery/status/:requestId
-router.get('/status/:requestId', (req: Request, res: Response) => {
-  const request = recoveryRequests.get(req.params.requestId);
-  if (!request) {
-    res.status(404).json({ error: 'Recovery request not found' });
-    return;
-  }
+router.get('/status/:requestId', async (req: Request, res: Response) => {
+  try {
+    const result = await getPool().query<RecoveryRequestRow>(
+      'SELECT * FROM recovery_requests WHERE id = $1',
+      [req.params.requestId],
+    );
+    if (result.rowCount === 0) {
+      res.status(404).json({ error: 'Recovery request not found' });
+      return;
+    }
 
-  const { contactValue: _hidden, ...safeRequest } = request;
-  res.json(safeRequest);
+    const { contact_value: _hidden, ...safeRequest } = result.rows[0];
+    res.json(safeRequest);
+  } catch (err) {
+    console.error('[recovery] DB error fetching status:', err);
+    res.status(500).json({ error: 'Failed to fetch recovery request' });
+  }
 });
 
 // GET /api/recovery/pending?attestor=<addr>
 // Returns pending_approval requests for attestors to review
-router.get('/pending', (req: Request, res: Response) => {
+router.get('/pending', async (req: Request, res: Response) => {
   const { attestor } = req.query;
 
   if (!attestor || typeof attestor !== 'string') {
@@ -214,16 +271,27 @@ router.get('/pending', (req: Request, res: Response) => {
     return;
   }
 
-  const pending = Array.from(recoveryRequests.values())
-    .filter((r) => r.status === 'pending_approval')
-    .map(({ contactValue: _hidden, ...r }) => r);
+  try {
+    const result = await getPool().query<RecoveryRequestRow>(
+      `SELECT id, credential_id, lost_wallet, new_wallet, contact_type,
+              status, created_at, verified_at, resolved_at, resolved_by,
+              rejection_reason, attestors
+       FROM recovery_requests
+       WHERE status = 'pending_approval'
+       ORDER BY created_at ASC`,
+    );
 
-  res.json({ attestor, items: pending, total: pending.length });
+    const items = result.rows;
+    res.json({ attestor, items, total: items.length });
+  } catch (err) {
+    console.error('[recovery] DB error fetching pending requests:', err);
+    res.status(500).json({ error: 'Failed to fetch pending requests' });
+  }
 });
 
 // POST /api/recovery/approve
 // Body: { requestId, attestor }
-router.post('/approve', (req: Request, res: Response) => {
+router.post('/approve', async (req: Request, res: Response) => {
   const { requestId, attestor } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -235,32 +303,49 @@ router.post('/approve', (req: Request, res: Response) => {
     return;
   }
 
-  const request = recoveryRequests.get(requestId);
-  if (!request) {
-    res.status(404).json({ error: 'Recovery request not found' });
-    return;
+  try {
+    const pool = getPool();
+
+    const reqResult = await pool.query<RecoveryRequestRow>(
+      'SELECT status, attestors FROM recovery_requests WHERE id = $1',
+      [requestId],
+    );
+    if (reqResult.rowCount === 0) {
+      res.status(404).json({ error: 'Recovery request not found' });
+      return;
+    }
+    const request = reqResult.rows[0];
+
+    if (request.status !== 'pending_approval') {
+      res.status(409).json({ error: `Cannot approve a request with status "${request.status}"` });
+      return;
+    }
+
+    const updatedAttestors = request.attestors.includes(attestor)
+      ? request.attestors
+      : [...request.attestors, attestor];
+
+    await pool.query(
+      `UPDATE recovery_requests
+       SET status = 'approved',
+           resolved_at = now(),
+           resolved_by = $1,
+           attestors = $2
+       WHERE id = $3`,
+      [attestor, updatedAttestors, requestId],
+    );
+
+    console.log(`[recovery] Request ${requestId} approved by attestor ${attestor}`);
+    res.json({ success: true, message: 'Recovery request approved. Credential re-issuance has been initiated.' });
+  } catch (err) {
+    console.error('[recovery] DB error approving request:', err);
+    res.status(500).json({ error: 'Failed to approve recovery request' });
   }
-  if (request.status !== 'pending_approval') {
-    res.status(409).json({ error: `Cannot approve a request with status "${request.status}"` });
-    return;
-  }
-
-  if (!request.attestors.includes(attestor)) {
-    request.attestors.push(attestor);
-  }
-
-  request.status = 'approved';
-  request.resolvedAt = new Date().toISOString();
-  request.resolvedBy = attestor;
-
-  console.log(`[recovery] Request ${requestId} approved by attestor ${attestor}`);
-
-  res.json({ success: true, message: 'Recovery request approved. Credential re-issuance has been initiated.' });
 });
 
 // POST /api/recovery/reject
 // Body: { requestId, attestor, reason }
-router.post('/reject', (req: Request, res: Response) => {
+router.post('/reject', async (req: Request, res: Response) => {
   const { requestId, attestor, reason } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -272,24 +357,42 @@ router.post('/reject', (req: Request, res: Response) => {
     return;
   }
 
-  const request = recoveryRequests.get(requestId);
-  if (!request) {
-    res.status(404).json({ error: 'Recovery request not found' });
-    return;
+  try {
+    const pool = getPool();
+
+    const reqResult = await pool.query<RecoveryRequestRow>(
+      'SELECT status FROM recovery_requests WHERE id = $1',
+      [requestId],
+    );
+    if (reqResult.rowCount === 0) {
+      res.status(404).json({ error: 'Recovery request not found' });
+      return;
+    }
+    const request = reqResult.rows[0];
+
+    if (request.status !== 'pending_approval') {
+      res.status(409).json({ error: `Cannot reject a request with status "${request.status}"` });
+      return;
+    }
+
+    await pool.query(
+      `UPDATE recovery_requests
+       SET status = 'rejected',
+           resolved_at = now(),
+           resolved_by = $1,
+           rejection_reason = $2
+       WHERE id = $3`,
+      [attestor, reason ?? 'No reason provided', requestId],
+    );
+
+    console.log(`[recovery] Request ${requestId} rejected by attestor ${attestor}`);
+    res.json({ success: true, message: 'Recovery request rejected.' });
+  } catch (err) {
+    console.error('[recovery] DB error rejecting request:', err);
+    res.status(500).json({ error: 'Failed to reject recovery request' });
   }
-  if (request.status !== 'pending_approval') {
-    res.status(409).json({ error: `Cannot reject a request with status "${request.status}"` });
-    return;
-  }
-
-  request.status = 'rejected';
-  request.resolvedAt = new Date().toISOString();
-  request.resolvedBy = attestor;
-  request.rejectionReason = reason ?? 'No reason provided';
-
-  console.log(`[recovery] Request ${requestId} rejected by attestor ${attestor}`);
-
-  res.json({ success: true, message: 'Recovery request rejected.' });
 });
 
+// Expose pruneExpiredOtps for the startup scheduler / test helpers.
+export { pruneExpiredOtps };
 export default router;

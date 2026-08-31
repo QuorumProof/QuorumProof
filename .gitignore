@@ -126,3 +126,26 @@ FILES_CHANGED.txt
 TASK_IMPLEMENTATIONS.md
 IMPLEMENTATION_SUMMARY.md
 VERIFICATION_CHECKLIST.md
+
+# vitest / test runner output
+api-server/test-results/
+api-server/.vitest-cache/
+test-results/
+
+# Vitest UI / coverage HTML reports
+api-server/coverage/
+html/
+
+# TypeScript build info
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Temporary / scratch files at repo root
+scratch.*
+tmp.*
+notes.md
+
+# OS-level junk
+.DS_Store
+ehthumbs.db
+Desktop.ini
