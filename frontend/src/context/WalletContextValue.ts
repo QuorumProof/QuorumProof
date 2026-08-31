@@ -5,6 +5,8 @@ export interface WalletState {
   address: string | null;
   wallets: string[];
   walletType: WalletType | null;
+  /** BIP-44 account index persisted alongside the active wallet type. */
+  accountIndex: number;
   activeIndex: number;
   accountIndex: number;
   isConnected: boolean;

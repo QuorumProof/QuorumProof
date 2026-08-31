@@ -35,10 +35,12 @@ export default function GdprRequest() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createdRequest, setCreatedRequest] = useState<GdprRequestRecord | null>(null);
 
+  // ── Lookup section ──────────────────────────────────────────────────────────
   const [lookupId, setLookupId] = useState('');
   const [lookupResult, setLookupResult] = useState<GdprRequestRecord | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
 
+  // ── Consent section ─────────────────────────────────────────────────────────
   const [consentRequestId, setConsentRequestId] = useState('');
   const [consentAddress, setConsentAddress] = useState('');
   const [consentSubmitting, setConsentSubmitting] = useState(false);
@@ -58,6 +60,7 @@ export default function GdprRequest() {
 
   const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
+
     const id = parseInt(credentialId.trim(), 10);
     if (!Number.isInteger(id) || id <= 0) {
       setSubmitError('Enter a valid credential ID (positive integer).');
@@ -107,8 +110,14 @@ export default function GdprRequest() {
       setLookupError('Enter a request ID.');
       return;
     }
+
+    // Cancel any previous in-flight lookup
+    lookupAbortRef.current?.abort();
+    lookupAbortRef.current = new AbortController();
+
     setLookupError(null);
     setLookupResult(null);
+
     try {
       const data = await apiClient.get<GdprRequestRecord>(
         `/api/gdpr/request/${encodeURIComponent(id)}`,
@@ -116,7 +125,14 @@ export default function GdprRequest() {
       );
       setLookupResult(data);
     } catch (err) {
-      setLookupError(err instanceof Error ? err.message : 'Lookup failed.');
+      if (err instanceof Error && err.name === 'AbortError') return;
+      setLookupError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+          ? err.message
+          : 'Lookup failed.',
+      );
     }
   };
 
@@ -128,6 +144,10 @@ export default function GdprRequest() {
       setConsentError('Both request ID and attestor address are required.');
       return;
     }
+
+    // Cancel any previous in-flight consent request
+    consentAbortRef.current?.abort();
+    consentAbortRef.current = new AbortController();
 
     setConsentSubmitting(true);
     setConsentError(null);
@@ -141,17 +161,28 @@ export default function GdprRequest() {
       );
       setConsentResult(data);
     } catch (err) {
-      setConsentError(err instanceof Error ? err.message : 'Consent failed.');
+      if (err instanceof Error && err.name === 'AbortError') return;
+      setConsentError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+          ? err.message
+          : 'Consent failed.',
+      );
     } finally {
       setConsentSubmitting(false);
     }
   };
+
+  // ── Render helpers ──────────────────────────────────────────────────────────
 
   const statusBadge = (status: RequestStatus) => {
     if (status === 'anonymized') return <span className="badge badge--green">Anonymized</span>;
     if (status === 'rejected') return <span className="badge badge--red">Rejected</span>;
     return <span className="badge badge--gray">Pending Consent</span>;
   };
+
+  // ── JSX ─────────────────────────────────────────────────────────────────────
 
   return (
     <>
@@ -217,7 +248,11 @@ export default function GdprRequest() {
               </p>
             )}
             {submitError && (
-              <p style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}>
+              <p
+                role="alert"
+                data-testid="submit-error"
+                style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}
+              >
                 {submitError}
               </p>
             )}
@@ -270,7 +305,11 @@ export default function GdprRequest() {
               />
             </div>
             {lookupError && (
-              <p style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}>
+              <p
+                role="alert"
+                data-testid="lookup-error"
+                style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}
+              >
                 {lookupError}
               </p>
             )}
@@ -350,12 +389,16 @@ export default function GdprRequest() {
               </div>
             </div>
             {consentError && (
-              <p style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}>
+              <p
+                role="alert"
+                data-testid="consent-error"
+                style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}
+              >
                 {consentError}
               </p>
             )}
             <button type="submit" className="btn btn--primary" disabled={consentSubmitting}>
-              {consentSubmitting ? 'Submitting...' : 'Submit Consent'}
+              {consentSubmitting ? 'Submitting…' : 'Submit Consent'}
             </button>
           </form>
 

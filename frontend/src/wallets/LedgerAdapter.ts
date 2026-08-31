@@ -59,6 +59,9 @@ export class LedgerAdapter implements WalletAdapter {
     const { default: TransportWebUSB } = await import('@ledgerhq/hw-transport-webusb');
     const StellarApp = (await import('@ledgerhq/hw-app-str')).default;
 
+    const idx = accountIndex ?? this._accountIndex;
+    const path = LedgerAdapter.derivationPath(idx);
+
     const transport = await TransportWebUSB.create();
     const stellar = new StellarApp(transport);
     const txBuffer = Buffer.from(xdr, 'base64');

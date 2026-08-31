@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { STELLAR_NETWORK } from '../config/env';
 import type { WalletType } from '../wallets/types';
-import { detectAvailableWallets } from '../wallets/registry';
+import { detectAvailableWallets, getWalletAdapter } from '../wallets/registry';
 import { isConnected, isAllowed, setAllowed, getAddress } from '@stellar/freighter-api';
 import type { WalletState } from './WalletContextValue';
 import { WalletContext } from './WalletContextValue';
@@ -89,7 +89,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
         // Detect available wallets
         const detected = await detectAvailableWallets();
         setAvailableWallets(detected);
-        
+
         const connResult = await isConnected();
         const freighterConnected = connResult.isConnected;
         setHasFreighter(freighterConnected);
@@ -159,6 +159,21 @@ export function WalletProvider({ children }: WalletProviderProps) {
           return newWallets;
         });
       }
+
+      setWallets(prev => {
+        const existing = prev.findIndex(w => w === connectedAddress);
+        if (existing >= 0) {
+          setActiveIndex(existing);
+          setWalletTypes(types => types.map((t, i) => (i === existing ? walletToUse : t)));
+          setAccountIndices(indices => indices.map((idx, i) => (i === existing ? hwAccountIndex : idx)));
+          return prev;
+        }
+        const newWallets = [...prev, connectedAddress];
+        setActiveIndex(newWallets.length - 1);
+        setWalletTypes(types => [...types, walletToUse]);
+        setAccountIndices(indices => [...indices, hwAccountIndex]);
+        return newWallets;
+      });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect wallet';
       setError(errorMsg);
@@ -199,6 +214,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     address,
     wallets,
     walletType,
+    accountIndex,
     activeIndex,
     accountIndex,
     isConnected: wallets.length > 0,

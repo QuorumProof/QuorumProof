@@ -15,13 +15,18 @@ export interface WalletAdapter {
 
 export interface WalletState {
   address: string | null;
+  wallets: string[];
   walletType: WalletType | null;
+  /** BIP-44 account index persisted alongside the active wallet type. */
+  accountIndex: number;
+  activeIndex: number;
   isConnected: boolean;
+  hasFreighter: boolean;
   isInitializing: boolean;
   network: string;
   error: string | null;
   accountIndex?: number;
   connect: (type: WalletType, accountIndex?: number) => Promise<void>;
   disconnect: () => void;
-  getAdapter: () => WalletAdapter | null;
+  switchWallet: (index: number) => void;
 }
