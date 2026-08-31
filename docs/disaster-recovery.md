@@ -79,15 +79,22 @@ Use this procedure if there is evidence the `api-server` process, its host, or o
 
 Use this procedure the moment a contract bug is discovered that could be exploited before a fix ships — do not wait for a full root-cause before pausing.
 
-1. **Pause immediately.** Two mechanisms exist; prefer the circuit breaker unless you need the simpler binary pause:
-   - `soroban contract invoke -- emergency_pause --admin <ADMIN> --reason "<short description>"` — moves the contract to `CircuitBreakerState::Paused`, blocks all mutating calls, and is logged as a `CircuitBreaker` event with the reason attached.
-   - `soroban contract invoke -- pause --admin <ADMIN>` — the simpler legacy binary pause flag (`is_paused()`), does not carry a reason and is not part of the circuit breaker state machine. Prefer `emergency_pause` for anything worth a postmortem.
-   - A lighter option for issues that only need writes slowed, not stopped, is `emergency_degrade --admin <ADMIN> --reason "..."` (`CircuitBreakerState::Degraded`), which rate-limits writes per ledger instead of blocking them entirely — use this for suspected-but-unconfirmed issues where halting the system entirely is a disproportionate response.
-   - Both circuit breaker states auto-recover after `ttl_seconds` if `auto_recover` is enabled in `CircuitBreakerConfig` — check `get_circuit_breaker_state()` and do not assume a pause is permanent without also disabling auto-recovery or tracking the TTL.
-2. **Confirm the pause took effect**: `soroban contract invoke -- get_circuit_breaker_state` (or `is_paused` for the legacy flag) before communicating "system is safe" to anyone.
+**All three contracts (quorum_proof, sbt_registry, zk_verifier) support per-contract pause/unpause.**
+
+1. **Pause the affected contract(s) immediately.** Two mechanisms exist:
+   - **quorum_proof only** — `soroban contract invoke <QUORUM_PROOF_ID> emergency_pause --admin <ADMIN> --reason "<short description>"` — moves to `CircuitBreakerState::Paused`, blocks all mutating calls, logged as a `CircuitBreaker` event. Lighter option: `emergency_degrade` to rate-limit writes instead. Both auto-recover after `ttl_seconds` if `auto_recover` is enabled — check `get_circuit_breaker_state()`.
+   - **All three contracts** — `soroban contract invoke <CONTRACT_ID> pause --admin <ADMIN>` — simpler binary pause flag (`is_paused()` returns true). Does not carry a reason or auto-recover; requires manual `unpause`. Use when you need immediate, unconditional halt across all state-changing operations in a contract.
+2. **Confirm pause took effect**: 
+   - quorum_proof: `soroban contract invoke <QUORUM_PROOF_ID> get_circuit_breaker_state` or `soroban contract invoke <QUORUM_PROOF_ID> is_paused`
+   - sbt_registry: `soroban contract invoke <SBT_REGISTRY_ID> is_paused`
+   - zk_verifier: `soroban contract invoke <ZK_VERIFIER_ID> is_paused`
 3. **Assess exploitability**: can the bug be triggered by a read-only call, or does it require a mutating call that is now blocked? A read-path bug is not mitigated by pausing writes.
 4. **Fix, test, redeploy**: develop the fix against a testnet fork, run the full contract test suite plus a regression test that reproduces the original bug, then follow §1.2 (Contract Redeployment).
-5. **Resume**: `soroban contract invoke -- resume --admin <ADMIN>` once the fix is live and verified — or `unpause` if the legacy flag was used. Do not resume on a timer; resume only after the fix is confirmed deployed.
+5. **Resume** once the fix is live and verified:
+   - quorum_proof: `soroban contract invoke <QUORUM_PROOF_ID> resume --admin <ADMIN>` (circuit breaker) or `unpause` (binary flag)
+   - sbt_registry: `soroban contract invoke <SBT_REGISTRY_ID> unpause --admin <ADMIN>`
+   - zk_verifier: `soroban contract invoke <ZK_VERIFIER_ID> unpause --admin <ADMIN>`
+   - Do not resume on a timer; resume only after the fix is confirmed deployed.
 6. **Disclose** per [SECURITY.md](../SECURITY.md)'s embargo guidance once affected users have had a chance to act.
 
 #### Emergency Withdrawal Considerations
