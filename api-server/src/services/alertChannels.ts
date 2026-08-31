@@ -101,3 +101,30 @@ export async function dispatchAlert(payload: AlertPayload): Promise<AlertChannel
   if (payload.severity === 'critical') sends.push(sendPagerDutyAlert(payload));
   return Promise.all(sends);
 }
+
+/**
+ * Dispatches a warning-severity alert when the WebSocket message drop rate
+ * exceeds the configured threshold for a sustained period.
+ * Called from src/ws/metrics.ts after detecting a sustained drop burst.
+ *
+ * @param dropsInWindow - number of messages dropped in the observation window
+ * @param windowSeconds - length of the observation window in seconds
+ * @param instanceId - ws instance identifier for dedup key
+ */
+export async function dispatchWsMessageDropAlert(
+  dropsInWindow: number,
+  windowSeconds: number,
+  instanceId: string,
+): Promise<AlertChannelResult[]> {
+  return dispatchAlert({
+    title: 'Sustained WebSocket Message Drops',
+    description:
+      `${dropsInWindow} message(s) dropped in the last ${windowSeconds}s on instance ${instanceId}. ` +
+      'One or more clients are falling behind the send queue. ' +
+      'Check for slow consumers or network issues. ' +
+      'See docs/operational-runbook.md#ws-message-drops for remediation steps.',
+    severity: 'warning',
+    dedupKey: `ws-message-drops-${instanceId}`,
+    metadata: { dropsInWindow, windowSeconds, instanceId },
+  });
+}
