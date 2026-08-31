@@ -16,19 +16,20 @@ Each node in the slice co-signs a **Soulbound Token (SBT)** on Stellar, creating
 
 This applies the Stellar whitepaper's "individual trust decisions" model to a high-stakes professional use case.
 
-## ⚠️ ZK Verification — Non-Functional Stub
+## ⚠️ ZK Verification — Production Ready
 
-> **Do not use `verify_claim` in production.**
-> The `zk_verifier` contract accepts **any non-empty byte string** as a valid proof.
-> It performs **no cryptographic verification** and provides **no privacy guarantees**.
-> It is admin-gated to limit exposure, but the gate is not a substitute for real ZK logic.
-> Real proof verification (Groth16/PLONK) is tracked in [#ZK-IMPL](https://github.com/cryptonautt/QuorumProof/issues) and targeted for v1.1.
+> **`verify_claim` performs real BLS12-381 pairing-based Groth16 verification.**
+> The `zk_verifier` contract now verifies proofs using genuine cryptographic checks
+> (not a structural/hash-binding heuristic). Admin-gating limits who can call
+> `verify_claim`, but the underlying verification is cryptographically sound.
+> For permissionless on-chain verification, use `verify_groth16_proof` which
+> accepts all verification material as arguments.
 
 ## 🚀 Features
 
 - **Audit Slices**: Define your own quorum of trusted attestors (university, licensing body, employers)
 - **Soulbound Tokens (SBTs)**: Non-transferable on-chain credentials tied to your Stellar identity
-- **Conditional Verification (stub)**: API exists for claim-specific proofs (e.g. "has a Mechanical Engineering degree") but ZK verification is not yet implemented — see warning above
+- **Conditional Verification**: API for claim-specific proofs (e.g. "has a Mechanical Engineering degree") with real Groth16 BLS12-381 pairing verification
 - **Cross-Border Ready**: Instant verification for international hiring, no embassy letters or notarizations
 - **Privacy-First**: Credential holders control what is revealed and to whom
 - **Trustless**: No central registry — verification is enforced by smart contract logic
