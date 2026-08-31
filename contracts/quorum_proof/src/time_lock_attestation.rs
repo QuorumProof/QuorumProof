@@ -26,6 +26,28 @@
 //! The main `is_attested` function checks `is_attestation_time_locked` before
 //! evaluating quorum weight: if the lock is still active it returns `false`
 //! regardless of how many attestors have signed.
+//!
+//! ## Interaction with `attestation_veto` (Issue #910, #1395)
+//!
+//! This module and `attestation_veto`'s `VetoTimeLock` are independent and
+//! do not reference each other's state:
+//!
+//! - Setting or clearing an `AttestationTimeLock` here never checks
+//!   `attestation_veto::get_credential_veto_requests` — a credential can
+//!   have its attestation time-lock set (or extended) while a veto is
+//!   already pending against it, with no interaction between the two
+//!   schedules.
+//! - `is_time_locked` only ever consults this module's own storage; it has
+//!   no awareness of whether the credential is also under an active veto
+//!   dispute. A credential can therefore simultaneously be "time-locked"
+//!   (not yet attested) and "vetoed" (attestation disputed) at once — those
+//!   are orthogonal facts a caller must check separately.
+//!
+//! This is intentional: this time-lock is a fixed detection window for
+//! *newly recorded* attestations, whereas a veto is an authority-initiated
+//! dispute that can apply regardless of whether that window has elapsed.
+//! See `integration_nested_slices.rs` for tests covering both mechanisms
+//! active on the same credential simultaneously.
 
 use soroban_sdk::{contracttype, Env};
 

@@ -13,9 +13,9 @@
 //! iteration over unbounded collections), so this call stays cheap regardless
 //! of how large the deployment has grown.
 
-use soroban_sdk::{contracttype, Env};
+use soroban_sdk::{contracttype, Env, Map, String};
 
-use crate::DataKey;
+use crate::{DataKey, EXTENDED_TTL, STANDARD_TTL};
 
 /// Snapshot of contract-level health indicators, returned by
 /// `get_state_metrics`. Every field is O(1) to compute from existing
@@ -75,5 +75,71 @@ pub fn collect(env: &Env) -> ContractStateMetrics {
         paused,
         state_version,
         storage_entries_estimate,
+    }
+}
+
+/// Storage key for the per-action credential lifecycle counters (issue #1390).
+/// Kept separate from `DataKey` so the counters can grow new action labels
+/// without touching the contract's main key enum.
+#[contracttype]
+#[derive(Clone)]
+pub enum CredentialMetricsKey {
+    /// Single map of `action label -> event count`. One instance entry
+    /// regardless of how many labels the lifecycle paths report.
+    ActionCounts,
+}
+
+/// Increment the counter for one credential lifecycle `action` (e.g.
+/// `"credential"` for an issuance, `"revocation"` for a revocation).
+pub fn record_credential_action(env: &Env, action: &String) {
+    let mut counts = get_credential_action_counts(env);
+    let next = counts.get(action.clone()).unwrap_or(0u64).saturating_add(1);
+    counts.set(action.clone(), next);
+    env.storage()
+        .instance()
+        .set(&CredentialMetricsKey::ActionCounts, &counts);
+    env.storage()
+        .instance()
+        .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+}
+
+/// Read the per-action credential lifecycle counters. Empty until the first
+/// lifecycle event is recorded.
+pub fn get_credential_action_counts(env: &Env) -> Map<String, u64> {
+    env.storage()
+        .instance()
+        .get(&CredentialMetricsKey::ActionCounts)
+        .unwrap_or(Map::new(env))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::QuorumProofContract;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Address;
+
+    #[test]
+    fn credential_action_counts_accumulate_per_action() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        crate::QuorumProofContractClient::new(&env, &contract_id).initialize(&admin);
+
+        env.as_contract(&contract_id, || {
+            let issuance = String::from_str(&env, "credential");
+            let revocation = String::from_str(&env, "revocation");
+
+            assert_eq!(get_credential_action_counts(&env).len(), 0);
+
+            record_credential_action(&env, &issuance);
+            record_credential_action(&env, &issuance);
+            record_credential_action(&env, &revocation);
+
+            let counts = get_credential_action_counts(&env);
+            assert_eq!(counts.get(issuance).unwrap(), 2u64);
+            assert_eq!(counts.get(revocation).unwrap(), 1u64);
+        });
     }
 }
