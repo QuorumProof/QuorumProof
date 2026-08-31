@@ -1,14 +1,15 @@
 import { useState } from 'react';
 import type { FormEvent, ChangeEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { issueCredential } from '../lib/contracts/quorumProof';
 import { useToast } from '../context/ToastContextValue';
 
 // Credential types matching the on-chain enum (1-indexed)
-const CREDENTIAL_TYPES = [
-  { value: 1, label: '🎓 Degree' },
-  { value: 2, label: '🏛️ License' },
-  { value: 3, label: '💼 Employment' },
+const CREDENTIAL_TYPE_KEYS = [
+  { value: 1, key: 'degree' },
+  { value: 2, key: 'license' },
+  { value: 3, key: 'employment' },
 ] as const;
 
 function encodeMetadataHash(input: string): Uint8Array {
@@ -37,6 +38,7 @@ interface SuccessState {
 
 export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }) {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const { addToast, removeToast } = useToast();
   const [form, setForm] = useState<FormState>({
     subject: '',
@@ -51,17 +53,17 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
   function validate(): FormErrors {
     const errs: FormErrors = {};
     if (!form.subject.trim()) {
-      errs.subject = 'Subject address is required.';
+      errs.subject = t('issueCredential.errSubjectRequired');
     } else if (!isValidStellarAddress(form.subject)) {
-      errs.subject = 'Must be a valid Stellar address (starts with G, 56 chars).';
+      errs.subject = t('issueCredential.errSubjectInvalid');
     }
     if (!form.credentialType) {
-      errs.credentialType = 'Please select a credential type.';
+      errs.credentialType = t('issueCredential.errTypeRequired');
     }
     if (!form.metadataHash.trim()) {
-      errs.metadataHash = 'Metadata hash is required.';
+      errs.metadataHash = t('issueCredential.errMetaRequired');
     } else if (form.metadataHash.trim().length < 4) {
-      errs.metadataHash = 'Metadata hash must be at least 4 characters.';
+      errs.metadataHash = t('issueCredential.errMetaTooShort');
     }
     return errs;
   }
@@ -76,7 +78,7 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
     }
     setErrors({});
     setSubmitting(true);
-    const pendingId = addToast({ type: 'pending', message: 'Transaction pending…' });
+    const pendingId = addToast({ type: 'pending', message: t('issueCredential.txPending') });
     try {
       const credentialId = await issueCredential(
         issuerAddress,
@@ -87,14 +89,14 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
       removeToast(pendingId);
       addToast({
         type: 'success',
-        message: 'Transaction confirmed — credential issued.',
+        message: t('issueCredential.txConfirmed'),
         explorerUrl: `https://stellar.expert/explorer/testnet/tx/${credentialId.toString()}`,
       });
       setSuccess({ credentialId });
     } catch (err: unknown) {
       removeToast(pendingId);
-      const msg = err instanceof Error ? err.message : 'Failed to issue credential.';
-      addToast({ type: 'error', message: `Transaction failed: ${msg}` });
+      const msg = err instanceof Error ? err.message : t('common.error');
+      addToast({ type: 'error', message: t('issueCredential.txFailed', { message: msg }) });
       setSubmitError(msg);
     } finally {
       setSubmitting(false);
@@ -114,9 +116,9 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
         <div className="status-banner status-banner--valid">
           <div className="status-banner__icon">✅</div>
           <div>
-            <div className="status-banner__title">Credential Issued</div>
+            <div className="status-banner__title">{t('issueCredential.successTitle')}</div>
             <div className="status-banner__sub">
-              Credential #{success.credentialId.toString()} has been issued on-chain.
+              {t('issueCredential.successSub', { credentialId: success.credentialId.toString() })}
             </div>
           </div>
         </div>
@@ -127,7 +129,7 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
               navigate(`/verify?credentialId=${success.credentialId.toString()}`)
             }
           >
-            View Credential →
+            {t('issueCredential.viewCredential')}
           </button>
           <button
             className="btn btn--ghost"
@@ -136,7 +138,7 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
               setForm({ subject: '', credentialType: 1, metadataHash: '' });
             }}
           >
-            Issue Another
+            {t('issueCredential.issueAnother')}
           </button>
         </div>
       </div>
@@ -148,19 +150,19 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
       className="issue-form"
       onSubmit={handleSubmit}
       noValidate
-      aria-label="Issue Credential Form"
+      aria-label={t('issueCredential.formLabel')}
     >
       {/* Subject Address */}
       <div className="form-row">
         <label htmlFor="icf-subject" className="form-label">
-          Subject Stellar Address
+          {t('issueCredential.subjectLabel')}
         </label>
         <div className="input-wrap">
           <span className="input-icon" aria-hidden="true">👤</span>
           <input
             id="icf-subject"
             type="text"
-            placeholder="GABC…XYZ"
+            placeholder={t('issueCredential.subjectPlaceholder')}
             value={form.subject}
             onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange('subject', e.target.value)}
             aria-describedby={errors.subject ? 'icf-subject-err' : undefined}
@@ -179,7 +181,7 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
       {/* Credential Type */}
       <div className="form-row">
         <label htmlFor="icf-type" className="form-label">
-          Credential Type
+          {t('issueCredential.typeLabel')}
         </label>
         <div className="input-wrap">
           <span className="input-icon" aria-hidden="true">📋</span>
@@ -189,9 +191,9 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
             onChange={(e: ChangeEvent<HTMLSelectElement>) => handleChange('credentialType', Number(e.target.value))}
             aria-invalid={!!errors.credentialType}
           >
-            {CREDENTIAL_TYPES.map((ct) => (
+            {CREDENTIAL_TYPE_KEYS.map((ct) => (
               <option key={ct.value} value={ct.value}>
-                {ct.label}
+                {t(`issueCredential.credentialTypes.${ct.key}`)}
               </option>
             ))}
           </select>
@@ -206,14 +208,14 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
       {/* Metadata Hash */}
       <div className="form-row">
         <label htmlFor="icf-meta" className="form-label">
-          Metadata Hash
+          {t('issueCredential.metaLabel')}
         </label>
         <div className="input-wrap">
           <span className="input-icon" aria-hidden="true">#</span>
           <input
             id="icf-meta"
             type="text"
-            placeholder="e.g. QmXoypiz… or sha256:abc123…"
+            placeholder={t('issueCredential.metaPlaceholder')}
             value={form.metadataHash}
             onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange('metadataHash', e.target.value)}
             aria-describedby="icf-meta-hint icf-meta-err"
@@ -223,7 +225,7 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
           />
         </div>
         <p id="icf-meta-hint" className="issue-form__hint">
-          An IPFS CID or SHA-256 hash pointing to the off-chain credential document.
+          {t('issueCredential.metaHint')}
         </p>
         {errors.metadataHash && (
           <p id="icf-meta-err" className="issue-form__field-error" role="alert">
@@ -237,7 +239,7 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
         <div className="error-card" role="alert">
           <span className="error-card__icon">⚠️</span>
           <div>
-            <div className="error-card__title">Transaction Failed</div>
+            <div className="error-card__title">{t('issueCredential.errorTitle')}</div>
             <div className="error-card__msg">{submitError}</div>
           </div>
         </div>
@@ -252,10 +254,10 @@ export function IssueCredentialForm({ issuerAddress }: { issuerAddress: string }
         {submitting ? (
           <>
             <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} aria-hidden="true" />
-            Issuing…
+            {t('issueCredential.submitting')}
           </>
         ) : (
-          'Issue Credential'
+          t('issueCredential.submitButton')
         )}
       </button>
     </form>

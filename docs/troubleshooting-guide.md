@@ -19,7 +19,8 @@ credential, transaction, or deployment.
 1. [Common Errors and Solutions](#1-common-errors-and-solutions)
 2. [Decision Tree](#2-decision-tree)
 3. [Logs Interpretation Guide](#3-logs-interpretation-guide)
-4. [Where to Go Next](#4-where-to-go-next)
+4. [Doc Cross-Reference Drift](#4-doc-cross-reference-drift)
+5. [Where to Go Next](#5-where-to-go-next)
 
 ---
 
@@ -153,7 +154,50 @@ If you operate an issuer, verifier, or auditor backend:
 
 ---
 
-## 4. Where to Go Next
+## 4. Doc Cross-Reference Drift
+
+With 70+ interlinked docs and ADRs, broken internal links and numbering
+collisions are an ongoing maintenance hazard. This section covers the known
+patterns and how to fix them.
+
+### Broken relative links in docs/
+
+Every PR that touches `docs/` runs the **Docs Link Check** CI workflow
+(`.github/workflows/docs-link-check.yml`), which uses
+[lychee](https://github.com/lycheeverse/lychee) to check all relative links
+inside `docs/`. If the check fails:
+
+1. Download the `lychee-link-report` artifact from the failed workflow run —
+   it lists every broken link with the source file and line number.
+2. Fix the broken references (rename the link target to match the actual
+   filename, or update the link to point at the correct file).
+3. Run lychee locally to confirm all links pass before pushing again:
+   ```bash
+   lychee --offline --no-progress --base docs "docs/**/*.md"
+   ```
+
+For a full list of links found broken on the initial run (2026-08-30) and
+their recommended resolutions, see
+[docs/README.md — Known doc-drift issues](README.md#known-doc-drift-issues).
+
+### ADR-006 number collision
+
+Two files currently share the `adr-006-` prefix:
+
+- `docs/adr/adr-006-economic-security-model.md`
+- `docs/adr/adr-006-quorum-intersection-verification.md`
+
+If you encounter a link to `adr-006` that resolves to the wrong document,
+this is the cause. The fix is to renumber one of them (the quorum-intersection
+file, which was added later) to `adr-008`. Until that rename lands, be
+explicit when linking — use the full filename rather than just the number.
+
+The renaming work is tracked in
+[docs/README.md — Known doc-drift issues](README.md#adr-number-collision).
+
+---
+
+## 5. Where to Go Next
 
 - [Error Code Reference](error-codes.md) — authoritative per-code recovery
 - [Integration Patterns Guide](integration-patterns-guide.md) — patterns and retry logic for developers
@@ -161,6 +205,7 @@ If you operate an issuer, verifier, or auditor backend:
 - [Threat Model](threat-model.md) — why a given risk is rated the way it is
 - [Backup System](backup-system.md) — recovering from data loss or corruption
 - [Monitoring Guide](monitoring-guide.md) — dashboards and alerts for ongoing operations
+- [Docs README](README.md) — contributor checklist and link checker instructions
 
 If your issue isn't covered above and you believe it's a security
 vulnerability rather than an operational problem, follow the reporting

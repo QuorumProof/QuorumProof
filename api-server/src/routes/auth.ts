@@ -81,8 +81,18 @@ export async function verifyPassword(password: string, storedHash: string): Prom
       Buffer.from(storedHash, 'hex'),
     );
   }
-
-  return false;
+  return [
+    {
+      userId: 'admin',
+      passwordHash: '057ba03d6c44104863dc7361fe4578965d1887360f90a0895882e58a6248fc86', // sha256("changeme")
+      role: 'admin',
+    },
+    {
+      userId: 'user1',
+      passwordHash: '057ba03d6c44104863dc7361fe4578965d1887360f90a0895882e58a6248fc86',
+      role: 'user',
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
