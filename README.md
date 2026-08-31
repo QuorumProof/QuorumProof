@@ -16,19 +16,35 @@ Each node in the slice co-signs a **Soulbound Token (SBT)** on Stellar, creating
 
 This applies the Stellar whitepaper's "individual trust decisions" model to a high-stakes professional use case.
 
-## ⚠️ ZK Verification — Non-Functional Stub
+## ✅ ZK Verification — Implementation Status
 
-> **Do not use `verify_claim` in production.**
-> The `zk_verifier` contract accepts **any non-empty byte string** as a valid proof.
-> It performs **no cryptographic verification** and provides **no privacy guarantees**.
-> It is admin-gated to limit exposure, but the gate is not a substitute for real ZK logic.
-> Real proof verification (Groth16/PLONK) is tracked in [#ZK-IMPL](https://github.com/cryptonautt/QuorumProof/issues) and targeted for v1.1.
+Real **BLS12-381 pairing-based** Groth16 and PLONK verification is implemented in
+`verify_groth16_proof` and `verify_plonk_proof` (see `groth16.rs` and `plonk.rs`).
+
+> **`verify_claim` and related legacy functions are test-only.** They are compiled
+> exclusively behind `#[cfg(any(test, feature = "testutils"))]` and are **not
+> exported to the production WASM binary**. Do not rely on them in integration code.
+
+> **`verify_bulletproof_range` is a fail-closed stub** (always returns `false`) until
+> a genuine Bulletproofs inner-product argument over BLS12-381 is integrated.
+> The previous SHA-256 hash heuristic had no cryptographic binding to the committed
+> value and has been removed. Tracked in [#1415](https://github.com/cryptonautt/QuorumProof/issues/1415).
+
+> **`encrypt_metadata` / `decrypt_metadata`** have been replaced with panicking stubs.
+> On-chain encryption is not the correct design for Soroban — ledger state is publicly
+> visible regardless of any flag. Callers must encrypt off-chain before storing metadata.
+> Tracked in [#1416](https://github.com/cryptonautt/QuorumProof/issues/1416).
+
+> **`compress_metadata` / `decompress_metadata`** have been replaced with panicking stubs.
+> The previous implementation only toggled a flag with no effect on stored byte length.
+> Callers must compress off-chain before storing metadata.
+> Tracked in [#1417](https://github.com/cryptonautt/QuorumProof/issues/1417).
 
 ## 🚀 Features
 
 - **Audit Slices**: Define your own quorum of trusted attestors (university, licensing body, employers)
 - **Soulbound Tokens (SBTs)**: Non-transferable on-chain credentials tied to your Stellar identity
-- **Conditional Verification (stub)**: API exists for claim-specific proofs (e.g. "has a Mechanical Engineering degree") but ZK verification is not yet implemented — see warning above
+- **Conditional Verification**: Claim-specific proof verification is implemented via the `zk_verifier` contract, with design details and caveats documented in [docs/zk-verification-implementation.md](docs/zk-verification-implementation.md)
 - **Cross-Border Ready**: Instant verification for international hiring, no embassy letters or notarizations
 - **Privacy-First**: Credential holders control what is revealed and to whom
 - **Trustless**: No central registry — verification is enforced by smart contract logic
@@ -72,6 +88,12 @@ STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 CONTRACT_QUORUM_PROOF=<your-contract-id>
 CONTRACT_SBT_REGISTRY=<your-contract-id>
 CONTRACT_ZK_VERIFIER=<your-contract-id>
+# contracts/bbs_plus_v1 (BBS+ selective-disclosure crypto core) is a Rust
+# library crate that other contract crates link in — not a standalone
+# deployed contract — so there is no address to set. It appears as an
+# in-scope component in SECURITY.md because it is cryptographic code in this
+# repo, not because it is separately deployed.
+# CONTRACT_BBS_PLUS_V1=
 
 # Frontend configuration
 VITE_STELLAR_NETWORK=testnet
@@ -97,16 +119,18 @@ stellar keys generate deployer --network testnet
 
 ### Run Demo
 
-Follow the step-by-step guide in `demo/demo-script.md`
+Follow the step-by-step walkthrough in [demo/demo-script.md](demo/demo-script.md).
 
 ## 📖 Documentation
 
+- [Documentation Index](docs/README.md) — all `docs/` guides grouped by topic (start here)
 - [Architecture Overview](docs/architecture.md)
 - [Trust Slice Model](docs/trust-slices.md)
-- [ZK Verification Design](docs/zk-verification.md)
+- [ZK Verification Design](docs/zk-verification-implementation.md)
 - [Threat Model & Security](docs/threat-model.md)
 - [Error Code Reference](docs/error-codes.md)
 - [Integration Patterns Guide](docs/integration-patterns-guide.md)
+- [Quorum Slice Trust Model Guide](docs/quorum-slice-guide.md)
 - [Issuer Security Checklist](docs/issuer-security-checklist.md)
 - [Troubleshooting Guide](docs/troubleshooting-guide.md)
 - [Backup System](docs/backup-system.md)
@@ -163,6 +187,17 @@ Run tests:
 cargo test
 ```
 
+### Formal Verification
+
+QuorumProof uses TLA+ formal specifications to mathematically verify critical properties of smart contracts. See [formal-verification/README.md](formal-verification/README.md) for:
+
+- **CredentialIssuance.tla** — Credential lifecycle safety invariants
+- **QuorumSliceAttestation.tla** — FBA attestation and threshold enforcement
+- **SbtNonTransferability.tla** — Soulbound token ownership immutability guarantee
+- **ZkVerifierVerificationTransition.tla** — Stub-to-real verification migration specification
+
+All specifications are model-checked with TLC to ensure properties hold in all reachable states. See the formal verification README for how to run checks, understand the gap analysis, and contribute new specs.
+
 ## 🌍 Why This Matters
 
 **The Problem**: A Mechanical Engineer licensed in Brazil applying for a role in Germany faces weeks of manual credential verification across institutions, embassies, and licensing bodies.
@@ -186,7 +221,7 @@ cargo test
 ## 🗺️ Roadmap
 
 - **v1.0 (Current)**: Core SBT issuance, quorum slice model, multi-attestor signing
-- **v1.1**: ZK conditional verification (claim-specific proofs)
+- **v1.1**: Continued ZK verification hardening, key management, and proof-format upgrades
 - **v2.0**: Revocation registry, credential expiry, renewal flows
 - **v3.0**: Frontend UI with Stellar wallet integration
 - **v4.0**: Mobile app, integration with national licensing APIs

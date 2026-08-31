@@ -25,12 +25,14 @@ const LOG_FILE = process.env.LOG_FILE ?? '/var/log/quorumproof/api.log';
 const LOG_LEVEL = (process.env.LOG_LEVEL ?? 'info') as pino.Level;
 const LOG_STDOUT = process.env.LOG_STDOUT !== 'false';
 
+let canWriteFile = true;
 // Ensure the log directory exists before we try to open the file.
 try {
   mkdirSync(dirname(LOG_FILE), { recursive: true });
 } catch {
   // If we cannot create the directory (e.g. permission denied in unit tests)
   // we fall back gracefully to stdout-only logging below.
+  canWriteFile = false;
 }
 
 // Build the pino transport destinations.
@@ -46,19 +48,24 @@ function buildStreams(): pino.MultiStreamRes {
   }
 
   // File transport — this is what promtail scrapes.
-  try {
-    const fileTransport = pino.destination({
-      dest: LOG_FILE,
-      sync: false, // async I/O — non-blocking
-    });
-    targets.push({ stream: fileTransport, level: LOG_LEVEL });
-  } catch (err) {
-    // If we cannot open the file (e.g. restricted permissions in CI) we
-    // continue with stdout-only so tests do not fail due to logging.
-    if (LOG_STDOUT) {
-      process.stderr.write(
-        `[logger] Warning: cannot open ${LOG_FILE}: ${String(err)}. Falling back to stdout only.\n`,
-      );
+  if (canWriteFile) {
+    try {
+      const fileTransport = pino.destination({
+        dest: LOG_FILE,
+        sync: false, // async I/O — non-blocking
+      });
+      fileTransport.on('error', () => {
+        // Suppress unhandled stream error in restricted environments
+      });
+      targets.push({ stream: fileTransport, level: LOG_LEVEL });
+    } catch (err) {
+      // If we cannot open the file (e.g. restricted permissions in CI) we
+      // continue with stdout-only so tests do not fail due to logging.
+      if (LOG_STDOUT) {
+        process.stderr.write(
+          `[logger] Warning: cannot open ${LOG_FILE}: ${String(err)}. Falling back to stdout only.\n`,
+        );
+      }
     }
   }
 

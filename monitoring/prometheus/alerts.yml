@@ -192,3 +192,13 @@ groups:
         annotations:
           summary: "Critical event alert dispatch is failing"
           description: "{{ $value }} critical-event alert(s) failed to reach every configured channel in the last 15 minutes — check Slack/PagerDuty credentials and connectivity; do not assume the absence of other alerts means no critical events occurred."
+
+      # #1434 — Sustained WebSocket message drop alerting
+      - alert: SustainedWsMessageDrops
+        expr: rate(quorumproof_ws_messages_dropped_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained WebSocket message drops detected"
+          description: "WebSocket messages are being dropped at {{ $value | humanize }} drops/s over the last 5 minutes. A client (or multiple) is falling far behind the send queue. Check for slow consumers or systemic network issues. See docs/operational-runbook.md#ws-message-drops."

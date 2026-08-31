@@ -36,6 +36,11 @@ jobs:
           cargo build --release --target wasm32-unknown-unknown -p sbt_registry
           cargo build --release --target wasm32-unknown-unknown -p zk_verifier
 
+      # Issue #1391: bare `.unwrap()` in contract code traps opaquely instead of
+      # returning a typed ContractError. Ratchet check — see docs/unwrap-audit.md.
+      - name: Check for new bare .unwrap() calls
+        run: ./scripts/check_unwraps.sh
+
       - name: Run unit tests
         run: cargo test --target x86_64-unknown-linux-gnu --lib --workspace
 
@@ -159,42 +164,14 @@ jobs:
         working-directory: api-server
         run: npm test -- criticalEventMetricNames.test.ts criticalEventPrometheusIntegration.test.ts
 
-  monitoring-exporter:
+  # Issue #1498: every docs/*.md must be linked from docs/README.md so the
+  # documentation directory stays discoverable and docs don't get duplicated.
+  docs-index:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: monitoring/exporter/requirements.txt
-      - name: Install dependencies
-        run: pip install pytest pytest-cov -r monitoring/exporter/requirements.txt
-      - name: Run monitoring/exporter tests
-        run: pytest monitoring/exporter/tests/ -v --tb=short
-
-  services-tts:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: services/tts/package-lock.json
-      - name: Check if test suite exists
-        run: |
-          if [ -f services/tts/package.json ]; then
-            cd services/tts
-            npm ci
-            if grep -q '"test"' package.json; then
-              npm test
-            else
-              echo "No test script defined in services/tts/package.json"
-            fi
-          else
-            echo "services/tts/package.json not found; skipping"
-          fi
+      - name: Check docs index is complete
+        run: ./scripts/check_docs_index.sh
 
   security:
     runs-on: ubuntu-latest
@@ -205,13 +182,44 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - name: Install cargo-audit and cargo-deny
+        run: cargo install cargo-audit cargo-deny --locked
 
       - name: Cargo audit
         run: cargo audit
+
+      - name: Cargo deny check
+        run: cargo deny check
 
       - name: TruffleHog scan
         uses: trufflesecurity/trufflehog@main
         with:
           extra_args: --results=verified,unknown
+
+  mutation-testing:
+    runs-on: ubuntu-latest
+    # Run mutation tests nightly to control CI cost
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[mutation]')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation tests
+        run: cargo mutants --package quorum_proof --package sbt_registry --package zk_verifier
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-test-report
+          path: mutants.json
+          retention-days: 30

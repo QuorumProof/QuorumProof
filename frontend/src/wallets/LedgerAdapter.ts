@@ -5,6 +5,11 @@ export class LedgerAdapter implements WalletAdapter {
   readonly name = 'Ledger';
   readonly icon = '💻';
   private _address: string | null = null;
+  private _accountIndex: number = 0;
+
+  private getDerivationPath(accountIndex: number = 0): string {
+    return `44'/148'/${accountIndex}'`;
+  }
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -19,20 +24,23 @@ export class LedgerAdapter implements WalletAdapter {
     }
   }
 
-  async connect(): Promise<string> {
+  async connect(accountIndex: number = 0): Promise<string> {
     const { default: TransportWebUSB } = await import('@ledgerhq/hw-transport-webusb');
     const StellarApp = (await import('@ledgerhq/hw-app-str')).default;
 
     const transport = await TransportWebUSB.create();
     const stellar = new StellarApp(transport);
-    const result = await stellar.getPublicKey("44'/148'/0'");
+    const path = this.getDerivationPath(accountIndex);
+    const result = await stellar.getPublicKey(path);
     this._address = result.publicKey;
+    this._accountIndex = accountIndex;
     await transport.close();
     return this._address;
   }
 
   disconnect(): void {
     this._address = null;
+    this._accountIndex = 0;
   }
 
   isConnected(): boolean {
@@ -43,14 +51,19 @@ export class LedgerAdapter implements WalletAdapter {
     return this._address;
   }
 
-  async signTransaction(xdr: string): Promise<string> {
+  getAccountIndex(): number {
+    return this._accountIndex;
+  }
+
+  async signTransaction(xdr: string, accountIndex: number = this._accountIndex): Promise<string> {
     const { default: TransportWebUSB } = await import('@ledgerhq/hw-transport-webusb');
     const StellarApp = (await import('@ledgerhq/hw-app-str')).default;
 
     const transport = await TransportWebUSB.create();
     const stellar = new StellarApp(transport);
     const txBuffer = Buffer.from(xdr, 'base64');
-    const signature = await stellar.signTransaction("44'/148'/0'", txBuffer);
+    const path = this.getDerivationPath(accountIndex);
+    const signature = await stellar.signTransaction(path, txBuffer);
     await transport.close();
     return signature.signature.toString('base64');
   }

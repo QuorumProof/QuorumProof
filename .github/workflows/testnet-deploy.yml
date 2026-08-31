@@ -44,6 +44,25 @@ jobs:
           cargo build --release --target wasm32-unknown-unknown -p sbt_registry
           cargo build --release --target wasm32-unknown-unknown -p zk_verifier
 
+      # ── SBOM generation (Issue #1481) ─────────────────────────────────────
+      # Generate a CycloneDX SBOM for this deployment so downstream integrators
+      # and security reviewers have a machine-readable dependency manifest.
+      # The SBOM is uploaded as a workflow artifact alongside the deployment
+      # manifest.  See SECURITY.md § "Software Bill of Materials (SBOM)".
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate deployment SBOM
+        run: |
+          mkdir -p sbom
+          cargo cyclonedx \
+            --format json \
+            --output-cdx \
+            --spec-version 1.4 \
+            --all \
+            --output-file sbom/rust-workspace.cdx.json || \
+          echo "Warning: SBOM generation exited non-zero; deployment continues."
+
       - name: Install Stellar CLI
         run: |
           VERSION=$(curl -sSL https://api.github.com/repos/stellar/stellar-cli/releases/latest | jq -r .tag_name | sed 's/^v//')
@@ -94,3 +113,11 @@ jobs:
           name: testnet-deployment-manifest
           path: testnet-deployment.json*
           retention-days: 30
+
+      - name: Upload deployment SBOM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-deployment-sbom
+          path: sbom/*.cdx.json
+          retention-days: 90

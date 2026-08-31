@@ -27,6 +27,7 @@ import {
 import { v1Compat } from '../src/middleware/v1Compat.js';
 import { createV1Router } from '../src/routes/v1/index.js';
 import { createV2Router } from '../src/routes/v2/index.js';
+import { buildOpenApiSpec } from '../src/openapi/index.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -530,5 +531,58 @@ describe('VERSION_CATALOGUE', () => {
 
   it('provides a migrationGuide for v1', () => {
     expect(VERSION_CATALOGUE.v1.migrationGuide).toBeTruthy();
+  });
+});
+
+// ─── OpenAPI coverage — all newly mounted routes have path entries ─────────────
+
+describe('OpenAPI coverage — all mounted routes have path entries', () => {
+  function getPaths(): Record<string, unknown> {
+    const spec = buildOpenApiSpec();
+    return (spec.paths ?? {}) as Record<string, unknown>;
+  }
+
+  it('costs routes are documented', () => {
+    const paths = getPaths();
+    const costsRoutes = Object.keys(paths).filter((p) => p.startsWith('/api/costs'));
+    expect(costsRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('bridge routes are documented', () => {
+    const paths = getPaths();
+    const bridgeRoutes = Object.keys(paths).filter((p) => p.startsWith('/api/bridge'));
+    expect(bridgeRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('audit routes are documented', () => {
+    const paths = getPaths();
+    const auditRoutes = Object.keys(paths).filter(
+      (p) => p.startsWith('/api/audit') && !p.startsWith('/api/audit/auth-events'),
+    );
+    expect(auditRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('auth-audit routes are documented', () => {
+    const paths = getPaths();
+    const authAuditRoutes = Object.keys(paths).filter((p) => p.startsWith('/api/audit/auth-events'));
+    expect(authAuditRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('graphql routes are documented', () => {
+    const paths = getPaths();
+    const graphqlRoutes = Object.keys(paths).filter((p) => p.startsWith('/api/graphql'));
+    expect(graphqlRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('passwordless auth routes are documented', () => {
+    const paths = getPaths();
+    const passwordlessRoutes = Object.keys(paths).filter((p) => p.startsWith('/api/auth/passwordless') || p.startsWith('/api/auth/webauthn'));
+    expect(passwordlessRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('reports routes are documented', () => {
+    const paths = getPaths();
+    const reportsRoutes = Object.keys(paths).filter((p) => p.startsWith('/api/reports'));
+    expect(reportsRoutes.length).toBeGreaterThan(0);
   });
 });
