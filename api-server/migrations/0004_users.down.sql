@@ -1,0 +1,4 @@
+-- Undo migration 0004_users: drop the users table and related objects.
+DROP TRIGGER IF EXISTS users_updated_at ON users;
+DROP FUNCTION IF EXISTS set_updated_at();
+DROP TABLE IF EXISTS users;
