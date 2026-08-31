@@ -237,3 +237,27 @@ All tests pass by default. The `#[should_panic]` tests verify that certain opera
 - [ ] Test credential cache TTL boundary conditions
 - [ ] Load testing with max batch sizes
 - [ ] Recovery protocol under partial failures
+
+## Regression Test Convention (Issue #1479)
+
+In addition to chaos scenarios, the `integration_tests` crate hosts a
+dedicated regression suite at `src/regressions.rs`.  Every test there is
+explicitly pinned to a closed bug with a `// regression: #N` comment and a
+descriptive function name `regression_<N>_<short_description>`.
+
+**Rules for adding regression tests here:**
+
+1. Add a new submodule `regression_<N>` inside `regressions.rs`.
+2. Each `#[test]` in the module must carry a `// regression: #N` comment.
+3. The module doc-comment must describe the bug, the fix, and why removing
+   the fix causes the test to fail.
+4. Confirm the test is red before the fix and green after.
+
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) § "Regression Test Convention"
+for the full policy and a worked example.
+
+### Current regression inventory
+
+| Issue | Module | Description |
+|---|---|---|
+| #1362 | `regression_1362` | Per-(credential,slice) attestation duplicate guard and `check_quorum_intersection` all-slice validation |

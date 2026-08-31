@@ -21,6 +21,7 @@ ff = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

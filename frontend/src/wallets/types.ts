@@ -5,11 +5,12 @@ export interface WalletAdapter {
   name: string;
   icon: string;
   isAvailable(): Promise<boolean>;
-  connect(): Promise<string>;
+  connect(accountIndex?: number): Promise<string>;
   disconnect(): void;
   isConnected(): boolean;
   getAddress(): string | null;
-  signTransaction?(xdr: string): Promise<string>;
+  getAccountIndex?(): number;
+  signTransaction?(xdr: string, accountIndex?: number): Promise<string>;
 }
 
 export interface WalletState {
@@ -19,7 +20,8 @@ export interface WalletState {
   isInitializing: boolean;
   network: string;
   error: string | null;
-  connect: (type: WalletType) => Promise<void>;
+  accountIndex?: number;
+  connect: (type: WalletType, accountIndex?: number) => Promise<void>;
   disconnect: () => void;
   getAdapter: () => WalletAdapter | null;
 }

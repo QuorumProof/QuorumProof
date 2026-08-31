@@ -16,15 +16,29 @@ Each node in the slice co-signs a **Soulbound Token (SBT)** on Stellar, creating
 
 This applies the Stellar whitepaper's "individual trust decisions" model to a high-stakes professional use case.
 
-## ⚠️ ZK Verification — Current Status
+## ✅ ZK Verification — Implementation Status
 
-> `verify_claim` is not the old "accept any non-empty proof" stub.
-> The current implementation validates proof structure and binds proofs to a registered verifying-key hash, with PLONK using real KZG pairing checks where the SRS and verifying key are configured.
-> See [docs/zk-verification-implementation.md](docs/zk-verification-implementation.md) for the full, current design and limitations.
->
-> Important limitation: the Groth16 path currently uses a strengthened SHA-256 binding check instead of full BN254 pairing verification because Soroban does not expose native BN254 pairing host functions. That is a real cryptographic check, but it is not equivalent to full pairing-based Groth16 verification on a fully-featured zkVM / EVM host.
->
-> Treat verification as implementation-specific and configuration-dependent. Do not assume a proof is valid without checking the verifying key, public inputs, and the security assumptions documented in the ZK verification design notes.
+Real **BLS12-381 pairing-based** Groth16 and PLONK verification is implemented in
+`verify_groth16_proof` and `verify_plonk_proof` (see `groth16.rs` and `plonk.rs`).
+
+> **`verify_claim` and related legacy functions are test-only.** They are compiled
+> exclusively behind `#[cfg(any(test, feature = "testutils"))]` and are **not
+> exported to the production WASM binary**. Do not rely on them in integration code.
+
+> **`verify_bulletproof_range` is a fail-closed stub** (always returns `false`) until
+> a genuine Bulletproofs inner-product argument over BLS12-381 is integrated.
+> The previous SHA-256 hash heuristic had no cryptographic binding to the committed
+> value and has been removed. Tracked in [#1415](https://github.com/cryptonautt/QuorumProof/issues/1415).
+
+> **`encrypt_metadata` / `decrypt_metadata`** have been replaced with panicking stubs.
+> On-chain encryption is not the correct design for Soroban — ledger state is publicly
+> visible regardless of any flag. Callers must encrypt off-chain before storing metadata.
+> Tracked in [#1416](https://github.com/cryptonautt/QuorumProof/issues/1416).
+
+> **`compress_metadata` / `decompress_metadata`** have been replaced with panicking stubs.
+> The previous implementation only toggled a flag with no effect on stored byte length.
+> Callers must compress off-chain before storing metadata.
+> Tracked in [#1417](https://github.com/cryptonautt/QuorumProof/issues/1417).
 
 ## 🚀 Features
 
@@ -74,6 +88,12 @@ STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 CONTRACT_QUORUM_PROOF=<your-contract-id>
 CONTRACT_SBT_REGISTRY=<your-contract-id>
 CONTRACT_ZK_VERIFIER=<your-contract-id>
+# contracts/bbs_plus_v1 (BBS+ selective-disclosure crypto core) is a Rust
+# library crate that other contract crates link in — not a standalone
+# deployed contract — so there is no address to set. It appears as an
+# in-scope component in SECURITY.md because it is cryptographic code in this
+# repo, not because it is separately deployed.
+# CONTRACT_BBS_PLUS_V1=
 
 # Frontend configuration
 VITE_STELLAR_NETWORK=testnet
@@ -103,12 +123,14 @@ Follow the step-by-step walkthrough in [demo/demo-script.md](demo/demo-script.md
 
 ## 📖 Documentation
 
+- [Documentation Index](docs/README.md) — all `docs/` guides grouped by topic (start here)
 - [Architecture Overview](docs/architecture.md)
 - [Trust Slice Model](docs/trust-slices.md)
 - [ZK Verification Design](docs/zk-verification-implementation.md)
 - [Threat Model & Security](docs/threat-model.md)
 - [Error Code Reference](docs/error-codes.md)
 - [Integration Patterns Guide](docs/integration-patterns-guide.md)
+- [Quorum Slice Trust Model Guide](docs/quorum-slice-guide.md)
 - [Issuer Security Checklist](docs/issuer-security-checklist.md)
 - [Troubleshooting Guide](docs/troubleshooting-guide.md)
 - [Backup System](docs/backup-system.md)
@@ -164,6 +186,17 @@ Run tests:
 ```bash
 cargo test
 ```
+
+### Formal Verification
+
+QuorumProof uses TLA+ formal specifications to mathematically verify critical properties of smart contracts. See [formal-verification/README.md](formal-verification/README.md) for:
+
+- **CredentialIssuance.tla** — Credential lifecycle safety invariants
+- **QuorumSliceAttestation.tla** — FBA attestation and threshold enforcement
+- **SbtNonTransferability.tla** — Soulbound token ownership immutability guarantee
+- **ZkVerifierVerificationTransition.tla** — Stub-to-real verification migration specification
+
+All specifications are model-checked with TLC to ensure properties hold in all reachable states. See the formal verification README for how to run checks, understand the gap analysis, and contribute new specs.
 
 ## 🌍 Why This Matters
 

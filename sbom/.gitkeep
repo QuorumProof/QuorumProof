@@ -1,0 +1,4 @@
+# Generated SBOM artifacts are placed here by CI.
+# The directory is tracked in git so the path exists; actual .cdx.json
+# files are .gitignored (they're built artifacts) but committed when
+# CI pushes them via the sbom.yml workflow for tagged releases.

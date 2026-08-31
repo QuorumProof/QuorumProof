@@ -65,6 +65,31 @@ Tests credential creation:
 - Expiration timestamp variations
 - ID assignment uniqueness
 
+### 5. `fuzz_quorum_intersection` (NEW — Issue #1396)
+**Location:** `fuzz/fuzz_targets/fuzz_quorum_intersection.rs`
+
+Targets the core Byzantine-safety primitives the "Quorum Slice" trust model
+depends on: `is_quorum` (via `create_slice` + `check_quorum_intersection`)
+and `check_quorum_intersection` itself. Generates two slices with a
+controllable attestor overlap — including fully disjoint slices (zero shared
+attestors), single-attestor slices, and thresholds pinned to the exact slice
+size — and asserts `check_quorum_intersection` never certifies safety
+(`is_safe = true`) for a candidate node set that doesn't actually meet both
+slices' weighted thresholds. See the invariant doc comment at the top of the
+fuzz target for the FBA safety property being tested.
+
+**What It Catches:**
+- A certificate being accepted for two slices that share zero attestors
+- Off-by-one errors at threshold boundaries (`threshold == total weight`)
+- Weight-accumulation bugs that under/over-count a candidate set's power in
+  a slice
+
+**Manual run:**
+```bash
+cd fuzz
+cargo +nightly fuzz run fuzz_quorum_intersection -- -max_total_time=60
+```
+
 ## Running Fuzz Tests
 
 ### Build Fuzz Harnesses
