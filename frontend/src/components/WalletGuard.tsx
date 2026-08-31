@@ -1,4 +1,5 @@
-import { ReactNode } from 'react';
+import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useWallet } from '../hooks';
 import { getAllWalletAdapters } from '../wallets/registry';
 
@@ -11,13 +12,14 @@ export interface WalletGuardProps {
  * Shows an accessible onboarding prompt when no wallet is connected.
  */
 export function WalletGuard({ children }: WalletGuardProps) {
+  const { t } = useTranslation();
   const { address, isInitializing, connect, availableWallets } = useWallet();
 
   if (isInitializing) {
     return (
       <div className="loading-state">
         <div className="spinner" />
-        <p>Checking wallet…</p>
+        <p>{t('walletGuard.checkingWallet')}</p>
       </div>
     );
   }
