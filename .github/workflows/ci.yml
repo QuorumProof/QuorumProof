@@ -36,6 +36,11 @@ jobs:
           cargo build --release --target wasm32-unknown-unknown -p sbt_registry
           cargo build --release --target wasm32-unknown-unknown -p zk_verifier
 
+      # Issue #1391: bare `.unwrap()` in contract code traps opaquely instead of
+      # returning a typed ContractError. Ratchet check — see docs/unwrap-audit.md.
+      - name: Check for new bare .unwrap() calls
+        run: ./scripts/check_unwraps.sh
+
       - name: Run unit tests
         run: cargo test --target x86_64-unknown-linux-gnu --lib --workspace
 
