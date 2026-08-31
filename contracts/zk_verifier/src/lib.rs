@@ -1018,21 +1018,19 @@ impl ZkVerifierContract {
 
     /// Verify a Groth16 ZK proof for a claim.
     ///
-    /// The proof must be exactly 256 bytes (BN254 uncompressed: A‖B‖C).
-    /// A verifying key hash must have been registered via `set_verifying_key`.
+    /// The proof must be exactly 192 bytes (BLS12-381 compressed: A‖B‖C).
+    /// A Groth16 verifying key hash must have been registered via
+    /// `set_groth16_verifying_key`.
     ///
-    /// **WARNING: This is a test-only heuristic path that does NOT perform actual
-    /// cryptographic verification. It is only available in test builds. Production
-    /// code must use [`verify_groth16_proof`] which performs real BLS12-381 pairing
-    /// checks and binds the proof to specific credential_id and claim_type via
-    /// public inputs.**
-    #[cfg(any(test, feature = "testutils"))]
+    /// Performs genuine BLS12-381 pairing verification (not a structural/hash
+    /// placeholder). Public inputs are derived from `credential_id` and
+    /// `claim_type` and bound to the proof via the Groth16 verification equation.
     pub fn verify_claim(
         env: Env,
         admin: Address,
         _quorum_proof_id: Address,
-        _credential_id: u64,
-        _claim_type: ClaimType,
+        credential_id: u64,
+        claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
         if Self::is_paused(&env) {
@@ -1045,11 +1043,36 @@ impl ZkVerifierContract {
             .expect("not initialized");
         assert!(stored_admin == admin, "unauthorized");
 
-        let vk_hash: BytesN<32> = env.storage().instance()
-            .get(&DataKey::VerifyingKeyHash)
-            .expect("verifying key not set");
+        // Look up the real Groth16 verifying key hash (set via
+        // set_groth16_verifying_key / rotate_groth16_verifying_key).
+        let vk_hash: BytesN<32> = match env.storage().instance()
+            .get(&DataKey::Groth16VerifyingKeyHash)
+        {
+            Some(h) => h,
+            None => return false,
+        };
 
-        groth16_verify(&env, &vk_hash, &proof)
+        // Build public inputs from credential_id and claim_type.
+        // Layout: [credential_id as 32-byte LE Fr, claim_type discriminant as 32-byte LE Fr].
+        let claim_u32: u32 = match claim_type {
+            ClaimType::HasDegree => 1,
+            ClaimType::HasLicense => 2,
+            ClaimType::HasEmploymentHistory => 3,
+            ClaimType::HasCertification => 4,
+            ClaimType::HasResearchPublication => 5,
+        };
+        let mut public_inputs = Bytes::new(&env);
+        public_inputs.extend_from_array(&credential_id.to_le_bytes());
+        // Pad to 32-byte field element
+        let mut pi_part = [0u8; 32];
+        pi_part[0..8].copy_from_slice(&credential_id.to_le_bytes());
+        public_inputs = Bytes::new(&env);
+        public_inputs.extend_from_array(&pi_part);
+        let mut pi_part2 = [0u8; 32];
+        pi_part2[0..4].copy_from_slice(&claim_u32.to_le_bytes());
+        public_inputs.extend_from_array(&pi_part2);
+
+        groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
     }
 
     /// Set the admin address once after deployment.
