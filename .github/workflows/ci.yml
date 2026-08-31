@@ -173,13 +173,44 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - name: Install cargo-audit and cargo-deny
+        run: cargo install cargo-audit cargo-deny --locked
 
       - name: Cargo audit
         run: cargo audit
+
+      - name: Cargo deny check
+        run: cargo deny check
 
       - name: TruffleHog scan
         uses: trufflesecurity/trufflehog@main
         with:
           extra_args: --results=verified,unknown
+
+  mutation-testing:
+    runs-on: ubuntu-latest
+    # Run mutation tests nightly to control CI cost
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[mutation]')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation tests
+        run: cargo mutants --package quorum_proof --package sbt_registry --package zk_verifier
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-test-report
+          path: mutants.json
+          retention-days: 30
