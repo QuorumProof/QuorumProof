@@ -33,5 +33,9 @@ EXPOSE 3001
 ENV NODE_ENV=production
 ENV LOG_FILE=/var/log/quorumproof/api.log
 ENV LOG_LEVEL=info
+# Must match EXPOSE/ports/healthcheck above — src/index.ts defaults PORT to
+# 3000 when unset, which left the container listening on a port nothing
+# (including docker-compose's own healthcheck and Prometheus) could reach.
+ENV PORT=3001
 
 CMD ["node", "dist/index.js"]

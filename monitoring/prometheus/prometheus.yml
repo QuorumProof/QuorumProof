@@ -19,3 +19,18 @@ scrape_configs:
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]
+
+  # #3 follow-up — api-server/src/services/criticalEventListener.ts exposes
+  # revocation/dispute/upgrade counters at GET /metrics/events, consumed by
+  # the RevocationSpike/DisputeRaised/ContractUpgradeDetected/
+  # CriticalEventAlertingDegraded rules in alerts.yml. Without this job those
+  # rules never see data and can never fire. 15s matches the listener's own
+  # poll interval (EVENT_LISTENER_POLL_MS, default 15000) and is well under
+  # the tightest alert window (DisputeRaised/ContractUpgradeDetected: 5m), so
+  # a real event is reflected in Prometheus within one scrape interval. See
+  # docs/critical-event-alerting.md.
+  - job_name: "api-server-critical-events"
+    metrics_path: /metrics/events
+    static_configs:
+      - targets: ["host.docker.internal:3001"]
+    scrape_interval: 15s

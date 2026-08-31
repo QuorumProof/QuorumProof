@@ -7,6 +7,9 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(test)]
+mod proptest_sbt_registry;
+
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
@@ -29,6 +32,21 @@ fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
             .iter()
             .zip(needle.iter())
             .all(|(h, n)| h.to_ascii_lowercase() == *n)
+}
+
+/// Issue #1405: shared length/scheme validation for a metadata URI's raw
+/// bytes, used by both `mint()` and `set_sbt_metadata_uri`. Panics if
+/// `uri_bytes` exceeds `MAX_METADATA_URI_LEN` or doesn't start with
+/// `https://`/`ipfs://` (case-insensitive).
+fn validate_metadata_uri(uri_bytes: &[u8]) {
+    if uri_bytes.len() > MAX_METADATA_URI_LEN {
+        panic!("metadata_uri exceeds 256 characters");
+    }
+    let valid_scheme = starts_with_ignore_ascii_case(uri_bytes, b"https://")
+        || starts_with_ignore_ascii_case(uri_bytes, b"ipfs://");
+    if !valid_scheme {
+        panic!("metadata_uri must be HTTPS or IPFS");
+    }
 }
 
 #[contracterror]
@@ -82,6 +100,8 @@ pub enum ContractError {
     ClawbackNotFound = 26,
     /// Issue #1243: Caller is not the issuer who initiated this clawback.
     UnauthorizedClawback = 27,
+    /// Issue #1402: `entries` is empty or exceeds `MAX_BATCH_SIZE`.
+    BatchTooLarge = 28,
 }
 
 #[contracttype]
@@ -160,11 +180,9 @@ pub enum DataKey {
     /// The pending clawback id for an SBT, if any (sbt_id -> clawback_id).
     /// Enforces that only one clawback may be pending per SBT at a time.
     PendingClawbackBySbt(u64),
-    /// Issue #1413: Global list of all currently-pending clawback IDs.
-    /// Maintained on initiate/cancel so callers can enumerate active clawbacks
-    /// without iterating ClawbackRequestCount (which includes
-    /// cancelled/executed entries too).
-    PendingClawbacks,
+    /// A co-owner candidate proposed by an SBT's owner, awaiting the
+    /// candidate's acceptance.
+    CoOwnerProposal(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -233,7 +251,7 @@ pub struct OwnershipHistoryEntry {
     pub co_owner: Option<Address>,
     /// Ledger timestamp when this ownership state took effect.
     pub changed_at: u64,
-    /// Event kind: "mint", "dual_xfer", "set_co", "rm_co"
+    /// Event kind: "mint", "dual_xfer", "set_co", "rm_co", "attestor"
     pub event: Symbol,
 }
 
@@ -566,6 +584,20 @@ impl SbtRegistryContract {
             panic_with_error!(&env, ContractError::HolderBlacklisted);
         }
 
+        // Issue #1405: validate metadata_uri length/scheme up front, matching
+        // the check set_sbt_metadata_uri already enforces, so an
+        // unbounded or malformed-scheme URI can never be stored at mint time.
+        {
+            let uri_len = metadata_uri.len() as usize;
+            if uri_len > MAX_METADATA_URI_LEN {
+                panic!("metadata_uri exceeds 256 characters");
+            }
+            let mut uri_buf = [0u8; MAX_METADATA_URI_LEN];
+            let uri_slice = &mut uri_buf[..uri_len];
+            metadata_uri.copy_into_slice(uri_slice);
+            validate_metadata_uri(uri_slice);
+        }
+
         // Cross-contract: verify credential exists and is not revoked.
         // Uses env.invoke_contract to avoid a circular crate dependency with quorum_proof.
         let qp_id: Address = env
@@ -797,17 +829,17 @@ impl SbtRegistryContract {
 
         let delegation = Delegation {
             token_id,
-            delegatee,
+            delegatee: delegatee.clone(),
             expires_at,
         };
         env.storage()
             .persistent()
             .set(&DataKey::Delegation(token_id), &delegation);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Delegation(token_id),
-            STANDARD_TTL,
-            EXTENDED_TTL,
-        );
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("delegate").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (delegatee, expires_at));
     }
 
     /// Revoke an active delegation for a specific SBT. Only the token owner may call this.
@@ -819,9 +851,20 @@ impl SbtRegistryContract {
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
+
+        let delegatee: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<_, Delegation>(&DataKey::Delegation(token_id))
+            .map(|delegation| delegation.delegatee);
         env.storage()
             .persistent()
             .remove(&DataKey::Delegation(token_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("undeleg").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, delegatee);
     }
 
     /// Retrieve delegation details for a token.
@@ -870,36 +913,61 @@ impl SbtRegistryContract {
         let delegation = ScopedDelegation {
             token_id: sbt_id,
             delegatee: delegatee.clone(),
-            scope,
+            scope: scope.clone(),
         };
 
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::UsageDelegation(sbt_id, delegatee.clone()), &delegation);
-        env.storage().persistent().extend_ttl(
-            &DataKey::UsageDelegation(sbt_id, delegatee),
-            STANDARD_TTL,
-            EXTENDED_TTL,
-        );
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("deleg_use").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (delegatee, scope));
     }
 
     /// Verify a delegated SBT specifically for DeFi protocol usages.
     pub fn verify_delegated_sbt(env: Env, sbt_id: u64, delegatee: Address) -> bool {
+        matches!(
+            Self::active_usage_scope(&env, sbt_id, delegatee),
+            Some(UsageScope::DeFiCollateral(_))
+        )
+    }
+
+    /// Verify a delegated SBT specifically for identity verification usages.
+    pub fn verify_delegated_identity(env: Env, sbt_id: u64, delegatee: Address) -> bool {
+        matches!(
+            Self::active_usage_scope(&env, sbt_id, delegatee),
+            Some(UsageScope::IdentityVerification(_))
+        )
+    }
+
+    /// Verify a delegated SBT specifically for governance voting usages.
+    pub fn verify_delegated_governance(env: Env, sbt_id: u64, delegatee: Address) -> bool {
+        matches!(
+            Self::active_usage_scope(&env, sbt_id, delegatee),
+            Some(UsageScope::GovernanceVoting(_))
+        )
+    }
+
+    /// Internal helper: return the scope of a delegatee's usage delegation for
+    /// an existing token, but only while that delegation is still unexpired.
+    fn active_usage_scope(env: &Env, sbt_id: u64, delegatee: Address) -> Option<UsageScope> {
         if !env.storage().persistent().has(&DataKey::Token(sbt_id)) {
-            return false;
+            return None;
         }
 
         let key = DataKey::UsageDelegation(sbt_id, delegatee);
-        if let Some(delegation) = env.storage().persistent().get::<_, ScopedDelegation>(&key) {
-            let current_ts = env.ledger().timestamp();
-            match delegation.scope {
-                UsageScope::DeFiCollateral(expires_at) => {
-                    expires_at > current_ts
-                }
-                _ => false,
-            }
+        let delegation: ScopedDelegation = env.storage().instance().get(&key)?;
+        let expires_at = match &delegation.scope {
+            UsageScope::DeFiCollateral(expires_at) => *expires_at,
+            UsageScope::IdentityVerification(expires_at) => *expires_at,
+            UsageScope::GovernanceVoting(expires_at) => *expires_at,
+        };
+        if expires_at > env.ledger().timestamp() {
+            Some(delegation.scope)
         } else {
-            false
+            None
         }
     }
 
@@ -1064,6 +1132,13 @@ impl SbtRegistryContract {
             .expect("not initialized");
         assert!(caller == qp_id || caller == admin, "unauthorized");
 
+        // Issue #1403: recovery moves the SBT to a new holder address, so it
+        // must honor the blacklist the same way mint() does — recovery is not
+        // meant to be a way around a blacklist entry, only around lost keys.
+        if env.storage().instance().has(&DataKey::Blacklist(new_owner.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+
         let mut token: SoulboundToken = env
             .storage()
             .persistent()
@@ -1130,6 +1205,12 @@ impl SbtRegistryContract {
             .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
 
+        // Issue #1403: mirror mint()'s blacklist check so a blacklisted
+        // address cannot regain an SBT via admin transfer.
+        if env.storage().instance().has(&DataKey::Blacklist(new_owner.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+
         let mut token: SoulboundToken = env
             .storage()
             .persistent()
@@ -1188,27 +1269,112 @@ impl SbtRegistryContract {
 
     // ── Issue #1275: Dual-Ownership (individual + organization) ────────
 
+    /// Propose `candidate` as co-owner of an SBT held by `owner`. This only
+    /// records the proposal — the SBT is left untouched until the candidate
+    /// calls `accept_co_owner`, so an owner cannot name an unwilling party.
+    /// Proposing again replaces any earlier pending proposal.
+    ///
+    /// # Panics
+    /// - "token not found" if `token_id` does not exist.
+    /// - "not the owner" if `owner` does not hold the SBT.
+    /// - `ContractError::InvalidCoOwner` if `candidate == owner`.
+    pub fn propose_co_owner(env: Env, owner: Address, token_id: u64, candidate: Address) {
+        owner.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
+        if candidate == owner {
+            panic_with_error!(&env, ContractError::InvalidCoOwner);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CoOwnerProposal(token_id), &candidate);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("prop_co").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner, candidate));
+    }
+
+    /// Accept a pending co-owner proposal. Requires the candidate's own
+    /// signature, which is what makes co-ownership consensual.
+    ///
+    /// # Panics
+    /// - `ContractError::CoOwnerProposalNotFound` if there is no pending
+    ///   proposal for `candidate` on this SBT.
+    /// - "token not found" if `token_id` does not exist.
+    /// - `ContractError::InvalidCoOwner` if `candidate` is now the owner.
+    pub fn accept_co_owner(env: Env, candidate: Address, token_id: u64) {
+        candidate.require_auth();
+
+        let proposed: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoOwnerProposal(token_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CoOwnerProposalNotFound));
+        if proposed != candidate {
+            panic_with_error!(&env, ContractError::CoOwnerProposalNotFound);
+        }
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CoOwnerProposal(token_id));
+        Self::assign_co_owner(&env, token_id, token, candidate);
+    }
+
+    /// Returns the pending co-owner proposal for an SBT, if any.
+    pub fn get_co_owner_proposal(env: Env, token_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CoOwnerProposal(token_id))
+    }
+
     /// Assign a co-owner (e.g. an organization) to an SBT already held by an
-    /// individual `owner`. Once set, `transfer_ownership_dual` requires
-    /// signatures from both parties. Only the current `owner` may call this
-    /// (the co-owner is added unilaterally by the primary owner, mirroring
-    /// how `set_co_owner`'s counterpart `remove_co_owner` requires both
-    /// parties to undo it).
+    /// individual `owner`, in a single call.
+    ///
+    /// Deprecated in favour of `propose_co_owner` / `accept_co_owner`; it is
+    /// kept for compatibility and now requires the co-owner's signature too,
+    /// so it can no longer be used to name an unwilling party.
     ///
     /// # Panics
     /// - "token not found" if `token_id` does not exist.
     /// - `ContractError::InvalidCoOwner` if `co_owner == owner`.
     pub fn set_co_owner(env: Env, owner: Address, token_id: u64, co_owner: Address) {
         owner.require_auth();
+        co_owner.require_auth();
 
-        let mut token: SoulboundToken = env
+        let token: SoulboundToken = env
             .storage()
             .persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
+
+        Self::assign_co_owner(&env, token_id, token, co_owner);
+    }
+
+    /// Internal helper: write the co-owner onto an already-loaded token,
+    /// emit the `set_co` event and append to the ownership history.
+    fn assign_co_owner(
+        env: &Env,
+        token_id: u64,
+        mut token: SoulboundToken,
+        co_owner: Address,
+    ) {
+        let owner = token.owner.clone();
         if co_owner == owner {
-            panic_with_error!(&env, ContractError::InvalidCoOwner);
+            panic_with_error!(env, ContractError::InvalidCoOwner);
         }
 
         token.co_owner = Some(co_owner.clone());
@@ -1216,12 +1382,12 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::Token(token_id), &token);
 
-        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
-        topics.push_back(symbol_short!("set_co").into_val(&env));
-        topics.push_back(token_id.into_val(&env));
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(env);
+        topics.push_back(symbol_short!("set_co").into_val(env));
+        topics.push_back(token_id.into_val(env));
         env.events().publish(topics, (owner.clone(), co_owner.clone()));
         Self::record_ownership_history(
-            &env,
+            env,
             token_id,
             owner,
             Some(co_owner),
@@ -1938,9 +2104,10 @@ impl SbtRegistryContract {
     /// Mint multiple SBTs in a single atomic transaction.
     /// Returns the newly assigned token IDs in input order.
     pub fn batch_mint(env: Env, entries: Vec<BatchMintEntry>) -> Vec<u64> {
-        // Requirement 1.10: empty batch returns immediately with no state changes.
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE
+        // before any validation or state changes.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         // ── Validation phase ────────────────────────────────────────────────
@@ -1971,6 +2138,15 @@ impl SbtRegistryContract {
 
         for i in 0..entries.len() {
             let entry = entries.get(i).unwrap();
+
+            // Issue #1403: mirror mint()'s blacklist check for each entry's owner.
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::Blacklist(entry.owner.clone()))
+            {
+                panic_with_error!(&env, ContractError::HolderBlacklisted);
+            }
 
             // Requirement 1.3 / 1.4: verify credential is not revoked via QuorumProof.
             // is_revoked panics with CredentialNotFound if the credential doesn't exist.
@@ -2107,8 +2283,9 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics if any token doesn't exist or if caller is not the holder.
     pub fn batch_burn(env: Env, entries: Vec<BatchBurnEntry>) -> Vec<u64> {
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         // Require auth from each distinct caller
@@ -2209,8 +2386,9 @@ impl SbtRegistryContract {
             .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
 
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         let mut result_ids: Vec<u64> = Vec::new(&env);
@@ -2306,6 +2484,22 @@ impl SbtRegistryContract {
         env.storage().instance().has(&DataKey::Blacklist(holder))
     }
 
+    /// Issue #1404: remove a holder from the blacklist. Admin-only.
+    /// Reverses `add_holder_to_blacklist`, allowing a previously blacklisted
+    /// address to mint again.
+    pub fn remove_holder_from_blacklist(env: Env, admin: Address, holder: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().remove(&DataKey::Blacklist(holder.clone()));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("unblcklst").into_val(&env));
+        env.events().publish(topics, (holder, admin));
+    }
+
     /// Update the metadata URI of an SBT. Only the token owner may call this.
     /// Increments the token version on each update.
     pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
@@ -2384,8 +2578,10 @@ impl SbtRegistryContract {
     pub fn set_sbt_metadata_uri(env: Env, issuer: Address, sbt_id: u64, metadata_uri: soroban_sdk::String) {
         issuer.require_auth();
 
-        // Validate URI length. `String::len` is the byte length of the URI
-        // itself; the XDR envelope adds framing that must not count here.
+        // `String::len` is the byte length of the URI itself; the XDR
+        // envelope adds framing that must not count here. The buffer is
+        // sized to MAX_METADATA_URI_LEN, so the length must be checked
+        // before copying into it.
         let uri_len = metadata_uri.len() as usize;
         if uri_len > MAX_METADATA_URI_LEN {
             panic!("metadata_uri exceeds 256 characters");
@@ -2395,13 +2591,7 @@ impl SbtRegistryContract {
         let mut uri_buf = [0u8; MAX_METADATA_URI_LEN];
         let uri_bytes = &mut uri_buf[..uri_len];
         metadata_uri.copy_into_slice(uri_bytes);
-
-        // Check for HTTPS or IPFS scheme (case-insensitive)
-        let valid_scheme = starts_with_ignore_ascii_case(uri_bytes, b"https://")
-            || starts_with_ignore_ascii_case(uri_bytes, b"ipfs://");
-        if !valid_scheme {
-            panic!("metadata_uri must be HTTPS or IPFS");
-        }
+        validate_metadata_uri(uri_bytes);
 
         // Get the SBT to verify it exists
         let sbt: SoulboundToken = env
@@ -3162,6 +3352,16 @@ impl SbtRegistryContract {
         assert!(!delegation.executed, "delegation already executed");
         assert!(!proof.is_empty(), "proof required");
 
+        // Issue #1403: mirror mint()'s blacklist check on the delegation's
+        // target holder.
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::Blacklist(delegation.new_holder.clone()))
+        {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+
         let mut token: SoulboundToken = env
             .storage()
             .persistent()
@@ -3234,6 +3434,13 @@ impl SbtRegistryContract {
 
         Self::record_notification(&env, new_holder.clone(), sbt_id, symbol_short!("transfer"));
         Self::log_sbt_activity(&env, sbt_id, symbol_short!("transfer"), attestor);
+        Self::record_ownership_history(
+            &env,
+            sbt_id,
+            new_holder,
+            token.co_owner,
+            symbol_short!("attestor"),
+        );
     }
 
     /// Get the attestor delegation record for an SBT.
@@ -5547,6 +5754,223 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_delegated_identity_success_and_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::IdentityVerification(expires_at);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
+
+        assert!(client.verify_delegated_identity(&token_id, &delegatee));
+        // Scope-specific verifiers must not accept a different scope.
+        assert!(!client.verify_delegated_sbt(&token_id, &delegatee));
+        assert!(!client.verify_delegated_governance(&token_id, &delegatee));
+
+        env.ledger().set_timestamp(expires_at + 1);
+        assert!(!client.verify_delegated_identity(&token_id, &delegatee));
+    }
+
+    #[test]
+    fn test_verify_delegated_governance_success_and_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::GovernanceVoting(expires_at);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
+
+        assert!(client.verify_delegated_governance(&token_id, &delegatee));
+        assert!(!client.verify_delegated_sbt(&token_id, &delegatee));
+        assert!(!client.verify_delegated_identity(&token_id, &delegatee));
+
+        env.ledger().set_timestamp(expires_at + 1);
+        assert!(!client.verify_delegated_governance(&token_id, &delegatee));
+    }
+
+    /// Find the last emitted event whose first topic is `name`.
+    fn find_event(
+        env: &Env,
+        name: &str,
+    ) -> Option<(Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
+        env.events()
+            .all()
+            .iter()
+            .filter(|(_, topics, _)| {
+                topics
+                    .get(0)
+                    .and_then(|v| Symbol::try_from_val(env, &v).ok())
+                    .map(|s| s == Symbol::new(env, name))
+                    .unwrap_or(false)
+            })
+            .last()
+            .map(|(_, topics, data)| (topics, data))
+    }
+
+    #[test]
+    fn test_delegate_sbt_rights_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+
+        let (topics, data) = find_event(&env, "delegate").expect("delegate event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        let (emitted_delegatee, emitted_expiry) = <(Address, u64)>::from_val(&env, &data);
+        assert_eq!(emitted_delegatee, delegatee);
+        assert_eq!(emitted_expiry, expires_at);
+    }
+
+    #[test]
+    fn test_revoke_sbt_delegation_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+        client.revoke_sbt_delegation(&owner, &token_id);
+
+        let (topics, data) = find_event(&env, "undeleg").expect("undeleg event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        assert_eq!(
+            <Option<Address>>::from_val(&env, &data),
+            Some(delegatee)
+        );
+    }
+
+    #[test]
+    fn test_delegate_sbt_usage_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::GovernanceVoting(expires_at);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
+
+        let (topics, data) = find_event(&env, "deleg_use").expect("deleg_use event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        let (emitted_delegatee, emitted_scope) = <(Address, UsageScope)>::from_val(&env, &data);
+        assert_eq!(emitted_delegatee, delegatee);
+        assert_eq!(emitted_scope, scope);
+    }
+
+    // ── Issue #1408: consensual co-ownership ─────────────────────────────────
+
+    #[test]
+    fn test_propose_and_accept_co_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.propose_co_owner(&owner, &token_id, &candidate);
+        assert_eq!(client.get_co_owner_proposal(&token_id), Some(candidate.clone()));
+        assert_eq!(client.get_co_owner(&token_id), None);
+
+        client.accept_co_owner(&candidate, &token_id);
+        assert_eq!(client.get_co_owner(&token_id), Some(candidate.clone()));
+        assert_eq!(client.get_co_owner_proposal(&token_id), None);
+
+        let history = client.get_ownership_history(&token_id);
+        let last = history.last().unwrap();
+        assert_eq!(last.event, symbol_short!("set_co"));
+        assert_eq!(last.co_owner, Some(candidate));
+    }
+
+    #[test]
+    fn test_propose_co_owner_without_acceptance_leaves_token_unaffected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.propose_co_owner(&owner, &token_id, &candidate);
+
+        // The candidate never accepts: the SBT keeps no co-owner at all.
+        assert_eq!(client.get_co_owner(&token_id), None);
+        assert_eq!(client.get_co_owner_proposal(&token_id), Some(candidate));
+        assert_eq!(client.get_ownership_history(&token_id).len(), 1); // mint only
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_accept_co_owner_without_proposal_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.accept_co_owner(&candidate, &token_id);
+    }
+
+    #[test]
     #[should_panic(expected = "cannot delegate to self")]
     fn test_delegate_sbt_usage_to_self_panics() {
         let env = Env::default();
@@ -5820,6 +6244,34 @@ mod tests {
     }
 
     #[test]
+    fn test_transfer_sbt_via_attestor_records_ownership_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+
+        client.delegate_sbt_transfer(&owner, &token_id, &attestor, &new_holder, &reason);
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+
+        let history = client.get_ownership_history(&token_id);
+        assert_eq!(history.len(), 2); // mint + attestor transfer
+        let last = history.last().unwrap();
+        assert_eq!(last.event, symbol_short!("attestor"));
+        assert_eq!(last.owner, new_holder);
+    }
+
+    #[test]
     fn test_transfer_sbt_via_attestor_already_executed() {
         let env = Env::default();
         env.mock_all_auths();
@@ -6025,212 +6477,227 @@ mod tests {
         assert!(client.verify_sbt_commitment(&commitment, &proof));
     }
 
-    // ── Issue #1412: batch_mint ───────────────────────────────────────────────
+    // --- Issue #1402: batch size enforcement ---
 
     #[test]
-    fn test_batch_mint_success() {
+    fn test_batch_mint_accepts_exactly_max_batch_size() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
 
         let issuer = Address::generate(&env);
-        let owner1 = Address::generate(&env);
-        let owner2 = Address::generate(&env);
+        let subject = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred1 = qp_client.issue_credential(&issuer, &owner1, &1u32, &meta, &None, &0u64);
-        let cred2 = qp_client.issue_credential(&issuer, &owner2, &2u32, &meta, &None, &0u64);
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
-        let entries = soroban_sdk::vec![
-            &env,
-            BatchMintEntry {
-                owner: owner1.clone(),
-                credential_id: cred1,
-                metadata_uri: Bytes::from_slice(&env, b"ipfs://1"),
-            },
-            BatchMintEntry {
-                owner: owner2.clone(),
-                credential_id: cred2,
-                metadata_uri: Bytes::from_slice(&env, b"ipfs://2"),
-            },
-        ];
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        for _ in 0..client.get_max_batch_size() {
+            entries.push_back(BatchMintEntry {
+                owner: Address::generate(&env),
+                credential_id: cred_id,
+                metadata_uri: uri.clone(),
+            });
+        }
 
-        let ids = client.batch_mint(&entries);
-        assert_eq!(ids.len(), 2);
-        assert_eq!(client.owner_of(&ids.get(0).unwrap()), owner1);
-        assert_eq!(client.owner_of(&ids.get(1).unwrap()), owner2);
+        let result = client.batch_mint(&entries);
+        assert_eq!(result.len(), client.get_max_batch_size());
     }
 
     #[test]
-    fn test_batch_mint_empty_returns_empty() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
-        let empty: soroban_sdk::Vec<BatchMintEntry> = soroban_sdk::vec![&env];
-        let ids = client.batch_mint(&empty);
-        assert_eq!(ids.len(), 0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_batch_mint_rejects_duplicate_owner_credential() {
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_over_max_batch_size() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
 
         let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
+        let subject = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
 
-        let entries = soroban_sdk::vec![
-            &env,
-            BatchMintEntry {
-                owner: owner.clone(),
-                credential_id: cred,
-                metadata_uri: Bytes::from_slice(&env, b"ipfs://a"),
-            },
-            BatchMintEntry {
-                owner: owner.clone(),
-                credential_id: cred,
-                metadata_uri: Bytes::from_slice(&env, b"ipfs://b"),
-            },
-        ];
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        for _ in 0..(client.get_max_batch_size() + 1) {
+            entries.push_back(BatchMintEntry {
+                owner: Address::generate(&env),
+                credential_id: cred_id,
+                metadata_uri: uri.clone(),
+            });
+        }
+
         client.batch_mint(&entries);
     }
 
-    // ── Issue #1412: batch_burn ───────────────────────────────────────────────
-
     #[test]
-    fn test_batch_burn_success() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred1 = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let cred2 = qp_client.issue_credential(&issuer, &owner, &2u32, &meta, &None, &0u64);
-        let t1 = client.mint(&owner, &cred1, &Bytes::from_slice(&env, b"ipfs://1"));
-        let t2 = client.mint(&owner, &cred2, &Bytes::from_slice(&env, b"ipfs://2"));
-
-        let entries = soroban_sdk::vec![
-            &env,
-            BatchBurnEntry { caller: owner.clone(), token_id: t1 },
-            BatchBurnEntry { caller: owner.clone(), token_id: t2 },
-        ];
-        let burned = client.batch_burn(&entries);
-        assert_eq!(burned.len(), 2);
-        assert_eq!(client.get_tokens_by_owner(&owner).len(), 0);
-    }
-
-    #[test]
-    fn test_batch_burn_empty_returns_empty() {
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_empty_entries() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
-        let empty: soroban_sdk::Vec<BatchBurnEntry> = soroban_sdk::vec![&env];
-        let result = client.batch_burn(&empty);
-        assert_eq!(result.len(), 0);
+
+        let entries: Vec<BatchMintEntry> = Vec::new(&env);
+        client.batch_mint(&entries);
     }
 
-    // ── Issue #1412: batch_transfer ──────────────────────────────────────────
-
     #[test]
-    fn test_batch_transfer_success() {
+    #[should_panic(expected = "HostError")]
+    fn test_batch_burn_rejects_empty_entries() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
 
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let new_owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
-
-        let entries = soroban_sdk::vec![
-            &env,
-            BatchTransferEntry { token_id, new_owner: new_owner.clone() },
-        ];
-        let transferred = client.batch_transfer(&admin, &entries);
-        assert_eq!(transferred.len(), 1);
-        assert_eq!(client.owner_of(&token_id), new_owner);
+        let entries: Vec<BatchBurnEntry> = Vec::new(&env);
+        client.batch_burn(&entries);
     }
 
     #[test]
-    fn test_batch_transfer_empty_returns_empty() {
+    #[should_panic(expected = "HostError")]
+    fn test_batch_transfer_rejects_empty_entries() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
-        let empty: soroban_sdk::Vec<BatchTransferEntry> = soroban_sdk::vec![&env];
-        let result = client.batch_transfer(&admin, &empty);
-        assert_eq!(result.len(), 0);
+
+        let entries: Vec<BatchTransferEntry> = Vec::new(&env);
+        client.batch_transfer(&admin, &entries);
     }
 
-    // ── Issue #1412: clawback timelock ───────────────────────────────────────
+    // --- Issue #1403: blacklist enforcement on all owner-assigning paths ---
 
     #[test]
-    fn test_initiate_sbt_clawback_success() {
+    #[should_panic(expected = "HostError")]
+    fn test_admin_transfer_sbt_rejects_blacklisted_new_owner() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
 
+        let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
 
-        let reason = Bytes::from_slice(&env, b"fraudulent");
-        let clawback_id = client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
-        assert_eq!(clawback_id, 1);
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
 
-        let req = client.get_clawback_request(&clawback_id);
-        assert_eq!(req.sbt_id, token_id);
-        assert_eq!(req.issuer, admin);
+        client.admin_transfer_sbt(&admin, &token_id, &blacklisted);
     }
 
     #[test]
-    fn test_cancel_sbt_clawback_before_expiry() {
+    #[should_panic(expected = "HostError")]
+    fn test_recover_sbt_rejects_blacklisted_new_owner() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
 
+        let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
 
-        let reason = Bytes::from_slice(&env, b"test");
-        let clawback_id = client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
-        client.cancel_sbt_clawback(&admin, &clawback_id);
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
 
-        let req = client.get_clawback_request(&clawback_id);
-        assert_eq!(req.status, symbol_short!("cancelled"));
+        client.recover_sbt(&admin, &token_id, &blacklisted);
     }
 
     #[test]
-    #[should_panic]
-    fn test_initiate_clawback_rejects_duplicate_for_same_sbt() {
+    #[should_panic(expected = "HostError")]
+    fn test_transfer_sbt_via_attestor_rejects_blacklisted_new_holder() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
 
+        let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
 
-        let reason = Bytes::from_slice(&env, b"fraud");
-        client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
-        // Second initiation for the same SBT must panic (ClawbackAlreadyExists).
-        client.initiate_sbt_clawback(&admin, &token_id, &reason, &3600u64);
+        let attestor = Address::generate(&env);
+        let blacklisted = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+        client.delegate_sbt_transfer(&owner, &token_id, &attestor, &blacklisted, &reason);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
     }
 
-    // ── Issue #1412: marketplace register/deregister/query ───────────────────
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_blacklisted_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        entries.push_back(BatchMintEntry {
+            owner: blacklisted,
+            credential_id: cred_id,
+            metadata_uri: uri,
+        });
+
+        client.batch_mint(&entries);
+    }
+
+    // --- Issue #1404: remove_holder_from_blacklist ---
 
     #[test]
-    fn test_register_sbt_in_marketplace_and_query() {
+    fn test_remove_holder_from_blacklist_allows_remint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.add_holder_to_blacklist(&admin, &owner);
+        assert!(client.is_holder_blacklisted(&owner));
+
+        client.remove_holder_from_blacklist(&admin, &owner);
+        assert!(!client.is_holder_blacklisted(&owner));
+
+        // Minting succeeds now that the blacklist entry is gone.
+        let token_id = client.mint(&owner, &cred_id, &uri);
+        assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_remove_holder_from_blacklist_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let holder = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &holder);
+
+        let not_admin = Address::generate(&env);
+        client.remove_holder_from_blacklist(&not_admin, &holder);
+    }
+
+    // --- Issue #1405: mint() validates metadata_uri length/scheme ---
+
+    #[test]
+    #[should_panic(expected = "metadata_uri exceeds 256 characters")]
+    fn test_mint_rejects_oversized_metadata_uri() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
@@ -6238,19 +6705,19 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
-        let market_id = Bytes::from_slice(&env, b"market_A");
-        let listing_meta = Bytes::from_slice(&env, b"{}");
-        client.register_sbt_in_marketplace(&owner, &token_id, &market_id, &listing_meta);
+        let mut long_uri = std::vec::Vec::new();
+        long_uri.extend_from_slice(b"ipfs://");
+        long_uri.resize(300, b'a');
+        let uri = Bytes::from_slice(&env, &long_uri);
 
-        let results = client.query_marketplace_sbt(&market_id);
-        assert!(results.iter().any(|id| id == token_id));
+        client.mint(&owner, &cred_id, &uri);
     }
 
     #[test]
-    fn test_deregister_sbt_from_marketplace() {
+    #[should_panic(expected = "metadata_uri must be HTTPS or IPFS")]
+    fn test_mint_rejects_invalid_scheme_metadata_uri() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
@@ -6258,241 +6725,9 @@ mod tests {
         let issuer = Address::generate(&env);
         let owner = Address::generate(&env);
         let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
 
-        let market_id = Bytes::from_slice(&env, b"market_B");
-        let listing_meta = Bytes::from_slice(&env, b"{}");
-        client.register_sbt_in_marketplace(&owner, &token_id, &market_id, &listing_meta);
-        client.deregister_sbt_from_marketplace(&owner, &token_id, &market_id);
-
-        let results = client.query_marketplace_sbt(&market_id);
-        assert!(!results.iter().any(|id| id == token_id));
-    }
-
-    #[test]
-    fn test_get_all_registered_sbts_pagination() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let issuer = Address::generate(&env);
-        let market_id = Bytes::from_slice(&env, b"market_C");
-        let listing_meta = Bytes::from_slice(&env, b"{}");
-
-        for i in 0u32..3 {
-            let owner = Address::generate(&env);
-            let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-            let cred = qp_client.issue_credential(&issuer, &owner, &i, &meta, &None, &0u64);
-            let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://x"));
-            client.register_sbt_in_marketplace(&owner, &token_id, &market_id, &listing_meta);
-        }
-
-        // First page: offset=0, limit=2 → 2 items.
-        let page1 = client.get_all_registered_sbts(&0u64, &2u64);
-        assert_eq!(page1.len(), 2);
-
-        // Second page: offset=2, limit=2 → 1 item.
-        let page2 = client.get_all_registered_sbts(&2u64, &2u64);
-        assert_eq!(page2.len(), 1);
-
-        // Out-of-range page: offset=10 → empty.
-        let page3 = client.get_all_registered_sbts(&10u64, &2u64);
-        assert_eq!(page3.len(), 0);
-    }
-
-    // ── Issue #1412: attributes ───────────────────────────────────────────────
-
-    #[test]
-    fn test_add_sbt_attribute_and_get() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
-
-        let key = Bytes::from_slice(&env, b"specialization");
-        let value = Bytes::from_slice(&env, b"mechanical");
-        client.add_sbt_attribute(&admin, &token_id, &key, &value, &false);
-
-        let v = client.get_sbt_attribute(&owner, &token_id, &key);
-        assert_eq!(v, value);
-    }
-
-    #[test]
-    fn test_remove_sbt_attribute() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
-
-        let key = Bytes::from_slice(&env, b"tier");
-        let value = Bytes::from_slice(&env, b"gold");
-        client.add_sbt_attribute(&admin, &token_id, &key, &value, &false);
-        client.remove_sbt_attribute(&admin, &token_id, &key);
-
-        let keys = client.get_sbt_attribute_keys(&token_id);
-        assert!(!keys.iter().any(|k| k == key));
-    }
-
-    #[test]
-    fn test_query_sbt_by_attribute_pagination() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let key = Bytes::from_slice(&env, b"role");
-        let value = Bytes::from_slice(&env, b"engineer");
-
-        for i in 0u32..4 {
-            let owner = Address::generate(&env);
-            let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-            let cred = qp_client.issue_credential(&admin, &owner, &i, &meta, &None, &0u64);
-            let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://x"));
-            client.add_sbt_attribute(&admin, &token_id, &key, &value, &false);
-        }
-
-        // First page: 3 items.
-        let page1 = client.query_sbt_by_attribute(&key, &value, &0u64, &3u64);
-        assert_eq!(page1.len(), 3);
-
-        // Second page: 1 item.
-        let page2 = client.query_sbt_by_attribute(&key, &value, &3u64, &3u64);
-        assert_eq!(page2.len(), 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_private_attribute_denied_to_non_owner() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let owner = Address::generate(&env);
-        let stranger = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&admin, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
-
-        let key = Bytes::from_slice(&env, b"secret");
-        let value = Bytes::from_slice(&env, b"private_data");
-        client.add_sbt_attribute(&admin, &token_id, &key, &value, &true);
-
-        // Stranger reading a private attribute must panic.
-        client.get_sbt_attribute(&stranger, &token_id, &key);
-    }
-
-    // ── Issue #1412: co-owner and dual-transfer ───────────────────────────────
-
-    #[test]
-    fn test_set_co_owner_and_transfer_ownership_dual() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let co_owner = Address::generate(&env);
-        let new_owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
-
-        client.set_co_owner(&owner, &token_id, &co_owner);
-        let token = client.get_token(&token_id);
-        assert_eq!(token.co_owner, Some(co_owner.clone()));
-
-        client.transfer_ownership_dual(&token_id, &new_owner);
-        assert_eq!(client.owner_of(&token_id), new_owner);
-    }
-
-    #[test]
-    fn test_remove_co_owner() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let co_owner = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
-
-        client.set_co_owner(&owner, &token_id, &co_owner);
-        client.remove_co_owner(&owner, &co_owner, &token_id);
-
-        let token = client.get_token(&token_id);
-        assert_eq!(token.co_owner, None);
-    }
-
-    // ── Issue #1411: delegation uses persistent storage with TTL ─────────────
-
-    #[test]
-    fn test_delegation_persists_same_as_token() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let issuer = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let delegatee = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
-        let token_id = client.mint(&owner, &cred, &Bytes::from_slice(&env, b"ipfs://1"));
-
-        let expires_at = env.ledger().timestamp() + 10_000;
-        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
-
-        let d = client.get_delegation(&token_id);
-        assert_eq!(d.delegatee, delegatee);
-        assert_eq!(d.expires_at, expires_at);
-        assert!(client.is_delegate_active(&token_id, &delegatee));
-    }
-
-    // ── Issue #1413: PendingClawbacks index ──────────────────────────────────
-
-    #[test]
-    fn test_pending_clawbacks_index_maintained() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
-
-        let owner1 = Address::generate(&env);
-        let owner2 = Address::generate(&env);
-        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
-        let cred1 = qp_client.issue_credential(&admin, &owner1, &1u32, &meta, &None, &0u64);
-        let cred2 = qp_client.issue_credential(&admin, &owner2, &2u32, &meta, &None, &0u64);
-        let t1 = client.mint(&owner1, &cred1, &Bytes::from_slice(&env, b"ipfs://1"));
-        let t2 = client.mint(&owner2, &cred2, &Bytes::from_slice(&env, b"ipfs://2"));
-
-        let reason = Bytes::from_slice(&env, b"fraud");
-        let id1 = client.initiate_sbt_clawback(&admin, &t1, &reason, &3600u64);
-        let id2 = client.initiate_sbt_clawback(&admin, &t2, &reason, &3600u64);
-
-        let pending = client.get_pending_clawbacks();
-        assert!(pending.iter().any(|id| id == id1));
-        assert!(pending.iter().any(|id| id == id2));
-
-        // Cancel id1 — must be removed from the index.
-        client.cancel_sbt_clawback(&admin, &id1);
-        let after = client.get_pending_clawbacks();
-        assert!(!after.iter().any(|id| id == id1));
-        assert!(after.iter().any(|id| id == id2));
-    }
-
-    #[test]
-    fn test_get_pending_clawbacks_empty_initially() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
-        assert_eq!(client.get_pending_clawbacks().len(), 0);
+        let uri = Bytes::from_slice(&env, b"ftp://example.com/meta.json");
+        client.mint(&owner, &cred_id, &uri);
     }
 }

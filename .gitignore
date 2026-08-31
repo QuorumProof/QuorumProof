@@ -40,8 +40,15 @@ lcov.info
 *.bak.*
 **/*.rs.bak
 
-# Proptest regression files
+# Proptest regression files — excluded by default, but committed for
+# contracts where seeds are part of the test contract.
 **/proptest-regressions/
+!contracts/quorum_proof/proptest-regressions/
+!contracts/quorum_proof/proptest-regressions/**
+!contracts/sbt_registry/proptest-regressions/
+!contracts/sbt_registry/proptest-regressions/**
+!contracts/zk_verifier/proptest-regressions/
+!contracts/zk_verifier/proptest-regressions/**
 
 # Benchmark history / artifacts
 benches/history/*.json
@@ -127,14 +134,15 @@ TASK_IMPLEMENTATIONS.md
 IMPLEMENTATION_SUMMARY.md
 VERIFICATION_CHECKLIST.md
 
-# Soroban compiled WASM artifacts (never commit wasm blobs)
-**/*.wasm
-contracts/*/target/
+# Rust source backup files (e.g. lib.rs.bak created by editors/tools)
+**/*.rs.bak
+**/*.rs.orig
+**/*.rs.tmp
 
-# Cargo incremental build state
-**/.cargo-lock
-**/incremental/
+# Soroban / Stellar generated artifacts
+*.wasm.gz
+.stellar/
 
-# Test snapshots (runtime-generated, not committed except API contract baseline)
-contracts/**/snapshots/
-contracts/**/*.snap
+# OS-generated junk
+**/.DS_Store
+**/Thumbs.db

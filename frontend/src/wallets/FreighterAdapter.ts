@@ -10,6 +10,7 @@ export class FreighterAdapter implements WalletAdapter {
   readonly name = 'Freighter';
   readonly icon = '🦊';
   private _address: string | null = null;
+  private _accountIndex: number = 0;
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -20,7 +21,7 @@ export class FreighterAdapter implements WalletAdapter {
     }
   }
 
-  async connect(): Promise<string> {
+  async connect(accountIndex: number = 0): Promise<string> {
     const connected = await isConnected();
     if (!connected.isConnected) {
       throw new Error('Freighter extension not detected');
@@ -31,11 +32,13 @@ export class FreighterAdapter implements WalletAdapter {
       throw new Error('Failed to get address from Freighter');
     }
     this._address = result.address;
+    this._accountIndex = accountIndex;
     return result.address;
   }
 
   disconnect(): void {
     this._address = null;
+    this._accountIndex = 0;
   }
 
   isConnected(): boolean {
@@ -46,7 +49,11 @@ export class FreighterAdapter implements WalletAdapter {
     return this._address;
   }
 
-  async signTransaction(xdr: string): Promise<string> {
+  getAccountIndex(): number {
+    return this._accountIndex;
+  }
+
+  async signTransaction(xdr: string, accountIndex?: number): Promise<string> {
     const { signTransaction } = await import('@stellar/freighter-api');
     const result = await signTransaction(xdr);
     if ('error' in result && result.error) {
