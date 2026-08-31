@@ -49,7 +49,7 @@ function verifyLinkSignature(
 
 // GET /auth/oauth2/:provider/authorize — build the provider's consent screen URL
 router.get('/:provider/authorize', (req: Request, res: Response) => {
-  const provider = req.params.provider;
+  const provider = req.params.provider as string;
   if (!isSupportedProvider(provider)) {
     res.status(400).json({ error: `Unsupported OAuth2 provider: ${provider}` });
     return;
