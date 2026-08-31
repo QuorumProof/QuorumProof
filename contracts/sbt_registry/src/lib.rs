@@ -7,6 +7,9 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(test)]
+mod proptest_sbt_registry;
+
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,

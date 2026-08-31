@@ -2655,6 +2655,9 @@ impl ZkVerifierContract {
 }
 
 #[cfg(test)]
+mod proptest_zk_verifier;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
