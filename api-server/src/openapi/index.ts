@@ -44,6 +44,13 @@ import { recoveryPaths } from './paths/recovery.js';
 import { privilegeEscalationPaths } from './paths/privilegeEscalation.js';
 import { tracingPaths } from './paths/tracing.js';
 import { metricsPaths } from './paths/metrics.js';
+import { costsPaths } from './paths/costs.js';
+import { bridgePaths } from './paths/bridge.js';
+import { auditPaths } from './paths/audit.js';
+import { authAuditPaths } from './paths/authAudit.js';
+import { graphqlPaths } from './paths/graphql.js';
+import { passwordlessAuthPaths } from './paths/passwordlessAuth.js';
+import { reportsPaths } from './paths/reports.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8')) as { version: string };
@@ -101,6 +108,13 @@ export function buildOpenApiSpec(): OpenAPIObject {
     privilegeEscalationPaths,
     tracingPaths,
     metricsPaths,
+    costsPaths,
+    bridgePaths,
+    auditPaths,
+    authAuditPaths,
+    graphqlPaths,
+    passwordlessAuthPaths,
+    reportsPaths,
   );
 
   const baseUrl = (process.env.PUBLIC_APP_BASE_URL ?? 'http://localhost:3000').replace(/\/+$/, '');

@@ -4,6 +4,12 @@
 
 QuorumProof uses Soroban's built-in contract upgrade mechanism to enable seamless updates without losing state. This document outlines the procedures, migration strategies, and testing protocols for upgrading the QuorumProof contract.
 
+> **Monitoring**: The **[Backup, DR & Migration dashboard](../monitoring/grafana/dashboards/backup-and-migration.json)**
+> (`monitoring/grafana/dashboards/backup-and-migration.json`) provides a real-time view of migration
+> progress (cursor advancement, job status, state-version cardinality) during and after an upgrade.
+> Open the dashboard before starting an upgrade to confirm a clean baseline, and keep it open
+> throughout to catch a `StateVersionMismatch` or `MigrationStalled` condition early.
+
 ## Upgrade Mechanism
 
 ### How Soroban Upgrades Work

@@ -40,8 +40,15 @@ lcov.info
 *.bak.*
 **/*.rs.bak
 
-# Proptest regression files
+# Proptest regression files — excluded by default, but committed for
+# contracts where seeds are part of the test contract.
 **/proptest-regressions/
+!contracts/quorum_proof/proptest-regressions/
+!contracts/quorum_proof/proptest-regressions/**
+!contracts/sbt_registry/proptest-regressions/
+!contracts/sbt_registry/proptest-regressions/**
+!contracts/zk_verifier/proptest-regressions/
+!contracts/zk_verifier/proptest-regressions/**
 
 # Benchmark history / artifacts
 benches/history/*.json
@@ -83,6 +90,7 @@ Thumbs.db
 
 # Misc
 .env
+*.env.local
 dist/
 dashboard/dist/
 frontend/dist/
@@ -126,3 +134,16 @@ FILES_CHANGED.txt
 TASK_IMPLEMENTATIONS.md
 IMPLEMENTATION_SUMMARY.md
 VERIFICATION_CHECKLIST.md
+
+# Rust source backup files (e.g. lib.rs.bak created by editors/tools)
+**/*.rs.bak
+**/*.rs.orig
+**/*.rs.tmp
+
+# Soroban / Stellar generated artifacts
+*.wasm.gz
+.stellar/
+
+# OS-generated junk
+**/.DS_Store
+**/Thumbs.db

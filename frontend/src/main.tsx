@@ -1,6 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+// i18n must be imported before any component that calls useTranslation()
+import './i18n/index.ts'
 import App from './App.tsx'
 import { WalletProvider } from './context/WalletContext.tsx'
 import { ToastProvider } from './context/ToastContext.tsx'

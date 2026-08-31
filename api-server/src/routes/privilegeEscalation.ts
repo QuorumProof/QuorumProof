@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { privilegeEscalationManager } from '../services/privilegeEscalationPrevention.js';
 import { logger } from '../services/logger.js';
+import { problemJson } from '../middleware/problemDetails.js';
 
 const router = Router();
 
@@ -10,7 +11,7 @@ router.post('/mfa-challenge', (req: Request, res: Response) => {
     const { userId } = req.body;
 
     if (!userId) {
-      res.status(400).json({ error: 'userId is required' });
+      res.status(400).json(problemJson(400, 'missing-parameter', 'userId is required'));
       return;
     }
 
@@ -27,7 +28,7 @@ router.post('/mfa-challenge', (req: Request, res: Response) => {
       'privilege-escalation',
       { error: error instanceof Error ? error.message : String(error) },
     );
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(problemJson(500, 'internal-server-error', 'Internal server error'));
   }
 });
 
@@ -37,14 +38,14 @@ router.post('/verify-mfa', (req: Request, res: Response) => {
     const { userId, code } = req.body;
 
     if (!userId || !code) {
-      res.status(400).json({ error: 'userId and code are required' });
+      res.status(400).json(problemJson(400, 'missing-parameter', 'userId and code are required'));
       return;
     }
 
     const verified = privilegeEscalationManager.verifyMFACode(userId, code);
 
     if (!verified) {
-      res.status(401).json({ error: 'Invalid or expired MFA code' });
+      res.status(401).json(problemJson(401, 'invalid-mfa-code', 'Invalid or expired MFA code'));
       return;
     }
 
@@ -55,7 +56,7 @@ router.post('/verify-mfa', (req: Request, res: Response) => {
       'privilege-escalation',
       { error: error instanceof Error ? error.message : String(error) },
     );
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(problemJson(500, 'internal-server-error', 'Internal server error'));
   }
 });
 
@@ -65,7 +66,7 @@ router.post('/request', (req: Request, res: Response) => {
     const { userId, newRole, reason, approvers } = req.body;
 
     if (!userId || !newRole) {
-      res.status(400).json({ error: 'userId and newRole are required' });
+      res.status(400).json(problemJson(400, 'missing-parameter', 'userId and newRole are required'));
       return;
     }
 
@@ -87,7 +88,7 @@ router.post('/request', (req: Request, res: Response) => {
       'privilege-escalation',
       { error: error instanceof Error ? error.message : String(error) },
     );
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(problemJson(500, 'internal-server-error', 'Internal server error'));
   }
 });
 
@@ -97,14 +98,14 @@ router.post('/approve', (req: Request, res: Response) => {
     const { requestId, approverId } = req.body;
 
     if (!requestId || !approverId) {
-      res.status(400).json({ error: 'requestId and approverId are required' });
+      res.status(400).json(problemJson(400, 'missing-parameter', 'requestId and approverId are required'));
       return;
     }
 
     const approved = privilegeEscalationManager.approvePrivilegeChange(requestId, approverId);
 
     if (!approved) {
-      res.status(404).json({ error: 'Request not found' });
+      res.status(404).json(problemJson(404, 'not-found', 'Request not found'));
       return;
     }
 
@@ -115,7 +116,7 @@ router.post('/approve', (req: Request, res: Response) => {
       'privilege-escalation',
       { error: error instanceof Error ? error.message : String(error) },
     );
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(problemJson(500, 'internal-server-error', 'Internal server error'));
   }
 });
 
@@ -125,14 +126,14 @@ router.post('/reject', (req: Request, res: Response) => {
     const { requestId, approverId, reason } = req.body;
 
     if (!requestId || !approverId) {
-      res.status(400).json({ error: 'requestId and approverId are required' });
+      res.status(400).json(problemJson(400, 'missing-parameter', 'requestId and approverId are required'));
       return;
     }
 
     const rejected = privilegeEscalationManager.rejectPrivilegeChange(requestId, approverId, reason);
 
     if (!rejected) {
-      res.status(404).json({ error: 'Request not found' });
+      res.status(404).json(problemJson(404, 'not-found', 'Request not found'));
       return;
     }
 
@@ -143,7 +144,7 @@ router.post('/reject', (req: Request, res: Response) => {
       'privilege-escalation',
       { error: error instanceof Error ? error.message : String(error) },
     );
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(problemJson(500, 'internal-server-error', 'Internal server error'));
   }
 });
 
@@ -165,7 +166,7 @@ router.get('/audit-log', (req: Request, res: Response) => {
       'privilege-escalation',
       { error: error instanceof Error ? error.message : String(error) },
     );
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(problemJson(500, 'internal-server-error', 'Internal server error'));
   }
 });
 
@@ -184,7 +185,7 @@ router.get('/pending', (req: Request, res: Response) => {
       'privilege-escalation',
       { error: error instanceof Error ? error.message : String(error) },
     );
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(problemJson(500, 'internal-server-error', 'Internal server error'));
   }
 });
 

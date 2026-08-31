@@ -843,4 +843,413 @@ mod tests_bbs_plus {
             assert!(!result_perm.disclosure_permitted);
         });
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1422 – Contract-boundary integration tests for BBS+ escrow,
+    // revocation, and linkability
+    //
+    // TEST COVERAGE SPLIT
+    // ───────────────────
+    // Library-level (bbs_plus_v1/src/lib.rs, escrow.rs, linkability.rs):
+    //   - split_secret / reconstruct_secret cryptographic correctness
+    //   - generate_nonce_with_rng, create_unlinkable_disclosure,
+    //     verify_unlinkable_disclosure proof-level semantics
+    //   - NonceRegistry replay-detection at the data-structure level
+    //
+    // Contract-level (this file, quorum_proof entry points):
+    //   - deposit_key_escrow / submit_recovery_share / recover_key through
+    //     the deployed contract's public API, including t-of-n threshold
+    //     enforcement and duplicate-submit rejection
+    //   - Epoch-based revocation observed via contract calls
+    //     (add_revocation_accumulator + verify_non_revocation)
+    //   - Nonce reuse rejection tested via the escrow duplicate-submit path
+    //     (the contract has no separate nonce-registry entry point; the
+    //     library-level NonceRegistry is exercised by its own #[cfg(test)]
+    //     block inside bbs_plus_v1/src/linkability.rs)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Initialize a QuorumProofContract, set admin, grant issuer the Issuer role.
+    fn setup_with_issuer(env: &Env) -> (Address, Address, Address) {
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(env);
+        let issuer = Address::generate(env);
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::initialize(env.clone(), admin.clone());
+            crate::rbac::assign_role(env, &admin, &issuer, crate::rbac::Role::Issuer, 0u64);
+        });
+        (contract_id, admin, issuer)
+    }
+
+    // ── Escrow: deposit ───────────────────────────────────────────────────────
+
+    /// A 2-of-3 escrow can be deposited successfully and the resulting
+    /// `KeyEscrow` struct reflects the correct configuration.
+    #[test]
+    fn test_escrow_deposit_2_of_3() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        let g1 = Address::generate(&env);
+        let g2 = Address::generate(&env);
+        let g3 = Address::generate(&env);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1.clone());
+        guardians.push_back(g2.clone());
+        guardians.push_back(g3.clone());
+
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(BytesN::from_array(&env, &[0x01u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x02u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x03u8; 32]));
+
+        env.as_contract(&contract_id, || {
+            let escrow = QuorumProofContract::deposit_key_escrow(
+                env.clone(),
+                issuer.clone(),
+                guardians.clone(),
+                shares,
+                2u32,
+            );
+
+            assert_eq!(escrow.issuer, issuer);
+            assert_eq!(escrow.threshold, 2u32);
+            assert_eq!(escrow.total_shares, 3u32);
+            assert!(!escrow.recovered);
+        });
+    }
+
+    /// Depositing an escrow for the same issuer a second time must panic
+    /// with `EscrowAlreadyExists`.
+    #[test]
+    #[should_panic]
+    fn test_escrow_deposit_duplicate_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        let g1 = Address::generate(&env);
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1.clone());
+        guardians.push_back(Address::generate(&env));
+
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(BytesN::from_array(&env, &[0x01u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x02u8; 32]));
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer.clone(), guardians.clone(), shares.clone(), 2u32,
+            );
+            // Second deposit must fail
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer, guardians, shares, 2u32,
+            );
+        });
+    }
+
+    // ── Escrow: threshold recovery path ──────────────────────────────────────
+
+    /// Happy path: 2 of 3 guardians submit, then `recover_key` succeeds and
+    /// returns the correct share blobs.
+    #[test]
+    fn test_escrow_recovery_2_of_3_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        let g1 = Address::generate(&env);
+        let g2 = Address::generate(&env);
+        let g3 = Address::generate(&env);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1.clone());
+        guardians.push_back(g2.clone());
+        guardians.push_back(g3.clone());
+
+        let share1 = BytesN::from_array(&env, &[0xAAu8; 32]);
+        let share2 = BytesN::from_array(&env, &[0xBBu8; 32]);
+        let share3 = BytesN::from_array(&env, &[0xCCu8; 32]);
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(share1.clone());
+        shares.push_back(share2.clone());
+        shares.push_back(share3.clone());
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer.clone(), guardians, shares, 2u32,
+            );
+        });
+
+        // g1 and g2 submit — threshold is 2, so this is enough.
+        env.as_contract(&contract_id, || {
+            let count = QuorumProofContract::submit_recovery_share(
+                env.clone(), g1.clone(), issuer.clone(),
+            );
+            assert_eq!(count, 1u32);
+        });
+        env.as_contract(&contract_id, || {
+            let count = QuorumProofContract::submit_recovery_share(
+                env.clone(), g2.clone(), issuer.clone(),
+            );
+            assert_eq!(count, 2u32);
+        });
+
+        env.as_contract(&contract_id, || {
+            let recovered_shares = QuorumProofContract::recover_key(
+                env.clone(), issuer.clone(), issuer.clone(),
+            );
+            // Should return the 2 submitted guardians' share blobs.
+            assert_eq!(recovered_shares.len(), 2u32);
+        });
+    }
+
+    /// Attempting `recover_key` before the threshold is met must panic.
+    #[test]
+    #[should_panic]
+    fn test_escrow_recovery_below_threshold_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        let g1 = Address::generate(&env);
+        let g2 = Address::generate(&env);
+        let g3 = Address::generate(&env);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1.clone());
+        guardians.push_back(g2.clone());
+        guardians.push_back(g3.clone());
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(BytesN::from_array(&env, &[0x01u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x02u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x03u8; 32]));
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer.clone(), guardians, shares, 2u32,
+            );
+        });
+
+        // Only 1 submission — below threshold of 2.
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::submit_recovery_share(env.clone(), g1, issuer.clone());
+        });
+
+        // Must panic with InsufficientShares.
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::recover_key(env.clone(), issuer.clone(), issuer.clone());
+        });
+    }
+
+    /// A guardian submitting twice is rejected with `DuplicateShareSubmission`.
+    #[test]
+    #[should_panic]
+    fn test_escrow_duplicate_guardian_submission_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        let g1 = Address::generate(&env);
+        let g2 = Address::generate(&env);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1.clone());
+        guardians.push_back(g2.clone());
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(BytesN::from_array(&env, &[0x01u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x02u8; 32]));
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer.clone(), guardians, shares, 2u32,
+            );
+        });
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::submit_recovery_share(env.clone(), g1.clone(), issuer.clone());
+        });
+        // Same guardian submitting a second time — must panic.
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::submit_recovery_share(env.clone(), g1.clone(), issuer.clone());
+        });
+    }
+
+    /// A non-guardian address attempting to submit must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_escrow_non_guardian_submit_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        let g1 = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1);
+        guardians.push_back(Address::generate(&env));
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(BytesN::from_array(&env, &[0x01u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x02u8; 32]));
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer.clone(), guardians, shares, 2u32,
+            );
+        });
+        // Impostor (not in guardians list) must be rejected.
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::submit_recovery_share(env.clone(), impostor, issuer.clone());
+        });
+    }
+
+    /// After a successful recovery the escrow is marked `recovered = true`
+    /// and a second `recover_key` call is rejected.
+    #[test]
+    #[should_panic]
+    fn test_escrow_replay_after_recovery_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        let g1 = Address::generate(&env);
+        let g2 = Address::generate(&env);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1.clone());
+        guardians.push_back(g2.clone());
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(BytesN::from_array(&env, &[0x01u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x02u8; 32]));
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer.clone(), guardians, shares, 2u32,
+            );
+        });
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::submit_recovery_share(env.clone(), g1, issuer.clone());
+        });
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::submit_recovery_share(env.clone(), g2, issuer.clone());
+        });
+        // First recovery succeeds.
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::recover_key(env.clone(), issuer.clone(), issuer.clone());
+        });
+        // Second recovery must panic with EscrowAlreadyRecovered.
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::recover_key(env.clone(), issuer.clone(), issuer.clone());
+        });
+    }
+
+    // ── Escrow: get_key_escrow ────────────────────────────────────────────────
+
+    /// `get_key_escrow` returns `None` before deposit and `Some` after.
+    #[test]
+    fn test_get_key_escrow_before_and_after_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin, issuer) = setup_with_issuer(&env);
+
+        env.as_contract(&contract_id, || {
+            // Before deposit: None
+            let before = QuorumProofContract::get_key_escrow(env.clone(), issuer.clone());
+            assert!(before.is_none());
+        });
+
+        let g1 = Address::generate(&env);
+        let g2 = Address::generate(&env);
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1);
+        guardians.push_back(g2);
+        let mut shares: Vec<BytesN<32>> = Vec::new(&env);
+        shares.push_back(BytesN::from_array(&env, &[0x01u8; 32]));
+        shares.push_back(BytesN::from_array(&env, &[0x02u8; 32]));
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::deposit_key_escrow(
+                env.clone(), issuer.clone(), guardians, shares, 2u32,
+            );
+        });
+
+        env.as_contract(&contract_id, || {
+            // After deposit: Some with correct threshold
+            let after = QuorumProofContract::get_key_escrow(env.clone(), issuer.clone());
+            assert!(after.is_some());
+            assert_eq!(after.unwrap().threshold, 2u32);
+        });
+    }
+
+    // ── Epoch-based revocation through contract entrypoints ──────────────────
+
+    /// Advancing the revocation epoch (via `bbs_add_revocation_accumulator`)
+    /// invalidates a proof that was created for an earlier epoch — the contract
+    /// entry point `bbs_verify_non_revocation` must return false.
+    #[test]
+    fn test_contract_epoch_revocation_invalidates_old_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::initialize(env.clone(), admin.clone());
+
+            // Epoch 1: add accumulator and create a non-revocation proof.
+            QuorumProofContract::bbs_add_revocation_accumulator(
+                env.clone(),
+                admin.clone(),
+                1u64,
+                Bytes::from_slice(&env, b"acc-epoch-1"),
+            );
+            QuorumProofContract::bbs_create_non_revocation_proof(
+                env.clone(),
+                holder.clone(),
+                1u64,
+                Bytes::from_slice(&env, b"proof-for-epoch-1"),
+            );
+            // Proof is valid at epoch 1.
+            assert!(QuorumProofContract::bbs_verify_non_revocation(env.clone(), 1u64));
+
+            // Epoch 2: accumulator updated (credential was revoked/renewed).
+            QuorumProofContract::bbs_add_revocation_accumulator(
+                env.clone(),
+                admin.clone(),
+                2u64,
+                Bytes::from_slice(&env, b"acc-epoch-2"),
+            );
+            // Old proof is now stale — must return false through contract entry point.
+            assert!(!QuorumProofContract::bbs_verify_non_revocation(env.clone(), 1u64));
+        });
+    }
+
+    /// A fresh non-revocation proof created against the current epoch verifies.
+    #[test]
+    fn test_contract_non_revocation_fresh_proof_verifies() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let admin = Address::generate(&env);
+        let holder = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            QuorumProofContract::initialize(env.clone(), admin.clone());
+
+            QuorumProofContract::bbs_add_revocation_accumulator(
+                env.clone(), admin, 10u64,
+                Bytes::from_slice(&env, b"acc-epoch-10"),
+            );
+            // Epoch 10 proof created — should verify.
+            QuorumProofContract::bbs_create_non_revocation_proof(
+                env.clone(), holder, 10u64,
+                Bytes::from_slice(&env, b"fresh-proof"),
+            );
+            assert!(QuorumProofContract::bbs_verify_non_revocation(env.clone(), 10u64));
+        });
+    }
 }

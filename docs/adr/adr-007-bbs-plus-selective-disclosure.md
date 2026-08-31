@@ -76,6 +76,7 @@ Each credential is signed as a vector of messages (one per attribute). Holders d
 2. **Presentation/proof derivation**: `contracts/bbs_plus_v1/src/presentation.rs` implements the holder-side derivation of a selective-disclosure proof of knowledge, using `transcript.rs` for Fiat-Shamir challenge generation.
 3. **Revocation**: `contracts/bbs_plus_v1/src/accumulator.rs` provides a cryptographic accumulator so individual credentials can be revoked without breaking unlinkability of unrevoked ones.
 4. **Verification path**: The on-chain contract entry point verifies the proof of knowledge against the issuer's public key and the set of disclosed messages; hidden messages never appear on-chain or in call arguments.
+5. **Epoch staleness enforcement**: `contracts/bbs_plus_v1/src/accumulator.rs` defines `MAX_WITNESS_EPOCH_AGE = 2` epochs. All verifiers MUST call `is_witness_stale(witness_epoch, current_epoch)` and reject witnesses whose epoch age exceeds this bound. The `AccumulatorEpoch::rebuild` method returns an `EpochRolloverEvent` on every rollover — indexers listening for this event allow verifiers to track the current epoch without maintaining independent state. A stale witness still passes `Witness::verify` cryptographically (the signature remains valid), so the staleness check is the **only** defense against accepting a revoked holder's outdated witness.
 
 ## References
 - [BBS+ Signatures — IETF CFRG Draft](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/)
