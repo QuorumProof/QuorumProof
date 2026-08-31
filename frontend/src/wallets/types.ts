@@ -5,14 +5,11 @@ export interface WalletAdapter {
   name: string;
   icon: string;
   isAvailable(): Promise<boolean>;
-  /** Connect to the wallet. Hardware wallets accept an optional accountIndex. */
   connect(accountIndex?: number): Promise<string>;
   disconnect(): void;
   isConnected(): boolean;
   getAddress(): string | null;
-  /** Returns the account index used for this connection (hardware wallets only). */
   getAccountIndex?(): number;
-  /** Sign a transaction XDR. Hardware wallets accept an optional accountIndex. */
   signTransaction?(xdr: string, accountIndex?: number): Promise<string>;
 }
 
@@ -28,8 +25,8 @@ export interface WalletState {
   isInitializing: boolean;
   network: string;
   error: string | null;
-  availableWallets: WalletType[];
-  connect: (type?: WalletType, accountIndex?: number) => Promise<void>;
+  accountIndex?: number;
+  connect: (type: WalletType, accountIndex?: number) => Promise<void>;
   disconnect: () => void;
   switchWallet: (index: number) => void;
 }

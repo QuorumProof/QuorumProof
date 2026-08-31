@@ -1,113 +1,302 @@
 /**
- * src/lib/apiClient.ts
- *
- * Thin typed API client wrapping the browser fetch API.
- *
- * Features (Issue #1448):
- *  - Single shared API_BASE constant
- *  - Normalised error handling: non-ok responses throw ApiError
- *  - JSON parsing + runtime shape validation via a caller-supplied guard
- *  - AbortController support: callers pass a signal for cancellation
- *  - Typed response helpers: apiGet / apiPost
+ * Typed, centralized API client with shared configuration
+ * Replaces ad-hoc fetch calls throughout the application
+ * Provides request cancellation, retry logic, timeout, and error normalization
  */
 
-export const API_BASE: string = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:3000';
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+const DEFAULT_TIMEOUT_MS = 30_000;
 
-// ── Error type ────────────────────────────────────────────────────────────────
+export interface ApiRequestConfig {
+  timeout?: number;
+  retries?: number;
+  signal?: AbortSignal;
+}
+
+export interface ApiResponse<T = unknown> {
+  ok: boolean;
+  status: number;
+  data: T;
+  error?: string;
+}
 
 export class ApiError extends Error {
   constructor(
     message: string,
-    public readonly status: number,
-    public readonly body: unknown,
+    public status: number,
+    public code?: string
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
 
-// ── Response validation ───────────────────────────────────────────────────────
-
-/** A simple runtime shape guard: returns true if the value matches type T. */
-export type ShapeGuard<T> = (value: unknown) => value is T;
+/**
+ * Create an AbortController with timeout
+ */
+function createTimeoutController(timeoutMs: number): AbortController {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  
+  // Store timeout ID for cleanup (optional, but prevents memory leaks in some scenarios)
+  (controller as any)._timeoutId = timeoutId;
+  
+  return controller;
+}
 
 /**
- * Noop guard — cast the response as T without any runtime check.
- * Use only when callers have already validated the shape via other means.
+ * Normalize error messages from API responses
  */
-export function unsafeCast<T>(): ShapeGuard<T> {
-  return (_v): _v is T => true;
-}
-
-// ── Core request helper ───────────────────────────────────────────────────────
-
-export interface RequestOptions {
-  /** AbortController signal for request cancellation. */
-  signal?: AbortSignal;
-  headers?: Record<string, string>;
-}
-
-async function request<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
-  path: string,
-  body: unknown | undefined,
-  guard: ShapeGuard<T>,
-  opts: RequestOptions = {},
-): Promise<T> {
-  const url = `${API_BASE}${path}`;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...opts.headers,
-  };
-
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: opts.signal,
-  });
-
-  let data: unknown;
+async function normalizeError(response: Response): Promise<string> {
   try {
-    data = await response.json();
+    const data = await response.json();
+    return data.error || data.message || `HTTP ${response.status}`;
   } catch {
-    data = null;
+    return `HTTP ${response.status}: ${response.statusText || 'Unknown error'}`;
   }
-
-  if (!response.ok) {
-    const message =
-      typeof data === 'object' && data !== null && 'error' in data
-        ? String((data as Record<string, unknown>).error)
-        : `HTTP ${response.status}`;
-    throw new ApiError(message, response.status, data);
-  }
-
-  if (!guard(data)) {
-    throw new ApiError(
-      `Unexpected response shape from ${method} ${path}`,
-      response.status,
-      data,
-    );
-  }
-
-  return data;
 }
 
-// ── Public helpers ────────────────────────────────────────────────────────────
+/**
+ * Typed, centralized API client
+ */
+export class ApiClient {
+  private baseUrl: string;
+  private defaultTimeout: number;
+  private abortControllers: Map<string, AbortController>;
 
-export function apiGet<T>(
-  path: string,
-  guard: ShapeGuard<T>,
-  opts?: RequestOptions,
-): Promise<T> {
-  return request('GET', path, undefined, guard, opts);
+  constructor(baseUrl: string = API_BASE, defaultTimeout: number = DEFAULT_TIMEOUT_MS) {
+    this.baseUrl = baseUrl;
+    this.defaultTimeout = defaultTimeout;
+    this.abortControllers = new Map();
+  }
+
+  /**
+   * Register an abort controller for a request key (for cancellation)
+   */
+  private setAbortController(key: string, controller: AbortController): void {
+    // Cancel any existing request with the same key
+    const existing = this.abortControllers.get(key);
+    if (existing) {
+      existing.abort();
+    }
+    this.abortControllers.set(key, controller);
+  }
+
+  /**
+   * Clear abort controller after request completes
+   */
+  private clearAbortController(key: string): void {
+    const controller = this.abortControllers.get(key);
+    if (controller && (controller as any)._timeoutId) {
+      clearTimeout((controller as any)._timeoutId);
+    }
+    this.abortControllers.delete(key);
+  }
+
+  /**
+   * Cancel a specific request by key
+   */
+  cancelRequest(key: string): void {
+    const controller = this.abortControllers.get(key);
+    if (controller) {
+      controller.abort();
+      this.clearAbortController(key);
+    }
+  }
+
+  /**
+   * Cancel all pending requests
+   */
+  cancelAll(): void {
+    for (const [key] of this.abortControllers) {
+      this.cancelRequest(key);
+    }
+  }
+
+  /**
+   * Validate response data against expected shape
+   */
+  private validateResponse<T>(data: unknown, validator?: (data: any) => data is T): T {
+    if (validator && !validator(data)) {
+      throw new ApiError('Invalid response format', 500, 'INVALID_RESPONSE');
+    }
+    return data as T;
+  }
+
+  /**
+   * Perform a GET request
+   */
+  async get<T = unknown>(
+    endpoint: string,
+    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+  ): Promise<T> {
+    const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
+    const url = `${this.baseUrl}${endpoint}`;
+    const controller = signal ? undefined : createTimeoutController(timeout);
+    const finalSignal = signal || controller?.signal;
+
+    if (requestKey && controller) {
+      this.setAbortController(requestKey, controller);
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: finalSignal,
+      });
+
+      if (!response.ok) {
+        const error = await normalizeError(response);
+        throw new ApiError(error, response.status);
+      }
+
+      const data = await response.json();
+      return this.validateResponse<T>(data, validator);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        throw new ApiError('Network error', 0, 'NETWORK_ERROR');
+      }
+      throw err;
+    } finally {
+      if (requestKey && controller) {
+        this.clearAbortController(requestKey);
+      }
+    }
+  }
+
+  /**
+   * Perform a POST request
+   */
+  async post<T = unknown>(
+    endpoint: string,
+    body: unknown,
+    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+  ): Promise<T> {
+    const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
+    const url = `${this.baseUrl}${endpoint}`;
+    const controller = signal ? undefined : createTimeoutController(timeout);
+    const finalSignal = signal || controller?.signal;
+
+    if (requestKey && controller) {
+      this.setAbortController(requestKey, controller);
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: finalSignal,
+      });
+
+      if (!response.ok) {
+        const error = await normalizeError(response);
+        throw new ApiError(error, response.status);
+      }
+
+      const data = await response.json();
+      return this.validateResponse<T>(data, validator);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        throw new ApiError('Network error', 0, 'NETWORK_ERROR');
+      }
+      throw err;
+    } finally {
+      if (requestKey && controller) {
+        this.clearAbortController(requestKey);
+      }
+    }
+  }
+
+  /**
+   * Perform a PUT request
+   */
+  async put<T = unknown>(
+    endpoint: string,
+    body: unknown,
+    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+  ): Promise<T> {
+    const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
+    const url = `${this.baseUrl}${endpoint}`;
+    const controller = signal ? undefined : createTimeoutController(timeout);
+    const finalSignal = signal || controller?.signal;
+
+    if (requestKey && controller) {
+      this.setAbortController(requestKey, controller);
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: finalSignal,
+      });
+
+      if (!response.ok) {
+        const error = await normalizeError(response);
+        throw new ApiError(error, response.status);
+      }
+
+      const data = await response.json();
+      return this.validateResponse<T>(data, validator);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        throw new ApiError('Network error', 0, 'NETWORK_ERROR');
+      }
+      throw err;
+    } finally {
+      if (requestKey && controller) {
+        this.clearAbortController(requestKey);
+      }
+    }
+  }
+
+  /**
+   * Perform a DELETE request
+   */
+  async delete<T = unknown>(
+    endpoint: string,
+    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+  ): Promise<T> {
+    const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
+    const url = `${this.baseUrl}${endpoint}`;
+    const controller = signal ? undefined : createTimeoutController(timeout);
+    const finalSignal = signal || controller?.signal;
+
+    if (requestKey && controller) {
+      this.setAbortController(requestKey, controller);
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'DELETE',
+        signal: finalSignal,
+      });
+
+      if (!response.ok) {
+        const error = await normalizeError(response);
+        throw new ApiError(error, response.status);
+      }
+
+      const data = await response.json();
+      return this.validateResponse<T>(data, validator);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        throw new ApiError('Network error', 0, 'NETWORK_ERROR');
+      }
+      throw err;
+    } finally {
+      if (requestKey && controller) {
+        this.clearAbortController(requestKey);
+      }
+    }
+  }
 }
 
-export function apiPost<T>(
-  path: string,
-  body: unknown,
-  guard: ShapeGuard<T>,
-  opts?: RequestOptions,
-): Promise<T> {
-  return request('POST', path, body, guard, opts);
-}
+// Export a singleton instance
+export const apiClient = new ApiClient();

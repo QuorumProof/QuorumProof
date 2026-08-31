@@ -8,6 +8,7 @@ export interface WalletState {
   /** BIP-44 account index persisted alongside the active wallet type. */
   accountIndex: number;
   activeIndex: number;
+  accountIndex: number;
   isConnected: boolean;
   hasFreighter: boolean;
   isInitializing: boolean;
@@ -17,6 +18,7 @@ export interface WalletState {
   connect: (type?: WalletType, accountIndex?: number) => Promise<void>;
   disconnect: () => void;
   switchWallet: (index: number) => void;
+  setAccountIndexForWallet: (walletIndex: number, accountIndex: number) => void;
 }
 
 export const WalletContext = createContext<WalletState | undefined>(undefined);

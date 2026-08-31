@@ -12,6 +12,34 @@ Frontend dashboard for the QuorumProof credential verification platform.
 
 ## Getting Started
 
+### Environment Variables
+
+Before running the dashboard, copy `.env.example` (or create `.env.local`) and set:
+
+| Variable | Required | Description |
+|---|---|---|
+| `VITE_WS_URL` | No | WebSocket endpoint (default: `ws://localhost:3000/ws`) |
+| `VITE_DASHBOARD_TOKEN` | **Yes** | Operator/admin token sent with every `subscribe_dashboard` message. The API server's `/ws` endpoint requires this token to be a valid operator credential. Without it the server closes the connection with code `4401` and the dashboard shows *"Not authorized"*. |
+
+#### Obtaining a token
+
+Generate a token with the API server's admin CLI or via your identity provider (see `api-server/README.md`). Treat it like a password — do not commit it to version control.
+
+```bash
+cp .env.example .env.local
+echo "VITE_DASHBOARD_TOKEN=<your-operator-token>" >> .env.local
+```
+
+#### Auth-rejection behaviour
+
+If the server rejects the token (close code `4401`), the dashboard shows:
+
+> **Not authorized** — Authorization failed. Check that VITE_DASHBOARD_TOKEN is set correctly.
+
+It does **not** retry automatically, since retrying with a bad token would just spam the server.
+
+---
+
 ### Install Dependencies
 
 ```bash

@@ -29,6 +29,10 @@ dist-ssr/
 out
 build/
 
+# Compiled contract client artefacts — TypeScript sources in src/lib/contracts/
+# are the single source of truth; .js siblings are stale build output (#1461).
+src/lib/contracts/*.js
+
 # Cache and testing
 .cache/
 .eslintcache

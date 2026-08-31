@@ -1,23 +1,8 @@
-/**
- * GdprRequest.tsx
- *
- * Issue #1447 — Require a wallet-signed proof of ownership before a GDPR
- *   anonymization request is submitted.  The connected wallet must match the
- *   credential's subject address; an off-chain challenge string is signed via
- *   Freighter / hardware wallet before the request is sent to the server.
- *
- * Issue #1448 — All HTTP calls now go through the shared typed apiClient
- *   (src/lib/apiClient.ts) with AbortController-based cancellation on unmount
- *   or re-submit, normalised error handling, and runtime shape guards instead
- *   of unchecked `as GdprRequestRecord` casts.
- */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
+import { useWallet } from '../context/WalletContextValue';
 import { Navbar } from '../components/Navbar';
-import { useWallet } from '../hooks';
-import { apiGet, apiPost, ApiError, type ShapeGuard } from '../lib/apiClient';
-import { getCredential } from '../stellar';
-
-// ── Types ─────────────────────────────────────────────────────────────────────
+import { createSignedGdprRequest } from '../lib/gdprSigning';
+import { apiClient, ApiError } from '../lib/apiClient';
 
 type RequestStatus = 'pending_consent' | 'anonymized' | 'rejected';
 
@@ -30,50 +15,21 @@ interface GdprRequestRecord {
   requiredConsents: number;
 }
 
-// ── Runtime shape guard ───────────────────────────────────────────────────────
-
-const isGdprRequestRecord: ShapeGuard<GdprRequestRecord> = (v): v is GdprRequestRecord =>
-  typeof v === 'object' &&
-  v !== null &&
-  typeof (v as GdprRequestRecord).requestId === 'string' &&
-  typeof (v as GdprRequestRecord).credentialId === 'number' &&
-  typeof (v as GdprRequestRecord).status === 'string' &&
-  Array.isArray((v as GdprRequestRecord).attestorConsents);
-
-// ── Challenge signing helper ──────────────────────────────────────────────────
-
-/**
- * Build a deterministic challenge string for a GDPR request.
- * The challenge encodes enough context to prevent replay across different
- * credentials or wallet addresses.
- */
-function buildChallenge(credentialId: number, walletAddress: string): string {
-  return `QuorumProof GDPR erasure request\ncredentialId=${credentialId}\nsubject=${walletAddress}\ntimestamp=${Math.floor(Date.now() / 60_000)}`; // 60-second window
-}
-
-/**
- * Sign the challenge string using the connected wallet (Freighter API).
- * Returns the base-64 encoded signature, or throws on failure.
- */
-async function signChallenge(challenge: string): Promise<string> {
-  const { signMessage } = await import('@stellar/freighter-api');
-  // signMessage encodes the message as UTF-8 and signs with the active key.
-  const result = await (signMessage as (msg: string) => Promise<{ signedMessage?: string; error?: string }>)(challenge);
-  if ('error' in result && result.error) {
-    throw new Error(`Wallet signing failed: ${result.error}`);
-  }
-  if (!result.signedMessage) {
-    throw new Error('Wallet returned no signature');
-  }
-  return result.signedMessage;
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
+// Type validators for responses
+const isGdprRequestRecord = (data: any): data is GdprRequestRecord => {
+  return (
+    typeof data === 'object' &&
+    typeof data.requestId === 'string' &&
+    typeof data.credentialId === 'number' &&
+    typeof data.status === 'string' &&
+    Array.isArray(data.attestorConsents) &&
+    typeof data.requiredConsents === 'number'
+  );
+};
 
 export default function GdprRequest() {
-  const { address: walletAddress } = useWallet();
+  const { address: walletAddress, isConnected } = useWallet();
 
-  // ── Submit section ──────────────────────────────────────────────────────────
   const [credentialId, setCredentialId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -91,21 +47,16 @@ export default function GdprRequest() {
   const [consentError, setConsentError] = useState<string | null>(null);
   const [consentResult, setConsentResult] = useState<GdprRequestRecord | null>(null);
 
-  // AbortController refs to cancel in-flight requests on unmount / re-submit
-  const submitAbortRef = useRef<AbortController | null>(null);
-  const lookupAbortRef = useRef<AbortController | null>(null);
-  const consentAbortRef = useRef<AbortController | null>(null);
+  const [walletMismatch, setWalletMismatch] = useState<string | null>(null);
 
-  // Cancel all in-flight requests when the component unmounts
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      submitAbortRef.current?.abort();
-      lookupAbortRef.current?.abort();
-      consentAbortRef.current?.abort();
+      apiClient.cancelRequest('gdpr-submit');
+      apiClient.cancelRequest('gdpr-lookup');
+      apiClient.cancelRequest('gdpr-consent');
     };
   }, []);
-
-  // ── Handlers ────────────────────────────────────────────────────────────────
 
   const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -116,62 +67,37 @@ export default function GdprRequest() {
       return;
     }
 
-    // Issue #1447: wallet must be connected
-    if (!walletAddress) {
-      setSubmitError('Connect your wallet before submitting a GDPR request.');
+    if (!isConnected || !walletAddress) {
+      setSubmitError('Please connect your wallet first to prove ownership.');
       return;
     }
-
-    // Issue #1447: verify that the connected wallet matches the credential subject
-    try {
-      const credential = await getCredential(id);
-      if (credential.subject !== walletAddress) {
-        setSubmitError(
-          'The connected wallet does not match the credential subject. ' +
-          'You can only request erasure of your own credentials.',
-        );
-        return;
-      }
-    } catch {
-      setSubmitError('Could not verify credential ownership. Check the credential ID and try again.');
-      return;
-    }
-
-    // Issue #1447: sign a challenge to prove ownership of the wallet
-    let signature: string;
-    try {
-      const challenge = buildChallenge(id, walletAddress);
-      signature = await signChallenge(challenge);
-    } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Wallet signing failed.');
-      return;
-    }
-
-    // Cancel any previous in-flight submit request
-    submitAbortRef.current?.abort();
-    submitAbortRef.current = new AbortController();
 
     setSubmitting(true);
     setSubmitError(null);
     setCreatedRequest(null);
+    setWalletMismatch(null);
 
     try {
-      const record = await apiPost(
+      // Sign the GDPR request with the wallet to prove ownership
+      const signedPayload = await createSignedGdprRequest(id, walletAddress);
+
+      const data = await apiClient.post<GdprRequestRecord>(
         '/api/gdpr/request',
-        { credentialId: id, subjectAddress: walletAddress, signature },
-        isGdprRequestRecord,
-        { signal: submitAbortRef.current.signal },
+        signedPayload,
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-submit' }
       );
-      setCreatedRequest(record);
+      setCreatedRequest(data);
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') return;
-      setSubmitError(
-        err instanceof ApiError
-          ? err.message
-          : err instanceof Error
-          ? err.message
-          : 'Request failed.',
-      );
+      if (err instanceof ApiError && err.status === 403) {
+        setWalletMismatch(err.message);
+      }
+      const message = err instanceof Error ? err.message : 'Request failed.';
+      if (message.includes('signature') || message.includes('User denied')) {
+        setSubmitError('Signature request cancelled. Please sign with your wallet to proceed.');
+      } else {
+        setSubmitError(message);
+      }
+      }
     } finally {
       setSubmitting(false);
     }
@@ -193,12 +119,11 @@ export default function GdprRequest() {
     setLookupResult(null);
 
     try {
-      const record = await apiGet(
+      const data = await apiClient.get<GdprRequestRecord>(
         `/api/gdpr/request/${encodeURIComponent(id)}`,
-        isGdprRequestRecord,
-        { signal: lookupAbortRef.current.signal },
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-lookup' }
       );
-      setLookupResult(record);
+      setLookupResult(data);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;
       setLookupError(
@@ -229,13 +154,12 @@ export default function GdprRequest() {
     setConsentResult(null);
 
     try {
-      const record = await apiPost(
+      const data = await apiClient.post<GdprRequestRecord>(
         '/api/gdpr/consent',
         { requestId: reqId, attestorAddress: addr },
-        isGdprRequestRecord,
-        { signal: consentAbortRef.current.signal },
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-consent' }
       );
-      setConsentResult(record);
+      setConsentResult(data);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;
       setConsentError(
@@ -269,26 +193,24 @@ export default function GdprRequest() {
           <h1 className="verify-hero__title">GDPR Right to be Forgotten</h1>
           <p className="verify-hero__subtitle">
             Request anonymization of a credential. Deletion requires consent from all
-            attestors linked to the credential.
+            attestors linked to the credential. Your wallet signature proves ownership.
           </p>
         </div>
 
-        {/* Issue #1447: wallet-connection notice */}
-        {!walletAddress && (
+        {/* Wallet connection notice */}
+        {!isConnected && (
           <div
-            className="error-card"
-            role="alert"
-            aria-live="polite"
-            style={{ marginBottom: 24 }}
+            style={{
+              padding: 12,
+              background: 'rgba(249, 115, 22, 0.1)',
+              border: '1px solid var(--color-amber, #f59e0b)',
+              borderRadius: 8,
+              marginBottom: 24,
+              fontSize: 13,
+              color: 'var(--text-muted)',
+            }}
           >
-            <div className="error-card__icon">!</div>
-            <div>
-              <div className="error-card__title">Wallet not connected</div>
-              <div className="error-card__msg">
-                Connect your Stellar wallet to prove ownership before submitting an
-                anonymization request.
-              </div>
-            </div>
+            ⚠️ <strong>Wallet Required:</strong> Connect your wallet to sign GDPR requests and prove you control the credential.
           </div>
         )}
 
@@ -315,6 +237,16 @@ export default function GdprRequest() {
                 aria-label="Credential ID"
               />
             </div>
+            {isConnected && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, padding: 8, background: 'var(--color-surface-2, #1e293b)', borderRadius: 4 }}>
+                Connected: <code>{walletAddress?.slice(0, 10)}...{walletAddress?.slice(-6)}</code>
+              </div>
+            )}
+            {walletMismatch && (
+              <p style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}>
+                ❌ {walletMismatch}
+              </p>
+            )}
             {submitError && (
               <p
                 role="alert"
@@ -324,13 +256,8 @@ export default function GdprRequest() {
                 {submitError}
               </p>
             )}
-            <button
-              type="submit"
-              className="btn btn--primary"
-              disabled={submitting || !walletAddress}
-              aria-disabled={submitting || !walletAddress}
-            >
-              {submitting ? 'Signing & Submitting…' : 'Submit Request'}
+            <button type="submit" className="btn btn--primary" disabled={submitting || !isConnected}>
+              {submitting ? 'Signing & Submitting...' : isConnected ? 'Submit Request' : 'Connect Wallet First'}
             </button>
           </form>
 

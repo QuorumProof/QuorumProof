@@ -137,47 +137,150 @@ Maintain two contract versions for zero-downtime upgrades:
 
 ## Failover Procedures
 
-### Automatic Failover
+### What Failover Changes
 
-The exporter automatically switches to backup RPC if primary is unavailable:
+`scripts/failover.sh --switch` updates:
 
-```python
-# In monitoring/exporter/exporter.py
-def _fetch_events(self) -> list:
-    try:
-        # Try primary RPC
-        response = requests.get(f"{self.rpc_url}/events", timeout=10)
-        response.raise_for_status()
-        return response.json().get("events", [])
-    except requests.RequestException:
-        # Switch to backup RPC
-        backup_rpc = get_backup_rpc(self.network)
-        response = requests.get(f"{backup_rpc}/events", timeout=10)
-        return response.json().get("events", [])
-```
+1. **Primary RPC endpoint** (`STELLAR_RPC_URL` in `.env`) — the node the API server and exporter query for contract state and events
+2. **Load balancer DNS target** — if using DNS-based load balancing, the switch may trigger a DNS TTL refresh (typically 60s)
+3. **RPC endpoint preference** — future transactions use the new endpoint; in-flight requests complete against the old endpoint
 
-### Manual Failover
+What it **does NOT** change:
+- Contract addresses (`CONTRACT_*` variables) — these are immutable
+- Network selection (`STELLAR_NETWORK`) — use `deploy_multi_region.sh` to deploy to a different network
+- Historical event data or ledger history — existing backups remain on their original chain
 
-Switch to backup RPC endpoint manually:
+### Pre-Failover Checklist
+
+Before initiating a failover during an incident:
 
 ```bash
-# Check endpoint health
+# 1. Check health of all endpoints
 ./scripts/failover.sh --check
 
-# Switch to backup endpoint
-./scripts/failover.sh --switch https://horizon-testnet.stellar.org
-
-# Verify switch
+# 2. Verify current state consistency
 ./scripts/failover.sh --verify
+
+# 3. Confirm backup endpoint is reachable and synchronized
+curl -X POST https://backup-rpc-endpoint/ \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+
+# 4. Log the decision and time (store in failover.log)
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Initiating failover from primary to backup" >> failover.log
+```
+
+### Manual Failover Runbook
+
+Execute this sequence during a primary endpoint outage:
+
+```bash
+#!/bin/bash
+set -e
+
+# Step 1: Confirm primary is down
+echo "Step 1: Confirming primary endpoint is unreachable..."
+./scripts/failover.sh --check | grep -E "✗|unreachable" || {
+  echo "ERROR: Primary endpoint appears reachable; aborting failover"
+  exit 1
+}
+
+# Step 2: Confirm backup is healthy
+echo "Step 2: Confirming backup endpoint is healthy..."
+BACKUP_HEALTHY=$(./scripts/failover.sh --check | grep -E "✓.*backup" | wc -l)
+if [ "$BACKUP_HEALTHY" -eq 0 ]; then
+  echo "ERROR: Backup endpoint is not healthy; cannot failover"
+  exit 1
+fi
+
+# Step 3: Execute switch
+echo "Step 3: Switching to backup endpoint..."
+BACKUP_URL="https://horizon-testnet.stellar.org"  # Or your backup RPC URL
+./scripts/failover.sh --switch "$BACKUP_URL"
+
+# Step 4: Wait for DNS propagation
+echo "Step 4: Waiting for DNS propagation (60–120 seconds)..."
+sleep 90
+
+# Step 5: Verify consistency
+echo "Step 5: Verifying contract state consistency..."
+./scripts/failover.sh --verify
+
+# Step 6: Run reconciliation (see Reconciliation & State Sync below)
+echo "Step 6: Running state reconciliation..."
+./scripts/reconcile_state.sh --network testnet --contract "$CONTRACT_QUORUM_PROOF"
+
+# Step 7: Resume monitoring
+echo "Step 7: Failover complete. Monitoring resumed on backup endpoint."
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Failover completed to backup endpoint" >> failover.log
+```
+
+### Expected Propagation Time
+
+- **DNS update**: 60–120 seconds (typical TTL for Stellar RPC endpoints)
+- **Load balancer target switch**: immediate (if using API-based load balancing)
+- **Client reconnection**: within 1–2 request retry cycles (5–10 seconds)
+- **Full state consistency check**: 30–60 seconds
+- **Total estimated time to recovery**: 2–3 minutes
+
+### Automatic Failover (Exporter)
+
+The exporter (`monitoring/exporter/exporter.py`) includes automatic RPC failover:
+
+```python
+# Attempt primary RPC; on failure, fall back to backup
+try:
+    response = self.get_events_from_rpc(self.primary_rpc_url)
+except RpcException:
+    logger.warning("Primary RPC failed; trying backup")
+    response = self.get_events_from_rpc(self.backup_rpc_url)
 ```
 
 ### Failover Configuration
 
+Configure primary and backup endpoints in `.env`:
+
 ```bash
-# In .env
+# Primary RPC endpoint (used for all contract queries)
 STELLAR_RPC_URL=https://soroban-testnet.stellar.org
-STELLAR_RPC_BACKUP=https://horizon-testnet.stellar.org
+STELLAR_NETWORK=testnet
+
+# Backup RPC endpoints (environment variable overrides in failover.sh)
+RPC_TESTNET_BACKUP=https://horizon-testnet.stellar.org
+RPC_MAINNET_BACKUP=https://horizon.stellar.org
+
+# Optional: Timeout for RPC calls (seconds)
 RPC_FAILOVER_TIMEOUT=10
+```
+
+### Reconciliation & State Sync
+
+After a failover, run `scripts/reconcile_state.sh` to:
+
+1. **Verify contract state** on the new endpoint matches expectations
+2. **Compare credential counts** between endpoint replicas
+3. **Detect orphaned transactions** that may not have replicated
+4. **Replay missed events** if the backup endpoint is behind
+
+```bash
+# Reconcile state after failover
+./scripts/reconcile_state.sh --network testnet \
+  --contract "$CONTRACT_QUORUM_PROOF" \
+  --primary "$STELLAR_RPC_URL" \
+  --backup "$RPC_TESTNET_BACKUP"
+
+# Output:
+# Reconciliation report:
+#   Primary endpoint: 42 credentials
+#   Backup endpoint: 42 credentials
+#   Status: ✓ Consistent
+#   Last sync: 2024-05-29T14:32:00Z
+#
+# If backup is behind:
+#   Primary endpoint: 45 credentials
+#   Backup endpoint: 42 credentials
+#   Status: ⚠ Behind by 3 credentials
+#   Recommended action: Wait for replication or trigger manual sync
 ```
 
 ---
@@ -388,6 +491,106 @@ abs(quorumproof_credentials_issued_total{region="testnet"} -
     severity: critical
   annotations:
     summary: "RPC endpoint is unreachable"
+```
+
+---
+
+## Failover Testing & Audit Trail
+
+### Last Tested Convention
+
+Maintain a `failover-tests.log` at the root of the repository to track when failover procedures have been exercised:
+
+```
+# failover-tests.log format: ISO8601 timestamp, operator, result, notes
+
+2024-06-15T10:30:00Z  alice   PASS  Testnet failover from soroban-testnet to horizon-testnet; state consistent; total time ~2m45s
+2024-06-01T14:15:00Z  bob     PASS  Mainnet failover drill; no production impact (pre-incident test)
+2024-05-29T14:32:00Z  charlie FAIL  Mainnet failover; backup endpoint was 3 credentials behind; required manual replay
+2024-05-20T09:00:00Z  alice   PASS  Testnet failover; exporter reconnected in 45s
+```
+
+Add an entry after each failover test:
+
+```bash
+# During/after a failover:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  $(whoami)  PASS  Brief description of failover and any issues encountered" >> failover-tests.log
+git add failover-tests.log
+git commit -m "ops: log failover test on [network]"
+```
+
+### Determining if Failover Path is Current
+
+Before trusting a failover during a real incident:
+
+```bash
+# Check when failover was last successfully tested
+grep PASS failover-tests.log | tail -5
+
+# If the last successful test is >1 month old, schedule a drill:
+LAST_TEST=$(grep PASS failover-tests.log | tail -1 | cut -d' ' -f1)
+echo "Failover last tested: $LAST_TEST (consider running a drill if older than 1 month)"
+```
+
+If failover has not been tested recently (>30 days):
+1. Schedule a drill during a maintenance window
+2. Notify the on-call team
+3. Document any issues discovered
+4. Update runbook procedures based on findings
+
+### Creating a Failover Test Drill
+
+To safely test failover without impacting production:
+
+```bash
+#!/bin/bash
+# scripts/test-failover-drill.sh
+
+set -e
+
+echo "=== Failover Test Drill (Non-Destructive) ==="
+echo "Testing failover procedures against testnet..."
+echo "Start time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# 1. Snapshot current state
+BEFORE=$(./scripts/failover.sh --verify)
+echo "State before failover:"
+echo "$BEFORE"
+
+# 2. Execute failover
+PRIMARY="https://soroban-testnet.stellar.org"
+BACKUP="https://horizon-testnet.stellar.org"
+echo ""
+echo "Switching from $PRIMARY to $BACKUP..."
+./scripts/failover.sh --switch "$BACKUP"
+
+# 3. Wait for propagation
+echo "Waiting for DNS/LB propagation..."
+sleep 90
+
+# 4. Verify consistency
+echo "Verifying state after switch..."
+./scripts/failover.sh --verify
+
+# 5. Run reconciliation
+echo "Running state reconciliation..."
+./scripts/reconcile_state.sh --network testnet
+
+# 6. Switch back to primary
+echo "Switching back to $PRIMARY..."
+./scripts/failover.sh --switch "$PRIMARY"
+
+# 7. Final verification
+echo "Final verification..."
+./scripts/failover.sh --verify
+
+echo ""
+echo "=== Drill Complete ==="
+echo "End time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "[PASS] All failover procedures executed successfully"
+
+# Log the test
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  $(whoami)  PASS  Failover drill completed; state remained consistent; round-trip time ~4m" >> failover-tests.log
 ```
 
 ---

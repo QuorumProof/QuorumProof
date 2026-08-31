@@ -7,8 +7,7 @@ export class LedgerAdapter implements WalletAdapter {
   private _address: string | null = null;
   private _accountIndex: number = 0;
 
-  /** Build the BIP-44 derivation path for a given account index. */
-  private static derivationPath(accountIndex: number): string {
+  private getDerivationPath(accountIndex: number = 0): string {
     return `44'/148'/${accountIndex}'`;
   }
 
@@ -25,19 +24,13 @@ export class LedgerAdapter implements WalletAdapter {
     }
   }
 
-  /**
-   * Connect to the Ledger device and retrieve the Stellar address for the
-   * given `accountIndex` (BIP-44 path `44'/148'/<accountIndex>'`).
-   *
-   * @param accountIndex - Account index to use (default: 0)
-   */
   async connect(accountIndex: number = 0): Promise<string> {
     const { default: TransportWebUSB } = await import('@ledgerhq/hw-transport-webusb');
     const StellarApp = (await import('@ledgerhq/hw-app-str')).default;
 
     const transport = await TransportWebUSB.create();
     const stellar = new StellarApp(transport);
-    const path = LedgerAdapter.derivationPath(accountIndex);
+    const path = this.getDerivationPath(accountIndex);
     const result = await stellar.getPublicKey(path);
     this._address = result.publicKey;
     this._accountIndex = accountIndex;
@@ -58,19 +51,11 @@ export class LedgerAdapter implements WalletAdapter {
     return this._address;
   }
 
-  /** Return the account index that was used when connecting. */
   getAccountIndex(): number {
     return this._accountIndex;
   }
 
-  /**
-   * Sign a transaction XDR using the Ledger device.
-   *
-   * @param xdr          - Base-64 encoded transaction XDR
-   * @param accountIndex - Account index to sign with (defaults to the index
-   *                       used at connect time, falls back to 0)
-   */
-  async signTransaction(xdr: string, accountIndex?: number): Promise<string> {
+  async signTransaction(xdr: string, accountIndex: number = this._accountIndex): Promise<string> {
     const { default: TransportWebUSB } = await import('@ledgerhq/hw-transport-webusb');
     const StellarApp = (await import('@ledgerhq/hw-app-str')).default;
 
@@ -80,6 +65,7 @@ export class LedgerAdapter implements WalletAdapter {
     const transport = await TransportWebUSB.create();
     const stellar = new StellarApp(transport);
     const txBuffer = Buffer.from(xdr, 'base64');
+    const path = this.getDerivationPath(accountIndex);
     const signature = await stellar.signTransaction(path, txBuffer);
     await transport.close();
     return signature.signature.toString('base64');

@@ -7,8 +7,7 @@ export class TrezorAdapter implements WalletAdapter {
   private _address: string | null = null;
   private _accountIndex: number = 0;
 
-  /** Build the BIP-44 derivation path for a given account index. */
-  private static derivationPath(accountIndex: number): string {
+  private getDerivationPath(accountIndex: number = 0): string {
     return `m/44'/148'/${accountIndex}'`;
   }
 
@@ -27,17 +26,13 @@ export class TrezorAdapter implements WalletAdapter {
     }
   }
 
-  /**
-   * Connect to the Trezor device and retrieve the Stellar public key for the
-   * given `accountIndex` (BIP-44 path `m/44'/148'/<accountIndex>'`).
-   *
-   * @param accountIndex - Account index to use (default: 0)
-   */
   async connect(accountIndex: number = 0): Promise<string> {
     const TrezorConnect = (await import('@trezor/connect')).default;
 
-    const path = TrezorAdapter.derivationPath(accountIndex);
-    const result = await TrezorConnect.stellarGetPublicKey({ path });
+    const path = this.getDerivationPath(accountIndex);
+    const result = await TrezorConnect.stellarGetPublicKey({
+      path,
+    });
 
     if (!result.success || !result.payload?.publicKey) {
       throw new Error(result.payload?.error || 'Failed to get address from Trezor');
@@ -61,24 +56,14 @@ export class TrezorAdapter implements WalletAdapter {
     return this._address;
   }
 
-  /** Return the account index that was used when connecting. */
   getAccountIndex(): number {
     return this._accountIndex;
   }
 
-  /**
-   * Sign a transaction XDR using the Trezor device.
-   *
-   * @param xdr          - Transaction payload to sign
-   * @param accountIndex - Account index to sign with (defaults to the index
-   *                       used at connect time, falls back to 0)
-   */
-  async signTransaction(xdr: string, accountIndex?: number): Promise<string> {
+  async signTransaction(xdr: string, accountIndex: number = this._accountIndex): Promise<string> {
     const TrezorConnect = (await import('@trezor/connect')).default;
 
-    const idx = accountIndex ?? this._accountIndex;
-    const path = TrezorAdapter.derivationPath(idx);
-
+    const path = this.getDerivationPath(accountIndex);
     const result = await TrezorConnect.stellarSignTransaction({
       path,
       transaction: xdr,

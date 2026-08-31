@@ -36,6 +36,11 @@ jobs:
           cargo build --release --target wasm32-unknown-unknown -p sbt_registry
           cargo build --release --target wasm32-unknown-unknown -p zk_verifier
 
+      # Issue #1391: bare `.unwrap()` in contract code traps opaquely instead of
+      # returning a typed ContractError. Ratchet check — see docs/unwrap-audit.md.
+      - name: Check for new bare .unwrap() calls
+        run: ./scripts/check_unwraps.sh
+
       - name: Run unit tests
         run: cargo test --target x86_64-unknown-linux-gnu --lib --workspace
 
@@ -112,6 +117,25 @@ jobs:
         run: npm run test:coverage
       - run: npm run build
 
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run lint:no-contract-js
+      - run: npm test
+      - run: npm run type-check
+      - run: npm run build
+
   # Issue #1003: chaos test scenarios (network delay, packet loss, sustained
   # service unavailability) injected into api-server's mocked RPC client.
   # See docs/resilience.md for the requirements these verify.
@@ -164,6 +188,15 @@ jobs:
         working-directory: api-server
         run: npm test -- criticalEventMetricNames.test.ts criticalEventPrometheusIntegration.test.ts
 
+  # Issue #1498: every docs/*.md must be linked from docs/README.md so the
+  # documentation directory stays discoverable and docs don't get duplicated.
+  docs-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check docs index is complete
+        run: ./scripts/check_docs_index.sh
+
   security:
     runs-on: ubuntu-latest
     steps:
@@ -173,13 +206,44 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - name: Install cargo-audit and cargo-deny
+        run: cargo install cargo-audit cargo-deny --locked
 
       - name: Cargo audit
         run: cargo audit
+
+      - name: Cargo deny check
+        run: cargo deny check
 
       - name: TruffleHog scan
         uses: trufflesecurity/trufflehog@main
         with:
           extra_args: --results=verified,unknown
+
+  mutation-testing:
+    runs-on: ubuntu-latest
+    # Run mutation tests nightly to control CI cost
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[mutation]')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation tests
+        run: cargo mutants --package quorum_proof --package sbt_registry --package zk_verifier
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-test-report
+          path: mutants.json
+          retention-days: 30

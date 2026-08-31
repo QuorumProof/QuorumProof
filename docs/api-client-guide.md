@@ -21,6 +21,7 @@ This guide covers everything you need to integrate with the QuorumProof smart co
 8. [Read-Only Queries](#read-only-queries)
 9. [ZK Claim Verification](#zk-claim-verification)
 10. [SBT Operations](#sbt-operations)
+11. [Handling API Version Changes](#handling-api-version-changes)
 
 ---
 
@@ -689,8 +690,126 @@ const credentialId = await withRetry(() =>
 
 ---
 
+## Handling API Version Changes
+
+> For the full versioning specification, deprecation schedule, and step-by-step
+> migration code samples, see
+> [api-server/docs/API_VERSIONING.md](../api-server/docs/API_VERSIONING.md).
+
+### Versioning scheme
+
+All REST endpoints are prefixed with a version segment:
+
+```
+/api/v1/<resource>
+/api/v2/<resource>
+```
+
+Every response includes an `API-Version` header confirming which version was
+matched:
+
+```
+API-Version: v1
+```
+
+The unversioned `/api/*` paths remain available for backward compatibility
+but are treated as v2 (no response envelope) and will be sunset together
+with v1 on **2027-03-01**. Migrate to an explicit versioned path as soon as
+possible.
+
+### Deprecation and sunset policy
+
+The policy is code-backed: the `VERSION_CATALOGUE` constant in
+`api-server/src/middleware/apiVersion.ts` is the single source of truth for
+lifecycle dates and status. Updating `status` in that file is all that is
+required to move a version into a new lifecycle stage — headers are emitted
+automatically.
+
+| Version | Current status | Maintenance date | Sunset date  |
+|---------|---------------|-----------------|--------------|
+| v1      | Stable        | 2026-09-01      | 2027-03-01   |
+| v2      | Development   | GA: 2026-09-01  | —            |
+
+**Stage definitions:**
+
+- **Stable** — production-ready; no breaking changes; all bug fixes applied.
+- **Development** — active feature work; minor breaking changes possible between builds.
+- **Maintenance** — security and critical bug fixes only; no new features.
+- **Deprecated** — EOL announced; every response carries a `Deprecation` header.
+- **Sunset** — removed; all requests return `410 Gone`.
+
+### Detecting deprecation from response headers
+
+When v1 enters maintenance on **2026-09-01**, every v1 response will include
+the following headers. Your client should log or surface these as actionable
+warnings.
+
+```
+Deprecation: 2026-09-01
+Sunset: 2027-03-01
+Link: <https://docs.quorumproof.io/api/migration/v1-to-v2>; rel="successor-version"
+X-API-Deprecation-Info: v1 enters maintenance on 2026-09-01 and will be sunset on 2027-03-01.
+```
+
+Example check (TypeScript):
+
+```typescript
+const response = await fetch(`${BASE_URL}/api/v1/credentials/${id}`);
+
+if (response.headers.get('Deprecation')) {
+  const sunset = response.headers.get('Sunset');
+  const info   = response.headers.get('X-API-Deprecation-Info');
+  const link   = response.headers.get('Link');
+  console.warn(`[QuorumProof] API deprecation notice: ${info}`);
+  console.warn(`[QuorumProof] Sunset date: ${sunset}`);
+  console.warn(`[QuorumProof] Migration guide: ${link}`);
+}
+```
+
+After **2027-03-01**, all v1 requests return `410 Gone`:
+
+```json
+{
+  "error": "API version sunset",
+  "message": "Version \"v1\" has been retired and is no longer available.",
+  "docs": "https://docs.quorumproof.io/api/versioning"
+}
+```
+
+### Breaking-change announcements
+
+Breaking changes and version lifecycle events will be announced through the
+following channels — watch all three to ensure you receive advance notice:
+
+- **GitHub releases** — tagged releases on [cryptonautt/QuorumProof](https://github.com/cryptonautt/QuorumProof) include a changelog entry for every lifecycle stage change. Subscribe to repository notifications or watch releases.
+- **GitHub issues** — lifecycle milestones (maintenance, deprecation, sunset) are tracked as pinned issues labelled `api-versioning`. The issue for v1 sunset is the canonical discussion thread.
+- **Response headers** — the `Deprecation`, `Sunset`, and `X-API-Deprecation-Info` headers described above are emitted on every response once a version enters maintenance or deprecated state. Integrating header-based detection in your HTTP client is the most reliable in-band signal.
+
+There is no separate mailing list or blog at this time. If that changes it
+will be noted in `API_VERSIONING.md`.
+
+### Migration guides
+
+Step-by-step code examples for each migration path live in the versioning
+reference doc:
+
+- [Unversioned `/api/*` → v1](../api-server/docs/API_VERSIONING.md#from-unversioned-api-to-apiv1) — add `/v1`, unwrap the response envelope, update error handling.
+- [v1 → v2](../api-server/docs/API_VERSIONING.md#from-apiv1-to-apiv2) — remove the envelope, switch to RFC 9457 error format, rename two fields.
+
+Key differences to plan for when migrating from v1 to v2:
+
+| Area | v1 | v2 |
+|------|----|----|
+| Response shape | Wrapped in `{ ok, version, data }` envelope | Resource returned directly |
+| Success check | `if (!raw.ok)` | HTTP status code |
+| Error format | `{ ok: false, error: "..." }` | RFC 9457 `{ type, title, status, detail }` |
+| Field names | `metadata`, `address` | `metadata_hash`, `stellar_address` |
+
+---
+
 ## Further Reading
 
+- [API Versioning Reference](../api-server/docs/API_VERSIONING.md)
 - [Error Code Reference](./error-codes.md)
 - [Architecture Decision Records](./adr/README.md)
 - [Trust Slice Model](./trust-slices.md)
