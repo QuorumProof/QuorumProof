@@ -97,7 +97,7 @@ export const CredentialCard: React.FC<CredentialCardProps> = ({
       width: 12,
       height: 12,
       className: 'credential-card__status-dot',
-      'aria-hidden': 'true',
+      'aria-hidden': true as const,
     }
 
     switch (status) {

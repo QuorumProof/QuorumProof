@@ -215,7 +215,7 @@ export const AttestationPanel: React.FC<AttestationPanelProps> = ({
           <div
             className="attestation-panel__progress-fill"
             style={{ width: `${progressPercentage}%` }}
-            roll="progressbar"
+            role="progressbar"
             aria-valuenow={threshold.signed}
             aria-valuemin={0}
             aria-valuemax={threshold.required}
