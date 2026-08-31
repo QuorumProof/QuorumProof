@@ -34,6 +34,21 @@ fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
             .all(|(h, n)| h.to_ascii_lowercase() == *n)
 }
 
+/// Issue #1405: shared length/scheme validation for a metadata URI's raw
+/// bytes, used by both `mint()` and `set_sbt_metadata_uri`. Panics if
+/// `uri_bytes` exceeds `MAX_METADATA_URI_LEN` or doesn't start with
+/// `https://`/`ipfs://` (case-insensitive).
+fn validate_metadata_uri(uri_bytes: &[u8]) {
+    if uri_bytes.len() > MAX_METADATA_URI_LEN {
+        panic!("metadata_uri exceeds 256 characters");
+    }
+    let valid_scheme = starts_with_ignore_ascii_case(uri_bytes, b"https://")
+        || starts_with_ignore_ascii_case(uri_bytes, b"ipfs://");
+    if !valid_scheme {
+        panic!("metadata_uri must be HTTPS or IPFS");
+    }
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -85,6 +100,8 @@ pub enum ContractError {
     ClawbackNotFound = 26,
     /// Issue #1243: Caller is not the issuer who initiated this clawback.
     UnauthorizedClawback = 27,
+    /// Issue #1402: `entries` is empty or exceeds `MAX_BATCH_SIZE`.
+    BatchTooLarge = 28,
 }
 
 #[contracttype]
@@ -562,6 +579,20 @@ impl SbtRegistryContract {
 
         if env.storage().instance().has(&DataKey::Blacklist(owner.clone())) {
             panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+
+        // Issue #1405: validate metadata_uri length/scheme up front, matching
+        // the check set_sbt_metadata_uri already enforces, so an
+        // unbounded or malformed-scheme URI can never be stored at mint time.
+        {
+            let uri_len = metadata_uri.len() as usize;
+            if uri_len > MAX_METADATA_URI_LEN {
+                panic!("metadata_uri exceeds 256 characters");
+            }
+            let mut uri_buf = [0u8; MAX_METADATA_URI_LEN];
+            let uri_slice = &mut uri_buf[..uri_len];
+            metadata_uri.copy_into_slice(uri_slice);
+            validate_metadata_uri(uri_slice);
         }
 
         // Cross-contract: verify credential exists and is not revoked.
@@ -1052,6 +1083,13 @@ impl SbtRegistryContract {
             .expect("not initialized");
         assert!(caller == qp_id || caller == admin, "unauthorized");
 
+        // Issue #1403: recovery moves the SBT to a new holder address, so it
+        // must honor the blacklist the same way mint() does — recovery is not
+        // meant to be a way around a blacklist entry, only around lost keys.
+        if env.storage().instance().has(&DataKey::Blacklist(new_owner.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
+
         let mut token: SoulboundToken = env
             .storage()
             .persistent()
@@ -1117,6 +1155,12 @@ impl SbtRegistryContract {
             .get(&DataKey::Admin)
             .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
+
+        // Issue #1403: mirror mint()'s blacklist check so a blacklisted
+        // address cannot regain an SBT via admin transfer.
+        if env.storage().instance().has(&DataKey::Blacklist(new_owner.clone())) {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
 
         let mut token: SoulboundToken = env
             .storage()
@@ -1926,9 +1970,10 @@ impl SbtRegistryContract {
     /// Mint multiple SBTs in a single atomic transaction.
     /// Returns the newly assigned token IDs in input order.
     pub fn batch_mint(env: Env, entries: Vec<BatchMintEntry>) -> Vec<u64> {
-        // Requirement 1.10: empty batch returns immediately with no state changes.
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE
+        // before any validation or state changes.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         // ── Validation phase ────────────────────────────────────────────────
@@ -1959,6 +2004,15 @@ impl SbtRegistryContract {
 
         for i in 0..entries.len() {
             let entry = entries.get(i).unwrap();
+
+            // Issue #1403: mirror mint()'s blacklist check for each entry's owner.
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::Blacklist(entry.owner.clone()))
+            {
+                panic_with_error!(&env, ContractError::HolderBlacklisted);
+            }
 
             // Requirement 1.3 / 1.4: verify credential is not revoked via QuorumProof.
             // is_revoked panics with CredentialNotFound if the credential doesn't exist.
@@ -2095,8 +2149,9 @@ impl SbtRegistryContract {
     /// # Panics
     /// Panics if any token doesn't exist or if caller is not the holder.
     pub fn batch_burn(env: Env, entries: Vec<BatchBurnEntry>) -> Vec<u64> {
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         // Require auth from each distinct caller
@@ -2197,8 +2252,9 @@ impl SbtRegistryContract {
             .expect("not initialized");
         assert!(admin == stored_admin, "unauthorized");
 
-        if entries.is_empty() {
-            return Vec::new(&env);
+        // Issue #1402: reject empty batches and batches over MAX_BATCH_SIZE.
+        if !Self::is_valid_batch_size(entries.len()) {
+            panic_with_error!(&env, ContractError::BatchTooLarge);
         }
 
         let mut result_ids: Vec<u64> = Vec::new(&env);
@@ -2294,6 +2350,22 @@ impl SbtRegistryContract {
         env.storage().instance().has(&DataKey::Blacklist(holder))
     }
 
+    /// Issue #1404: remove a holder from the blacklist. Admin-only.
+    /// Reverses `add_holder_to_blacklist`, allowing a previously blacklisted
+    /// address to mint again.
+    pub fn remove_holder_from_blacklist(env: Env, admin: Address, holder: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage().instance().remove(&DataKey::Blacklist(holder.clone()));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("unblcklst").into_val(&env));
+        env.events().publish(topics, (holder, admin));
+    }
+
     /// Update the metadata URI of an SBT. Only the token owner may call this.
     /// Increments the token version on each update.
     pub fn update_metadata(env: Env, owner: Address, token_id: u64, new_metadata_uri: Bytes) {
@@ -2372,8 +2444,10 @@ impl SbtRegistryContract {
     pub fn set_sbt_metadata_uri(env: Env, issuer: Address, sbt_id: u64, metadata_uri: soroban_sdk::String) {
         issuer.require_auth();
 
-        // Validate URI length. `String::len` is the byte length of the URI
-        // itself; the XDR envelope adds framing that must not count here.
+        // `String::len` is the byte length of the URI itself; the XDR
+        // envelope adds framing that must not count here. The buffer is
+        // sized to MAX_METADATA_URI_LEN, so the length must be checked
+        // before copying into it.
         let uri_len = metadata_uri.len() as usize;
         if uri_len > MAX_METADATA_URI_LEN {
             panic!("metadata_uri exceeds 256 characters");
@@ -2383,13 +2457,7 @@ impl SbtRegistryContract {
         let mut uri_buf = [0u8; MAX_METADATA_URI_LEN];
         let uri_bytes = &mut uri_buf[..uri_len];
         metadata_uri.copy_into_slice(uri_bytes);
-
-        // Check for HTTPS or IPFS scheme (case-insensitive)
-        let valid_scheme = starts_with_ignore_ascii_case(uri_bytes, b"https://")
-            || starts_with_ignore_ascii_case(uri_bytes, b"ipfs://");
-        if !valid_scheme {
-            panic!("metadata_uri must be HTTPS or IPFS");
-        }
+        validate_metadata_uri(uri_bytes);
 
         // Get the SBT to verify it exists
         let sbt: SoulboundToken = env
@@ -3100,6 +3168,16 @@ impl SbtRegistryContract {
         assert!(delegation.attestor == attestor, "not authorized attestor");
         assert!(!delegation.executed, "delegation already executed");
         assert!(!proof.is_empty(), "proof required");
+
+        // Issue #1403: mirror mint()'s blacklist check on the delegation's
+        // target holder.
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::Blacklist(delegation.new_holder.clone()))
+        {
+            panic_with_error!(&env, ContractError::HolderBlacklisted);
+        }
 
         let mut token: SoulboundToken = env
             .storage()
@@ -5927,5 +6005,259 @@ mod tests {
         // A verifier only needs commitment + proof; verification succeeds
         // without ever supplying or learning `owner`.
         assert!(client.verify_sbt_commitment(&commitment, &proof));
+    }
+
+    // --- Issue #1402: batch size enforcement ---
+
+    #[test]
+    fn test_batch_mint_accepts_exactly_max_batch_size() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        for _ in 0..client.get_max_batch_size() {
+            entries.push_back(BatchMintEntry {
+                owner: Address::generate(&env),
+                credential_id: cred_id,
+                metadata_uri: uri.clone(),
+            });
+        }
+
+        let result = client.batch_mint(&entries);
+        assert_eq!(result.len(), client.get_max_batch_size());
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_over_max_batch_size() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        for _ in 0..(client.get_max_batch_size() + 1) {
+            entries.push_back(BatchMintEntry {
+                owner: Address::generate(&env),
+                credential_id: cred_id,
+                metadata_uri: uri.clone(),
+            });
+        }
+
+        client.batch_mint(&entries);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_empty_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let entries: Vec<BatchMintEntry> = Vec::new(&env);
+        client.batch_mint(&entries);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_burn_rejects_empty_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let entries: Vec<BatchBurnEntry> = Vec::new(&env);
+        client.batch_burn(&entries);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_transfer_rejects_empty_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let entries: Vec<BatchTransferEntry> = Vec::new(&env);
+        client.batch_transfer(&admin, &entries);
+    }
+
+    // --- Issue #1403: blacklist enforcement on all owner-assigning paths ---
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_admin_transfer_sbt_rejects_blacklisted_new_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        client.admin_transfer_sbt(&admin, &token_id, &blacklisted);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_recover_sbt_rejects_blacklisted_new_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        client.recover_sbt(&admin, &token_id, &blacklisted);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_transfer_sbt_via_attestor_rejects_blacklisted_new_holder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let blacklisted = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+        client.delegate_sbt_transfer(&owner, &token_id, &attestor, &blacklisted, &reason);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_batch_mint_rejects_blacklisted_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &subject, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        let blacklisted = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &blacklisted);
+
+        let mut entries: Vec<BatchMintEntry> = Vec::new(&env);
+        entries.push_back(BatchMintEntry {
+            owner: blacklisted,
+            credential_id: cred_id,
+            metadata_uri: uri,
+        });
+
+        client.batch_mint(&entries);
+    }
+
+    // --- Issue #1404: remove_holder_from_blacklist ---
+
+    #[test]
+    fn test_remove_holder_from_blacklist_allows_remint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        client.add_holder_to_blacklist(&admin, &owner);
+        assert!(client.is_holder_blacklisted(&owner));
+
+        client.remove_holder_from_blacklist(&admin, &owner);
+        assert!(!client.is_holder_blacklisted(&owner));
+
+        // Minting succeeds now that the blacklist entry is gone.
+        let token_id = client.mint(&owner, &cred_id, &uri);
+        assert_eq!(client.owner_of(&token_id), owner);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_remove_holder_from_blacklist_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _qp_client, _qp_id) = setup_with_qp(&env);
+
+        let holder = Address::generate(&env);
+        client.add_holder_to_blacklist(&admin, &holder);
+
+        let not_admin = Address::generate(&env);
+        client.remove_holder_from_blacklist(&not_admin, &holder);
+    }
+
+    // --- Issue #1405: mint() validates metadata_uri length/scheme ---
+
+    #[test]
+    #[should_panic(expected = "metadata_uri exceeds 256 characters")]
+    fn test_mint_rejects_oversized_metadata_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+
+        let mut long_uri = std::vec::Vec::new();
+        long_uri.extend_from_slice(b"ipfs://");
+        long_uri.resize(300, b'a');
+        let uri = Bytes::from_slice(&env, &long_uri);
+
+        client.mint(&owner, &cred_id, &uri);
+    }
+
+    #[test]
+    #[should_panic(expected = "metadata_uri must be HTTPS or IPFS")]
+    fn test_mint_rejects_invalid_scheme_metadata_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+
+        let uri = Bytes::from_slice(&env, b"ftp://example.com/meta.json");
+        client.mint(&owner, &cred_id, &uri);
     }
 }
