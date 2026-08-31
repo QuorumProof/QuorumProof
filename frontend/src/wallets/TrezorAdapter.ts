@@ -5,6 +5,11 @@ export class TrezorAdapter implements WalletAdapter {
   readonly name = 'Trezor';
   readonly icon = '🔒';
   private _address: string | null = null;
+  private _accountIndex: number = 0;
+
+  private getDerivationPath(accountIndex: number = 0): string {
+    return `m/44'/148'/${accountIndex}'`;
+  }
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -21,11 +26,12 @@ export class TrezorAdapter implements WalletAdapter {
     }
   }
 
-  async connect(): Promise<string> {
+  async connect(accountIndex: number = 0): Promise<string> {
     const TrezorConnect = (await import('@trezor/connect')).default;
 
+    const path = this.getDerivationPath(accountIndex);
     const result = await TrezorConnect.stellarGetPublicKey({
-      path: "m/44'/148'/0'",
+      path,
     });
 
     if (!result.success || !result.payload?.publicKey) {
@@ -33,11 +39,13 @@ export class TrezorAdapter implements WalletAdapter {
     }
 
     this._address = result.payload.publicKey;
+    this._accountIndex = accountIndex;
     return this._address;
   }
 
   disconnect(): void {
     this._address = null;
+    this._accountIndex = 0;
   }
 
   isConnected(): boolean {
@@ -48,11 +56,16 @@ export class TrezorAdapter implements WalletAdapter {
     return this._address;
   }
 
-  async signTransaction(xdr: string): Promise<string> {
+  getAccountIndex(): number {
+    return this._accountIndex;
+  }
+
+  async signTransaction(xdr: string, accountIndex: number = this._accountIndex): Promise<string> {
     const TrezorConnect = (await import('@trezor/connect')).default;
 
+    const path = this.getDerivationPath(accountIndex);
     const result = await TrezorConnect.stellarSignTransaction({
-      path: "m/44'/148'/0'",
+      path,
       transaction: xdr,
     });
 
