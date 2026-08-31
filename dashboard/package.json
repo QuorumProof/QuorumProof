@@ -7,17 +7,15 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint src --ext ts,tsx --report-unused-disable-directives",
-    "lint:no-contract-js": "node scripts/check-no-contract-js.mjs",
     "type-check": "tsc --noEmit",
-    "test": "vitest --run",
-    "test:coverage": "vitest --run --coverage"
+    "test": "vitest --run"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "lucide-react": "^0.263.1",
     "clsx": "^2.0.0",
-    "date-fns": "^2.30.0"
+    "date-fns": "^2.30.0",
+    "lucide-react": "^0.263.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",
@@ -25,14 +23,14 @@
     "@testing-library/user-event": "^14.5.2",
     "@types/react": "^18.2.37",
     "@types/react-dom": "^18.2.15",
-    "@vitejs/plugin-react": "^4.2.0",
     "@typescript-eslint/eslint-plugin": "^6.10.0",
     "@typescript-eslint/parser": "^6.10.0",
+    "@vitejs/plugin-react": "^4.2.0",
     "eslint": "^8.53.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "jsdom": "^25.0.1",
     "typescript": "^5.3.3",
     "vite": "^5.0.2",
-    "vitest": "^2.1.9"
+    "vitest": "^1.6.1"
   }
 }

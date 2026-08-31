@@ -4,6 +4,12 @@
 
 This document defines the **formal invariant set** that every contract migration (upgrade + state migration) must preserve. These invariants guard against common upgrade failures: dropped storage keys, orphaned cross-contract references, stale caches, and silent data corruption.
 
+> **Monitoring**: The **[Backup, DR & Migration dashboard](../monitoring/grafana/dashboards/backup-and-migration.json)**
+> (`monitoring/grafana/dashboards/backup-and-migration.json`) surfaces the metrics that reflect migration
+> health in real time: `quorumproof_migration_status`, `quorumproof_migration_cursor`,
+> `quorumproof_migration_last_progress_timestamp`, and `quorumproof_state_version` cardinality.
+> Use it as a live view while verifying the invariants below during a migration run.
+
 ## Invariant Definitions
 
 ### I1 — No Orphaned SBT-to-Credential References

@@ -1,0 +1,127 @@
+# .github/workflows/mutation-testing.yml
+#
+# Mutation testing trend tracking (Issue #1480).
+#
+# Runs cargo-mutants against the three core contract crates, records the
+# caught/total score in the append-only JSONL store at mutants/history/,
+# and warns (without hard-failing) when the score regresses more than
+# REGRESSION_THRESHOLD_PP points below the rolling baseline.
+#
+# History file is committed back to the branch so it persists across runs
+# in the same way as benches/history/ does for benchmark exponents.
+#
+# Scheduled weekly so trend data accumulates even when no code changes,
+# and on push/PR to main so any regression is caught early.
+
+name: Mutation Testing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - "cargo-mutants.toml"
+      - "scripts/mutation_test.sh"
+      - "scripts/mutation_history.py"
+      - ".github/workflows/mutation-testing.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "contracts/**"
+  schedule:
+    # Every Sunday at 04:00 UTC
+    - cron: "0 4 * * 0"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutation-test:
+    name: Mutation Testing + History
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so git rev-parse works and we can commit back
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      # ── Run mutation tests ────────────────────────────────────────────────
+      - name: Run mutation tests
+        id: mutants
+        run: |
+          chmod +x scripts/mutation_test.sh
+          ./scripts/mutation_test.sh
+        continue-on-error: true   # We handle exit codes explicitly below
+
+      # ── Append score to JSONL history ─────────────────────────────────────
+      # mutation_test.sh already calls mutation_history.py; this step is
+      # here as a fallback / explicit record in case the shell script exits
+      # early on missed mutants.
+      - name: Record mutation score history
+        if: always()
+        run: |
+          # Extract caught/total from the outcomes file produced by cargo-mutants.
+          OUTCOMES="mutants.out/outcomes.json"
+          if [[ -f "$OUTCOMES" ]]; then
+            CAUGHT=$(python3 -c "
+          import json, sys
+          data = json.load(open('$OUTCOMES'))
+          outcomes = data.get('outcomes', data) if isinstance(data, dict) else data
+          print(sum(1 for o in outcomes if o.get('summary') == 'CaughtMutant'))
+          " 2>/dev/null || echo 0)
+            TOTAL=$(python3 -c "
+          import json, sys
+          data = json.load(open('$OUTCOMES'))
+          outcomes = data.get('outcomes', data) if isinstance(data, dict) else data
+          print(len(outcomes))
+          " 2>/dev/null || echo 0)
+            python3 scripts/mutation_history.py append workspace "$CAUGHT" "$TOTAL" || true
+          fi
+
+      # ── Warn on score regression ──────────────────────────────────────────
+      - name: Check mutation score regression
+        if: always()
+        run: python3 scripts/mutation_history.py check workspace
+        continue-on-error: true   # Warn only; do not hard-fail PRs
+
+      # ── Commit history back to the branch ────────────────────────────────
+      # Only on pushes to main so history accumulates in the repo, mirroring
+      # the benches/history/ pattern.
+      - name: Commit mutation score history
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add mutants/history/
+          if git diff --cached --quiet; then
+            echo "No history changes to commit."
+          else
+            git commit -m "chore(mutants): update mutation score history [skip ci]"
+            git push
+          fi
+
+      # ── Upload full results as artifact ──────────────────────────────────
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results-${{ github.run_number }}
+          path: mutants.out/
+          retention-days: 30
+
+      # ── Propagate missed-mutant failure ──────────────────────────────────
+      - name: Fail if mutants were missed
+        if: steps.mutants.outcome == 'failure'
+        run: |
+          echo "Missed mutants detected — see artifact for details."
+          exit 1

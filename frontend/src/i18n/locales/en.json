@@ -1,0 +1,111 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "verify": "Verify",
+    "sliceBuilder": "Slice Builder",
+    "recover": "Recover",
+    "help": "Help",
+    "connectWallet": "Connect Wallet",
+    "disconnect": "Disconnect",
+    "connecting": "Connecting…"
+  },
+  "walletGate": {
+    "title": "Connect your Stellar wallet to continue",
+    "selectPrompt": "Select a wallet to connect:",
+    "noWalletTitle": "Wallet Required",
+    "noWalletMessage": "No wallet detected. Install Freighter or connect a Ledger/Trezor hardware wallet.",
+    "installFreighter": "Install Freighter"
+  },
+  "walletGuard": {
+    "checkingWallet": "Checking wallet…",
+    "title": "Connect Your Stellar Wallet",
+    "selectPrompt": "Select a wallet to connect:",
+    "noWalletTitle": "Wallet Required",
+    "noWalletMessage": "Install the Freighter browser extension or connect a Ledger/Trezor hardware wallet to use this feature.",
+    "installFreighter": "Install Freighter"
+  },
+  "issueCredential": {
+    "formLabel": "Issue Credential Form",
+    "subjectLabel": "Subject Stellar Address",
+    "subjectPlaceholder": "GABC…XYZ",
+    "typeLabel": "Credential Type",
+    "metaLabel": "Metadata Hash",
+    "metaPlaceholder": "e.g. QmXoypiz… or sha256:abc123…",
+    "metaHint": "An IPFS CID or SHA-256 hash pointing to the off-chain credential document.",
+    "submitButton": "Issue Credential",
+    "submitting": "Issuing…",
+    "successTitle": "Credential Issued",
+    "successSub": "Credential #{{credentialId}} has been issued on-chain.",
+    "viewCredential": "View Credential →",
+    "issueAnother": "Issue Another",
+    "txPending": "Transaction pending…",
+    "txConfirmed": "Transaction confirmed — credential issued.",
+    "txFailed": "Transaction failed: {{message}}",
+    "errorTitle": "Transaction Failed",
+    "errSubjectRequired": "Subject address is required.",
+    "errSubjectInvalid": "Must be a valid Stellar address (starts with G, 56 chars).",
+    "errTypeRequired": "Please select a credential type.",
+    "errMetaRequired": "Metadata hash is required.",
+    "errMetaTooShort": "Metadata hash must be at least 4 characters.",
+    "credentialTypes": {
+      "degree": "🎓 Degree",
+      "license": "🏛️ License",
+      "employment": "💼 Employment"
+    }
+  },
+  "verify": {
+    "pageTitle": "Verify Credential",
+    "inputLabel": "Credential ID",
+    "inputPlaceholder": "Enter credential ID",
+    "verifyButton": "Verify",
+    "verifying": "Verifying…",
+    "resultValid": "Credential is valid",
+    "resultInvalid": "Credential is invalid",
+    "resultNotFound": "Credential not found"
+  },
+  "quorumSlice": {
+    "pageTitle": "Quorum Slice Builder",
+    "addMember": "Add Member",
+    "removeMember": "Remove Member",
+    "threshold": "Threshold",
+    "members": "Members",
+    "save": "Save Slice",
+    "saving": "Saving…",
+    "saved": "Slice saved"
+  },
+  "notifications": {
+    "panelTitle": "Notifications",
+    "markAllRead": "Mark all read",
+    "clearAll": "Clear all",
+    "empty": "No notifications",
+    "bellLabel": "Notifications",
+    "bellLabelUnread": "Notifications, {{count}} unread",
+    "badgeLabel_one": "{{count}} unread notification",
+    "badgeLabel_other": "{{count}} unread notifications",
+    "dismissLabel": "Dismiss notification: {{title}}",
+    "typeSuccess": "Success",
+    "typeError": "Error",
+    "typeWarning": "Warning",
+    "typeInfo": "Info"
+  },
+  "languageSwitcher": {
+    "label": "Language",
+    "en": "English",
+    "es": "Español",
+    "fr": "Français",
+    "zh": "中文",
+    "ar": "العربية"
+  },
+  "common": {
+    "loading": "Loading…",
+    "error": "Something went wrong.",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "close": "Close",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "back": "Back"
+  }
+}

@@ -43,7 +43,6 @@ jobs:
         env:
           STELLAR_NETWORK: testnet
           TEST_THREADS: 1
-        continue-on-error: true
 
   e2e-futurenet:
     runs-on: ubuntu-latest
@@ -68,7 +67,6 @@ jobs:
         env:
           STELLAR_NETWORK: futurenet
           TEST_THREADS: 1
-        continue-on-error: true
 
   e2e-canary:
     runs-on: ubuntu-latest

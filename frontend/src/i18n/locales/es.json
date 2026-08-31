@@ -1,0 +1,111 @@
+{
+  "nav": {
+    "dashboard": "Panel",
+    "verify": "Verificar",
+    "sliceBuilder": "Constructor de Cuórum",
+    "recover": "Recuperar",
+    "help": "Ayuda",
+    "connectWallet": "Conectar billetera",
+    "disconnect": "Desconectar",
+    "connecting": "Conectando…"
+  },
+  "walletGate": {
+    "title": "Conecta tu billetera Stellar para continuar",
+    "selectPrompt": "Selecciona una billetera:",
+    "noWalletTitle": "Billetera requerida",
+    "noWalletMessage": "No se detectó ninguna billetera. Instala Freighter o conecta una billetera hardware Ledger/Trezor.",
+    "installFreighter": "Instalar Freighter"
+  },
+  "walletGuard": {
+    "checkingWallet": "Verificando billetera…",
+    "title": "Conecta tu billetera Stellar",
+    "selectPrompt": "Selecciona una billetera:",
+    "noWalletTitle": "Billetera requerida",
+    "noWalletMessage": "Instala la extensión Freighter o conecta una billetera hardware para usar esta función.",
+    "installFreighter": "Instalar Freighter"
+  },
+  "issueCredential": {
+    "formLabel": "Formulario de emisión de credencial",
+    "subjectLabel": "Dirección Stellar del sujeto",
+    "subjectPlaceholder": "GABC…XYZ",
+    "typeLabel": "Tipo de credencial",
+    "metaLabel": "Hash de metadatos",
+    "metaPlaceholder": "p.ej. QmXoypiz… o sha256:abc123…",
+    "metaHint": "Un CID de IPFS o hash SHA-256 que apunta al documento de credencial fuera de la cadena.",
+    "submitButton": "Emitir credencial",
+    "submitting": "Emitiendo…",
+    "successTitle": "Credencial emitida",
+    "successSub": "La credencial #{{credentialId}} ha sido emitida en la cadena.",
+    "viewCredential": "Ver credencial →",
+    "issueAnother": "Emitir otra",
+    "txPending": "Transacción pendiente…",
+    "txConfirmed": "Transacción confirmada — credencial emitida.",
+    "txFailed": "Transacción fallida: {{message}}",
+    "errorTitle": "Transacción fallida",
+    "errSubjectRequired": "La dirección del sujeto es obligatoria.",
+    "errSubjectInvalid": "Debe ser una dirección Stellar válida (empieza con G, 56 caracteres).",
+    "errTypeRequired": "Por favor selecciona un tipo de credencial.",
+    "errMetaRequired": "El hash de metadatos es obligatorio.",
+    "errMetaTooShort": "El hash de metadatos debe tener al menos 4 caracteres.",
+    "credentialTypes": {
+      "degree": "🎓 Título",
+      "license": "🏛️ Licencia",
+      "employment": "💼 Empleo"
+    }
+  },
+  "verify": {
+    "pageTitle": "Verificar credencial",
+    "inputLabel": "ID de credencial",
+    "inputPlaceholder": "Ingresa el ID de credencial",
+    "verifyButton": "Verificar",
+    "verifying": "Verificando…",
+    "resultValid": "La credencial es válida",
+    "resultInvalid": "La credencial no es válida",
+    "resultNotFound": "Credencial no encontrada"
+  },
+  "quorumSlice": {
+    "pageTitle": "Constructor de Cuórum",
+    "addMember": "Agregar miembro",
+    "removeMember": "Eliminar miembro",
+    "threshold": "Umbral",
+    "members": "Miembros",
+    "save": "Guardar",
+    "saving": "Guardando…",
+    "saved": "Guardado"
+  },
+  "notifications": {
+    "panelTitle": "Notificaciones",
+    "markAllRead": "Marcar todo como leído",
+    "clearAll": "Borrar todo",
+    "empty": "Sin notificaciones",
+    "bellLabel": "Notificaciones",
+    "bellLabelUnread": "Notificaciones, {{count}} sin leer",
+    "badgeLabel_one": "{{count}} notificación sin leer",
+    "badgeLabel_other": "{{count}} notificaciones sin leer",
+    "dismissLabel": "Descartar notificación: {{title}}",
+    "typeSuccess": "Éxito",
+    "typeError": "Error",
+    "typeWarning": "Advertencia",
+    "typeInfo": "Información"
+  },
+  "languageSwitcher": {
+    "label": "Idioma",
+    "en": "English",
+    "es": "Español",
+    "fr": "Français",
+    "zh": "中文",
+    "ar": "العربية"
+  },
+  "common": {
+    "loading": "Cargando…",
+    "error": "Algo salió mal.",
+    "retry": "Reintentar",
+    "cancel": "Cancelar",
+    "confirm": "Confirmar",
+    "close": "Cerrar",
+    "save": "Guardar",
+    "delete": "Eliminar",
+    "edit": "Editar",
+    "back": "Atrás"
+  }
+}
