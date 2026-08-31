@@ -44,7 +44,7 @@ Real **BLS12-381 pairing-based** Groth16 and PLONK verification is implemented i
 
 - **Audit Slices**: Define your own quorum of trusted attestors (university, licensing body, employers)
 - **Soulbound Tokens (SBTs)**: Non-transferable on-chain credentials tied to your Stellar identity
-- **Conditional Verification (stub)**: API exists for claim-specific proofs (e.g. "has a Mechanical Engineering degree") but ZK verification is not yet implemented — see warning above
+- **Conditional Verification**: Claim-specific proof verification is implemented via the `zk_verifier` contract, with design details and caveats documented in [docs/zk-verification-implementation.md](docs/zk-verification-implementation.md)
 - **Cross-Border Ready**: Instant verification for international hiring, no embassy letters or notarizations
 - **Privacy-First**: Credential holders control what is revealed and to whom
 - **Trustless**: No central registry — verification is enforced by smart contract logic
@@ -119,14 +119,14 @@ stellar keys generate deployer --network testnet
 
 ### Run Demo
 
-Follow the step-by-step guide in `demo/demo-script.md`
+Follow the step-by-step walkthrough in [demo/demo-script.md](demo/demo-script.md).
 
 ## 📖 Documentation
 
 - [Documentation Index](docs/README.md) — all `docs/` guides grouped by topic (start here)
 - [Architecture Overview](docs/architecture.md)
 - [Trust Slice Model](docs/trust-slices.md)
-- [ZK Verification Design](docs/zk-verification.md)
+- [ZK Verification Design](docs/zk-verification-implementation.md)
 - [Threat Model & Security](docs/threat-model.md)
 - [Error Code Reference](docs/error-codes.md)
 - [Integration Patterns Guide](docs/integration-patterns-guide.md)
@@ -221,7 +221,7 @@ All specifications are model-checked with TLC to ensure properties hold in all r
 ## 🗺️ Roadmap
 
 - **v1.0 (Current)**: Core SBT issuance, quorum slice model, multi-attestor signing
-- **v1.1**: ZK conditional verification (claim-specific proofs)
+- **v1.1**: Continued ZK verification hardening, key management, and proof-format upgrades
 - **v2.0**: Revocation registry, credential expiry, renewal flows
 - **v3.0**: Frontend UI with Stellar wallet integration
 - **v4.0**: Mobile app, integration with national licensing APIs
