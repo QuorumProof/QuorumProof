@@ -180,6 +180,9 @@ pub enum DataKey {
     /// The pending clawback id for an SBT, if any (sbt_id -> clawback_id).
     /// Enforces that only one clawback may be pending per SBT at a time.
     PendingClawbackBySbt(u64),
+    /// A co-owner candidate proposed by an SBT's owner, awaiting the
+    /// candidate's acceptance.
+    CoOwnerProposal(u64),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -248,7 +251,7 @@ pub struct OwnershipHistoryEntry {
     pub co_owner: Option<Address>,
     /// Ledger timestamp when this ownership state took effect.
     pub changed_at: u64,
-    /// Event kind: "mint", "dual_xfer", "set_co", "rm_co"
+    /// Event kind: "mint", "dual_xfer", "set_co", "rm_co", "attestor"
     pub event: Symbol,
 }
 
@@ -826,12 +829,17 @@ impl SbtRegistryContract {
 
         let delegation = Delegation {
             token_id,
-            delegatee,
+            delegatee: delegatee.clone(),
             expires_at,
         };
         env.storage()
             .instance()
             .set(&DataKey::Delegation(token_id), &delegation);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("delegate").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (delegatee, expires_at));
     }
 
     /// Revoke an active delegation for a specific SBT. Only the token owner may call this.
@@ -843,9 +851,20 @@ impl SbtRegistryContract {
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
+
+        let delegatee: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<_, Delegation>(&DataKey::Delegation(token_id))
+            .map(|delegation| delegation.delegatee);
         env.storage()
             .instance()
             .remove(&DataKey::Delegation(token_id));
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("undeleg").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, delegatee);
     }
 
     /// Retrieve delegation details for a token.
@@ -894,31 +913,61 @@ impl SbtRegistryContract {
         let delegation = ScopedDelegation {
             token_id: sbt_id,
             delegatee: delegatee.clone(),
-            scope,
+            scope: scope.clone(),
         };
 
         env.storage()
             .instance()
-            .set(&DataKey::UsageDelegation(sbt_id, delegatee), &delegation);
+            .set(&DataKey::UsageDelegation(sbt_id, delegatee.clone()), &delegation);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("deleg_use").into_val(&env));
+        topics.push_back(sbt_id.into_val(&env));
+        env.events().publish(topics, (delegatee, scope));
     }
 
     /// Verify a delegated SBT specifically for DeFi protocol usages.
     pub fn verify_delegated_sbt(env: Env, sbt_id: u64, delegatee: Address) -> bool {
+        matches!(
+            Self::active_usage_scope(&env, sbt_id, delegatee),
+            Some(UsageScope::DeFiCollateral(_))
+        )
+    }
+
+    /// Verify a delegated SBT specifically for identity verification usages.
+    pub fn verify_delegated_identity(env: Env, sbt_id: u64, delegatee: Address) -> bool {
+        matches!(
+            Self::active_usage_scope(&env, sbt_id, delegatee),
+            Some(UsageScope::IdentityVerification(_))
+        )
+    }
+
+    /// Verify a delegated SBT specifically for governance voting usages.
+    pub fn verify_delegated_governance(env: Env, sbt_id: u64, delegatee: Address) -> bool {
+        matches!(
+            Self::active_usage_scope(&env, sbt_id, delegatee),
+            Some(UsageScope::GovernanceVoting(_))
+        )
+    }
+
+    /// Internal helper: return the scope of a delegatee's usage delegation for
+    /// an existing token, but only while that delegation is still unexpired.
+    fn active_usage_scope(env: &Env, sbt_id: u64, delegatee: Address) -> Option<UsageScope> {
         if !env.storage().persistent().has(&DataKey::Token(sbt_id)) {
-            return false;
+            return None;
         }
 
         let key = DataKey::UsageDelegation(sbt_id, delegatee);
-        if let Some(delegation) = env.storage().instance().get::<_, ScopedDelegation>(&key) {
-            let current_ts = env.ledger().timestamp();
-            match delegation.scope {
-                UsageScope::DeFiCollateral(expires_at) => {
-                    expires_at > current_ts
-                }
-                _ => false,
-            }
+        let delegation: ScopedDelegation = env.storage().instance().get(&key)?;
+        let expires_at = match &delegation.scope {
+            UsageScope::DeFiCollateral(expires_at) => *expires_at,
+            UsageScope::IdentityVerification(expires_at) => *expires_at,
+            UsageScope::GovernanceVoting(expires_at) => *expires_at,
+        };
+        if expires_at > env.ledger().timestamp() {
+            Some(delegation.scope)
         } else {
-            false
+            None
         }
     }
 
@@ -1220,27 +1269,112 @@ impl SbtRegistryContract {
 
     // ── Issue #1275: Dual-Ownership (individual + organization) ────────
 
+    /// Propose `candidate` as co-owner of an SBT held by `owner`. This only
+    /// records the proposal — the SBT is left untouched until the candidate
+    /// calls `accept_co_owner`, so an owner cannot name an unwilling party.
+    /// Proposing again replaces any earlier pending proposal.
+    ///
+    /// # Panics
+    /// - "token not found" if `token_id` does not exist.
+    /// - "not the owner" if `owner` does not hold the SBT.
+    /// - `ContractError::InvalidCoOwner` if `candidate == owner`.
+    pub fn propose_co_owner(env: Env, owner: Address, token_id: u64, candidate: Address) {
+        owner.require_auth();
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+        assert!(token.owner == owner, "not the owner");
+        if candidate == owner {
+            panic_with_error!(&env, ContractError::InvalidCoOwner);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CoOwnerProposal(token_id), &candidate);
+
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+        topics.push_back(symbol_short!("prop_co").into_val(&env));
+        topics.push_back(token_id.into_val(&env));
+        env.events().publish(topics, (owner, candidate));
+    }
+
+    /// Accept a pending co-owner proposal. Requires the candidate's own
+    /// signature, which is what makes co-ownership consensual.
+    ///
+    /// # Panics
+    /// - `ContractError::CoOwnerProposalNotFound` if there is no pending
+    ///   proposal for `candidate` on this SBT.
+    /// - "token not found" if `token_id` does not exist.
+    /// - `ContractError::InvalidCoOwner` if `candidate` is now the owner.
+    pub fn accept_co_owner(env: Env, candidate: Address, token_id: u64) {
+        candidate.require_auth();
+
+        let proposed: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoOwnerProposal(token_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CoOwnerProposalNotFound));
+        if proposed != candidate {
+            panic_with_error!(&env, ContractError::CoOwnerProposalNotFound);
+        }
+
+        let token: SoulboundToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id))
+            .expect("token not found");
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CoOwnerProposal(token_id));
+        Self::assign_co_owner(&env, token_id, token, candidate);
+    }
+
+    /// Returns the pending co-owner proposal for an SBT, if any.
+    pub fn get_co_owner_proposal(env: Env, token_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CoOwnerProposal(token_id))
+    }
+
     /// Assign a co-owner (e.g. an organization) to an SBT already held by an
-    /// individual `owner`. Once set, `transfer_ownership_dual` requires
-    /// signatures from both parties. Only the current `owner` may call this
-    /// (the co-owner is added unilaterally by the primary owner, mirroring
-    /// how `set_co_owner`'s counterpart `remove_co_owner` requires both
-    /// parties to undo it).
+    /// individual `owner`, in a single call.
+    ///
+    /// Deprecated in favour of `propose_co_owner` / `accept_co_owner`; it is
+    /// kept for compatibility and now requires the co-owner's signature too,
+    /// so it can no longer be used to name an unwilling party.
     ///
     /// # Panics
     /// - "token not found" if `token_id` does not exist.
     /// - `ContractError::InvalidCoOwner` if `co_owner == owner`.
     pub fn set_co_owner(env: Env, owner: Address, token_id: u64, co_owner: Address) {
         owner.require_auth();
+        co_owner.require_auth();
 
-        let mut token: SoulboundToken = env
+        let token: SoulboundToken = env
             .storage()
             .persistent()
             .get(&DataKey::Token(token_id))
             .expect("token not found");
         assert!(token.owner == owner, "not the owner");
+
+        Self::assign_co_owner(&env, token_id, token, co_owner);
+    }
+
+    /// Internal helper: write the co-owner onto an already-loaded token,
+    /// emit the `set_co` event and append to the ownership history.
+    fn assign_co_owner(
+        env: &Env,
+        token_id: u64,
+        mut token: SoulboundToken,
+        co_owner: Address,
+    ) {
+        let owner = token.owner.clone();
         if co_owner == owner {
-            panic_with_error!(&env, ContractError::InvalidCoOwner);
+            panic_with_error!(env, ContractError::InvalidCoOwner);
         }
 
         token.co_owner = Some(co_owner.clone());
@@ -1248,12 +1382,12 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::Token(token_id), &token);
 
-        let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
-        topics.push_back(symbol_short!("set_co").into_val(&env));
-        topics.push_back(token_id.into_val(&env));
+        let mut topics: Vec<soroban_sdk::Val> = Vec::new(env);
+        topics.push_back(symbol_short!("set_co").into_val(env));
+        topics.push_back(token_id.into_val(env));
         env.events().publish(topics, (owner.clone(), co_owner.clone()));
         Self::record_ownership_history(
-            &env,
+            env,
             token_id,
             owner,
             Some(co_owner),
@@ -3251,6 +3385,13 @@ impl SbtRegistryContract {
 
         Self::record_notification(&env, new_holder.clone(), sbt_id, symbol_short!("transfer"));
         Self::log_sbt_activity(&env, sbt_id, symbol_short!("transfer"), attestor);
+        Self::record_ownership_history(
+            &env,
+            sbt_id,
+            new_holder,
+            token.co_owner,
+            symbol_short!("attestor"),
+        );
     }
 
     /// Get the attestor delegation record for an SBT.
@@ -5529,6 +5670,223 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_delegated_identity_success_and_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::IdentityVerification(expires_at);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
+
+        assert!(client.verify_delegated_identity(&token_id, &delegatee));
+        // Scope-specific verifiers must not accept a different scope.
+        assert!(!client.verify_delegated_sbt(&token_id, &delegatee));
+        assert!(!client.verify_delegated_governance(&token_id, &delegatee));
+
+        env.ledger().set_timestamp(expires_at + 1);
+        assert!(!client.verify_delegated_identity(&token_id, &delegatee));
+    }
+
+    #[test]
+    fn test_verify_delegated_governance_success_and_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::GovernanceVoting(expires_at);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
+
+        assert!(client.verify_delegated_governance(&token_id, &delegatee));
+        assert!(!client.verify_delegated_sbt(&token_id, &delegatee));
+        assert!(!client.verify_delegated_identity(&token_id, &delegatee));
+
+        env.ledger().set_timestamp(expires_at + 1);
+        assert!(!client.verify_delegated_governance(&token_id, &delegatee));
+    }
+
+    /// Find the last emitted event whose first topic is `name`.
+    fn find_event(
+        env: &Env,
+        name: &str,
+    ) -> Option<(Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
+        env.events()
+            .all()
+            .iter()
+            .filter(|(_, topics, _)| {
+                topics
+                    .get(0)
+                    .and_then(|v| Symbol::try_from_val(env, &v).ok())
+                    .map(|s| s == Symbol::new(env, name))
+                    .unwrap_or(false)
+            })
+            .last()
+            .map(|(_, topics, data)| (topics, data))
+    }
+
+    #[test]
+    fn test_delegate_sbt_rights_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+
+        let (topics, data) = find_event(&env, "delegate").expect("delegate event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        let (emitted_delegatee, emitted_expiry) = <(Address, u64)>::from_val(&env, &data);
+        assert_eq!(emitted_delegatee, delegatee);
+        assert_eq!(emitted_expiry, expires_at);
+    }
+
+    #[test]
+    fn test_revoke_sbt_delegation_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.delegate_sbt_rights(&owner, &token_id, &delegatee, &expires_at);
+        client.revoke_sbt_delegation(&owner, &token_id);
+
+        let (topics, data) = find_event(&env, "undeleg").expect("undeleg event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        assert_eq!(
+            <Option<Address>>::from_val(&env, &data),
+            Some(delegatee)
+        );
+    }
+
+    #[test]
+    fn test_delegate_sbt_usage_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let expires_at = env.ledger().timestamp() + 1_000;
+        let scope = UsageScope::GovernanceVoting(expires_at);
+        client.delegate_sbt_usage(&token_id, &delegatee, &scope);
+
+        let (topics, data) = find_event(&env, "deleg_use").expect("deleg_use event not emitted");
+        assert_eq!(u64::from_val(&env, &topics.get(1).unwrap()), token_id);
+        let (emitted_delegatee, emitted_scope) = <(Address, UsageScope)>::from_val(&env, &data);
+        assert_eq!(emitted_delegatee, delegatee);
+        assert_eq!(emitted_scope, scope);
+    }
+
+    // ── Issue #1408: consensual co-ownership ─────────────────────────────────
+
+    #[test]
+    fn test_propose_and_accept_co_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.propose_co_owner(&owner, &token_id, &candidate);
+        assert_eq!(client.get_co_owner_proposal(&token_id), Some(candidate.clone()));
+        assert_eq!(client.get_co_owner(&token_id), None);
+
+        client.accept_co_owner(&candidate, &token_id);
+        assert_eq!(client.get_co_owner(&token_id), Some(candidate.clone()));
+        assert_eq!(client.get_co_owner_proposal(&token_id), None);
+
+        let history = client.get_ownership_history(&token_id);
+        let last = history.last().unwrap();
+        assert_eq!(last.event, symbol_short!("set_co"));
+        assert_eq!(last.co_owner, Some(candidate));
+    }
+
+    #[test]
+    fn test_propose_co_owner_without_acceptance_leaves_token_unaffected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.propose_co_owner(&owner, &token_id, &candidate);
+
+        // The candidate never accepts: the SBT keeps no co-owner at all.
+        assert_eq!(client.get_co_owner(&token_id), None);
+        assert_eq!(client.get_co_owner_proposal(&token_id), Some(candidate));
+        assert_eq!(client.get_ownership_history(&token_id).len(), 1); // mint only
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError")]
+    fn test_accept_co_owner_without_proposal_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        client.accept_co_owner(&candidate, &token_id);
+    }
+
+    #[test]
     #[should_panic(expected = "cannot delegate to self")]
     fn test_delegate_sbt_usage_to_self_panics() {
         let env = Env::default();
@@ -5799,6 +6157,34 @@ mod tests {
         assert_eq!(client.owner_of(&token_id), new_holder);
         let tokens = client.get_tokens_by_owner(&new_holder);
         assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    fn test_transfer_sbt_via_attestor_records_ownership_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let attestor = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let reason = Bytes::from_slice(&env, b"employment_termination");
+
+        client.delegate_sbt_transfer(&owner, &token_id, &attestor, &new_holder, &reason);
+        let proof = Bytes::from_slice(&env, b"authorization_proof");
+        client.transfer_sbt_via_attestor(&attestor, &token_id, &proof);
+
+        let history = client.get_ownership_history(&token_id);
+        assert_eq!(history.len(), 2); // mint + attestor transfer
+        let last = history.last().unwrap();
+        assert_eq!(last.event, symbol_short!("attestor"));
+        assert_eq!(last.owner, new_holder);
     }
 
     #[test]
