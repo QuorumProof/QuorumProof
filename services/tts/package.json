@@ -1,0 +1,22 @@
+{
+  "name": "@quorumproof/tts-service",
+  "version": "1.0.0",
+  "description": "Provider-agnostic TTS client with exponential-backoff-plus-jitter retry logic for QuorumProof accessibility features",
+  "type": "module",
+  "main": "dist/TTSService.js",
+  "types": "dist/TTSService.d.ts",
+  "scripts": {
+    "build": "tsc --noEmit false",
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "typescript": "~5.9.3",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

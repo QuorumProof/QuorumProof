@@ -14,6 +14,8 @@ soroban-sdk = { version = "21.0.0", features = ["testutils"] }
 quorum_proof = { path = "../contracts/quorum_proof", features = ["testutils"] }
 sbt_registry = { path = "../contracts/sbt_registry", features = ["testutils"] }
 zk_verifier = { path = "../contracts/zk_verifier", features = ["testutils"] }
+bbs_plus_v1 = { path = "../contracts/bbs_plus_v1", features = ["std"] }
+rand = { version = "0.8", features = ["std", "std_rng"] }
 
 [[bin]]
 name = "fuzz_quorum_proof"
@@ -72,6 +74,12 @@ doc = false
 [[bin]]
 name = "fuzz_bbs_plus_operations"
 path = "fuzz_targets/fuzz_bbs_plus_operations.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_quorum_intersection"
+path = "fuzz_targets/fuzz_quorum_intersection.rs"
 test = false
 doc = false
 

@@ -1,4 +1,14 @@
 import { instanceId } from './instanceId.js';
+import { dispatchWsMessageDropAlert } from '../services/alertChannels.js';
+
+/** Minimum drops-per-window to trigger an alert dispatch (default: 10). */
+const WS_DROP_ALERT_THRESHOLD = parseInt(process.env.WS_DROP_ALERT_THRESHOLD ?? '10', 10);
+/** Observation window length in seconds (default: 60). */
+const WS_DROP_ALERT_WINDOW_SECONDS = parseInt(process.env.WS_DROP_ALERT_WINDOW_SECONDS ?? '60', 10);
+
+/** Tracks drops within the current observation window. */
+let dropWindowCount = 0;
+let dropWindowStart = Date.now();
 
 export interface WsMetrics {
   instanceId: string;
@@ -63,6 +73,19 @@ export function recordError(): void {
 
 export function recordMessageDropped(): void {
   metrics.messagesDropped++;
+  dropWindowCount++;
+
+  const now = Date.now();
+  const elapsedMs = now - dropWindowStart;
+
+  if (elapsedMs >= WS_DROP_ALERT_WINDOW_SECONDS * 1000) {
+    if (dropWindowCount >= WS_DROP_ALERT_THRESHOLD) {
+      // fire-and-forget: alert dispatch must not block the send path
+      void dispatchWsMessageDropAlert(dropWindowCount, WS_DROP_ALERT_WINDOW_SECONDS, instanceId);
+    }
+    dropWindowCount = 0;
+    dropWindowStart = now;
+  }
 }
 
 export function recordCrossInstanceMessageReceived(): void {
@@ -89,6 +112,8 @@ export function resetWsMetrics(): void {
   metrics.messagesDropped = 0;
   metrics.crossInstanceMessagesReceived = 0;
   metrics.crossInstanceMessagesPublished = 0;
+  dropWindowCount = 0;
+  dropWindowStart = Date.now();
 }
 
 /**

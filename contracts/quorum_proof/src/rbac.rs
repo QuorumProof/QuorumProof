@@ -335,6 +335,145 @@ pub fn revoke_delegation(env: &Env, delegator: &Address, delegatee: &Address) {
     );
 }
 
+/// Returns `true` if `address` has a stored role assignment that has passed
+/// its `expires_at` timestamp. An assignment with `expires_at == 0` (never
+/// expires) or no assignment at all returns `false`.
+///
+/// Note: this is a logical check only, distinct from Soroban's instance
+/// storage TTL/archival mechanism. An expired-but-unpurged assignment stays
+/// fully present in storage (and its TTL keeps getting extended by other
+/// RBAC writes via `extend_ttl`) until [`purge_expired_role`] removes it
+/// explicitly; this function does not affect storage rent or archival.
+pub fn is_role_expired(env: &Env, address: &Address) -> bool {
+    match env
+        .storage()
+        .instance()
+        .get::<_, RoleAssignment>(&DataKey6::RoleAssignment(address.clone()))
+    {
+        Some(assignment) => {
+            assignment.expires_at != 0 && env.ledger().timestamp() >= assignment.expires_at
+        }
+        None => false,
+    }
+}
+
+/// Returns `true` if `address` has a stored role delegation that has passed
+/// its `expires_at` timestamp. See [`is_role_expired`] for the same caveat
+/// regarding storage TTL/archival.
+pub fn is_delegation_expired(env: &Env, address: &Address) -> bool {
+    match env
+        .storage()
+        .instance()
+        .get::<_, RoleDelegation>(&DataKey6::RoleDelegation(address.clone()))
+    {
+        Some(delegation) => {
+            delegation.expires_at != 0 && env.ledger().timestamp() >= delegation.expires_at
+        }
+        None => false,
+    }
+}
+
+/// Admin-only cleanup: removes an expired role assignment's storage entry.
+/// Panics if no assignment exists, or if the assignment exists but has not
+/// actually expired yet — this purges stale grants, it does not revoke live
+/// ones (use [`revoke_role`] for that).
+pub fn purge_expired_role(env: &Env, admin: &Address, address: &Address) {
+    let stored_admin: Address = env
+        .storage()
+        .instance()
+        .get(&crate::DataKey::Admin)
+        .expect("not initialized");
+    if stored_admin != *admin {
+        panic_with_error!(env, ContractError::PermissionDenied);
+    }
+
+    let assignment: RoleAssignment = env
+        .storage()
+        .instance()
+        .get(&DataKey6::RoleAssignment(address.clone()))
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::RoleNotFound));
+
+    if !is_role_expired(env, address) {
+        panic_with_error!(env, ContractError::GrantNotExpired);
+    }
+
+    let role = assignment.role;
+    env.storage()
+        .instance()
+        .remove(&DataKey6::RoleAssignment(address.clone()));
+
+    let now = env.ledger().timestamp();
+    let entry = RoleAuditEntry {
+        timestamp: now,
+        action: RoleAction::Expired,
+        actor: admin.clone(),
+        target: address.clone(),
+        role,
+    };
+    let mut audit_log: Vec<RoleAuditEntry> = env
+        .storage()
+        .instance()
+        .get(&DataKey6::RoleAuditLog)
+        .unwrap_or(Vec::new(env));
+    audit_log.push_back(entry);
+    env.storage()
+        .instance()
+        .set(&DataKey6::RoleAuditLog, &audit_log);
+    env.storage()
+        .instance()
+        .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+}
+
+/// Admin-only cleanup: removes an expired role delegation's storage entry.
+/// Panics if no delegation exists, or if the delegation exists but has not
+/// actually expired yet.
+pub fn purge_expired_delegation(env: &Env, admin: &Address, address: &Address) {
+    let stored_admin: Address = env
+        .storage()
+        .instance()
+        .get(&crate::DataKey::Admin)
+        .expect("not initialized");
+    if stored_admin != *admin {
+        panic_with_error!(env, ContractError::PermissionDenied);
+    }
+
+    let delegation: RoleDelegation = env
+        .storage()
+        .instance()
+        .get(&DataKey6::RoleDelegation(address.clone()))
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::RoleDelegationNotFound));
+
+    if !is_delegation_expired(env, address) {
+        panic_with_error!(env, ContractError::GrantNotExpired);
+    }
+
+    let role = delegation.role;
+    env.storage()
+        .instance()
+        .remove(&DataKey6::RoleDelegation(address.clone()));
+
+    let now = env.ledger().timestamp();
+    let entry = RoleAuditEntry {
+        timestamp: now,
+        action: RoleAction::Expired,
+        actor: admin.clone(),
+        target: address.clone(),
+        role,
+    };
+    let mut audit_log: Vec<RoleAuditEntry> = env
+        .storage()
+        .instance()
+        .get(&DataKey6::RoleAuditLog)
+        .unwrap_or(Vec::new(env));
+    audit_log.push_back(entry);
+    env.storage()
+        .instance()
+        .set(&DataKey6::RoleAuditLog, &audit_log);
+    env.storage()
+        .instance()
+        .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+}
+
 pub fn get_role_assignment(env: &Env, address: &Address) -> Option<RoleAssignment> {
     env.storage()
         .instance()
@@ -668,6 +807,160 @@ mod tests {
             }));
             assert!(result.is_err());
             assert!(has_role(&env, &user2, Role::Issuer));
+        });
+    }
+
+    #[test]
+    fn test_is_role_expired() {
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 1_000_500);
+            assert!(!is_role_expired(&env, &user));
+
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+            assert!(is_role_expired(&env, &user));
+        });
+    }
+
+    #[test]
+    fn test_is_role_expired_false_for_no_expiry() {
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 0);
+            assert!(!is_role_expired(&env, &user));
+        });
+    }
+
+    #[test]
+    fn test_is_role_expired_false_when_no_assignment() {
+        let (env, _admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assert!(!is_role_expired(&env, &user));
+        });
+    }
+
+    #[test]
+    fn test_is_delegation_expired() {
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Verifier, 0);
+            delegate_role(&env, &user1, &user2, Role::Verifier, 1_000_500);
+            assert!(!is_delegation_expired(&env, &user2));
+
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+            assert!(is_delegation_expired(&env, &user2));
+        });
+    }
+
+    #[test]
+    fn test_purge_expired_role_before_expiry_rejected() {
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 1_000_500);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                purge_expired_role(&env, &admin, &user);
+            }));
+            assert!(result.is_err());
+            // Still present and active.
+            assert!(has_role(&env, &user, Role::Issuer));
+        });
+    }
+
+    #[test]
+    fn test_purge_expired_role_after_expiry_succeeds() {
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user, Role::Issuer, 1_000_500);
+
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+
+            purge_expired_role(&env, &admin, &user);
+            assert!(get_role_assignment(&env, &user).is_none());
+
+            let log = get_audit_log(&env);
+            assert_eq!(log.get(log.len() - 1).unwrap().action, RoleAction::Expired);
+        });
+    }
+
+    #[test]
+    fn test_purge_expired_role_panics_when_no_assignment() {
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                purge_expired_role(&env, &admin, &user);
+            }));
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_purge_expired_role_panics_for_non_admin() {
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Issuer, 1_000_500);
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                purge_expired_role(&env, &user2, &user1);
+            }));
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_purge_expired_delegation_before_expiry_rejected() {
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Verifier, 0);
+            delegate_role(&env, &user1, &user2, Role::Verifier, 1_000_500);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                purge_expired_delegation(&env, &admin, &user2);
+            }));
+            assert!(result.is_err());
+            assert!(has_role(&env, &user2, Role::Verifier));
+        });
+    }
+
+    #[test]
+    fn test_purge_expired_delegation_after_expiry_succeeds() {
+        let (env, admin, user1, user2, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assign_role(&env, &admin, &user1, Role::Verifier, 0);
+            delegate_role(&env, &user1, &user2, Role::Verifier, 1_000_500);
+
+            env.ledger().set(LedgerInfo {
+                timestamp: 1_000_600,
+                ..env.ledger().get()
+            });
+
+            purge_expired_delegation(&env, &admin, &user2);
+            assert!(get_role_delegation(&env, &user2).is_none());
+            assert!(!has_role(&env, &user2, Role::Verifier));
+        });
+    }
+
+    #[test]
+    fn test_purge_expired_delegation_panics_when_no_delegation() {
+        let (env, admin, user, _, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                purge_expired_delegation(&env, &admin, &user);
+            }));
+            assert!(result.is_err());
         });
     }
 }

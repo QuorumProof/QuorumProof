@@ -380,3 +380,76 @@ fn test_unauthorized_burn_panics() {
 - [cargo-mutants Documentation](https://mutants.rs/)
 - ["Mutation Testing" by Pitest](https://pitest.org/)
 - [Google Testing Blog: Mutation Testing](https://testing.googleblog.com/2015/06/mutation-testing-and-test-suites.html)
+
+## Mutation Score Trend Tracking (Issue #1480)
+
+### Why trend tracking matters
+
+A per-run mutation score is a snapshot.  A gradual decline — one or two
+extra missed mutants per PR — is invisible until the damage is severe.
+The same reasoning that motivated `benches/src/history.rs` for benchmark
+exponents applies here: **append-only JSONL + rolling baseline comparison**
+gives you a time-series view of test quality.
+
+### How it works
+
+```
+scripts/mutation_test.sh   # runs cargo-mutants; calls mutation_history.py
+    │
+    ├─► scripts/mutation_history.py append workspace <caught> <total>
+    │       └─► mutants/history/workspace.jsonl   (one line per CI run)
+    │
+    └─► scripts/mutation_history.py check workspace
+            └─► warns (exit 1) if current score is > 5pp below the
+                rolling mean of the last 5 entries
+```
+
+The `.github/workflows/mutation-testing.yml` workflow:
+
+1. Runs `mutation_test.sh` (which invokes `cargo-mutants`).
+2. Appends the score to `mutants/history/workspace.jsonl`.
+3. Compares against the rolling baseline and emits a warning if the score
+   regressed more than `REGRESSION_THRESHOLD_PP` (default 5pp).
+4. Commits `mutants/history/` back to `main` on every push so history
+   accumulates as diff-able git commits (same pattern as `benches/history/`).
+5. Uploads the full `mutants.out/` directory as a GitHub Actions artifact
+   (retention 30 days).
+
+### JSONL format
+
+Each line in `mutants/history/<package>.jsonl` is a JSON object:
+
+```json
+{
+  "commit":    "a1b2c3d4e5f6",
+  "timestamp": "2026-08-30T03:00:00+00:00",
+  "package":   "workspace",
+  "caught":    142,
+  "total":     155,
+  "score":     91.61
+}
+```
+
+Fields are stable; additional fields may be added in future.
+
+### Regression threshold
+
+The default threshold is **5 percentage points** below the rolling baseline
+(mean of the last 5 runs).  Adjust `REGRESSION_THRESHOLD_PP` in
+`scripts/mutation_history.py` if your project's noise floor differs.
+
+CI warns on regression but does not hard-fail PRs from this gate alone,
+since a single legitimately-difficult mutant in a new feature area should
+not block merging.  Hard failures are reserved for newly missed mutants in
+the `mutation_test.sh` exit code.
+
+### Manual invocation
+
+```bash
+# Run mutation tests and record history
+./scripts/mutation_test.sh
+
+# Check trend without running tests (e.g. after manual cargo-mutants run)
+python3 scripts/mutation_history.py append workspace <caught> <total>
+python3 scripts/mutation_history.py check  workspace
+```

@@ -25,6 +25,7 @@
  * requires explicit replay (see replayDeadLetter) and replay is not
  * re-inserted at its original position in the sequence.
  */
+import type { Pool as PgPool } from 'pg';
 import { WebhookStore, type WebhookEvent, type WebhookRegistration, type WebhookPayload, type DeliveryRecord } from './webhookStore.js';
 import { WebhookCircuitBreaker } from './webhookCircuitBreaker.js';
 
@@ -42,6 +43,8 @@ export interface WebhookServiceOptions {
   breaker?: WebhookCircuitBreaker;
   maxRetries?: number;
   retryDelaysMs?: number[];
+  /** Postgres pool — passed through to WebhookStore when no explicit store is given. */
+  pool?: PgPool;
 }
 
 export class WebhookService {
@@ -53,7 +56,7 @@ export class WebhookService {
   private readonly chains = new Map<string, Promise<void>>();
 
   constructor(options: WebhookServiceOptions = {}) {
-    this.store = options.store ?? new WebhookStore();
+    this.store = options.store ?? new WebhookStore({ pool: options.pool });
     this.breaker = options.breaker ?? new WebhookCircuitBreaker();
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
@@ -62,13 +65,17 @@ export class WebhookService {
 
   /** Rebuild in-memory ordering chains from durable pending deliveries — runs the "restart recovery" path at construction. */
   private recoverPendingDeliveries(): void {
-    for (const [orderKey, records] of this.store.listPendingByOrderKey()) {
-      let chain = Promise.resolve();
-      for (const record of records) {
-        chain = chain.then(() => this.processDelivery(record));
+    // listPendingByOrderKey() is now async; fire-and-forget with error suppression
+    // to keep the constructor synchronous (same behaviour as before).
+    void this.store.listPendingByOrderKey().then((pending) => {
+      for (const [orderKey, records] of pending) {
+        let chain = Promise.resolve();
+        for (const record of records) {
+          chain = chain.then(() => this.processDelivery(record));
+        }
+        this.chains.set(orderKey, chain.catch(() => {}));
       }
-      this.chains.set(orderKey, chain.catch(() => {}));
-    }
+    }).catch(() => {});
   }
 
   private enqueue(record: DeliveryRecord): void {
@@ -77,50 +84,50 @@ export class WebhookService {
     this.chains.set(record.orderKey, next);
   }
 
-  registerWebhook(url: string, events: WebhookEvent[], secret?: string): WebhookRegistration {
+  async registerWebhook(url: string, events: WebhookEvent[], secret?: string): Promise<WebhookRegistration> {
     return this.store.registerWebhook(url, events, secret);
   }
 
-  listWebhooks(): WebhookRegistration[] {
+  async listWebhooks(): Promise<WebhookRegistration[]> {
     return this.store.listWebhooks();
   }
 
-  getWebhook(id: string): WebhookRegistration | undefined {
+  async getWebhook(id: string): Promise<WebhookRegistration | undefined> {
     return this.store.getWebhook(id);
   }
 
-  deleteWebhook(id: string): boolean {
+  async deleteWebhook(id: string): Promise<boolean> {
     return this.store.deleteWebhook(id);
   }
 
-  getDeliveryLog(): DeliveryRecord[] {
+  async getDeliveryLog(): Promise<DeliveryRecord[]> {
     return this.store.listDeliveries();
   }
 
-  listDeadLetters(): DeliveryRecord[] {
+  async listDeadLetters(): Promise<DeliveryRecord[]> {
     return this.store.listDeadLetters();
   }
 
   /** Called after broadcastEvent — durably enqueues delivery to every webhook subscribed to the event. */
-  dispatchWebhookEvent(payload: WebhookPayload): void {
+  async dispatchWebhookEvent(payload: WebhookPayload): Promise<void> {
     const event = payload.event as WebhookEvent;
-    for (const reg of this.store.listWebhooks()) {
+    for (const reg of await this.store.listWebhooks()) {
       if (!reg.events.includes(event)) continue;
-      const record = this.store.createDelivery(reg.id, payload.credential_id, payload.event, payload);
+      const record = await this.store.createDelivery(reg.id, payload.credential_id, payload.event, payload);
       this.enqueue(record);
     }
   }
 
   /** Re-inject a dead-lettered delivery for another attempt, keeping its idempotency key but resetting attempts. */
-  replayDeadLetter(id: string): DeliveryRecord | undefined {
-    const record = this.store.getDelivery(id);
+  async replayDeadLetter(id: string): Promise<DeliveryRecord | undefined> {
+    const record = await this.store.getDelivery(id);
     if (!record || record.status !== 'dead_letter') return undefined;
 
     record.status = 'pending';
     record.attempts = 0;
     record.error = undefined;
     record.completedAt = undefined;
-    this.store.saveDelivery(record);
+    await this.store.saveDelivery(record);
     this.enqueue(record);
     return record;
   }
@@ -128,15 +135,15 @@ export class WebhookService {
   private async processDelivery(queuedRecord: DeliveryRecord): Promise<void> {
     // Re-read from the store: a prior chain link (or a restart-recovery replay) may already have
     // resolved this delivery, or its attempt count may have advanced since it was queued.
-    const record = this.store.getDelivery(queuedRecord.id) ?? queuedRecord;
+    const record = (await this.store.getDelivery(queuedRecord.id)) ?? queuedRecord;
     if (record.status !== 'pending') return;
 
-    const reg = this.store.getWebhook(record.webhookId);
+    const reg = await this.store.getWebhook(record.webhookId);
     if (!reg) {
       record.status = 'dead_letter';
       record.error = 'webhook registration no longer exists';
       record.completedAt = new Date().toISOString();
-      this.store.saveDelivery(record);
+      await this.store.saveDelivery(record);
       console.error(`[webhook] delivery ${record.id} dead-lettered: webhook registration no longer exists`);
       return;
     }
@@ -161,7 +168,7 @@ export class WebhookService {
 
       if (this.breaker.getStateWithRecovery(reg.id) === 'open') {
         record.error = 'circuit breaker open for this endpoint';
-        this.store.saveDelivery(record);
+        await this.store.saveDelivery(record);
         continue;
       }
 
@@ -170,7 +177,7 @@ export class WebhookService {
         if (res.ok) {
           record.status = 'success';
           record.completedAt = new Date().toISOString();
-          this.store.saveDelivery(record);
+          await this.store.saveDelivery(record);
           this.breaker.recordSuccess(reg.id);
           return;
         }
@@ -180,12 +187,12 @@ export class WebhookService {
         record.error = err instanceof Error ? err.message : String(err);
         this.breaker.recordFailure(reg.id, record.error);
       }
-      this.store.saveDelivery(record);
+      await this.store.saveDelivery(record);
     }
 
     record.status = 'dead_letter';
     record.completedAt = new Date().toISOString();
-    this.store.saveDelivery(record);
+    await this.store.saveDelivery(record);
     console.error(`[webhook] delivery ${record.id} dead-lettered after ${record.attempts} attempts: ${record.error}`);
   }
 
@@ -203,36 +210,36 @@ export class WebhookService {
 
 let service = new WebhookService();
 
-export function registerWebhook(url: string, events: WebhookEvent[], secret?: string): WebhookRegistration {
+export async function registerWebhook(url: string, events: WebhookEvent[], secret?: string): Promise<WebhookRegistration> {
   return service.registerWebhook(url, events, secret);
 }
 
-export function listWebhooks(): WebhookRegistration[] {
+export async function listWebhooks(): Promise<WebhookRegistration[]> {
   return service.listWebhooks();
 }
 
-export function getWebhook(id: string): WebhookRegistration | undefined {
+export async function getWebhook(id: string): Promise<WebhookRegistration | undefined> {
   return service.getWebhook(id);
 }
 
-export function deleteWebhook(id: string): boolean {
+export async function deleteWebhook(id: string): Promise<boolean> {
   return service.deleteWebhook(id);
 }
 
-export function getDeliveryLog(): DeliveryRecord[] {
+export async function getDeliveryLog(): Promise<DeliveryRecord[]> {
   return service.getDeliveryLog();
 }
 
-export function listDeadLetters(): DeliveryRecord[] {
+export async function listDeadLetters(): Promise<DeliveryRecord[]> {
   return service.listDeadLetters();
 }
 
-export function replayDeadLetter(id: string): DeliveryRecord | undefined {
+export async function replayDeadLetter(id: string): Promise<DeliveryRecord | undefined> {
   return service.replayDeadLetter(id);
 }
 
-export function dispatchWebhookEvent(payload: WebhookPayload): void {
-  service.dispatchWebhookEvent(payload);
+export async function dispatchWebhookEvent(payload: WebhookPayload): Promise<void> {
+  return service.dispatchWebhookEvent(payload);
 }
 
 /** Test-only: point the module-level service at fresh (typically temp-dir-backed) store/breaker instances. */
