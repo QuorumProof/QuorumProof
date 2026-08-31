@@ -103,6 +103,14 @@ pub fn get_and_increment_degraded_write_count(env: &Env) -> u32 {
     next
 }
 
+/// Read-only: current count of writes recorded in the active Degraded window.
+pub fn get_degraded_write_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey4::CircuitBreakerDegradedWriteCount)
+        .unwrap_or(0)
+}
+
 pub fn reset_degraded_write_count(env: &Env) {
     env.storage()
         .instance()
