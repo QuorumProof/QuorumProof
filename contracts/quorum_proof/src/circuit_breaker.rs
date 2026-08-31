@@ -103,6 +103,14 @@ pub fn get_and_increment_degraded_write_count(env: &Env) -> u32 {
     next
 }
 
+/// Read-only: current count of writes recorded in the active Degraded window.
+pub fn get_degraded_write_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey4::CircuitBreakerDegradedWriteCount)
+        .unwrap_or(0)
+}
+
 pub fn reset_degraded_write_count(env: &Env) {
     env.storage()
         .instance()
@@ -565,6 +573,154 @@ mod tests {
             // No circuit breaker activation — state is Normal
             assert!(enforce_degraded_write_limit(&test.env).is_ok());
         });
+    }
+
+    /// Issue #1393: the degraded-mode write cap must cover mutating entry
+    /// points that do not route through `require_not_paused` -- `register_did`
+    /// is one of them, guarded by `enforce_write_limit`.
+    #[test]
+    fn degraded_mode_caps_writes_on_register_did() {
+        let test = setup();
+        let client = crate::QuorumProofContractClient::new(&test.env, &test.contract_id);
+
+        client.set_circuit_breaker_config(
+            &test.admin,
+            &CircuitBreakerConfig {
+                ttl_seconds: 86_400,
+                degraded_write_limit: 2,
+                auto_recover: true,
+            },
+        );
+        client.emergency_degrade(&test.admin, &String::from_str(&test.env, "load spike"));
+
+        // Two writes fit inside the cap. Each DID must be distinct, since
+        // register_did rejects duplicates for reasons unrelated to the cap.
+        for did in ["did:example:first", "did:example:second"] {
+            client.register_did(
+                &Address::generate(&test.env),
+                &String::from_str(&test.env, did),
+                &crate::DidKeyType::Ed25519,
+                &soroban_sdk::Bytes::from_array(&test.env, &[7u8; 32]),
+            );
+        }
+
+        // One write past the cap must be rejected with the typed error.
+        let result = client.try_register_did(
+            &Address::generate(&test.env),
+            &String::from_str(&test.env, "did:example:over"),
+            &crate::DidKeyType::Ed25519,
+            &soroban_sdk::Bytes::from_array(&test.env, &[8u8; 32]),
+        );
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::CircuitBreakerDegradedLimitReached))
+        );
+    }
+
+    /// Issue #1393: coverage ratchet. Every `pub fn` in `lib.rs` that writes to
+    /// storage must pass through either `require_not_paused` or
+    /// `enforce_write_limit`, or appear in the exemption list below -- which is
+    /// mirrored, with reasons, in `docs/circuit-breaker-write-coverage.md`.
+    /// Parsing the source keeps this honest as new entry points are added.
+    #[test]
+    fn every_mutating_entry_point_is_write_limited() {
+        const EXEMPT: &[&str] = &[
+            // Circuit breaker and pause controls: must stay callable while the
+            // breaker is engaged, otherwise the contract cannot be recovered.
+            "initialize",
+            "pause",
+            "unpause",
+            "set_circuit_breaker_config",
+            "migrate_state",
+            // Admin configuration: operators need these to tune limits and
+            // policy while the contract is degraded.
+            "set_rate_limit_config",
+            "set_issuer_rate_limit_config",
+            "add_rate_limit_whitelist",
+            "remove_rate_limit_whitelist",
+            "set_congestion_config",
+            "update_congestion_and_adjust",
+            "admin_bypass_rate_limit",
+            "set_issuer_quota",
+            "remove_issuer_quota",
+            "set_pow_difficulty",
+            "set_max_attestors_per_slice",
+            "set_grace_period",
+            "set_reputation_weighting_enabled",
+            "set_transfer_restriction",
+            "set_attestor_reputation_config",
+            "set_holder_reputation_config",
+            // Reached from an already-guarded entry point; guarding again would
+            // consume two write slots for one logical operation.
+            "slash_attestor",
+            "detect_fork",
+            // Read paths whose only write is a cache or audit line derived from
+            // the read itself. Capping them would break monitoring and
+            // verification in Degraded mode without limiting state growth.
+            "get_credential_metadata_schema",
+            "get_metadata_schema_distribution",
+            "validate_contract_state",
+            "get_pow_difficulty",
+            "get_rate_limit_usage",
+            "get_attestation_window",
+            "get_slice_attack_cost_estimate",
+            "get_slice_modifications",
+            "is_attested",
+            "is_quorum",
+            "check_quorum_intersection",
+            "get_proof_request",
+            "get_proof_request_audit_log",
+            "get_attestor_reputation_record",
+            "get_holder_reputation",
+            "verify_credential",
+            "get_attestation_queue",
+            "recommend_attestors",
+            "validate_slice_composition",
+            "bbs_get_revocation_accumulator",
+        ];
+
+        let source = include_str!("lib.rs");
+        let lines: std::vec::Vec<&str> = source.lines().collect();
+        let mut unguarded: std::vec::Vec<&str> = std::vec::Vec::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.strip_prefix("    pub fn ") else {
+                continue;
+            };
+            let name = rest.split(['(', '<']).next().unwrap_or(rest);
+            if EXEMPT.contains(&name) {
+                continue;
+            }
+
+            let mut mutates = false;
+            let mut guarded = false;
+            for body in lines[i + 1..].iter() {
+                if body.starts_with("    pub fn ")
+                    || body.starts_with("    fn ")
+                    || body.starts_with("    pub(crate) fn ")
+                {
+                    break;
+                }
+                if body.contains(".set(") || body.contains(".remove(") {
+                    mutates = true;
+                }
+                if body.contains("Self::require_not_paused")
+                    || body.contains("Self::enforce_write_limit")
+                {
+                    guarded = true;
+                }
+            }
+
+            if mutates && !guarded {
+                unguarded.push(name);
+            }
+        }
+
+        assert!(
+            unguarded.is_empty(),
+            "mutating entry points missing the degraded write cap: {:?}",
+            unguarded
+        );
     }
 
     #[test]

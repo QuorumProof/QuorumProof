@@ -66,6 +66,7 @@ const TOPIC_TEMPLATE_UPDATED: &str = "TemplateUpdated";
 const TOPIC_ATTESTOR_REPLACEMENT: &str = "AttestorReplaced";
 const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
 const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
+const TOPIC_KEY_ESCROW_ROTATED: &str = "KeyEscrowRotated";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
 const STANDARD_TTL: u32 = 16_384;
@@ -841,6 +842,8 @@ pub enum ContractError {
     InsufficientShares = 92,
     /// Referenced slice schema version is not registered
     SchemaNotFound = 93,
+    /// Issue #1394: Attempted to purge a role assignment/delegation that has not expired yet
+    GrantNotExpired = 94,
 }
 
 #[contracttype]
@@ -2610,6 +2613,33 @@ pub struct CongestionConfig {
     pub max_max_calls: u32,
 }
 
+/// Issue #1397: Combined read-only snapshot of all three independent
+/// throttling systems (circuit breaker, rate limiting, congestion), so an
+/// operator/dashboard can read all of their current state in one round trip
+/// instead of calling each system's getters separately. See
+/// `docs/throttling.md` for how these systems interact and their precedence
+/// order when more than one applies to a single call.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ThrottlingStatus {
+    /// Circuit breaker: current operational state (Normal/Degraded/Paused).
+    pub circuit_breaker_state: circuit_breaker::CircuitBreakerState,
+    /// Circuit breaker: active degradation/pause details, if any.
+    pub circuit_breaker_activation: Option<circuit_breaker::CircuitBreakerActivation>,
+    /// Circuit breaker: max writes allowed per ledger while Degraded.
+    pub degraded_write_limit: u32,
+    /// Circuit breaker: writes recorded in the current Degraded window.
+    pub degraded_write_count: u32,
+    /// Rate limiting: global (default) max calls per window.
+    pub rate_limit_max_calls: u32,
+    /// Rate limiting: global (default) window length in seconds.
+    pub rate_limit_window_seconds: u64,
+    /// Congestion: current classification (Low/Normal/High).
+    pub congestion_level: CongestionLevel,
+    /// Congestion: thresholds/factors driving automatic rate-limit adjustment.
+    pub congestion_config: CongestionConfig,
+}
+
 // ── Feature (b): Admin bypass for emergency attestations ─────────────────────
 
 /// Audit record written every time the admin bypass is exercised.
@@ -2869,6 +2899,7 @@ impl QuorumProofContract {
         public_key: soroban_sdk::Bytes,
     ) {
         address.require_auth();
+        Self::enforce_write_limit(&env);
 
         assert!(!did.is_empty(), "DID string cannot be empty");
 
@@ -2966,6 +2997,7 @@ impl QuorumProofContract {
         new_public_key: soroban_sdk::Bytes,
     ) {
         address.require_auth();
+        Self::enforce_write_limit(&env);
 
         let did_bytes: soroban_sdk::Bytes = env
             .storage()
@@ -3000,6 +3032,7 @@ impl QuorumProofContract {
     /// remains on-chain for resolution and audit purposes.
     pub fn deactivate_did(env: Env, address: Address) {
         address.require_auth();
+        Self::enforce_write_limit(&env);
 
         let did_bytes: soroban_sdk::Bytes = env
             .storage()
@@ -3528,6 +3561,13 @@ impl QuorumProofContract {
         state_metrics::collect(&env)
     }
 
+    /// Per-action credential lifecycle counters (`"credential"` for issuance,
+    /// `"revocation"` for revocation), as a map of action label to event
+    /// count. Unauthenticated and O(1), like `get_state_metrics`.
+    pub fn get_credential_action_counts(env: Env) -> soroban_sdk::Map<String, u64> {
+        state_metrics::get_credential_action_counts(&env)
+    }
+
     /// Return the schema version distribution across all credentials.
     /// Scans all credential IDs from 1 to current count and returns counts per schema version.
     pub fn get_metadata_schema_distribution(env: Env) -> soroban_sdk::Map<u32, u32> {
@@ -3686,6 +3726,22 @@ impl QuorumProofContract {
     /// Read the current circuit breaker configuration.
     pub fn get_circuit_breaker_config(env: Env) -> circuit_breaker::CircuitBreakerConfig {
         circuit_breaker::get_config(&env)
+    }
+
+    /// Apply only the circuit breaker's degraded-mode write cap (issue #1393).
+    ///
+    /// Mutating entry points that deliberately stay callable while the contract
+    /// is paused — or that predate `require_not_paused` and whose pause
+    /// semantics must not change — call this instead, so the Degraded-state
+    /// write cap is contract-wide rather than covering only the
+    /// `require_not_paused` paths. Entry points already calling
+    /// `require_not_paused` are covered by it and must not call this too, or
+    /// they would consume two write slots per call.
+    fn enforce_write_limit(env: &Env) {
+        circuit_breaker::check_and_recover(env);
+        if let Err(e) = circuit_breaker::enforce_degraded_write_limit(env) {
+            panic_with_error!(env, e);
+        }
     }
 
     fn require_not_paused(env: &Env) {
@@ -4015,6 +4071,23 @@ impl QuorumProofContract {
             .get::<_, NetworkCongestionMetrics>(&DataKey10::CongestionMetrics)
             .map(|m| m.level)
             .unwrap_or(CongestionLevel::Normal)
+    }
+
+    /// Issue #1397: Read the current state of all three independent
+    /// throttling systems (circuit breaker, rate limiting, congestion) in a
+    /// single round trip. See `docs/throttling.md` for how they interact.
+    pub fn get_throttling_status(env: Env) -> ThrottlingStatus {
+        let rate_limit_config = Self::get_rate_limit_config(&env);
+        ThrottlingStatus {
+            circuit_breaker_state: circuit_breaker::get_state(&env),
+            circuit_breaker_activation: circuit_breaker::get_activation(&env),
+            degraded_write_limit: circuit_breaker::get_config(&env).degraded_write_limit,
+            degraded_write_count: circuit_breaker::get_degraded_write_count(&env),
+            rate_limit_max_calls: rate_limit_config.max_calls,
+            rate_limit_window_seconds: rate_limit_config.window_seconds,
+            congestion_level: Self::get_congestion_level(env.clone()),
+            congestion_config: Self::get_congestion_config(env),
+        }
     }
 
     // ── Feature (b): Admin bypass for urgent / emergency attestations ──────────
@@ -6272,7 +6345,7 @@ impl QuorumProofContract {
             let type_def: CredentialTypeDef = env.storage()
                 .instance()
                 .get(&DataKey::CredentialType(credential_type))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialTypeNotFound));
             env.storage()
                 .instance()
                 .set(&DataKey10::CredentialTypeDefVersion(id), &type_def.version);
@@ -6514,7 +6587,7 @@ impl QuorumProofContract {
             let type_def: CredentialTypeDef = env.storage()
                 .instance()
                 .get(&DataKey::CredentialType(credential_type))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(env, ContractError::CredentialTypeNotFound));
             env.storage()
                 .instance()
                 .set(&DataKey10::CredentialTypeDefVersion(id), &type_def.version);
@@ -8690,6 +8763,7 @@ impl QuorumProofContract {
     /// If the removal would make the threshold unreachable, the threshold is clamped to the new total weight.
     pub fn remove_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         let mut slice: QuorumSlice = env
             .storage()
             .instance()
@@ -8751,6 +8825,7 @@ impl QuorumProofContract {
     /// the total weight sum (existing + new attestor).
     pub fn add_attestor(env: Env, creator: Address, slice_id: u64, attestor: Address, weight: u32) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         Self::require_valid_address(&env, &creator);
         Self::require_valid_address(&env, &attestor);
         let mut slice: QuorumSlice = env
@@ -8816,6 +8891,7 @@ impl QuorumProofContract {
         new_weight: u32,
     ) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         Self::validate_weight(new_weight);
         let mut slice: QuorumSlice = env
             .storage()
@@ -8831,7 +8907,10 @@ impl QuorumProofContract {
             .iter()
             .position(|candidate| candidate == attestor)
             .expect("attestor not in slice") as u32;
-        let old_weight = slice.weights.get(position).unwrap();
+        let old_weight = slice
+            .weights
+            .get(position)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInSlice));
         slice.weights.set(position, new_weight);
 
         let total_weight = Self::total_slice_weight(&slice.weights);
@@ -8888,6 +8967,7 @@ impl QuorumProofContract {
     /// Must be greater than 0 and cannot exceed the total weight sum of all attestors.
     pub fn update_slice_threshold(env: Env, creator: Address, slice_id: u64, new_threshold: u32) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         let mut slice: QuorumSlice = env
             .storage()
             .instance()
@@ -8974,6 +9054,7 @@ impl QuorumProofContract {
         percentage: u32,
     ) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
         assert!(
             (1..=100).contains(&percentage),
             "percentage threshold must be between 1 and 100"
@@ -9082,6 +9163,7 @@ impl QuorumProofContract {
         expires_at: Option<u64>,
     ) {
         delegator.require_auth();
+        Self::enforce_write_limit(&env);
         Self::require_valid_address(&env, &delegator);
         Self::require_valid_address(&env, &delegate);
 
@@ -9147,6 +9229,7 @@ impl QuorumProofContract {
     /// Issue #896: Revoke a vote delegation
     pub fn revoke_slice_delegation(env: Env, delegator: Address, slice_id: u64) {
         delegator.require_auth();
+        Self::enforce_write_limit(&env);
 
         let delegation: SliceDelegation = env
             .storage()
@@ -10234,6 +10317,7 @@ impl QuorumProofContract {
     /// Add a holder to an issuer's whitelist.
     pub fn add_holder_to_whitelist(env: Env, issuer: Address, holder: Address) {
         issuer.require_auth();
+        Self::enforce_write_limit(&env);
         Self::require_valid_address(&env, &holder);
 
         env.storage().instance().set(
@@ -10278,6 +10362,7 @@ impl QuorumProofContract {
     /// Remove a holder from an issuer's whitelist.
     pub fn remove_holder_from_whitelist(env: Env, issuer: Address, holder: Address) {
         issuer.require_auth();
+        Self::enforce_write_limit(&env);
 
         env.storage()
             .instance()
@@ -10322,6 +10407,7 @@ impl QuorumProofContract {
         threshold: u32,
     ) {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -10786,6 +10872,7 @@ impl QuorumProofContract {
     /// Explicitly roll back an expired attestation request.
     /// Anyone can trigger rollback once the window has passed and threshold wasn't met.
     pub fn rollback_attestation_request(env: Env, request_id: u64) {
+        Self::enforce_write_limit(&env);
         let mut request: AttestationRequest = env
             .storage()
             .instance()
@@ -10831,6 +10918,7 @@ impl QuorumProofContract {
 
     /// Check if a credential's attestation request window has expired without reaching threshold.
     pub fn check_and_rollback_attestation(env: Env, request_id: u64) -> bool {
+        Self::enforce_write_limit(&env);
         let mut request: AttestationRequest = env
             .storage()
             .instance()
@@ -11928,6 +12016,7 @@ impl QuorumProofContract {
         parent_type: Option<u32>,
     ) {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -12395,7 +12484,7 @@ impl QuorumProofContract {
                 .storage()
                 .instance()
                 .get(&DataKey::Credential(id))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
             if credential.credential_type != type_id {
                 continue;
             }
@@ -12813,6 +12902,7 @@ impl QuorumProofContract {
     /// Panics if no pending recovery exists for the attestor.
     pub fn complete_reputation_recovery(env: Env, admin: Address, attestor: Address) {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -14108,6 +14198,7 @@ impl QuorumProofContract {
         metadata: soroban_sdk::Bytes,
     ) {
         attestor.require_auth();
+        Self::enforce_write_limit(&env);
         // Verify the attestor has actually attested this credential
         let records: Vec<AttestationRecord> = env
             .storage()
@@ -15398,6 +15489,7 @@ impl QuorumProofContract {
     /// The amount collected (may be zero if nothing was pending).
     pub fn collect_slashed_stake(env: Env, admin: Address, attestor: Address) -> u64 {
         admin.require_auth();
+        Self::enforce_write_limit(&env);
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -16133,9 +16225,11 @@ impl QuorumProofContract {
 
     // ── Missing helper methods ────────────────────────────────────────────────
 
-    /// Update credential metrics (no-op stub for tracking purposes).
-    fn update_credential_metrics(_env: &Env, _credential_id: u64, _action: &str) {
-        // Metrics tracking stub — extend as needed
+    /// Record a credential lifecycle event against the per-action counters
+    /// exposed by `get_credential_action_counts` (issue #1390). The credential
+    /// id is not stored — the counters are aggregate, so they stay O(1).
+    fn update_credential_metrics(env: &Env, _credential_id: u64, action: &str) {
+        state_metrics::record_credential_action(env, &String::from_str(env, action));
     }
 
     /// Validate that a metadata hash is non-empty.
@@ -16450,6 +16544,7 @@ impl QuorumProofContract {
     /// Subject approves a pending consent request.
     pub fn approve_credential_request(env: Env, subject: Address, request_id: u64) {
         subject.require_auth();
+        Self::enforce_write_limit(&env);
 
         let mut request: ConsentRequest = env
             .storage()
@@ -16483,6 +16578,7 @@ impl QuorumProofContract {
         nonce: u64,
     ) -> u64 {
         issuer.require_auth();
+        Self::enforce_write_limit(&env);
 
         let request: ConsentRequest = env
             .storage()
@@ -17011,6 +17107,32 @@ impl QuorumProofContract {
         crate::rbac::get_audit_log(&env)
     }
 
+    /// Check whether an address's role assignment has passed its expiry.
+    pub fn is_role_expired(env: Env, address: Address) -> bool {
+        crate::rbac::is_role_expired(&env, &address)
+    }
+
+    /// Check whether an address's role delegation has passed its expiry.
+    pub fn is_delegation_expired(env: Env, address: Address) -> bool {
+        crate::rbac::is_delegation_expired(&env, &address)
+    }
+
+    /// Admin-only: purge an expired role assignment's storage entry.
+    /// Panics if the assignment does not exist or has not yet expired.
+    pub fn purge_expired_role(env: Env, admin: Address, address: Address) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::purge_expired_role(&env, &admin, &address);
+    }
+
+    /// Admin-only: purge an expired role delegation's storage entry.
+    /// Panics if the delegation does not exist or has not yet expired.
+    pub fn purge_expired_delegation(env: Env, admin: Address, address: Address) {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::purge_expired_delegation(&env, &admin, &address);
+    }
+
     // ── BBS+ Key Escrow (#1295) ─────────────────────────────────────────
 
     /// Deposits a threshold (`threshold`-of-`guardians.len()`) Shamir-split
@@ -17029,6 +17151,31 @@ impl QuorumProofContract {
         Self::require_not_paused(&env);
         crate::rbac::require_role(&env, &issuer, rbac::Role::Issuer);
         crate::key_escrow::deposit_key_escrow(&env, &issuer, guardians, shares, threshold)
+    }
+
+    /// Replaces the guardian set, share blobs and threshold of an existing
+    /// escrow — the recovery path for a lost or compromised guardian key, or
+    /// for adding/removing a guardian. Re-splitting the key happens off-chain
+    /// exactly as for `deposit_key_escrow`. Issuer-only, and only while the
+    /// escrow has not been recovered; any in-progress recovery submissions are
+    /// cleared. See the module docs in `key_escrow.rs` for the full flow.
+    pub fn rotate_key_escrow_guardians(
+        env: Env,
+        issuer: Address,
+        new_guardians: Vec<Address>,
+        new_shares: Vec<BytesN<32>>,
+        new_threshold: u32,
+    ) -> key_escrow::KeyEscrow {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        crate::rbac::require_role(&env, &issuer, rbac::Role::Issuer);
+        crate::key_escrow::rotate_key_escrow_guardians(
+            &env,
+            &issuer,
+            new_guardians,
+            new_shares,
+            new_threshold,
+        )
     }
 
     /// A guardian confirms it holds its share and consents to a recovery
@@ -17223,6 +17370,7 @@ impl QuorumProofContract {
         new_priority: AttestationPriority,
     ) {
         caller.require_auth();
+        Self::enforce_write_limit(&env);
         let mut entry: AttestationQueueEntry = env.storage().instance()
             .get(&DataKey3::AttestationQueueEntry(entry_id))
             .expect("queue entry not found");
@@ -17252,6 +17400,7 @@ impl QuorumProofContract {
         entry_id: u64,
     ) {
         caller.require_auth();
+        Self::enforce_write_limit(&env);
         let entry: AttestationQueueEntry = env.storage().instance()
             .get(&DataKey3::AttestationQueueEntry(entry_id))
             .expect("queue entry not found");
@@ -17280,6 +17429,7 @@ impl QuorumProofContract {
         max_entries: u32,
     ) -> u32 {
         caller.require_auth();
+        Self::enforce_write_limit(&env);
         let count: u64 = env.storage().instance()
             .get(&DataKey3::AttestationQueueCount)
             .unwrap_or(0u64);
@@ -17692,6 +17842,7 @@ impl QuorumProofContract {
         threshold: u32,
     ) -> u64 {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
 
         let now = env.ledger().timestamp();
 
@@ -17796,6 +17947,7 @@ impl QuorumProofContract {
         change_description: soroban_sdk::String,
     ) {
         creator.require_auth();
+        Self::enforce_write_limit(&env);
 
         let mut template: SliceTemplate = env
             .storage()
@@ -17953,6 +18105,7 @@ impl QuorumProofContract {
         reason: soroban_sdk::String,
     ) {
         owner.require_auth();
+        Self::enforce_write_limit(&env);
 
         let now = env.ledger().timestamp();
 
@@ -17977,7 +18130,10 @@ impl QuorumProofContract {
             .expect("old attestor not in slice");
 
         // Get the weight of the old attestor
-        let attestor_weight = slice.weights.get(attestor_idx as u32).unwrap();
+        let attestor_weight = slice
+            .weights
+            .get(attestor_idx as u32)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInSlice));
 
         // Update slice
         let mut new_attestors = Vec::new(&env);
@@ -19138,16 +19294,15 @@ impl QuorumProofContract {
         slice: QuorumSlice,
         credential_type: u32,
     ) -> bool {
-        let rule: Option<CompositionRule> = env
+        let rule: CompositionRule = match env
             .storage()
             .instance()
-            .get(&DataKey11::SliceCompositionRule(credential_type));
-
-        if rule.is_none() {
-            return true;
-        }
-
-        let rule = rule.unwrap();
+            .get(&DataKey11::SliceCompositionRule(credential_type))
+        {
+            Some(rule) => rule,
+            // No composition rule configured for this credential type.
+            None => return true,
+        };
         let mut type_counts: Map<u32, u32> = Map::new(&env);
 
         for attestor_addr in slice.attestors.iter() {
@@ -19386,6 +19541,7 @@ impl QuorumProofContract {
         nonce: Bytes,
     ) -> Bytes {
         holder.require_auth();
+        Self::enforce_write_limit(&env);
 
         // Verify credential exists and is BBS+-enabled
         let bbs_cred: BbsCredential = env
@@ -27652,6 +27808,78 @@ mod doc_tests {
         client.update_congestion_and_adjust();
         let m = client.get_congestion_metrics().unwrap();
         assert_eq!(m.calls_in_window, 1);
+    }
+
+    // ── Issue #1397: Throttling systems interaction ───────────────────────────
+
+    #[test]
+    fn test_rate_limit_whitelist_does_not_bypass_degraded_write_cap() {
+        // A rate-limit-whitelisted issuer still hits the circuit breaker's
+        // degraded write cap: whitelisting only bypasses system #2 (rate
+        // limiting), not system #1 (circuit breaker). See docs/throttling.md.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let issuer = Address::generate(&env);
+
+        client.add_rate_limit_whitelist(&admin, &issuer);
+        assert!(client.is_rate_limit_whitelisted(&issuer));
+
+        client.set_circuit_breaker_config(
+            &admin,
+            &circuit_breaker::CircuitBreakerConfig {
+                ttl_seconds: 86_400,
+                degraded_write_limit: 1,
+                auto_recover: false,
+            },
+        );
+        let reason = String::from_str(&env, "load test");
+        client.emergency_degrade(&admin, &reason);
+        assert_eq!(
+            client.get_circuit_breaker_state(),
+            circuit_breaker::CircuitBreakerState::Degraded
+        );
+
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+
+        // First write: within the degraded-write cap (limit=1) — succeeds
+        // even though the contract is Degraded, and the whitelist means rate
+        // limiting never even gets consulted.
+        client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        // Second write: the whitelist still bypasses rate limiting, but the
+        // circuit breaker's degraded write cap is unconditional and rejects
+        // it regardless of whitelist status.
+        let subject2 = Address::generate(&env);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.issue_credential(&issuer, &subject2, &1u32, &metadata, &None, &0u64);
+        }));
+        assert!(
+            result.is_err(),
+            "whitelisted issuer must still be rejected by the degraded write cap"
+        );
+    }
+
+    #[test]
+    fn test_get_throttling_status_combines_all_three_systems() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        client.set_rate_limit_config(&admin, &42u32, &3600u64);
+        let reason = String::from_str(&env, "combined status check");
+        client.emergency_degrade(&admin, &reason);
+
+        let status = client.get_throttling_status();
+        assert_eq!(
+            status.circuit_breaker_state,
+            circuit_breaker::CircuitBreakerState::Degraded
+        );
+        assert!(status.circuit_breaker_activation.is_some());
+        assert_eq!(status.rate_limit_max_calls, 42);
+        assert_eq!(status.rate_limit_window_seconds, 3600);
+        assert_eq!(status.congestion_level, CongestionLevel::Normal);
     }
 
     // ── Feature (b): Admin bypass rate-limit tests ────────────────────────────

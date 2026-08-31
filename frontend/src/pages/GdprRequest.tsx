@@ -1,5 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useWallet } from '../context/WalletContextValue';
 import { Navbar } from '../components/Navbar';
+import { createSignedGdprRequest } from '../lib/gdprSigning';
+import { apiClient, ApiError } from '../lib/apiClient';
 
 type RequestStatus = 'pending_consent' | 'anonymized' | 'rejected';
 
@@ -12,9 +15,21 @@ interface GdprRequestRecord {
   requiredConsents: number;
 }
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+// Type validators for responses
+const isGdprRequestRecord = (data: any): data is GdprRequestRecord => {
+  return (
+    typeof data === 'object' &&
+    typeof data.requestId === 'string' &&
+    typeof data.credentialId === 'number' &&
+    typeof data.status === 'string' &&
+    Array.isArray(data.attestorConsents) &&
+    typeof data.requiredConsents === 'number'
+  );
+};
 
 export default function GdprRequest() {
+  const { address: walletAddress, isConnected } = useWallet();
+
   const [credentialId, setCredentialId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -30,6 +45,17 @@ export default function GdprRequest() {
   const [consentError, setConsentError] = useState<string | null>(null);
   const [consentResult, setConsentResult] = useState<GdprRequestRecord | null>(null);
 
+  const [walletMismatch, setWalletMismatch] = useState<string | null>(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      apiClient.cancelRequest('gdpr-submit');
+      apiClient.cancelRequest('gdpr-lookup');
+      apiClient.cancelRequest('gdpr-consent');
+    };
+  }, []);
+
   const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     const id = parseInt(credentialId.trim(), 10);
@@ -38,21 +64,37 @@ export default function GdprRequest() {
       return;
     }
 
+    if (!isConnected || !walletAddress) {
+      setSubmitError('Please connect your wallet first to prove ownership.');
+      return;
+    }
+
     setSubmitting(true);
     setSubmitError(null);
     setCreatedRequest(null);
+    setWalletMismatch(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/gdpr/request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credentialId: id }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Request failed');
-      setCreatedRequest(data as GdprRequestRecord);
+      // Sign the GDPR request with the wallet to prove ownership
+      const signedPayload = await createSignedGdprRequest(id, walletAddress);
+
+      const data = await apiClient.post<GdprRequestRecord>(
+        '/api/gdpr/request',
+        signedPayload,
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-submit' }
+      );
+      setCreatedRequest(data);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Request failed.');
+      if (err instanceof ApiError && err.status === 403) {
+        setWalletMismatch(err.message);
+      }
+      const message = err instanceof Error ? err.message : 'Request failed.';
+      if (message.includes('signature') || message.includes('User denied')) {
+        setSubmitError('Signature request cancelled. Please sign with your wallet to proceed.');
+      } else {
+        setSubmitError(message);
+      }
+      }
     } finally {
       setSubmitting(false);
     }
@@ -68,10 +110,11 @@ export default function GdprRequest() {
     setLookupError(null);
     setLookupResult(null);
     try {
-      const res = await fetch(`${API_BASE}/api/gdpr/request/${encodeURIComponent(id)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Not found');
-      setLookupResult(data as GdprRequestRecord);
+      const data = await apiClient.get<GdprRequestRecord>(
+        `/api/gdpr/request/${encodeURIComponent(id)}`,
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-lookup' }
+      );
+      setLookupResult(data);
     } catch (err) {
       setLookupError(err instanceof Error ? err.message : 'Lookup failed.');
     }
@@ -91,14 +134,12 @@ export default function GdprRequest() {
     setConsentResult(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/gdpr/consent`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requestId: reqId, attestorAddress: addr }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Consent failed');
-      setConsentResult(data as GdprRequestRecord);
+      const data = await apiClient.post<GdprRequestRecord>(
+        '/api/gdpr/consent',
+        { requestId: reqId, attestorAddress: addr },
+        { validator: isGdprRequestRecord, requestKey: 'gdpr-consent' }
+      );
+      setConsentResult(data);
     } catch (err) {
       setConsentError(err instanceof Error ? err.message : 'Consent failed.');
     } finally {
@@ -121,9 +162,26 @@ export default function GdprRequest() {
           <h1 className="verify-hero__title">GDPR Right to be Forgotten</h1>
           <p className="verify-hero__subtitle">
             Request anonymization of a credential. Deletion requires consent from all
-            attestors linked to the credential.
+            attestors linked to the credential. Your wallet signature proves ownership.
           </p>
         </div>
+
+        {/* Wallet connection notice */}
+        {!isConnected && (
+          <div
+            style={{
+              padding: 12,
+              background: 'rgba(249, 115, 22, 0.1)',
+              border: '1px solid var(--color-amber, #f59e0b)',
+              borderRadius: 8,
+              marginBottom: 24,
+              fontSize: 13,
+              color: 'var(--text-muted)',
+            }}
+          >
+            ⚠️ <strong>Wallet Required:</strong> Connect your wallet to sign GDPR requests and prove you control the credential.
+          </div>
+        )}
 
         {/* Submit request */}
         <section className="search-card" style={{ marginBottom: 24 }}>
@@ -148,13 +206,23 @@ export default function GdprRequest() {
                 aria-label="Credential ID"
               />
             </div>
+            {isConnected && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, padding: 8, background: 'var(--color-surface-2, #1e293b)', borderRadius: 4 }}>
+                Connected: <code>{walletAddress?.slice(0, 10)}...{walletAddress?.slice(-6)}</code>
+              </div>
+            )}
+            {walletMismatch && (
+              <p style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}>
+                ❌ {walletMismatch}
+              </p>
+            )}
             {submitError && (
               <p style={{ color: 'var(--color-red, #f87171)', fontSize: 13, marginBottom: 8 }}>
                 {submitError}
               </p>
             )}
-            <button type="submit" className="btn btn--primary" disabled={submitting}>
-              {submitting ? 'Submitting...' : 'Submit Request'}
+            <button type="submit" className="btn btn--primary" disabled={submitting || !isConnected}>
+              {submitting ? 'Signing & Submitting...' : isConnected ? 'Submit Request' : 'Connect Wallet First'}
             </button>
           </form>
 
