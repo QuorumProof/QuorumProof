@@ -1,138 +1,183 @@
-# QuorumProof — Documentation Index
+# QuorumProof Documentation
 
-This directory contains all design, operational, and reference documentation for QuorumProof.
-New contributors should start with [Architecture Overview](architecture.md) and
-[Trust Slice Model](trust-slices.md) before diving into specific areas.
+This directory holds the project's long-form documentation — deployment and
+operations, security and compliance, ZK verification, testing, contracts, and
+API guides. This page is the index. **If you are adding a new doc, you must
+also add it to the relevant section below** (CI enforces this — see
+[Adding a new doc](#adding-a-new-doc)).
+
+For Architecture Decision Records, see the dedicated sub-index at
+[`adr/README.md`](./adr/README.md).
 
 ---
 
-## Quick navigation
+## Start here
 
-| Area | Document |
+New to the codebase? Read these two first:
+
+| Doc | What it covers |
 |---|---|
-| Architecture & design | [architecture.md](architecture.md) |
-| Trust model (FBA) | [trust-slices.md](trust-slices.md) |
-| ZK verification design | [zk-verification.md](zk-verification.md) |
-| BBS+ selective disclosure | [bbs-plus-tutorial.md](bbs-plus-tutorial.md) |
-| Threat model & security | [threat-model.md](threat-model.md) |
-| Credential fraud threat model | [THREAT_MODEL_CREDENTIAL_FRAUD.md](THREAT_MODEL_CREDENTIAL_FRAUD.md) |
-| Error code reference | [error-codes.md](error-codes.md) |
-| SDK methods reference | [sdk-methods-reference.md](sdk-methods-reference.md) |
-| REST API client guide | [api-client-guide.md](api-client-guide.md) |
-| Integration patterns | [integration-patterns-guide.md](integration-patterns-guide.md) |
-| Issuer security checklist | [issuer-security-checklist.md](issuer-security-checklist.md) |
-| Troubleshooting | [troubleshooting-guide.md](troubleshooting-guide.md) |
-| Backup & recovery | [backup-system.md](backup-system.md) |
-| Roadmap | [roadmap.md](roadmap.md) |
-| Privacy guide | [privacy-guide.md](privacy-guide.md) |
-| Architecture Decision Records | [adr/README.md](adr/README.md) |
+| [architecture.md](./architecture.md) | System overview: FBA trust slices, SBTs, the contract set, how the pieces fit together. |
+| [deployment-guide.md](./deployment-guide.md) | End-to-end walkthrough: build the contracts, deploy them, initialize and wire them, verify. |
+
+Then see [`../README.md`](../README.md) for the contribution workflow and
+[`../SECURITY.md`](../SECURITY.md) for the vulnerability-reporting policy.
 
 ---
 
-## Internal Link Checker
+## Architecture & core concepts
 
-Every pull request and push to `main` that modifies files under `docs/` is
-automatically validated by the **Docs Link Check** GitHub Actions workflow
-(`.github/workflows/docs-link-check.yml`). The check uses
-[lychee](https://github.com/lycheeverse/lychee) in `--offline` mode, which means:
+| Doc | What it covers |
+|---|---|
+| [architecture.md](./architecture.md) | High-level system architecture and component responsibilities. |
+| [economic-security-model.md](./economic-security-model.md) | Economic assumptions, incentives, and attack cost analysis (see also [ADR-006](./adr/adr-006-economic-security-model.md)). |
+| [weighted-voting.md](./weighted-voting.md) | Weighted quorum voting: per-attestor trust weights (1–100) and threshold semantics. |
+| [claim-types.md](./claim-types.md) | Claim type registry — the claims a credential holder can prove. |
+| [credential-types.md](./credential-types.md) | Credential type registry — the credential kinds the system issues. |
+| [crypto-shredding-architecture.md](./crypto-shredding-architecture.md) | Crypto-shredding design for GDPR-style erasure of off-chain personal data. |
+| [METADATA_SCHEMA_VERSIONING_PLAN.md](./METADATA_SCHEMA_VERSIONING_PLAN.md) | Plan for versioning the credential metadata schema and migrating between versions. |
+| [IMPLEMENTATION_NOTES_910_913_915.md](./IMPLEMENTATION_NOTES_910_913_915.md) | Implementation notes for attestation veto and related features (issues #910/#913/#915). |
+| [infrastructure-improvements.md](./infrastructure-improvements.md) | Security, versioning, and state-validation infrastructure work (issues #574–577). |
 
-- Only **relative links** within `docs/` are verified.
-- External URLs (`https://…`) are **not** checked — this keeps the check fast
-  and avoids flaky failures from transient network issues.
-- The check **fails the PR** if any dead internal cross-reference is found.
+---
 
-### Running the link checker locally
+## Deployment & Operations
 
-Before opening a PR that adds or renames docs, run:
+| Doc | What it covers |
+|---|---|
+| [deployment-guide.md](./deployment-guide.md) | Primary build-and-deploy walkthrough. |
+| [deployment-checklist.md](./deployment-checklist.md) | Pre-flight checklist to run before any deployment. |
+| [mainnet-deployment-runbook.md](./mainnet-deployment-runbook.md) | Step-by-step mainnet deployment procedure with per-contract confirmation gates. |
+| [ci-testnet-deployment.md](./ci-testnet-deployment.md) | How the automated testnet deployment pipeline works. |
+| [cicd-pipeline.md](./cicd-pipeline.md) | Overview of the CI/CD pipeline stages and gates. |
+| [multi-region-deployment.md](./multi-region-deployment.md) | Running the API server across multiple regions. |
+| [capacity-planning.md](./capacity-planning.md) | Sizing guidance for throughput, storage, and RPC load. |
+| [cost-optimization-guide.md](./cost-optimization-guide.md) | Reducing on-chain fees and infrastructure cost. |
+| [database-migrations.md](./database-migrations.md) | Running and authoring API-server database migrations. |
+| [backup-system.md](./backup-system.md) | Backup architecture, schedule, and restore procedure. |
+| [disaster-recovery.md](./disaster-recovery.md) | Emergency pause/redeploy and credential-restoration procedures. |
+| [DR_PLAN_IMPLEMENTATION.md](./DR_PLAN_IMPLEMENTATION.md) | Implementation notes for the disaster-recovery plan. |
+| [resilience.md](./resilience.md) | Resilience requirements and chaos-testing approach (issue #1003). |
+| [operational-runbook.md](./operational-runbook.md) | Day-to-day operational procedures. |
+| [OPERATOR_RUNBOOK.md](./OPERATOR_RUNBOOK.md) | Operator-facing runbook for common incidents and tasks. |
+| [troubleshooting-guide.md](./troubleshooting-guide.md) | Diagnosing common failures across contracts, API, and infra. |
+
+---
+
+## Monitoring & Observability
+
+| Doc | What it covers |
+|---|---|
+| [monitoring-guide.md](./monitoring-guide.md) | What to monitor and how the monitoring stack is set up. |
+| [observability-setup-guide.md](./observability-setup-guide.md) | Setting up metrics, logs, and traces end to end. |
+| [contract-monitoring.md](./contract-monitoring.md) | Monitoring on-chain contract activity and health. |
+| [critical-event-alerting.md](./critical-event-alerting.md) | Critical-event metrics and the Prometheus alert rules that fire on them. |
+| [operator-health-metrics.md](./operator-health-metrics.md) | Health metrics exposed for operators and their meaning. |
+| [perf-regression.md](./perf-regression.md) | Performance-regression benchmarking and thresholds. |
+
+---
+
+## Security & Compliance
+
+| Doc | What it covers |
+|---|---|
+| [threat-model.md](./threat-model.md) | Assets, threat actors, attack vectors, and mitigations already considered. |
+| [THREAT_MODEL_CREDENTIAL_FRAUD.md](./THREAT_MODEL_CREDENTIAL_FRAUD.md) | Focused threat model for credential-fraud detection (issue #1252). |
+| [security-best-practices.md](./security-best-practices.md) | Security guidance for contributors and integrators. |
+| [security-audit-checklist.md](./security-audit-checklist.md) | Internal review checklist used before releases. |
+| [issuer-security-checklist.md](./issuer-security-checklist.md) | Security checklist for institutions issuing credentials. |
+| [gdpr-compliance.md](./gdpr-compliance.md) | GDPR obligations and how the system meets them. |
+| [audit-log-format.md](./audit-log-format.md) | Structure and semantics of the audit log. |
+| [formal-verification.md](./formal-verification.md) | Formal verification of critical functions (issue #1317). |
+
+---
+
+## ZK Verification & Privacy
+
+| Doc | What it covers |
+|---|---|
+| [zk-verification-developer-guide.md](./zk-verification-developer-guide.md) | Developer guide to the ZK verification flow. |
+| [zk-verification-implementation.md](./zk-verification-implementation.md) | Implementation details of the ZK verifier contract. |
+| [zk-api-reference.md](./zk-api-reference.md) | API reference for proof generation and verification. |
+| [zk-proof-scheme-specification.md](./zk-proof-scheme-specification.md) | Specification of the proof scheme, including known limitations. |
+| [plonk-verification.md](./plonk-verification.md) | PLONK verification path. |
+| [groth16-migration.md](./groth16-migration.md) | Plan for migrating verification to Groth16. |
+| [verification-cache-invalidation.md](./verification-cache-invalidation.md) | Correctness guarantees for the verification result cache. |
+| [privacy-guide.md](./privacy-guide.md) | Credential-holder privacy guide: anonymity modes and best practices. |
+| [sbt-possession-privacy.md](./sbt-possession-privacy.md) | Privacy guarantees of SBT possession commitments. |
+| [bbs-plus-tutorial.md](./bbs-plus-tutorial.md) | BBS+ selective-disclosure tutorial (see also [ADR-007](./adr/adr-007-bbs-plus-selective-disclosure.md)). |
+
+---
+
+## Contracts, Upgrades & Migrations
+
+| Doc | What it covers |
+|---|---|
+| [sdk-methods-reference.md](./sdk-methods-reference.md) | Complete reference for every contract method: signatures, params, errors. |
+| [error-codes.md](./error-codes.md) | Every contract error code and what triggers it. |
+| [contract-upgrade-guide.md](./contract-upgrade-guide.md) | How to perform a contract upgrade. |
+| [contract-upgrade-checklist.md](./contract-upgrade-checklist.md) | Checklist to run through before and during an upgrade. |
+| [contract-upgrade-strategy.md](./contract-upgrade-strategy.md) | The upgrade strategy and its rationale. |
+| [scheduled-upgrades.md](./scheduled-upgrades.md) | Scheduling an upgrade to execute at a future time. |
+| [migration-invariants.md](./migration-invariants.md) | Formal invariant set the migration verifier checks (enforced in CI). |
+| [SLICE_MIGRATION_GUIDE.md](./SLICE_MIGRATION_GUIDE.md) | Migrating existing quorum slices (issue #1253). |
+
+---
+
+## API & Integrations
+
+| Doc | What it covers |
+|---|---|
+| [api-client-guide.md](./api-client-guide.md) | Using the API client to talk to the API server. |
+| [api-endpoint-examples.md](./api-endpoint-examples.md) | Worked request/response examples for the REST endpoints. |
+| [integration-patterns-guide.md](./integration-patterns-guide.md) | Common integration patterns for verifiers and issuers. |
+| [interoperability-guide.md](./interoperability-guide.md) | Interoperating with external credential systems. |
+| [government-licensing-integration.md](./government-licensing-integration.md) | Protocol for licensing bodies to integrate as verified issuers. |
+| [websocket-scaling.md](./websocket-scaling.md) | Scaling WebSocket delivery across multiple API-server replicas. |
+
+See also [`../api-server/docs/API_DOCUMENTATION.md`](../api-server/docs/API_DOCUMENTATION.md)
+for the auto-generated OpenAPI / Swagger reference.
+
+---
+
+## Testing & QA
+
+| Doc | What it covers |
+|---|---|
+| [TESTING_COMPREHENSIVE_GUIDE.md](./TESTING_COMPREHENSIVE_GUIDE.md) | The overall testing strategy and how the layers fit together. |
+| [API_CONTRACT_TESTING.md](./API_CONTRACT_TESTING.md) | Contract tests between the API server and its consumers. |
+| [E2E_TESTING.md](./E2E_TESTING.md) | End-to-end test suite against testnet. |
+| [SNAPSHOT_TESTING.md](./SNAPSHOT_TESTING.md) | Snapshot testing approach and how to update snapshots. |
+| [FUZZING.md](./FUZZING.md) | Fuzz targets (including BBS+ operations) and how to run them. |
+| [fuzz-testing-guide.md](./fuzz-testing-guide.md) | Guide to writing and running fuzz tests. |
+| [code-coverage.md](./code-coverage.md) | How coverage is measured and reported. |
+| [coverage-configuration.md](./coverage-configuration.md) | Coverage tooling configuration reference. |
+
+---
+
+## Architecture Decision Records
+
+ADRs live in [`adr/`](./adr/) and have their own navigable index:
+**[adr/README.md](./adr/README.md)**. Start there rather than reading the
+files directly — it lists every ADR with status and date, and explains how to
+add a new one.
+
+---
+
+## Adding a new doc
+
+When you add a Markdown file to `docs/`, add a link to it in the appropriate
+section above (a one-line description in the table). This keeps the directory
+discoverable and stops the same doc being written twice.
+
+This is enforced by `scripts/check_docs_index.sh`, which runs in CI (the
+`docs-index` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)).
+The check fails if any `docs/*.md` file is not linked from this index. Run it
+locally with:
 
 ```bash
-# Install lychee (one-time)
-curl -sSfL https://github.com/lycheeverse/lychee/releases/latest/download/lychee-x86_64-unknown-linux-gnu.tar.gz \
-  | tar xz -C ~/.local/bin
-
-# Run from the repository root
-lychee \
-  --offline \
-  --no-progress \
-  --base docs \
-  "docs/**/*.md"
+./scripts/check_docs_index.sh
 ```
 
-A successful run prints a summary and exits `0`. Any `[ERR]` line means a
-relative link target does not exist — fix it before pushing.
-
-### What counts as a broken link
-
-The checker flags any `[text](relative-path.md)` where the target file does
-not exist at that path relative to `docs/`. This catches:
-
-- Files that were renamed without updating all references
-- Files that were planned but never written (stub references)
-- ADR number collisions where two files share the same prefix (see below)
-
-### ADR numbering convention
-
-ADR filenames follow the pattern `adr-NNN-<slug>.md`. Each `NNN` must be
-**unique**. If two ADRs share the same number, tools and humans will
-misidentify them. See [Known doc-drift issues](#known-doc-drift-issues) for
-the current duplication.
-
-### Contributor checklist for new docs
-
-When adding a new document to `docs/`:
-
-1. Place it under `docs/` (or `docs/adr/` for architecture decisions).
-2. Add an entry to the table above in this file.
-3. If it's an ADR, assign the next available number and update `docs/adr/README.md`.
-4. Run the local link checker command above and fix any errors before pushing.
-5. If your doc references files that don't exist yet, use a `<!-- TODO: link once #NNNN ships -->` comment instead of a broken relative link.
-
----
-
-## Known doc-drift issues
-
-The following broken links and numbering issues were found by the link checker
-on **2026-08-30** when it was first run against the current docs tree. They are
-tracked here as follow-up work rather than blocking the link-checker rollout.
-
-> **Note**: These are not fixed in this PR to keep the scope small. Each item
-> should be resolved in a dedicated follow-up.
-
-### Broken relative links (3 missing files)
-
-| Missing file | Referenced from | Notes |
-|---|---|---|
-| `docs/trust-slices.md` | `docs/error-codes.md:373` | File was listed in README but never created; content may be partially in `docs/architecture.md` |
-| `docs/trust-slices.md` | `docs/sdk-methods-reference.md:807` | Same missing file |
-| `docs/trust-slices.md` | `docs/credential-types.md:858` | Same missing file |
-| `docs/trust-slices.md` | `docs/adr/adr-001-fba-trust-model.md:133` | Same missing file |
-| `docs/trust-slices.md` | `docs/api-client-guide.md:696` | Same missing file |
-| `docs/zk-verification.md` | `docs/credential-types.md:859` | File was listed in README but never created; content exists in `docs/zk-verification-implementation.md` and `docs/zk-proof-scheme-specification.md` |
-| `docs/zk-verification.md` | `docs/adr/adr-003-zk-verification.md:167` | Same missing file |
-| `docs/zk-verification.md` | `docs/api-client-guide.md:697` | Same missing file |
-| `docs/credential-expiry.md` | `docs/credential-types.md:857` | Planned v2.0 feature doc, not yet written |
-| `docs/credential-expiry.md` | `docs/adr/adr-002-sbt-non-transferability.md:130` | Same missing file |
-
-**Suggested resolutions**:
-- `docs/trust-slices.md` — create as a redirect/summary page pointing to `architecture.md` and the FBA trust model ADR, or write the missing content (estimated: 1–2 hours).
-- `docs/zk-verification.md` — create as a redirect/index page pointing to `zk-verification-implementation.md`, `zk-proof-scheme-specification.md`, and ADR-003 (estimated: 30 minutes).
-- `docs/credential-expiry.md` — add a stub with a "planned for v2.0" notice so the link resolves and the roadmap context is clear (estimated: 15 minutes).
-
-### ADR number collision
-
-Both of the following files use the prefix `adr-006-`:
-
-- `docs/adr/adr-006-economic-security-model.md`
-- `docs/adr/adr-006-quorum-intersection-verification.md`
-
-One of them must be renumbered. The quorum-intersection-verification ADR
-appears to have been added later (July 2026); renaming it to `adr-008` (next
-available number after `adr-007`) and updating all references is the
-recommended resolution. This requires:
-
-1. Renaming the file to `docs/adr/adr-008-quorum-intersection-verification.md`
-2. Updating `docs/adr/README.md` index row
-3. Searching `docs/**` for any cross-references to `adr-006-quorum-intersection-verification.md` and updating them
-4. Updating any external links or issue references
-
-(Estimated: 30 minutes)
+`docs/README.md` itself and files under `docs/adr/` (indexed by
+`adr/README.md`) are exempt.

@@ -12,6 +12,37 @@
 //! 4. After time-lock expires, veto can be executed
 //! 5. Execution moves credential to `VetoPending` state temporarily
 //! 6. On successful veto, attestation is removed and audit logged
+//!
+//! ## Interaction with `time_lock_attestation` (Issue #872, #1395)
+//!
+//! This module's `VetoTimeLock` and `time_lock_attestation`'s
+//! `AttestationTimeLock` are independent mechanisms that do not reference or
+//! validate against each other:
+//!
+//! - `request_veto`/`execute_veto` operate purely on `(credential_id,
+//!   slice_id, attestor)` and never consult `time_lock_attestation::
+//!   is_time_locked`. A veto can be requested and executed against a
+//!   credential whose attestation is still pending release (i.e.
+//!   `is_attestation_time_locked == true`) — the veto authority is disputing
+//!   the attestor's action, not the attestation's current visibility to
+//!   relying parties, so waiting for the attestation lock to release first is
+//!   not required.
+//! - Conversely, `time_lock_attestation::set_time_lock` never checks whether
+//!   a veto is pending for the credential. Setting or extending an
+//!   attestation time-lock on a credential that already has a pending veto
+//!   is allowed and has no effect on the veto's own `unlocks_at` schedule.
+//! - Both mechanisms are consulted independently wherever a caller needs the
+//!   full picture: `is_attested` already gates on
+//!   `time_lock_attestation::is_time_locked`; a caller wanting to know if a
+//!   credential's attestation is also under active dispute must separately
+//!   inspect `get_credential_veto_requests`/`get_veto_request`.
+//!
+//! This independence is intentional (not a gap to be closed): the veto path
+//! is an authority-driven dispute process while the attestation time-lock is
+//! an automatic detection window, and requiring one to block the other would
+//! only slow down legitimate disputes without adding safety. See
+//! `integration_nested_slices.rs` for tests exercising both mechanisms
+//! active on the same credential simultaneously.
 
 use soroban_sdk::{contracttype, Address, Bytes, Env, Symbol, Vec};
 

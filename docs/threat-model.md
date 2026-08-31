@@ -6,7 +6,9 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 **Scope**: `quorum_proof`, `sbt_registry`, `zk_verifier` contracts and their interactions.
 
-**Last Updated**: August 30, 2026
+**Last Updated**: August 29, 2026
+
+**Review Cadence**: Reviewed before each major release (see §6 for next review date).
 
 ---
 
@@ -847,12 +849,127 @@ BBS+ signatures (`contracts/bbs_plus_v1`) allow a credential holder to derive a 
 
 ---
 
+---
+
+## 6. Atomic Saga Operations (Issue #913)
+
+**Feature**: Cross-contract operations use a 3-phase saga pattern (quorum_proof → sbt_registry → zk_verifier) with automatic rollback on failure.
+
+**New Attack Vectors**:
+
+#### 6.1 Partial State Commit (Stuck Saga)
+
+**Attack**: A saga fails partway through (e.g., Phase 2 succeeds but Phase 3 fails) and manual rollback is not triggered, leaving the system in an inconsistent state.
+
+**Vector**:
+- Phase 1 (quorum_proof): Credential issued ✓
+- Phase 2 (sbt_registry): SBT minted ✓
+- Phase 3 (zk_verifier): Proof verification fails ✗
+- Rollback event listener crashes before triggering `initiate_rollback()`
+- SBT exists but was never verified; credential state is changed but SBT was not finalized
+
+**Mitigation**:
+- ✅ Automatic rollback triggered immediately on Phase failure
+- ✅ Manual `initiate_rollback()` available to operators as a safety net
+- ✅ Stuck transactions are detected by monitoring `RollingBack` state
+- ✅ `complete_rollback()` retries failed reverts if the network recovers
+- ✅ Transaction log is immutable; all state changes are auditable
+
+**Residual Risk**: Low. Auto-rollback + manual recovery path prevents indefinite partial commits.
+
+**Recommendation**: Monitor for transactions in `RollingBack` state longer than 24 hours; trigger manual recovery.
+
+---
+
+#### 6.2 Double-Rollback Corruption
+
+**Attack**: A transaction is rolled back twice, causing state to oscillate or corrupt.
+
+**Vector**:
+- Phase 3 fails, triggering auto-rollback (Phase 2 and Phase 1 are reverted)
+- Operator manually calls `initiate_rollback()` again without checking transaction state
+- Revert operations run twice, potentially causing double-deduction or data inconsistency
+
+**Mitigation**:
+- ✅ `initiate_rollback()` checks transaction phase: rejects if already `Committed` or `RolledBack`
+- ✅ Rollback-idempotent operations: reverting an already-reverted state is a no-op
+- ✅ Transaction state machine enforces phase transitions (cannot go from `RolledBack` → `RollingBack`)
+
+**Residual Risk**: Low. State machine and phase checks prevent double-rollback corruption.
+
+**Recommendation**: Test double-rollback scenario in integration tests to confirm rejection.
+
+---
+
+#### 6.3 Coordinated Attack During Rollback
+
+**Attack**: Attacker triggers a credential revocation at the exact moment rollback is in progress, creating a race condition.
+
+**Vector**:
+- Phase 3 fails; `initiate_rollback()` is called
+- Simultaneous: Attacker calls `revoke_credential()` on the same credential in Phase 1 revert
+- Revocation and rollback try to mutate the same credential state concurrently
+- One operation wins; the other's state is lost
+
+**Mitigation**:
+- ✅ Soroban storage layer uses atomic transactions: only one write to a key succeeds
+- ✅ Revocation checks transaction phase: if rollback is in progress, revocation is rejected
+- ✅ Lock-free design uses event-driven coordination: operations are serialized by Soroban's ledger
+
+**Residual Risk**: Low. Soroban's atomic ledger prevents concurrent writes to the same key.
+
+**Recommendation**: Test concurrent saga + revocation scenarios to confirm atomic behavior.
+
+---
+
+## 7. Per-Contract Admin Key Topology
+
+**Feature**: Each contract (quorum_proof, sbt_registry, zk_verifier) has an independent admin key that controls pause/unpause and key rotation.
+
+**Current Topology**:
+- ✅ **quorum_proof**: Admin controls pause, key rotation, slice configuration
+- ✅ **sbt_registry**: Admin controls pause, metadata updates
+- ✅ **zk_verifier**: Admin controls pause, verifying key registration
+
+**Attack Vector: Admin Key Compromise**:
+
+If a single admin key is compromised, an attacker can:
+- Pause a single contract indefinitely (but other contracts remain operational)
+- Rotate verifying keys (but historical proofs still verify against old keys)
+- Revoke credentials or attestations
+
+**Mitigation**:
+- ✅ Each contract can be paused independently: other contracts can continue operating
+- ✅ Admin key rotation is supported on each contract: no key is permanent
+- ✅ Read-only functions remain accessible when paused: verification still works
+- ⚠️ **Partial**: Multi-sig admin enforcement planned for v2.0 to require multiple keys for sensitive operations
+
+**Residual Risk**: Medium (single point of failure per contract).
+
+**Recommendation**: 
+- Use different admin keys for each contract (do not reuse the same key).
+- Consider a 2-of-3 multi-sig admin setup for production: each contract requires approval from 2 of 3 administrators.
+- Implement key rotation annually or upon any staff changes.
+
+---
+
+## 8. Known Limitations & Future Work
+
+1. **No circuit-breaker degraded mode on sbt_registry/zk_verifier**: Pause is binary (on/off). Rate limiting under load is not yet supported. Planned for v2.1.
+2. **Revocation cache staleness**: Credential revocation cache has a 1000-ledger TTL; in rare network partitions, a revoked credential might be accepted as valid for up to ~1 hour. Acceptable for most use cases; critical applications should query the authoritative source.
+3. **Saga rollback auto-recovery**: If rollback fails (network partition), manual operator intervention is required. Planned for v2.2: automatic retry with exponential backoff.
+
+---
+
 ## 9. References
 
 - [Stellar Whitepaper](https://www.stellar.org/papers/stellar-consensus-protocol)
 - [Soroban Documentation](https://developers.stellar.org/docs/learn/soroban)
 - [OWASP Smart Contract Security](https://owasp.org/www-project-smart-contract-security/)
 - [Threat Modeling Guide](https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html)
+- [Atomic Saga Rollback Specification](./saga-rollback-specification.md)
+- [Attestor Key-Custody Guide](./attestor-key-custody-guide.md)
+- [Disaster Recovery Procedures](./disaster-recovery.md)
 
 ---
 
@@ -864,5 +981,5 @@ BBS+ signatures (`contracts/bbs_plus_v1`) allow a credential holder to derive a 
 | Contract Author | | | |
 | Compliance Officer | | | |
 
-**Last Reviewed**: May 29, 2026
-**Next Review**: November 29, 2026 (6-month cycle)
+**Last Reviewed**: August 29, 2026
+**Next Review**: February 29, 2027 (6-month cycle)

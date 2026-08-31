@@ -34,6 +34,13 @@ mod contract_analytics;
 #[cfg(test)]
 mod migration_verification;
 
+// Issue #1479: Central regression suite — each test is explicitly pinned to
+// a closed bug/issue number via a `// regression: #N` comment, making it
+// discoverable which past incidents have dedicated regression coverage.
+// See CONTRIBUTING.md § "Regression Test Convention" for the policy.
+#[cfg(test)]
+mod regressions;
+
 // Issue #558: Contract upgrade safety tests — verifies that upgrades
 // preserve existing state, produce no data loss, and that rollback
 // scenarios are handled correctly. This module previously existed on disk

@@ -1,0 +1,155 @@
+# api-server Kubernetes Deployment + Service
+#
+# Issue #1482 — canonical manifests so monitoring/chaos/*.yaml experiments work
+# out of the box.  All resources live in the `quorumproof` namespace and carry
+# the `app: quorumproof-api-server` label that network-delay.yaml,
+# packet-loss.yaml, and service-unavailable.yaml already target.
+#
+# Quick start:
+#   kubectl apply -f k8s/
+#
+# Prerequisites:
+#   1. Create the namespace:
+#      kubectl create namespace quorumproof
+#   2. Create required Secrets (see "Secrets" section below).
+#   3. Push the api-server image to a registry your cluster can pull from,
+#      then update the `image:` field below.
+#
+# Secrets:
+#   kubectl -n quorumproof create secret generic quorumproof-api-server-env \
+#     --from-literal=STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+#     --from-literal=CONTRACT_QUORUM_PROOF=<contract-id> \
+#     --from-literal=CONTRACT_SBT_REGISTRY=<contract-id> \
+#     --from-literal=CONTRACT_ZK_VERIFIER=<contract-id> \
+#     --from-literal=DATABASE_URL=postgres://... \
+#     --from-literal=REDIS_URL=redis://... \
+#     --from-literal=SLACK_ALERT_WEBHOOK_URL=https://hooks.slack.com/... \
+#     --from-literal=PAGERDUTY_ROUTING_KEY=<routing-key>
+#
+# After applying, run the Chaos Mesh experiments from monitoring/chaos/:
+#   kubectl apply -f monitoring/chaos/network-delay.yaml
+#   kubectl apply -f monitoring/chaos/packet-loss.yaml
+#   kubectl apply -f monitoring/chaos/service-unavailable.yaml
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quorumproof-api-server
+  namespace: quorumproof
+  labels:
+    app: quorumproof-api-server
+    app.kubernetes.io/name: quorumproof-api-server
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: quorumproof
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: quorumproof-api-server
+  template:
+    metadata:
+      labels:
+        app: quorumproof-api-server
+        app.kubernetes.io/name: quorumproof-api-server
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: quorumproof
+      annotations:
+        # Prometheus scrape annotations — matches the api-server-critical-events
+        # scrape job in monitoring/prometheus/prometheus.yml.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics/events"
+        prometheus.io/port: "3001"
+    spec:
+      # Graceful shutdown: allow in-flight requests to drain before the pod is
+      # terminated (matches the graceful-shutdown logic in src/index.ts).
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: api-server
+          # Replace with your registry image after building from api-server/Dockerfile.
+          image: quorumproof/api-server:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+            - name: LOG_LEVEL
+              value: info
+            - name: LOG_FILE
+              value: /var/log/quorumproof/api.log
+
+          # All secret env vars injected from the Secret created above.
+          envFrom:
+            - secretRef:
+                name: quorumproof-api-server-env
+
+          # Liveness probe: if /health stops returning 200 the container is
+          # considered stuck and restarted.  initialDelaySeconds allows time for
+          # Node.js to start and run migrations.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Readiness probe: the pod is removed from the Service's endpoint list
+          # until /health returns 200, preventing traffic from reaching a pod
+          # that hasn't finished startup or is temporarily unhealthy.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          volumeMounts:
+            # Log directory — matches ENV LOG_FILE in Dockerfile and the
+            # bind-mount comment in api-server/Dockerfile for promtail/Loki.
+            - name: log-dir
+              mountPath: /var/log/quorumproof
+
+      volumes:
+        - name: log-dir
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quorumproof-api-server
+  namespace: quorumproof
+  labels:
+    app: quorumproof-api-server
+    app.kubernetes.io/name: quorumproof-api-server
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: quorumproof
+spec:
+  selector:
+    app: quorumproof-api-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  type: ClusterIP

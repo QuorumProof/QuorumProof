@@ -1,5 +1,5 @@
 import { Navbar } from '../components/Navbar';
-import { WalletGuard } from '../components/WalletGate';
+import { WalletGuard } from '../components/WalletGuard';
 import { CredentialWizard } from '../components/CredentialWizard';
 import type { WizardSeed } from '../components/CredentialWizard';
 import { useWallet } from '../hooks';

@@ -30,15 +30,17 @@ export function distributedTracingMiddleware(req: Request, res: Response, next: 
   res.set('X-Trace-ID', traceId);
   res.set('X-Span-ID', span.spanId);
 
+  let finished = false;
+
   res.on('finish', () => {
-    if (res.statusCode >= 400) {
-      distributedTracer.endSpan(traceId, span.spanId, 'completed');
-    } else {
+    if (!finished) {
+      finished = true;
       distributedTracer.endSpan(traceId, span.spanId, 'completed');
     }
   });
 
   res.on('error', (error: Error) => {
+    finished = true;
     distributedTracer.endSpan(traceId, span.spanId, 'error', error.message);
   });
 

@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useFreighter } from '../lib/hooks/useFreighter';
 import { NotificationCenter } from './NotificationCenter';
 import { NetworkSwitcher } from './NetworkSwitcher';
+import { LanguageSwitcher } from './LanguageSwitcher';
 
 function formatAddress(addr: string) {
   if (!addr || addr.length < 10) return addr;
@@ -11,6 +13,7 @@ function formatAddress(addr: string) {
 
 export function Navbar() {
   const location = useLocation();
+  const { t } = useTranslation();
   const { address, isInitializing, connect, disconnect, wallets, activeIndex, switchWallet } = useFreighter();
   const [showWalletMenu, setShowWalletMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -38,39 +41,40 @@ export function Navbar() {
             to="/dashboard"
             className={`nav-link${location.pathname === '/dashboard' ? ' active' : ''}`}
           >
-            Dashboard
+            {t('nav.dashboard')}
           </Link>
           <Link
             to="/verify"
             className={`nav-link${location.pathname === '/verify' ? ' active' : ''}`}
           >
-            Verify
+            {t('nav.verify')}
           </Link>
           <Link
             to="/slice"
             className={`nav-link${location.pathname === '/slice' ? ' active' : ''}`}
           >
-            Slice Builder
+            {t('nav.sliceBuilder')}
           </Link>
           <Link
             to="/recover"
             className={`nav-link${location.pathname === '/recover' ? ' active' : ''}`}
           >
-            Recover
+            {t('nav.recover')}
           </Link>
           <Link
             to="/help"
             className={`nav-link${location.pathname === '/help' ? ' active' : ''}`}
           >
-            Help
+            {t('nav.help')}
           </Link>
         </div>
 
         <div className="navbar__right">
           <NetworkSwitcher />
+          <LanguageSwitcher />
           <NotificationCenter />
           {isInitializing ? (
-            <span className="navbar__badge" style={{ opacity: 0.5 }}>Connecting…</span>
+            <span className="navbar__badge" style={{ opacity: 0.5 }}>{t('nav.connecting')}</span>
           ) : address ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} ref={menuRef}>
               <div style={{ position: 'relative' }}>
@@ -127,12 +131,12 @@ export function Navbar() {
                 )}
               </div>
               <button className="btn btn--ghost" style={{ padding: '4px 10px', fontSize: '12px' }} onClick={() => { disconnect(); setShowWalletMenu(false); }}>
-                Disconnect
+                {t('nav.disconnect')}
               </button>
             </div>
           ) : (
             <button className="btn btn--primary" style={{ padding: '6px 14px', fontSize: '13px' }} onClick={connect}>
-              Connect Wallet
+              {t('nav.connectWallet')}
             </button>
           )}
         </div>
