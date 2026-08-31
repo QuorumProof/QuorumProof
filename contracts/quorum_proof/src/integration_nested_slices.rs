@@ -392,3 +392,126 @@ mod integration_nested_slices {
         assert_eq!(attestors.len(), 6u32);
     }
 }
+
+/// Issue #1395: the attestation veto (`attestation_veto`) and attestation
+/// time-lock (`time_lock_attestation`) mechanisms are independent — neither
+/// blocks or defers to the other. These tests lock that behavior in.
+#[cfg(test)]
+mod veto_time_lock_interaction {
+    use crate::{QuorumProofContract, QuorumProofContractClient};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{vec, Address, Bytes, Env};
+
+    fn setup(env: &Env) -> QuorumProofContractClient<'_> {
+        env.mock_all_auths_allowing_non_root_auth();
+        let id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(env, &id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        client
+    }
+
+    fn issue_and_attest(env: &Env, client: &QuorumProofContractClient) -> (u64, u64, Address) {
+        let issuer = Address::generate(env);
+        let holder = Address::generate(env);
+        let attestor = Address::generate(env);
+
+        let creator = Address::generate(env);
+        let attestors = vec![env, attestor.clone()];
+        let weights = vec![env, 1u32];
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &1u32);
+
+        let metadata = Bytes::from_slice(env, b"QmTestHash000000000000000000000000");
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+        client.attest(&attestor, &cred_id, &slice_id, &true, &None);
+
+        (cred_id, slice_id, attestor)
+    }
+
+    /// A veto can be requested against a credential whose attestation is
+    /// still pending release under a time-lock — the veto mechanism does not
+    /// wait for the attestation to become effective first.
+    #[test]
+    fn test_veto_requested_while_attestation_time_locked() {
+        let env = Env::default();
+        let client = setup(&env);
+        let (cred_id, slice_id, attestor) = issue_and_attest(&env, &client);
+
+        let admin_authorities = vec![&env, Address::generate(&env)];
+        let admin = admin_authorities.get(0).unwrap();
+        client.init_veto_authorities(&admin, &admin_authorities);
+
+        let release_at = env.ledger().timestamp() + 10_000;
+        let credential = client.get_credential(&cred_id);
+        let reason = Bytes::from_slice(&env, b"fraud detection window");
+        client.set_attestation_time_lock(&credential.issuer, &cred_id, &release_at, &reason);
+        assert!(client.is_attestation_time_locked(&cred_id));
+
+        let veto_id = client.request_veto(&admin, &cred_id, &slice_id, &attestor, &None, &None);
+        let veto = client.get_veto_request(&veto_id).unwrap();
+        assert_eq!(veto.credential_id, cred_id);
+    }
+
+    /// A veto can be executed once its own time-lock has elapsed, regardless
+    /// of whether the credential's attestation time-lock has also released.
+    #[test]
+    fn test_veto_executed_after_attestation_lock_released() {
+        let env = Env::default();
+        let client = setup(&env);
+        let (cred_id, slice_id, attestor) = issue_and_attest(&env, &client);
+
+        let authorities = vec![&env, Address::generate(&env)];
+        let veto_authority = authorities.get(0).unwrap();
+        client.init_veto_authorities(&veto_authority, &authorities);
+        client.set_veto_timelock(&veto_authority, &1_000u64);
+
+        let credential = client.get_credential(&cred_id);
+        let release_at = env.ledger().timestamp() + 500;
+        let reason = Bytes::from_slice(&env, b"fraud detection window");
+        client.set_attestation_time_lock(&credential.issuer, &cred_id, &release_at, &reason);
+
+        let veto_id =
+            client.request_veto(&veto_authority, &cred_id, &slice_id, &attestor, &None, &None);
+
+        // Advance past both the attestation lock's release and the veto's
+        // own unlock time.
+        env.ledger().with_mut(|l| l.timestamp += 1_500);
+        assert!(!client.is_attestation_time_locked(&cred_id));
+
+        let executed = client.execute_veto(&veto_authority, &veto_id);
+        assert!(executed, "veto should execute once its own time-lock has elapsed");
+    }
+
+    /// Setting an attestation time-lock on a credential that already has a
+    /// pending veto is allowed — the two schedules do not interact.
+    #[test]
+    fn test_attestation_lock_set_with_pending_veto() {
+        let env = Env::default();
+        let client = setup(&env);
+        let (cred_id, slice_id, attestor) = issue_and_attest(&env, &client);
+
+        let authorities = vec![&env, Address::generate(&env)];
+        let veto_authority = authorities.get(0).unwrap();
+        client.init_veto_authorities(&veto_authority, &authorities);
+
+        let veto_id =
+            client.request_veto(&veto_authority, &cred_id, &slice_id, &attestor, &None, &None);
+        assert!(client.get_veto_request(&veto_id).is_some());
+
+        let credential = client.get_credential(&cred_id);
+        let release_at = env.ledger().timestamp() + 10_000;
+        let reason = Bytes::from_slice(&env, b"fraud detection window");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_attestation_time_lock(&credential.issuer, &cred_id, &release_at, &reason)
+        }));
+        assert!(
+            result.is_ok(),
+            "setting an attestation time-lock must not be blocked by a pending veto"
+        );
+
+        // The veto is untouched by the newly-set attestation lock.
+        let veto = client.get_veto_request(&veto_id).unwrap();
+        assert_eq!(veto.credential_id, cred_id);
+        assert!(client.is_attestation_time_locked(&cred_id));
+    }
+}

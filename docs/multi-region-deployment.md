@@ -195,24 +195,51 @@ Verify contract state is consistent across regions:
 # ==> Verifying contract state consistency...
 #
 #     testnet (CAAAAAAA...):
-#       primary: 42 credentials
-#       backup: 42 credentials
+#       testnet-backup: 42 credentials
+#       testnet: 42 credentials
 #       ✓ Consistent
 #
 #     mainnet (CAAAAAAA...):
-#       primary: 100 credentials
-#       backup: 100 credentials
+#       mainnet-backup: 100 credentials
+#       mainnet: 100 credentials
 #       ✓ Consistent
+```
+
+If a query fails on either side, it is never treated as a matching count of
+0 — it is surfaced explicitly instead:
+
+```
+#     testnet (CAAAAAAA...):
+#       testnet-backup: UNKNOWN credentials
+#       testnet: 42 credentials
+#       ? Could not verify (one or more endpoints did not return a valid count)
 ```
 
 ### Consistency Checks
 
-The verification script checks:
+`--verify` checks:
 
-1. **Credential count** — Same across all RPC endpoints
-2. **Slice count** — Same across all RPC endpoints
-3. **Contract state hash** — Identical across regions
-4. **Attestation records** — Consistent across endpoints
+1. **Credential count** — compared between a network's primary endpoint and
+   its `-backup` endpoint, via a real Soroban RPC call
+   (`stellar contract invoke ... get_credential_count`, simulated against
+   each endpoint) — the same mechanism `scripts/reconcile_state.sh` uses for
+   cross-instance comparison
+
+Slice count, a contract state hash, and attestation records are **not**
+checked by this script. Earlier revisions of this doc listed all four as
+checked; that described capabilities `failover.sh` never had.
+
+Because Horizon (the `-backup` endpoint for both networks by default) has no
+Soroban RPC and cannot serve contract-state queries, `--verify` will report
+"Could not verify" for the backup side against stock config. To get a real
+cross-region divergence check, point the backup override
+(`RPC_TESTNET_BACKUP` / `RPC_MAINNET_BACKUP`) at a second genuine Soroban RPC
+endpoint in another region/provider rather than Horizon.
+
+`--check` validates reachability using the protocol each endpoint type
+actually speaks: `getHealth` (JSON-RPC) for Soroban RPC endpoints, and a
+check for `horizon_version` on the root endpoint for Horizon endpoints —
+neither endpoint type has a `/health` REST route.
 
 ### Handling Inconsistencies
 

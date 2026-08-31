@@ -117,7 +117,59 @@ mod proptest_quorum_slices {
             prop_assert_eq!(after, before + 1);
         }
 
+        /// Property (Issue #1396): `threshold == 0` is always rejected at
+        /// slice creation, regardless of attestor count or weights.
+        #[test]
+        fn prop_threshold_zero_rejected(
+            n_attestors in 1usize..=8,
+            weight_seed in 1u32..=50,
+        ) {
+            let env = Env::default();
+            let client = setup(&env);
+            let creator = Address::generate(&env);
+
+            let mut attestors = soroban_sdk::Vec::new(&env);
+            let mut weights = soroban_sdk::Vec::new(&env);
+            for _ in 0..n_attestors {
+                attestors.push_back(Address::generate(&env));
+                weights.push_back(weight_seed);
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.create_slice(&creator, &attestors, &weights, &0u32);
+            }));
+            prop_assert!(result.is_err());
+        }
+
+        /// Property (Issue #1396): `threshold == attestors.len()` (i.e.
+        /// threshold equal to total weight when every attestor has weight 1)
+        /// is the maximal achievable threshold and must be accepted.
+        #[test]
+        fn prop_threshold_equals_attestor_count_accepted(n_attestors in 1usize..=8) {
+            let env = Env::default();
+            let client = setup(&env);
+            let creator = Address::generate(&env);
+
+            let mut attestors = soroban_sdk::Vec::new(&env);
+            let mut weights = soroban_sdk::Vec::new(&env);
+            for _ in 0..n_attestors {
+                attestors.push_back(Address::generate(&env));
+                weights.push_back(1u32);
+            }
+            let threshold = n_attestors as u32;
+
+            let slice_id = client.create_slice(&creator, &attestors, &weights, &threshold);
+            let slice = client.get_slice(&slice_id);
+            prop_assert_eq!(slice.threshold, threshold);
+
+            // Every attestor must attest for quorum to be reached at this
+            // maximal threshold.
+            prop_assert!(client.is_quorum(&slice_id, &attestors));
+        }
+
         /// Property: threshold exceeding total weight is always rejected.
+        /// (Issue #1396: this also covers `threshold > attestors.len()`,
+        /// since every attestor here has weight 1.)
         #[test]
         fn prop_threshold_exceeding_weight_rejected(
             n_attestors in 1usize..=5,
