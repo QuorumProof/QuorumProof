@@ -133,3 +133,16 @@ FILES_CHANGED.txt
 TASK_IMPLEMENTATIONS.md
 IMPLEMENTATION_SUMMARY.md
 VERIFICATION_CHECKLIST.md
+
+# Rust source backup files (e.g. lib.rs.bak created by editors/tools)
+**/*.rs.bak
+**/*.rs.orig
+**/*.rs.tmp
+
+# Soroban / Stellar generated artifacts
+*.wasm.gz
+.stellar/
+
+# OS-generated junk
+**/.DS_Store
+**/Thumbs.db
