@@ -833,7 +833,7 @@ impl SbtRegistryContract {
             expires_at,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Delegation(token_id), &delegation);
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
@@ -858,7 +858,7 @@ impl SbtRegistryContract {
             .get::<_, Delegation>(&DataKey::Delegation(token_id))
             .map(|delegation| delegation.delegatee);
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
@@ -870,7 +870,7 @@ impl SbtRegistryContract {
     /// Retrieve delegation details for a token.
     pub fn get_delegation(env: Env, token_id: u64) -> Delegation {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Delegation(token_id))
             .expect("delegation not found")
     }
@@ -879,7 +879,7 @@ impl SbtRegistryContract {
     pub fn is_delegate_active(env: Env, token_id: u64, delegatee: Address) -> bool {
         let current_ts: u64 = env.ledger().timestamp();
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Delegation(token_id))
             .map_or(false, |delegation: Delegation| {
                 delegation.delegatee == delegatee && delegation.expires_at > current_ts
@@ -997,7 +997,7 @@ impl SbtRegistryContract {
         env.storage().persistent().remove(&DataKey::Token(token_id));
         env.storage().persistent().remove(&DataKey::Owner(token_id));
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             owner.clone(),
@@ -1082,7 +1082,7 @@ impl SbtRegistryContract {
         env.storage().persistent().remove(&DataKey::Token(sbt_id));
         env.storage().persistent().remove(&DataKey::Owner(sbt_id));
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(sbt_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             owner.clone(),
@@ -1159,7 +1159,7 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             old_owner.clone(),
@@ -1231,7 +1231,7 @@ impl SbtRegistryContract {
             .persistent()
             .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(token_id));
         env.storage().instance().remove(&DataKey::OwnerCredential(
             old_owner.clone(),
@@ -2323,7 +2323,7 @@ impl SbtRegistryContract {
                 .persistent()
                 .remove(&DataKey::Owner(entry.token_id));
             env.storage()
-                .instance()
+                .persistent()
                 .remove(&DataKey::Delegation(entry.token_id));
             env.storage().instance().remove(&DataKey::OwnerCredential(
                 entry.caller.clone(),
@@ -2415,7 +2415,7 @@ impl SbtRegistryContract {
                 .persistent()
                 .set(&DataKey::OwnerTokens(old_owner.clone()), &old_tokens);
             env.storage()
-                .instance()
+                .persistent()
                 .remove(&DataKey::Delegation(entry.token_id));
             env.storage().instance().remove(&DataKey::OwnerCredential(
                 old_owner.clone(),
@@ -3015,6 +3015,24 @@ impl SbtRegistryContract {
             EXTENDED_TTL,
         );
 
+        // Issue #1413: maintain the global pending-clawbacks index.
+        let mut pending: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingClawbacks)
+            .unwrap_or(Vec::new(&env));
+        if !pending.iter().any(|id| id == clawback_id) {
+            pending.push_back(clawback_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingClawbacks, &pending);
+            env.storage().persistent().extend_ttl(
+                &DataKey::PendingClawbacks,
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
+        }
+
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("clawback").into_val(&env));
         topics.push_back(sbt_id.into_val(&env));
@@ -3047,10 +3065,41 @@ impl SbtRegistryContract {
             .persistent()
             .remove(&DataKey::PendingClawbackBySbt(request.sbt_id));
 
+        // Issue #1413: remove from the global pending-clawbacks index.
+        let mut pending: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingClawbacks)
+            .unwrap_or(Vec::new(&env));
+        if let Some(pos) = pending.iter().position(|id| id == clawback_id) {
+            pending.remove(pos as u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingClawbacks, &pending);
+            if !pending.is_empty() {
+                env.storage().persistent().extend_ttl(
+                    &DataKey::PendingClawbacks,
+                    STANDARD_TTL,
+                    EXTENDED_TTL,
+                );
+            }
+        }
+
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("clw_cncl").into_val(&env));
         topics.push_back(clawback_id.into_val(&env));
         env.events().publish(topics, issuer);
+    }
+
+    /// Issue #1413: Return all currently-pending clawback IDs.
+    ///
+    /// These are clawbacks with `status = "pending"` that have not yet been
+    /// cancelled or executed. Useful for dashboards and bulk notifications.
+    pub fn get_pending_clawbacks(env: Env) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingClawbacks)
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Look up a clawback request by id.
@@ -3374,7 +3423,7 @@ impl SbtRegistryContract {
 
         // Remove delegation from old owner
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Delegation(sbt_id));
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
@@ -3562,11 +3611,26 @@ impl SbtRegistryContract {
     /// `key`/`value`, enabling granular verification (e.g. "find all SBTs
     /// where specialization = mechanical_engineering") without exposing the
     /// full credential. Private attributes are never returned by this query.
-    pub fn query_sbt_by_attribute(env: Env, key: Bytes, value: Bytes) -> Vec<u64> {
-        env.storage()
+    ///
+    /// # Pagination
+    /// Use `offset` and `limit` to page through large result sets.
+    /// `offset` is the zero-based index of the first result to return.
+    /// `limit` is the maximum number of results to return (capped at 100).
+    /// Pass `offset = 0, limit = 100` for the first page.
+    pub fn query_sbt_by_attribute(env: Env, key: Bytes, value: Bytes, offset: u64, limit: u64) -> Vec<u64> {
+        let all: Vec<u64> = env
+            .storage()
             .persistent()
             .get(&DataKey::AttributeIndex(key, value))
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+        let cap: u64 = if limit == 0 { 100 } else { limit.min(100) };
+        let start = offset.min(all.len() as u64) as u32;
+        let end = (offset + cap).min(all.len() as u64) as u32;
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            page.push_back(all.get(i).unwrap());
+        }
+        page
     }
 
     fn add_to_attribute_index(env: &Env, key: &Bytes, value: &Bytes, sbt_id: u64) {
@@ -3659,14 +3723,19 @@ impl SbtRegistryContract {
 
         let mut registry: Vec<u64> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::GlobalMarketplaceRegistry)
             .unwrap_or(Vec::new(&env));
         if !registry.iter().any(|id| id == sbt_id) {
             registry.push_back(sbt_id);
             env.storage()
-                .instance()
+                .persistent()
                 .set(&DataKey::GlobalMarketplaceRegistry, &registry);
+            env.storage().persistent().extend_ttl(
+                &DataKey::GlobalMarketplaceRegistry,
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
         }
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
@@ -3766,11 +3835,26 @@ impl SbtRegistryContract {
     /// On-chain registry index of every SBT that has ever been registered in
     /// at least one marketplace — the discovery entry point for marketplace
     /// aggregators that don't already know a marketplace_id.
-    pub fn get_all_registered_sbts(env: Env) -> Vec<u64> {
-        env.storage()
-            .instance()
+    ///
+    /// # Pagination
+    /// Use `offset` and `limit` to page through large result sets.
+    /// `offset` is the zero-based index of the first result to return.
+    /// `limit` is the maximum number of results to return (capped at 100).
+    /// Pass `offset = 0, limit = 100` for the first page.
+    pub fn get_all_registered_sbts(env: Env, offset: u64, limit: u64) -> Vec<u64> {
+        let all: Vec<u64> = env
+            .storage()
+            .persistent()
             .get(&DataKey::GlobalMarketplaceRegistry)
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+        let cap: u64 = if limit == 0 { 100 } else { limit.min(100) };
+        let start = offset.min(all.len() as u64) as u32;
+        let end = (offset + cap).min(all.len() as u64) as u32;
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            page.push_back(all.get(i).unwrap());
+        }
+        page
     }
 
     // ---------------------------------------------------------------
