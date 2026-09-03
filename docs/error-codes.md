@@ -311,6 +311,38 @@ client.attest(&attestor2, &cred_id, &slice_id, &false, &None); // Error(Contract
 
 ---
 
+### #96 — `SubjectIsAttestor` *(Issue #1510)*
+**Trigger:** `attest()` was called by the credential's own **subject** while attestor-independence
+enforcement is enabled (`is_attestor_independence_enabled() == true`). A credential holder cannot
+independently verify their own credential — doing so would defeat the purpose of a quorum.
+
+```rust
+// Example: subject tries to attest their own credential — blocked when flag is enabled
+client.attest(&subject, &credential_id, &slice_id, &true, &None); // Error(Contract, #96)
+```
+
+**Recovery:** Use a genuine third-party attestor who has no identity overlap with the credential's
+subject or issuer. If this error occurs unexpectedly, confirm that `is_attestor_independence_enabled()`
+returns `true` and that the attesting address does not match the credential subject.
+
+---
+
+### #97 — `IssuerIsAttestor` *(Issue #1510)*
+**Trigger:** `attest()` was called by the credential's own **issuer** while attestor-independence
+enforcement is enabled. An issuer self-attesting would allow unilateral credential validation with
+no independent oversight.
+
+```rust
+// Example: issuer tries to attest a credential they issued — blocked when flag is enabled
+client.attest(&issuer, &credential_id, &slice_id, &true, &None); // Error(Contract, #97)
+```
+
+**Recovery:** Use a genuine third-party attestor. If the issuer must participate in attestation
+for a legitimate reason, an admin may temporarily disable enforcement with
+`disable_attestor_independence` — document the rationale in the audit log before doing so.
+
+---
+
 ## SBT Registry Contract
 
 ### #1 — `SoulboundNonTransferable`
