@@ -850,6 +850,12 @@ pub enum ContractError {
     SchemaNotFound = 93,
     /// Issue #1394: Attempted to purge a role assignment/delegation that has not expired yet
     GrantNotExpired = 94,
+    /// Issue #1510: Attestor independence — the credential subject cannot be an attestor
+    /// in a slice used to attest their own credential when enforcement is enabled.
+    SubjectIsAttestor = 96,
+    /// Issue #1510: Attestor independence — the credential issuer cannot be an attestor
+    /// in a slice used to attest their own credential when enforcement is enabled.
+    IssuerIsAttestor = 97,
 }
 
 #[contracttype]
@@ -1036,6 +1042,10 @@ pub enum DataKey10 {
     SliceDelegation(u64, Address),
     /// Issue #898: Configurable max attestors per slice
     MaxAttestorsPerSlice,
+    /// Issue #1510: Flag controlling attestor-independence enforcement.
+    /// When true, the credential subject and issuer are rejected as attestors
+    /// in any slice used to attest their own credential.
+    AttestorIndependenceEnabled,
     /// Issue #876: Which version of the credential type definition a credential was issued against
     CredentialTypeDefVersion(u64),
     /// Issue #876: Historical versions of a credential type definition (type_id -> Vec<CredentialTypeDef>)
@@ -9516,6 +9526,83 @@ impl QuorumProofContract {
             .unwrap_or(MAX_ATTESTORS_PER_SLICE)
     }
 
+    // ────────────────────────────────────────────────────────────────────────────
+    // Issue #1510: Attestor-independence enforcement
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// Enable attestor-independence enforcement (admin only).
+    ///
+    /// Once enabled, `attest()` will reject calls where the attesting party
+    /// is the credential's subject (`SubjectIsAttestor`) or its issuer
+    /// (`IssuerIsAttestor`).  This prevents self-serving attestations and
+    /// ensures every attestor is a genuinely independent third party.
+    ///
+    /// Idempotent — calling while already enabled is a no-op.
+    pub fn enable_attestor_independence(env: Env, admin: Address) {
+        admin.require_auth();
+        assert!(
+            Self::is_admin(&env, admin),
+            "only admin can enable attestor independence"
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey10::AttestorIndependenceEnabled, &true);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Disable attestor-independence enforcement (admin only).
+    ///
+    /// Reverts to the legacy permissive behaviour where subjects and issuers
+    /// may attest their own credentials.  Intended for emergency rollback only.
+    ///
+    /// Idempotent — calling while already disabled is a no-op.
+    pub fn disable_attestor_independence(env: Env, admin: Address) {
+        admin.require_auth();
+        assert!(
+            Self::is_admin(&env, admin),
+            "only admin can disable attestor independence"
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey10::AttestorIndependenceEnabled, &false);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Returns `true` if attestor-independence enforcement is currently active.
+    ///
+    /// Defaults to `false` (disabled) on freshly-initialised contracts so that
+    /// existing deployments are not broken by the upgrade.
+    pub fn is_attestor_independence_enabled(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey10::AttestorIndependenceEnabled)
+            .unwrap_or(false)
+    }
+
+    /// Internal helper: assert that `attestor` is independent from the
+    /// credential's subject and issuer when the independence flag is enabled.
+    ///
+    /// Called from [`attest`] after the credential has been loaded.
+    fn require_attestor_independence(
+        env: &Env,
+        attestor: &Address,
+        credential: &Credential,
+    ) {
+        if !Self::is_attestor_independence_enabled(env.clone()) {
+            return;
+        }
+        if attestor == &credential.subject {
+            panic_with_error!(env, ContractError::SubjectIsAttestor);
+        }
+        if attestor == &credential.issuer {
+            panic_with_error!(env, ContractError::IssuerIsAttestor);
+        }
+    }
+
     /// Attest a credential using a quorum slice.
     ///
     /// Records the attestor's signature for the given credential. Once the total weight
@@ -9950,6 +10037,8 @@ impl QuorumProofContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         assert!(!credential.revoked, "credential is revoked");
         assert!(!credential.suspended, "credential is suspended");
+        // Issue #1510: Enforce attestor independence — reject subject/issuer as attestor.
+        Self::require_attestor_independence(&env, &attestor, &credential);
         // Enforce attestation time window if configured
         if let Some(window) = env
             .storage()
@@ -28715,6 +28804,158 @@ mod doc_tests {
         // Verify the mechanism is in place by checking the challenge exists
         let challenge = client.get_challenge(&challenge_id);
         assert_eq!(challenge.status, 0u32); // Active status
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Issue #1510: Attestor-independence enforcement tests
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Helper: create an initialised client + admin.
+    fn new_client(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        (client, admin)
+    }
+
+    /// When independence enforcement is DISABLED (default), the credential
+    /// subject is allowed to attest their own credential.
+    #[test]
+    fn test_attestor_independence_disabled_by_default_subject_can_attest() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = new_client(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_1510_bbbbbb");
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(subject.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &100u32);
+
+        // Enforcement is disabled by default — subject is allowed to attest.
+        assert!(!client.is_attestor_independence_enabled());
+        client.attest(&subject, &credential_id, &slice_id, &true, &None);
+        assert!(client.is_attested(&credential_id, &slice_id));
+    }
+
+    /// When enforcement is ENABLED, the credential subject cannot attest
+    /// their own credential (panics with SubjectIsAttestor).
+    #[test]
+    #[should_panic]
+    fn test_attestor_independence_subject_blocked_when_enabled() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.enable_attestor_independence(&admin);
+        assert!(client.is_attestor_independence_enabled());
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_1510_cccccc");
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(subject.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &100u32);
+
+        // Should panic with SubjectIsAttestor
+        client.attest(&subject, &credential_id, &slice_id, &true, &None);
+    }
+
+    /// When enforcement is ENABLED, the credential issuer cannot attest
+    /// a credential they issued (panics with IssuerIsAttestor).
+    #[test]
+    #[should_panic]
+    fn test_attestor_independence_issuer_blocked_when_enabled() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.enable_attestor_independence(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_1510_dddddd");
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(issuer.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let slice_id = client.create_slice(&subject, &attestors, &weights, &100u32);
+
+        // Should panic with IssuerIsAttestor
+        client.attest(&issuer, &credential_id, &slice_id, &true, &None);
+    }
+
+    /// When enforcement is ENABLED, a genuine third-party attestor is still
+    /// allowed to attest — the happy path must not be broken.
+    #[test]
+    fn test_attestor_independence_third_party_allowed_when_enabled() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.enable_attestor_independence(&admin);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let third_party = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_1510_fffff");
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(third_party.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &100u32);
+
+        // Third-party attestor is independent — should succeed.
+        client.attest(&third_party, &credential_id, &slice_id, &true, &None);
+        assert!(client.is_attested(&credential_id, &slice_id));
+    }
+
+    /// `disable_attestor_independence` reverts enforcement so a previously-
+    /// blocked subject can attest again after the flag is turned off.
+    #[test]
+    fn test_attestor_independence_can_be_disabled_by_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.enable_attestor_independence(&admin);
+        assert!(client.is_attestor_independence_enabled());
+        client.disable_attestor_independence(&admin);
+        assert!(!client.is_attestor_independence_enabled());
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_1510_eeeeee");
+        let credential_id =
+            client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(subject.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let slice_id = client.create_slice(&issuer, &attestors, &weights, &100u32);
+
+        // Flag is now off — subject may attest.
+        client.attest(&subject, &credential_id, &slice_id, &true, &None);
+        assert!(client.is_attested(&credential_id, &slice_id));
     }
 }
 

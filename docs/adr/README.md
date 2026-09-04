@@ -18,12 +18,13 @@ An ADR is a short document that captures *why* a decision was made, not just *wh
 | [006](./adr-006-quorum-intersection-verification.md) | Quorum Intersection Verification | Accepted | 2026-07-21 |
 | [007](./adr-007-bbs-plus-selective-disclosure.md) | BBS+ Signatures for Selective Disclosure | Accepted | 2026-07-26 |
 | [008](./adr-008-economic-security-model.md) | Economic Security Model | Accepted | 2026-07-21 |
+| [009](./adr-009-attestor-independence.md) | Quorum Slice Attestor Independence | Accepted | 2026-09-03 |
 
 > Note: ADR-008 was originally filed as ADR-006 (`adr-006-economic-security-model.md`) before the
 > duplicate numbering conflict was noticed. It has been renumbered to 008 to resolve the conflict.
 > The old filename is kept as a redirect stub for stable external links (see
 > [adr-006-economic-security-model.md](./adr-006-economic-security-model.md)).
-> The next available ADR number is **009**.
+> The next available ADR number is **010**.
 
 ## How to Add a New ADR
 
