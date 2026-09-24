@@ -31168,6 +31168,49 @@ mod doc_tests {
 
     #[test]
     fn test_issue_credential_derivative() {
+    // ===== Tests for Issue #1599: Batch Credential Amendments =====
+
+    #[test]
+    fn test_batch_amend_credentials_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        let metadata1 = Bytes::from_slice(&env, b"metadata_hash_1");
+        let metadata2 = Bytes::from_slice(&env, b"metadata_hash_2");
+        let new_metadata1 = Bytes::from_slice(&env, b"new_metadata_hash_1");
+        let new_metadata2 = Bytes::from_slice(&env, b"new_metadata_hash_2");
+
+        let cred_id1 = client.issue_credential(&issuer, &subject1, &1u32, &metadata1, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject2, &1u32, &metadata2, &None, &0u64);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred_id1);
+        cred_ids.push_back(cred_id2);
+
+        let mut new_hashes = Vec::new(&env);
+        new_hashes.push_back(new_metadata1.clone());
+        new_hashes.push_back(new_metadata2.clone());
+
+        let batch_id = client.batch_amend_credentials(&issuer, &cred_ids, &new_hashes);
+        assert!(batch_id > 0);
+
+        client.execute_batch_amendment(&issuer, &batch_id);
+
+        let results = client.get_batch_amendment_results(&batch_id);
+        assert!(results.is_some());
+        let result_vec = results.unwrap();
+        assert_eq!(result_vec.len(), 2);
+        assert!(result_vec.get(0).unwrap().success);
+        assert!(result_vec.get(1).unwrap().success);
+    }
+
+    #[test]
+    fn test_batch_amend_credentials_mismatched_lengths() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin) = setup(&env);
@@ -31203,6 +31246,154 @@ mod doc_tests {
 
     #[test]
     fn test_exercise_derivative() {
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred_id);
+
+        let new_metadata = Bytes::from_slice(&env, b"new_metadata");
+        let extra_metadata = Bytes::from_slice(&env, b"extra_metadata");
+        let mut new_hashes = Vec::new(&env);
+        new_hashes.push_back(new_metadata);
+        new_hashes.push_back(extra_metadata);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_amend_credentials(&issuer, &cred_ids, &new_hashes);
+        }));
+        assert!(result.is_err());
+    }
+
+    // ===== Tests for Issue #1598: Credential Collateral for Loans =====
+
+    #[test]
+    fn test_lock_credential_as_collateral_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &borrower, &1u32, &metadata, &None, &0u64);
+
+        let lock_id = client.lock_credential_as_collateral(
+            &borrower,
+            &cred_id,
+            &lender,
+            &1000i128,
+            &5000i128,
+            &(env.ledger().timestamp() + 86400),
+        );
+
+        assert!(lock_id > 0);
+        let collateral = client.get_credential_collateral(&lock_id);
+        assert!(collateral.is_some());
+        let coll = collateral.unwrap();
+        assert_eq!(coll.credential_id, cred_id);
+        assert_eq!(coll.borrower, borrower);
+        assert_eq!(coll.lender, lender);
+        assert_eq!(coll.loan_amount, 1000);
+        assert!(!coll.liquidated);
+    }
+
+    #[test]
+    fn test_liquidate_credential_collateral_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &borrower, &1u32, &metadata, &None, &0u64);
+
+        let lock_id = client.lock_credential_as_collateral(
+            &borrower,
+            &cred_id,
+            &lender,
+            &1000i128,
+            &5000i128,
+            &(env.ledger().timestamp() + 86400),
+        );
+
+        client.liquidate_credential_collateral(&lender, &lock_id);
+
+        let collateral = client.get_credential_collateral(&lock_id);
+        assert!(collateral.is_some());
+        let coll = collateral.unwrap();
+        assert!(coll.liquidated);
+        assert!(coll.liquidated_at.is_some());
+    }
+
+    #[test]
+    fn test_lock_revoked_credential_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &borrower, &1u32, &metadata, &None, &0u64);
+        client.revoke_credential(&issuer, &cred_id, &None);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.lock_credential_as_collateral(
+                &borrower,
+                &cred_id,
+                &lender,
+                &1000i128,
+                &5000i128,
+                &(env.ledger().timestamp() + 86400),
+            );
+        }));
+        assert!(result.is_err());
+    }
+
+    // ===== Tests for Issue #1600: Credential Insurance Escrow =====
+
+    #[test]
+    fn test_create_insurance_escrow_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let escrow_id = client.create_insurance_escrow(
+            &issuer,
+            &cred_id,
+            &holder,
+            &10000i128,
+            &500i128,
+            &(env.ledger().timestamp() + 31536000),
+        );
+
+        assert!(escrow_id > 0);
+        let escrow = client.get_insurance_escrow(&escrow_id);
+        assert!(escrow.is_some());
+        let esc = escrow.unwrap();
+        assert_eq!(esc.credential_id, cred_id);
+        assert_eq!(esc.holder, holder);
+        assert_eq!(esc.issuer, issuer);
+        assert_eq!(esc.insurance_amount, 10000);
+        assert!(esc.active);
+    }
+
+    #[test]
+    fn test_submit_insurance_claim_success() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin) = setup(&env);
@@ -31235,6 +31426,35 @@ mod doc_tests {
 
     #[test]
     fn test_get_credential_derivatives() {
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let escrow_id = client.create_insurance_escrow(
+            &issuer,
+            &cred_id,
+            &holder,
+            &10000i128,
+            &500i128,
+            &(env.ledger().timestamp() + 31536000),
+        );
+
+        let claim_reason = String::from_str(&env, "credential fraud detected");
+        let claim_id = client.submit_insurance_claim(&holder, &escrow_id, &5000i128, &claim_reason);
+
+        assert!(claim_id > 0);
+        let claim = client.get_insurance_claim(&claim_id);
+        assert!(claim.is_some());
+        let c = claim.unwrap();
+        assert_eq!(c.escrow_id, escrow_id);
+        assert_eq!(c.claimant, holder);
+        assert_eq!(c.claim_amount, 5000);
+        assert!(!c.approved);
+    }
+
+    #[test]
+    fn test_approve_insurance_claim_success() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin) = setup(&env);
@@ -31269,6 +31489,38 @@ mod doc_tests {
 
     #[test]
     fn test_stake_credential() {
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let escrow_id = client.create_insurance_escrow(
+            &issuer,
+            &cred_id,
+            &holder,
+            &10000i128,
+            &500i128,
+            &(env.ledger().timestamp() + 31536000),
+        );
+
+        let claim_reason = String::from_str(&env, "credential fraud detected");
+        let claim_id = client.submit_insurance_claim(&holder, &escrow_id, &5000i128, &claim_reason);
+
+        client.approve_insurance_claim(&issuer, &claim_id);
+
+        let claim = client.get_insurance_claim(&claim_id);
+        assert!(claim.is_some());
+        let c = claim.unwrap();
+        assert!(c.approved);
+        assert!(c.approved_at.is_some());
+        assert!(c.payout_completed);
+        assert_eq!(c.payout_amount, Some(5000));
+    }
+
+    // ===== Tests for Issue #1601: Credential Inheritance for Estate Planning =====
+
+    #[test]
+    fn test_designate_credential_designee_success() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin) = setup(&env);
@@ -31294,6 +31546,55 @@ mod doc_tests {
 
     #[test]
     fn test_liquidate_stake() {
+        let holder = Address::generate(&env);
+        let designee = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let designee_id = client.designate_credential_designee(&holder, &cred_id, &designee, &100u32);
+
+        assert!(designee_id > 0);
+        let des = client.get_credential_designee(&designee_id);
+        assert!(des.is_some());
+        let d = des.unwrap();
+        assert_eq!(d.credential_id, cred_id);
+        assert_eq!(d.holder, holder);
+        assert_eq!(d.designee, designee);
+        assert_eq!(d.share_percentage, 100);
+        assert!(d.active);
+    }
+
+    #[test]
+    fn test_transfer_credential_to_designee_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let designee = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let designee_id = client.designate_credential_designee(&holder, &cred_id, &designee, &100u32);
+
+        let reason = String::from_str(&env, "holder deceased");
+        let transfer_id = client.transfer_credential_to_designee(&admin, &designee_id, &reason);
+
+        assert!(transfer_id > 0);
+        let transfer = client.get_inheritance_transfer(&transfer_id);
+        assert!(transfer.is_some());
+        let t = transfer.unwrap();
+        assert_eq!(t.credential_id, cred_id);
+        assert_eq!(t.new_holder, designee);
+        assert_eq!(t.original_holder, holder);
+        assert_eq!(t.share_percentage, 100);
+    }
+
+    #[test]
+    fn test_designate_invalid_share_percentage_fails() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin) = setup(&env);
@@ -31367,6 +31668,16 @@ mod doc_tests {
         let history = client.get_stake_liquidation_history(stake_id);
         assert!(history.len() > 0, "should have liquidation history");
         assert_eq!(history.get(0).unwrap().stake_id, stake_id);
+        let holder = Address::generate(&env);
+        let designee = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.designate_credential_designee(&holder, &cred_id, &designee, &150u32);
+        }));
+        assert!(result.is_err());
     }
 }
 
