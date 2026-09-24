@@ -58,6 +58,90 @@ const attestations: ThirdPartyAttestation[] = [];
 
 let idCounter = 0;
 
+/**
+ * Cache for slice verification results.
+ *
+ * Verification is deterministic for a given slice identity + version, so we
+ * memoize the computed result and invalidate it whenever the slice is updated.
+ * Metrics (hits/misses/evictions) are tracked so the cache can be observed.
+ */
+export type SliceVerificationResult = {
+  sliceId: string;
+  version: number;
+  verified: boolean;
+  verifiedAt: string;
+};
+
+export type SliceVerificationCacheMetrics = {
+  hits: number;
+  misses: number;
+  evictions: number;
+  size: number;
+};
+
+const sliceVerificationCache = new Map<string, SliceVerificationResult>();
+const sliceVerificationMetrics = { hits: 0, misses: 0, evictions: 0 };
+
+function sliceCacheKey(sliceId: string, version: number): string {
+  return `${sliceId}@${version}`;
+}
+
+/**
+ * Return the cached verification result for a slice, computing and storing it
+ * on a miss. The cache is keyed by slice identity + version so a stale result
+ * is never served after a slice update (which bumps the version).
+ */
+export function getSliceVerification(
+  sliceId: string,
+  version: number,
+  compute: () => boolean,
+): SliceVerificationResult {
+  const key = sliceCacheKey(sliceId, version);
+  const cached = sliceVerificationCache.get(key);
+  if (cached) {
+    sliceVerificationMetrics.hits += 1;
+    return cached;
+  }
+
+  sliceVerificationMetrics.misses += 1;
+  const result: SliceVerificationResult = {
+    sliceId,
+    version,
+    verified: compute(),
+    verifiedAt: new Date().toISOString(),
+  };
+  sliceVerificationCache.set(key, result);
+  return result;
+}
+
+/**
+ * Invalidate all cached verification results for a slice. Called whenever the
+ * slice is updated so subsequent reads recompute against the new version.
+ */
+export function invalidateSliceVerification(sliceId: string): number {
+  let evicted = 0;
+  for (const key of Array.from(sliceVerificationCache.keys())) {
+    if (key.startsWith(`${sliceId}@`)) {
+      sliceVerificationCache.delete(key);
+      evicted += 1;
+    }
+  }
+  sliceVerificationMetrics.evictions += evicted;
+  return evicted;
+}
+
+/**
+ * Snapshot of cache metrics for observability endpoints.
+ */
+export function getSliceVerificationCacheMetrics(): SliceVerificationCacheMetrics {
+  return {
+    hits: sliceVerificationMetrics.hits,
+    misses: sliceVerificationMetrics.misses,
+    evictions: sliceVerificationMetrics.evictions,
+    size: sliceVerificationCache.size,
+  };
+}
+
 export function createVerificationRouter(soroban: SorobanClient) {
   const router = Router();
 
@@ -145,6 +229,10 @@ export function createVerificationRouter(soroban: SorobanClient) {
     };
     attestations.push(entry);
 
+    // A new attestation changes the verification outcome for the credential's
+    // slice, so drop any cached verification result to keep the cache coherent.
+    invalidateSliceVerification(String(credentialId));
+
     res.status(201).json({ message: 'Attestation recorded', entry });
   });
 
@@ -169,6 +257,60 @@ export function createVerificationRouter(soroban: SorobanClient) {
         : attestations;
 
     res.json({ attestations: filtered, total: filtered.length });
+  });
+
+  /**
+   * GET /api/verification-services/slice-verification
+   * Return the (cached) verification result for a slice.
+   * Query params: sliceId (required), version (optional, defaults to 1)
+   */
+  router.get('/slice-verification', (req: Request, res: Response) => {
+    const sliceId = req.query.sliceId ? String(req.query.sliceId) : '';
+    if (!sliceId) {
+      res.status(400).json({ error: 'sliceId is required' });
+      return;
+    }
+
+    const version = req.query.version ? parseInt(String(req.query.version), 10) : 1;
+    if (isNaN(version) || version <= 0) {
+      res.status(400).json({ error: 'version must be a positive integer' });
+      return;
+    }
+
+    const result = getSliceVerification(sliceId, version, () => {
+      // Deterministic verification: a slice is verified when it has at least
+      // one passing attestation and no failing attestations.
+      const related = attestations.filter((a) => String(a.credentialId) === sliceId);
+      const hasPass = related.some((a) => a.result === 'pass');
+      const hasFail = related.some((a) => a.result === 'fail');
+      return hasPass && !hasFail;
+    });
+
+    res.json(result);
+  });
+
+  /**
+   * POST /api/verification-services/slice-verification/invalidate
+   * Invalidate cached verification results for a slice after an update.
+   * Body: { sliceId: string }
+   */
+  router.post('/slice-verification/invalidate', (req: Request, res: Response) => {
+    const { sliceId } = req.body as { sliceId?: string };
+    if (!sliceId || typeof sliceId !== 'string' || sliceId.trim() === '') {
+      res.status(400).json({ error: 'sliceId is required' });
+      return;
+    }
+
+    const evicted = invalidateSliceVerification(sliceId.trim());
+    res.json({ sliceId: sliceId.trim(), evicted });
+  });
+
+  /**
+   * GET /api/verification-services/slice-verification/metrics
+   * Expose slice verification cache metrics (hits/misses/evictions/size).
+   */
+  router.get('/slice-verification/metrics', (_req: Request, res: Response) => {
+    res.json(getSliceVerificationCacheMetrics());
   });
 
   /**
