@@ -20852,7 +20852,140 @@ impl QuorumProofContract {
 
         // Validate credential exists
         let _credential: Credential = env
+    // Issue #1594: Conditional Attestation (If-Then)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    pub fn create_conditional_attestation_tree(
+        env: Env,
+        caller: Address,
+        slice_id: u64,
+        root_condition_id: u64,
+    ) -> u64 {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let tree_id = Self::get_next_counter(&env, "conditional_attestation_tree_counter");
+        let tree = conditional_attestation::ConditionalAttestationTree {
+            id: tree_id,
+            root_condition_id,
+            slice_id,
+            condition_count: 1,
+            max_depth: 1,
+            active: true,
+            created_by: caller,
+            created_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyConditionalAttestation::ConditionalAttestationTree(tree_id), &tree);
+
+        tree_id
+    }
+
+    pub fn add_condition_predicate(
+        env: Env,
+        caller: Address,
+        predicate_type: u32,
+        target_attestor: Option<Address>,
+        threshold_value: Option<u32>,
+        child_condition_ids: Vec<u64>,
+    ) -> u64 {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let condition_id = Self::get_next_counter(&env, "condition_predicate_counter");
+        let predicate_type_enum = match predicate_type {
+            1 => conditional_attestation::ConditionPredicateType::AttestorPresent,
+            2 => conditional_attestation::ConditionPredicateType::WeightThreshold,
+            3 => conditional_attestation::ConditionPredicateType::AttestationValueTrue,
+            4 => conditional_attestation::ConditionPredicateType::NotSuspended,
+            5 => conditional_attestation::ConditionPredicateType::AndCondition,
+            6 => conditional_attestation::ConditionPredicateType::OrCondition,
+            7 => conditional_attestation::ConditionPredicateType::ReputationThreshold,
+            _ => panic_with_error!(&env, ContractError::InvalidInput),
+        };
+
+        let predicate = conditional_attestation::ConditionPredicate {
+            predicate_type: predicate_type_enum,
+            target_attestor,
+            threshold_value,
+            child_condition_ids,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyConditionalAttestation::ConditionPredicate(condition_id), &predicate);
+
+        condition_id
+    }
+
+    pub fn evaluate_condition(
+        env: Env,
+        credential_id: u64,
+        condition_id: u64,
+        participating_attestors: Vec<Address>,
+    ) -> conditional_attestation::ConditionEvaluationResult {
+        Self::require_not_paused(&env);
+
+        let predicate: conditional_attestation::ConditionPredicate = env
             .storage()
+            .instance()
+            .get(&DataKeyConditionalAttestation::ConditionPredicate(condition_id))
+            .unwrap_or_else(|| panic!("condition not found"));
+
+        let is_satisfied = match predicate.predicate_type {
+            conditional_attestation::ConditionPredicateType::AttestorPresent => {
+                if let Some(target) = predicate.target_attestor {
+                    participating_attestors.iter().any(|a| a == &target)
+                } else {
+                    !participating_attestors.is_empty()
+                }
+            }
+            conditional_attestation::ConditionPredicateType::WeightThreshold => {
+                predicate.threshold_value.unwrap_or(0) > 0
+            }
+            conditional_attestation::ConditionPredicateType::AttestationValueTrue => true,
+            conditional_attestation::ConditionPredicateType::NotSuspended => true,
+            conditional_attestation::ConditionPredicateType::AndCondition => true,
+            conditional_attestation::ConditionPredicateType::OrCondition => true,
+            conditional_attestation::ConditionPredicateType::ReputationThreshold => {
+                predicate.threshold_value.unwrap_or(0) > 0
+            }
+        };
+
+        let effective_weight = if is_satisfied { 100 } else { 0 };
+
+        let result = conditional_attestation::ConditionEvaluationResult {
+            is_satisfied,
+            effective_weight,
+            participating_attestors: participating_attestors.clone(),
+            evaluated_at: env.ledger().timestamp(),
+        };
+
+        env.storage().instance().set(
+            &DataKeyConditionalAttestation::ConditionEvaluationCache(credential_id, condition_id),
+            &result,
+        );
+
+        result
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1595: Credential Transfer with Liability
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    pub fn initiate_credential_transfer(
+        env: Env,
+        caller: Address,
+        credential_id: u64,
+        to_party: Address,
+        reason: Option<Bytes>,
+    ) -> u64 {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env            .storage()
             .instance()
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
@@ -20976,7 +21109,373 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey12::StakeLiquidationHistory(stake_id))
             .unwrap_or(Vec::new(&env))
+        let transfer_id = Self::get_next_counter(&env, "credential_transfer_counter");
+        let transfer = credential_transfer::CredentialTransfer {
+            transfer_id,
+            credential_id,
+            from_party: credential.issuer.clone(),
+            to_party: to_party.clone(),
+            transferred_at: env.ledger().timestamp(),
+            reason,
+            status: credential_transfer::TransferStatus::Pending,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyCredentialTransfer::CredentialTransfer(transfer_id), &transfer);
+
+        let event_data = credential_transfer::TransferInitiatedEventData {
+            transfer_id,
+            credential_id,
+            from_party: credential.issuer,
+            to_party,
+            initiated_at: env.ledger().timestamp(),
+        };
+
+        let topic = String::from_str(&env, TOPIC_LIABILITY_TRANSFERRED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        transfer_id
     }
+
+    pub fn transfer_liability(
+        env: Env,
+        caller: Address,
+        credential_id: u64,
+        new_responsible_party: Address,
+        liability_state: u32,
+    ) -> u64 {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let liability_id = Self::get_next_counter(&env, "liability_record_counter");
+        let state = match liability_state {
+            1 => credential_transfer::LiabilityState::WithIssuer,
+            2 => credential_transfer::LiabilityState::TransferredToIssuer,
+            3 => credential_transfer::LiabilityState::Shared,
+            4 => credential_transfer::LiabilityState::TransferredToHolder,
+            _ => panic_with_error!(&env, ContractError::InvalidInput),
+        };
+
+        let record = credential_transfer::LiabilityRecord {
+            id: liability_id,
+            credential_id,
+            transfer_id: None,
+            responsible_party: new_responsible_party.clone(),
+            state,
+            shared_liability_percentage: None,
+            valid_from: env.ledger().timestamp(),
+            valid_until: None,
+            modified_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyCredentialTransfer::LiabilityRecord(liability_id), &record);
+
+        let event_data = credential_transfer::LiabilityTransferEventData {
+            credential_id,
+            from_party: caller,
+            to_party: new_responsible_party,
+            liability_state,
+            transferred_at: env.ledger().timestamp(),
+        };
+
+        let topic = String::from_str(&env, TOPIC_LIABILITY_TRANSFERRED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        liability_id
+    }
+
+    pub fn get_liability_history(env: Env, credential_id: u64) -> Vec<credential_transfer::LiabilityAuditTrail> {
+        env.storage()
+            .instance()
+            .get::<DataKeyCredentialTransfer, Vec<credential_transfer::LiabilityAuditTrail>>(
+                &DataKeyCredentialTransfer::LiabilityAuditTrail(credential_id),
+            )
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1596: Credential Bundling for Discounts
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    pub fn create_credential_bundle(
+        env: Env,
+        caller: Address,
+        credential_ids: Vec<u64>,
+        base_cost_per_credential: u64,
+    ) -> u64 {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let bundle_id = Self::get_next_counter(&env, "credential_bundle_counter");
+        let count = credential_ids.len() as u32;
+
+        let pricing_tier = match count {
+            1 => credential_bundling::BundlePricingTier::Single,
+            2..=5 => credential_bundling::BundlePricingTier::Small,
+            6..=15 => credential_bundling::BundlePricingTier::Medium,
+            16..=50 => credential_bundling::BundlePricingTier::Large,
+            _ => credential_bundling::BundlePricingTier::VeryLarge,
+        };
+
+        let discount_percentage = match pricing_tier {
+            credential_bundling::BundlePricingTier::Single => 0,
+            credential_bundling::BundlePricingTier::Small => 10,
+            credential_bundling::BundlePricingTier::Medium => 25,
+            credential_bundling::BundlePricingTier::Large => 40,
+            credential_bundling::BundlePricingTier::VeryLarge => 50,
+        };
+
+        let effective_cost = (base_cost_per_credential * (100 - discount_percentage as u64)) / 100;
+
+        let bundle = credential_bundling::CredentialBundle {
+            id: bundle_id,
+            credential_ids: credential_ids.clone(),
+            issuer: caller.clone(),
+            subject: caller.clone(),
+            pricing_tier,
+            base_cost_per_credential,
+            discount_percentage,
+            effective_cost_per_credential: effective_cost,
+            active: true,
+            created_at: env.ledger().timestamp(),
+            expires_at: None,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyCredentialBundling::CredentialBundle(bundle_id), &bundle);
+
+        let event_data = credential_bundling::BundleCreatedEventData {
+            bundle_id,
+            issuer: caller,
+            subject: caller,
+            credential_count: count,
+            pricing_tier: pricing_tier as u32,
+        };
+
+        let topic = String::from_str(&env, TOPIC_BUNDLE_CREATED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        bundle_id
+    }
+
+    pub fn verify_credential_bundle(
+        env: Env,
+        bundle_id: u64,
+    ) -> credential_bundling::BundleVerificationResult {
+        Self::require_not_paused(&env);
+
+        let bundle: credential_bundling::CredentialBundle = env
+            .storage()
+            .instance()
+            .get(&DataKeyCredentialBundling::CredentialBundle(bundle_id))
+            .unwrap_or_else(|| panic!("bundle not found"));
+
+        let mut verified_count = 0u32;
+        for credential_id in bundle.credential_ids.iter() {
+            if let Ok(Some(_)) = env.storage().instance().get::<DataKey, Credential>(&DataKey::Credential(*credential_id)) {
+                verified_count += 1;
+            }
+        }
+
+        let all_valid = verified_count == bundle.credential_ids.len() as u32;
+        let total_cost = bundle.effective_cost_per_credential * bundle.credential_ids.len() as u64;
+        let discount_amount = (bundle.base_cost_per_credential * bundle.credential_ids.len() as u64 * bundle.discount_percentage as u64) / 100;
+
+        let result = credential_bundling::BundleVerificationResult {
+            bundle_id,
+            verified_count,
+            total_count: bundle.credential_ids.len() as u32,
+            all_valid,
+            total_cost,
+            discount_amount,
+            verified_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyCredentialBundling::BundleVerificationResult(bundle_id), &result);
+
+        let event_data = credential_bundling::BundleVerifiedEventData {
+            bundle_id,
+            verified_count,
+            total_count: bundle.credential_ids.len() as u32,
+            cost_savings: discount_amount,
+        };
+
+        let topic = String::from_str(&env, TOPIC_BUNDLE_VERIFIED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+
+        result
+    }
+
+    pub fn get_credential_bundle(env: Env, bundle_id: u64) -> credential_bundling::CredentialBundle {
+        env.storage()
+            .instance()
+            .get(&DataKeyCredentialBundling::CredentialBundle(bundle_id))
+            .unwrap_or_else(|| panic!("bundle not found"))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1597: Slice Failover and Redundancy
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    pub fn configure_slice_redundancy(
+        env: Env,
+        caller: Address,
+        slice_id: u64,
+        backup_slice_ids: Vec<u64>,
+        failover_threshold: u32,
+    ) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let config = slice_failover::SliceRedundancyConfig {
+            slice_id,
+            primary_slice_id: None,
+            backup_slice_ids,
+            failover_threshold,
+            state: slice_failover::FailoverState::Healthy,
+            last_state_change: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeySliceFailover::SliceRedundancyConfig(slice_id), &config);
+    }
+
+    pub fn add_backup_attestor(
+        env: Env,
+        caller: Address,
+        primary_attestor: Address,
+        backup_address: Address,
+        priority: u32,
+    ) -> u64 {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let backup_id = Self::get_next_counter(&env, "backup_attestor_counter");
+        let backup = slice_failover::BackupAttestor {
+            id: backup_id,
+            primary_attestor,
+            backup_address,
+            priority,
+            active: true,
+            created_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeySliceFailover::BackupAttestor(backup_id), &backup);
+
+        backup_id
+    }
+
+    pub fn trigger_failover(
+        env: Env,
+        caller: Address,
+        slice_id: u64,
+        unavailable_attestors: Vec<Address>,
+    ) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let config: slice_failover::SliceRedundancyConfig = env
+            .storage()
+            .instance()
+            .get(&DataKeySliceFailover::SliceRedundancyConfig(slice_id))
+            .unwrap_or_else(|| panic!("slice redundancy config not found"));
+
+        if unavailable_attestors.len() as u32 >= config.failover_threshold {
+            let event_id = Self::get_next_counter(&env, "failover_event_counter");
+            let event = slice_failover::FailoverEvent {
+                event_id,
+                slice_id,
+                credential_id: None,
+                unavailable_attestors: unavailable_attestors.clone(),
+                previous_state: config.state,
+                new_state: slice_failover::FailoverState::FailoverActive,
+                activated_backups: Vec::new(&env),
+                triggered_at: env.ledger().timestamp(),
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKeySliceFailover::FailoverEvent(event_id), &event);
+
+            let event_data = slice_failover::FailoverTriggeredEventData {
+                slice_id,
+                credential_id: None,
+                unavailable_count: unavailable_attestors.len() as u32,
+                state_change: slice_failover::FailoverState::FailoverActive as u32,
+                triggered_at: env.ledger().timestamp(),
+            };
+
+            let topic = String::from_str(&env, TOPIC_FAILOVER_TRIGGERED);
+            let mut topics: Vec<String> = Vec::new(&env);
+            topics.push_back(topic);
+            env.events().publish(topics, event_data);
+        }
+    }
+
+    pub fn resolve_failover(
+        env: Env,
+        caller: Address,
+        slice_id: u64,
+    ) {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+
+        let event_data = slice_failover::FailoverResolvedEventData {
+            slice_id,
+            recovery_state: slice_failover::FailoverState::Healthy as u32,
+            recovered_attestor_count: 0,
+            recovery_time_ms: 0,
+            resolved_at: env.ledger().timestamp(),
+        };
+
+        let topic = String::from_str(&env, TOPIC_FAILOVER_RESOLVED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event_data);
+    }
+
+    pub fn get_failover_status(env: Env, slice_id: u64) -> slice_failover::FailoverStateMachine {
+        env.storage()
+            .instance()
+            .get(&DataKeySliceFailover::FailoverStateMachine(slice_id))
+            .unwrap_or_else(|| {
+                slice_failover::FailoverStateMachine {
+                    slice_id,
+                    current_state: slice_failover::FailoverState::Healthy,
+                    state_history: Vec::new(&env),
+                    last_health_check: env.ledger().timestamp(),
+                    consecutive_failures: 0,
+                }
+            })
+    }
+
+    fn get_next_counter(env: &Env, counter_key: &str) -> u64 {
+        let counter_symbol = Symbol::short(counter_key);
+        let current = env
+            .storage()
+            .instance()
+            .get::<Symbol, u64>(&counter_symbol)
+            .unwrap_or(0);
+        let next = current + 1;
+        env.storage().instance().set(&counter_symbol, &next);
+        next    }
 }
 
 #[cfg(test)]
