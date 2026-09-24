@@ -190,6 +190,29 @@ app.get('/rpc/circuit-breaker', (_req, res) => {
   res.json(getDefaultRpcCircuitBreaker().getMetrics());
 });
 
+// Issue #1559: Database connection-pool metrics in both JSON and Prometheus
+// text-format expositions.  The pool must be initialised before this is
+// called (i.e. DATABASE_URL must be set); if not, a 503 is returned so
+// health-check tooling knows the pool is not yet ready.
+app.get('/metrics/db', (_req, res) => {
+  try {
+    const { getPoolMetricsPrometheus } = require('./db.js');
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(getPoolMetricsPrometheus());
+  } catch {
+    res.status(503).send('# Database pool not initialised\n');
+  }
+});
+
+app.get('/metrics/db/json', (_req, res) => {
+  try {
+    const { getPoolMetrics } = require('./db.js');
+    res.json(getPoolMetrics());
+  } catch {
+    res.status(503).json({ error: 'Database pool not initialised' });
+  }
+});
+
 // Critical contract event monitoring & alerting (issue #3). See
 // api-server/src/services/criticalEventListener.ts and
 // docs/critical-event-alerting.md. Polling only starts when a contract id
