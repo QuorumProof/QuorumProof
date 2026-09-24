@@ -29,8 +29,10 @@ pub mod credential_compartmentalization;
 pub mod homomorphic_encryption;
 pub mod conditional_attestation;
 mod credential_bundling;
+mod credential_bundling_helpers;
 mod credential_transfer;
 mod slice_failover;
+mod slice_failover_helpers;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
