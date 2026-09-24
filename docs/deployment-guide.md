@@ -334,3 +334,62 @@ If both calls succeed, the deployment is functional.
 - [Threat Model & Security](threat-model.md)
 - [Stellar CLI Documentation](https://developers.stellar.org/docs/tools/stellar-cli)
 - [Soroban Contract Deployment](https://developers.stellar.org/docs/build/smart-contracts/getting-started/deploy-to-testnet)
+
+---
+
+## 9. Alertmanager Configuration (Issue #1486)
+
+`monitoring/prometheus/alertmanager.yml` uses `${SLACK_ALERT_WEBHOOK_URL}` and
+`${PAGERDUTY_ROUTING_KEY}` as placeholders.  Alertmanager does **not** expand
+`${VAR}` natively — the file must be rendered with literal values before
+Alertmanager starts.  If this step is skipped, Alertmanager silently posts to
+the literal string `${SLACK_ALERT_WEBHOOK_URL}`, which means **no alerts are
+ever delivered**.
+
+### Required environment variables
+
+| Variable | Description |
+| --- | --- |
+| `SLACK_ALERT_WEBHOOK_URL` | Full Slack incoming webhook URL, e.g. `https://hooks.slack.com/services/T.../B.../...` |
+| `PAGERDUTY_ROUTING_KEY` | PagerDuty Events API v2 integration key (32 hex characters) |
+
+Both variables must be set before starting the monitoring stack.  Store them in
+your secrets manager (Vault, AWS Secrets Manager, etc.) and inject them into the
+environment at deploy time — **never commit them to the repository**.
+
+### Rendering the config (Docker Compose)
+
+```bash
+# 1. Set the required variables (source from your secrets manager or .env)
+export SLACK_ALERT_WEBHOOK_URL="https://hooks.slack.com/services/..."
+export PAGERDUTY_ROUTING_KEY="<32-char integration key>"
+
+# 2. Render the config (writes monitoring/prometheus/alertmanager.rendered.yml)
+./scripts/render_alertmanager_config.sh
+
+# 3. Start the full monitoring stack (Alertmanager will use the rendered file)
+docker compose -f monitoring/docker-compose.yml up -d
+```
+
+`docker-compose.yml` also includes a `render-alertmanager-config` service that
+runs `envsubst` automatically before Alertmanager starts.  Either approach is
+equivalent.  The rendered file is listed in `.gitignore` so it can never be
+committed accidentally.
+
+### Startup check
+
+`scripts/render_alertmanager_config.sh` exits with a non-zero status and prints
+a clear error message if either variable is unset:
+
+```
+ERROR: The following required environment variables are not set:
+  - SLACK_ALERT_WEBHOOK_URL
+  - PAGERDUTY_ROUTING_KEY
+
+Alertmanager will post notifications to the literal placeholder string
+${...} if these are left unset, meaning alerts will never be delivered.
+```
+
+The `docker-compose.yml` `render-alertmanager-config` service uses the
+`${VAR:?message}` Compose expansion syntax, which also fails loudly at
+`docker compose up` time if a variable is missing.
