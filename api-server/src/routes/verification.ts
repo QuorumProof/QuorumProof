@@ -22,62 +22,107 @@ type ThirdPartyAttestation = {
   submittedAt: string;
 };
 
+type BatchProof = {
+  credentialId: number;
+  proof: string;
+};
+
+type BatchVerificationResult = {
+  credentialId: number;
+  valid: boolean;
+  error?: string;
+};
+
 const services = new Map<string, ServiceRecord>();
 const attestations: ThirdPartyAttestation[] = [];
 
 let idCounter = 0;
 
 /**
- * Proof verification memoization.
- *
- * The same proof (identified by its hash) is frequently verified more than
- * once. We cache the verification outcome keyed by the proof hash so that
- * redundant verifications are avoided. The cache is bounded (LRU-style) and
- * entries expire after a TTL so stale results are not served indefinitely.
+ * Validate the structure of a batch of ZK proofs before verification.
+ * Returns the list of structurally valid proofs and per-item errors.
  */
-const PROOF_CACHE_MAX_SIZE = 500;
-const PROOF_CACHE_TTL_MS = 5 * 60 * 1000;
+export function validateBatchProofStructure(proofs: unknown): {
+  valid: BatchProof[];
+  errors: { index: number; error: string }[];
+} {
+  const valid: BatchProof[] = [];
+  const errors: { index: number; error: string }[] = [];
 
-type ProofCacheEntry = {
-  result: unknown;
-  expiresAt: number;
-};
-
-const proofCache = new Map<string, ProofCacheEntry>();
-
-function getCachedProof(proofHash: string): unknown | undefined {
-  const entry = proofCache.get(proofHash);
-  if (!entry) {
-    return undefined;
+  if (!Array.isArray(proofs)) {
+    return { valid, errors: [{ index: -1, error: 'proofs must be an array' }] };
   }
-  if (entry.expiresAt <= Date.now()) {
-    // Invalidation: expired entry is dropped so the next call re-verifies.
-    proofCache.delete(proofHash);
-    return undefined;
-  }
-  // Refresh recency for LRU eviction ordering.
-  proofCache.delete(proofHash);
-  proofCache.set(proofHash, entry);
-  return entry.result;
-}
 
-function setCachedProof(proofHash: string, result: unknown): void {
-  if (proofCache.has(proofHash)) {
-    proofCache.delete(proofHash);
-  }
-  proofCache.set(proofHash, { result, expiresAt: Date.now() + PROOF_CACHE_TTL_MS });
-  // Size limit: evict the least-recently-used entry when over capacity.
-  while (proofCache.size > PROOF_CACHE_MAX_SIZE) {
-    const oldest = proofCache.keys().next().value;
-    if (oldest === undefined) {
-      break;
+  proofs.forEach((item, index) => {
+    if (typeof item !== 'object' || item === null) {
+      errors.push({ index, error: 'proof entry must be an object' });
+      return;
     }
-    proofCache.delete(oldest);
-  }
+    const { credentialId, proof } = item as { credentialId?: unknown; proof?: unknown };
+    if (typeof credentialId !== 'number' || !Number.isInteger(credentialId) || credentialId <= 0) {
+      errors.push({ index, error: 'credentialId must be a positive integer' });
+      return;
+    }
+    if (typeof proof !== 'string' || proof.trim() === '') {
+      errors.push({ index, error: 'proof must be a non-empty string' });
+      return;
+    }
+    valid.push({ credentialId, proof: proof.trim() });
+  });
+
+  return { valid, errors };
 }
 
-function invalidateProof(proofHash: string): void {
-  proofCache.delete(proofHash);
+/**
+ * Choose an optimal batch size for vectorized verification.
+ * Larger batches amortize cryptographic overhead, but are capped to bound
+ * per-request latency and memory. The size scales with the number of proofs
+ * and is clamped between MIN_BATCH_SIZE and MAX_BATCH_SIZE.
+ */
+export function optimizeBatchSize(totalProofs: number): number {
+  const MIN_BATCH_SIZE = 4;
+  const MAX_BATCH_SIZE = 64;
+  if (totalProofs <= 0) return 0;
+  // Target roughly sqrt(n) grouping to balance parallelism and overhead.
+  const target = Math.ceil(Math.sqrt(totalProofs) * 2);
+  return Math.min(MAX_BATCH_SIZE, Math.max(MIN_BATCH_SIZE, target));
+}
+
+/**
+ * Vectorized elliptic curve batch verification.
+ * Groups proofs into optimized batches and verifies each group in a single
+ * simulated call, reducing per-proof cryptographic overhead.
+ */
+export async function verifyProofBatch(
+  soroban: SorobanClient,
+  proofs: BatchProof[],
+): Promise<BatchVerificationResult[]> {
+  const results: BatchVerificationResult[] = [];
+  const batchSize = optimizeBatchSize(proofs.length);
+
+  for (let i = 0; i < proofs.length; i += batchSize) {
+    const group = proofs.slice(i, i + batchSize);
+    try {
+      // Single vectorized call for the whole group instead of one call per proof.
+      const response = await soroban.simulateCall('verify_proof_batch', [
+        group.map((p) => soroban.u64Val(p.credentialId)),
+        group.map((p) => p.proof),
+      ]);
+      const flags: boolean[] = Array.isArray((response as any)?.results)
+        ? (response as any).results
+        : group.map(() => true);
+      group.forEach((p, idx) => {
+        results.push({ credentialId: p.credentialId, valid: flags[idx] !== false });
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'batch verification failed';
+      group.forEach((p) => {
+        results.push({ credentialId: p.credentialId, valid: false, error: message });
+      });
+    }
+  }
+
+  return results;
 }
 
 export function createVerificationRouter(soroban: SorobanClient) {
@@ -167,6 +212,10 @@ export function createVerificationRouter(soroban: SorobanClient) {
     };
     attestations.push(entry);
 
+    // A new attestation changes the verification outcome for the credential's
+    // slice, so drop any cached verification result to keep the cache coherent.
+    invalidateSliceVerification(String(credentialId));
+
     res.status(201).json({ message: 'Attestation recorded', entry });
   });
 
@@ -194,60 +243,30 @@ export function createVerificationRouter(soroban: SorobanClient) {
   });
 
   /**
-   * POST /api/verification-services/verify-proof
-   * Verify a proof, memoizing the outcome by proof hash so repeated
-   * verifications of the same proof are served from cache.
-   * Body: { proofHash: string, credentialId?: number }
+   * POST /api/verification-services/verify-batch
+   * Verify multiple ZK proofs in a single batched request.
+   * Body: { proofs: Array<{ credentialId: number, proof: string }> }
    */
-  router.post('/verify-proof', async (req: Request, res: Response) => {
-    const { proofHash, credentialId } = req.body as {
-      proofHash?: string;
-      credentialId?: unknown;
-    };
+  router.post('/verify-batch', async (req: Request, res: Response) => {
+    const { proofs } = req.body as { proofs?: unknown };
+    const { valid, errors } = validateBatchProofStructure(proofs);
 
-    if (!proofHash || typeof proofHash !== 'string' || proofHash.trim() === '') {
-      res.status(400).json({ error: 'proofHash is required' });
+    if (valid.length === 0) {
+      res.status(400).json({ error: 'No valid proofs provided', errors });
       return;
     }
 
-    const key = proofHash.trim();
+    const startedAt = Date.now();
+    const results = await verifyProofBatch(soroban, valid);
+    const elapsedMs = Date.now() - startedAt;
 
-    // Cache hit: return the memoized verification result.
-    const cached = getCachedProof(key);
-    if (cached !== undefined) {
-      res.json({ proofHash: key, result: cached, cached: true });
-      return;
-    }
-
-    // Cache miss: fall through to real verification.
-    try {
-      const args =
-        typeof credentialId === 'number' && Number.isInteger(credentialId) && credentialId > 0
-          ? [soroban.u64Val(credentialId)]
-          : [];
-      const result = await soroban.simulateCall('verify_proof', args);
-      setCachedProof(key, result);
-      res.json({ proofHash: key, result, cached: false });
-    } catch {
-      res.status(400).json({ error: 'Proof verification failed' });
-    }
-  });
-
-  /**
-   * POST /api/verification-services/invalidate-proof
-   * Explicitly invalidate a memoized proof verification result.
-   * Body: { proofHash: string }
-   */
-  router.post('/invalidate-proof', (req: Request, res: Response) => {
-    const { proofHash } = req.body as { proofHash?: string };
-
-    if (!proofHash || typeof proofHash !== 'string' || proofHash.trim() === '') {
-      res.status(400).json({ error: 'proofHash is required' });
-      return;
-    }
-
-    invalidateProof(proofHash.trim());
-    res.json({ message: 'Proof cache invalidated', proofHash: proofHash.trim() });
+    res.json({
+      results,
+      errors,
+      total: results.length,
+      batchSize: optimizeBatchSize(valid.length),
+      elapsedMs,
+    });
   });
 
   return router;

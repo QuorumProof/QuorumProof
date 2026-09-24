@@ -427,6 +427,88 @@ export function noDuplicatesValidator(fieldName: string): CustomValidator {
 }
 
 // ---------------------------------------------------------------------------
+// Credential query filtering (Issue #1563)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fields that may be used as server-side credential query filters.  Only these
+ * fields are accepted; anything else is rejected to prevent unbounded or
+ * injection-prone queries.  `credential_type` and `status` are the common,
+ * indexed fields.
+ */
+export const CREDENTIAL_FILTER_FIELDS = ['credential_type', 'status'] as const;
+
+export type CredentialFilterField = (typeof CREDENTIAL_FILTER_FIELDS)[number];
+
+/**
+ * Allowed values per filter field.  Values are validated against this map so
+ * that only known, safe values reach the query layer.
+ */
+export const CREDENTIAL_FILTER_VALUES: Record<CredentialFilterField, readonly string[]> = {
+  credential_type: ['PE', 'EX', 'AC', 'DE'],
+  status: ['active', 'revoked', 'expired', 'pending'],
+};
+
+/**
+ * A single parsed credential filter, e.g. `{ field: 'credential_type', value: 'PE' }`.
+ */
+export interface CredentialFilter {
+  field: CredentialFilterField;
+  value: string;
+}
+
+/**
+ * Parses and validates credential query filters from a request query object.
+ *
+ * Supported syntax: `?credential_type=PE&status=active`.  Unknown fields,
+ * non-string values, and values outside the allow-list are rejected.
+ *
+ * Returns `{ filters }` on success or `{ error }` with a human-readable
+ * message on failure.  The returned filters are safe to pass to the query
+ * layer (parameterised), never interpolated into SQL.
+ */
+export function parseCredentialFilters(
+  query: unknown,
+): { filters: CredentialFilter[] } | { error: string } {
+  if (typeof query !== 'object' || query === null) {
+    return { filters: [] };
+  }
+
+  const filters: CredentialFilter[] = [];
+  const record = query as Record<string, unknown>;
+
+  for (const key of Object.keys(record)) {
+    if (!(CREDENTIAL_FILTER_FIELDS as readonly string[]).includes(key)) {
+      return { error: `Unknown filter field: ${key}` };
+    }
+
+    const raw = record[key];
+    if (typeof raw !== 'string') {
+      return { error: `Filter ${key} must be a single string value` };
+    }
+
+    const field = key as CredentialFilterField;
+    const allowed = CREDENTIAL_FILTER_VALUES[field];
+    if (!allowed.includes(raw)) {
+      return { error: `Invalid value for ${key}: ${raw}` };
+    }
+
+    filters.push({ field, value: raw });
+  }
+
+  return { filters };
+}
+
+/**
+ * Custom validator for the credential query endpoint.  Rejects unknown filter
+ * fields and invalid values before the handler runs.
+ */
+export const credentialFilterValidator: CustomValidator = (data) => {
+  const result = parseCredentialFilters(data);
+  return 'error' in result ? result.error : true;
+};
+
+// ---------------------------------------------------------------------------
 // Shared schemas
 // ---------------------------------------------------------------------------
 
@@ -437,8 +519,6 @@ export const schemas = {
       properties: {
         credential_ids: {
           type: 'array',
-        },
-      },
-    },
-  },
-};
+       
+
+/* … truncated 3359 chars — edit only what you need near the top … */
