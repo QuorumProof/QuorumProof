@@ -60,6 +60,8 @@ import { getDefaultCriticalEventListener } from './services/criticalEventListene
 import { broadcastEvent as _wsServerBroadcastEvent, getConnectionCount, closeWsServer } from './ws/server.js';
 import { dispatchWebhookEvent } from './services/webhooks.js';
 import { createGracefulShutdown } from './services/gracefulShutdown.js';
+// #1559: Connection pooling for the API server.
+import { createConnectionPool, createConnectionPoolMiddleware } from './services/connectionPool.js';
 import * as Soroban from './soroban.js';
 
 const app = express();
@@ -67,6 +69,17 @@ const app = express();
 // #1311: Create the HTTP server early so the graceful shutdown service can
 // reference it before httpServer.listen() is called.
 const httpServer = createServer(app);
+
+// #1559: Connection pool — reuses upstream connections across requests to
+// reduce per-request connection overhead. Size and wait behaviour are
+// configurable via env vars; when the pool is exhausted callers wait up to
+// POOL_MAX_WAIT_MS before degrading gracefully instead of blocking forever.
+const connectionPool = createConnectionPool({
+  maxSize: parseInt(process.env.POOL_MAX_SIZE ?? '20', 10),
+  minSize: parseInt(process.env.POOL_MIN_SIZE ?? '2', 10),
+  maxWaitMs: parseInt(process.env.POOL_MAX_WAIT_MS ?? '5000', 10),
+  idleTimeoutMs: parseInt(process.env.POOL_IDLE_TIMEOUT_MS ?? '30000', 10),
+});
 
 // #1311: Graceful shutdown — drains in-flight requests before exiting.
 // The drain timeout defaults to 30 s and is overridable via env var so
@@ -94,6 +107,10 @@ app.use(structuredLoggingMiddleware);
 app.use(distributedTracingMiddleware);
 
 app.use(express.json({ limit: '100kb' }));
+
+// #1559: Acquire a pooled connection for the request lifetime and release it
+// back to the pool on response finish so it can be reused.
+app.use(createConnectionPoolMiddleware(connectionPool));
 
 // #1311: Track in-flight HTTP requests. Must come after body parsers so
 // the counter includes the full request lifetime, and early enough that
@@ -343,5 +360,4 @@ function broadcastEvent(...args: Parameters<typeof _wsServerBroadcastEvent>) {
   return result;
 }
 
-export { broadcastEvent };
-export default app;
+/* … truncated 5498 chars — edit only what you need near the top … */
