@@ -27,6 +27,10 @@ pub mod migration_v2;
 pub mod range_proofs;
 pub mod credential_compartmentalization;
 pub mod homomorphic_encryption;
+pub mod conditional_attestation;
+mod credential_bundling;
+mod credential_transfer;
+mod slice_failover;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -135,6 +139,20 @@ const TOPIC_ROLE_DELEGATION_REVOKED: &str = "RoleDelegationRevoked";
 // ── Issue #1511: Governance audit trail for cross-contract address repointing ──
 const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
 const TOPIC_CONTRACT_ADDRESS_UPDATED: &str = "ContractAddressUpdated";
+
+// ── Issue #1594: Conditional Attestation ──
+const TOPIC_CONDITIONAL_ATTESTATION: &str = "ConditionalAttestationEvaluated";
+
+// ── Issue #1595: Credential Transfer with Liability ──
+const TOPIC_LIABILITY_TRANSFERRED: &str = "LiabilityTransferred";
+
+// ── Issue #1596: Credential Bundling ──
+const TOPIC_BUNDLE_CREATED: &str = "CredentialBundleCreated";
+const TOPIC_BUNDLE_VERIFIED: &str = "CredentialBundleVerified";
+
+// ── Issue #1597: Slice Failover ──
+const TOPIC_FAILOVER_TRIGGERED: &str = "FailoverTriggered";
+const TOPIC_FAILOVER_RESOLVED: &str = "FailoverResolved";
 
 #[contracttype]
 #[derive(Clone)]
@@ -1527,6 +1545,69 @@ pub struct StakeLiquidationRecord {
     pub liquidated_at: u64,
     /// Reason for liquidation
     pub reason: soroban_sdk::String,
+}
+
+/// Storage keys for conditional attestation (Issue #1594)
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyConditionalAttestation {
+    /// Conditional attestation tree (id -> ConditionalAttestationTree)
+    ConditionalAttestationTree(u64),
+    /// Condition predicates (condition_id -> ConditionPredicate)
+    ConditionPredicate(u64),
+    /// Conditional attestation nodes (node_id -> ConditionalAttestationNode)
+    ConditionalAttestationNode(u64),
+    /// Condition evaluation cache (credential_id, condition_id -> ConditionEvaluationResult)
+    ConditionEvaluationCache(u64, u64),
+}
+
+/// Storage keys for credential transfer and liability (Issue #1595)
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyCredentialTransfer {
+    /// Credential transfer records (transfer_id -> CredentialTransfer)
+    CredentialTransfer(u64),
+    /// Liability records (liability_id -> LiabilityRecord)
+    LiabilityRecord(u64),
+    /// Liability proof records (proof_id -> LiabilityProof)
+    LiabilityProof(u64),
+    /// Audit trail for liability (credential_id -> Vec<LiabilityAuditTrail>)
+    LiabilityAuditTrail(u64),
+    /// Pending transfers for an issuer (issuer -> Vec<u64> of transfer_ids)
+    PendingTransfersForIssuer(Address),
+}
+
+/// Storage keys for credential bundling (Issue #1596)
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyCredentialBundling {
+    /// Credential bundles (bundle_id -> CredentialBundle)
+    CredentialBundle(u64),
+    /// Bundle verification results (bundle_id -> BundleVerificationResult)
+    BundleVerificationResult(u64),
+    /// Bundle analytics (bundle_id -> BundleAnalytics)
+    BundleAnalytics(u64),
+    /// Bundles for a subject (subject -> Vec<u64> of bundle_ids)
+    SubjectBundles(Address),
+}
+
+/// Storage keys for slice failover and redundancy (Issue #1597)
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeySliceFailover {
+    /// Backup attestors (backup_id -> BackupAttestor)
+    BackupAttestor(u64),
+    /// Slice redundancy config (slice_id -> SliceRedundancyConfig)
+    SliceRedundancyConfig(u64),
+    /// Failover events (event_id -> FailoverEvent)
+    FailoverEvent(u64),
+    /// Failover state machine (slice_id -> FailoverStateMachine)
+    FailoverStateMachine(u64),
+    /// Health check results (slice_id, attestor -> AttestorHealthCheck)
+    AttestorHealthCheck(u64, Address),
+    /// Failover statistics (slice_id -> FailoverStatistics)
+    FailoverStatistics(u64),
+}
 }
 
 /// A BBS+ selective-disclosure credential record.
