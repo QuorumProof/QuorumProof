@@ -44,6 +44,8 @@ import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
 import { structuredLoggingMiddleware } from './middleware/structuredLogging.js';
 // #1307: Distributed tracing
 import { distributedTracingMiddleware } from './middleware/distributedTracingMiddleware.js';
+// #1566: Concurrent request handling limits
+import { createConcurrencyLimiter } from './middleware/concurrencyLimiter.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -125,6 +127,22 @@ const apiRateLimiter = createAdaptiveRateLimiter({
 });
 
 app.use('/api', apiRateLimiter);
+
+// #1566: Concurrent request handling limits. Caps in-flight requests with a
+// semaphore, queues excess requests (graceful degradation) up to a bounded
+// depth, and applies tighter per-endpoint limits for expensive routes.
+const concurrencyLimiter = createConcurrencyLimiter({
+  name: 'api',
+  maxConcurrent: parseInt(process.env.CONCURRENCY_MAX ?? '100', 10),
+  maxQueue: parseInt(process.env.CONCURRENCY_MAX_QUEUE ?? '200', 10),
+  maxWaitMs: parseInt(process.env.CONCURRENCY_MAX_WAIT_MS ?? '5000', 10),
+  pathOverrides: {
+    '/api/verify': parseInt(process.env.CONCURRENCY_VERIFY_MAX ?? '20', 10),
+    '/api/credentials': parseInt(process.env.CONCURRENCY_CREDENTIALS_MAX ?? '50', 10),
+  },
+});
+app.use('/api', concurrencyLimiter.middleware);
+
 app.use(cacheControl);
 
 app.use('/api/slices', slicesRouter);
@@ -158,155 +176,17 @@ app.use('/api/me', createDashboardRouter(sorobanClient));
 // #1308: Health check endpoints
 app.use('/health', healthRouter);
 
+// #1566: Expose concurrency queue metrics for observability.
+app.get('/health/concurrency', (_req: Request, res: Response) => {
+  res.json({ limiters: concurrencyLimiter.metrics() });
+});
+
 // #1309: Auto-generated OpenAPI 3.1 docs — JSON spec, Swagger UI, ReDoc.
 app.use('/api-docs', docsRouter);
 
 // #1305: Privilege escalation prevention
 app.use('/api/admin/privilege-escalation', privilegeEscalationRouter);
 
-// #1307: Distributed tracing
-app.use('/api/tracing', tracingRouter);
+// #1307: Distributed 
 
-app.get('/ws/metrics', (_req, res) => {
-  res.json(getWsMetrics());
-});
-
-// Prometheus exposition, tagged with this instance's id — scrape every
-// replica and aggregate (e.g. sum(quorumproof_ws_connections)) to get
-// cluster-wide totals. See docs/websocket-scaling.md.
-app.get('/metrics/ws', (_req, res) => {
-  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-  res.send(getWsMetricsPrometheus());
-});
-
-// Circuit breaker state for outbound Soroban RPC calls (issue #2). See
-// api-server/src/services/rpcCircuitBreaker.ts and docs/resilience.md.
-app.get('/metrics/rpc', (_req, res) => {
-  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-  res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
-});
-
-app.get('/rpc/circuit-breaker', (_req, res) => {
-  res.json(getDefaultRpcCircuitBreaker().getMetrics());
-});
-
-// Critical contract event monitoring & alerting (issue #3). See
-// api-server/src/services/criticalEventListener.ts and
-// docs/critical-event-alerting.md. Polling only starts when a contract id
-// is configured; harmless (and inert) otherwise, so this is safe to load
-// in any environment including tests.
-const criticalEventListener = getDefaultCriticalEventListener();
-if (process.env.CONTRACT_QUORUM_PROOF && process.env.CRITICAL_EVENT_MONITORING !== 'disabled') {
-  criticalEventListener.start();
-}
-
-app.get('/metrics/events', (_req, res) => {
-  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-  res.send(criticalEventListener.getMetricsPrometheus());
-});
-
-app.get('/events/critical/recent', (_req, res) => {
-  res.json({
-    metrics: criticalEventListener.getMetrics(),
-    events: criticalEventListener.getRecentEvents(),
-  });
-});
-
-const PORT = parseInt(process.env.PORT ?? '3000', 10);
-createWsServer(httpServer, '/ws');
-
-// #1311: Register cleanup tasks that run after the HTTP server stops
-// accepting connections — the WS server and critical event listener
-// hold their own resources that should be released cleanly.
-gracefulShutdown.addCleanupTask(() => {
-  criticalEventListener.stop();
-});
-gracefulShutdown.addCleanupTask(() => {
-  closeWsServer();
-});
-
-// #1311: Attach SIGTERM / SIGINT handlers. This is idempotent; the
-// handlers are registered with process.once so they fire at most once.
-gracefulShutdown.registerSignalHandlers();
-
-/**
- * Apply any pending database migrations before accepting traffic. Manual
- * migrations were error-prone (an operator forgets to run them, environments
- * drift). Skipped entirely when DATABASE_URL isn't set so this stays a no-op
- * for the file/DurableLog-backed stores the API server also supports.
- *
- * Issue #870: uses the shared connection pool (initPool / getPool) instead of
- * opening a dedicated one-shot Pool here.  The pool is kept alive for the
- * lifetime of the server so subsequent route handlers that need Postgres can
- * call getPool() instead of each opening their own connection.
- *
- * A failed migration is treated as fatal for startup — see
- * docs/database-migrations.md for the rollback procedure.
- */
-async function runStartupMigrations(): Promise<void> {
-  if (!process.env.DATABASE_URL) return;
-
-  const { initPool } = await import('./db.js');
-  const { runMigrations } = await import('./migrations/runner.js');
-
-  // initPool is idempotent — safe to call here and again if any route
-  // handler calls it independently.
-  const pool = await initPool(process.env.DATABASE_URL);
-  const applied = await runMigrations(pool);
-  if (applied.length > 0) {
-    console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
-  }
-  // Note: do NOT call pool.end() here — the pool lives for the full server
-  // lifetime.  closePool() is called on graceful shutdown below.
-}
-
-(async () => {
-  try {
-    await runStartupMigrations();
-  } catch (err) {
-    console.error('Startup migration failed, refusing to start:', err);
-    process.exit(1);
-    return;
-  }
-  httpServer.listen(PORT, () =>
-    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
-  );
-
-  // Issue #870: Graceful shutdown — drain the connection pool so in-flight
-  // queries finish cleanly before the process exits.
-  async function shutdown(signal: string): Promise<void> {
-    console.log(`Received ${signal}, shutting down gracefully…`);
-    httpServer.close(async () => {
-      try {
-        const { closePool } = await import('./db.js');
-        await closePool();
-      } catch {
-        // Best-effort; if db.ts was never imported (no DATABASE_URL) this is a no-op.
-      }
-      process.exit(0);
-    });
-  }
-  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
-  process.once('SIGINT', () => { void shutdown('SIGINT'); });
-})();
-
-// #926: fire webhooks for credential events alongside WS broadcast
-function broadcastEvent(...args: Parameters<typeof _wsServerBroadcastEvent>) {
-  const result = _wsServerBroadcastEvent(...args);
-  const [event] = args;
-  const webhookEvents = ['credential_issued', 'credential_attested', 'credential_revoked'] as const;
-  if (webhookEvents.includes(event.type as typeof webhookEvents[number])) {
-    dispatchWebhookEvent({
-      event: event.type,
-      credential_id: event.credential_id,
-      issuer: event.issuer,
-      holder: event.holder,
-      attestor: event.attestor,
-      timestamp: event.timestamp ?? new Date().toISOString(),
-    });
-  }
-  return result;
-}
-
-export { broadcastEvent };
-export default app;
+/* … truncated 5498 chars — edit only what you need near the top … */
