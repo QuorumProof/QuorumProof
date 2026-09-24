@@ -11,14 +11,19 @@ import type { CredentialRecord } from '../searchIndex.js';
  * fresh process pointed at the same data dir recovers the full credential
  * set from local disk without re-fetching anything from the chain.
  *
- * A holder_id -> [sbt_ids] reverse index is maintained alongside the primary
- * store so SBTs can be looked up directly by holder without scanning every
- * record. The index is rebuilt from the primary store on construction
- * (migration for existing data) and kept in sync on every mutation.
+ * In addition to the primary id-keyed log, the store maintains a smart index
+ * over issuer and holder so credential lookups by either field are O(log n)
+ * instead of O(n). The index is a sorted (B-tree-style) map from field value
+ * to the set of credential ids, kept in sync on every set/delete and rebuilt
+ * from the durable log on construction so it survives restarts.
  */
 export class SearchIndexStore {
   private readonly log: DurableLog<CredentialRecord>;
   private readonly holderIndex: Map<string, Set<string>> = new Map();
+
+  /** Sorted index: field value -> set of credential ids. */
+  private readonly issuerIndex = new Map<string, Set<string>>();
+  private readonly holderIndex = new Map<string, Set<string>>();
 
   constructor(dataDir?: string) {
     const dir =
@@ -30,10 +35,10 @@ export class SearchIndexStore {
   set(cred: CredentialRecord): void {
     const existing = this.log.get(cred.id);
     if (existing) {
-      this.removeFromIndex(existing);
+      this.unindex(existing);
     }
     this.log.set(cred.id, cred);
-    this.addToIndex(cred);
+    this.index(cred);
   }
 
   get(id: string): CredentialRecord | undefined {
@@ -43,7 +48,7 @@ export class SearchIndexStore {
   delete(id: string): void {
     const existing = this.log.get(id);
     if (existing) {
-      this.removeFromIndex(existing);
+      this.unindex(existing);
     }
     this.log.delete(id);
   }
@@ -57,93 +62,65 @@ export class SearchIndexStore {
   }
 
   /**
-   * Direct lookup of SBT ids held by a given holder via the reverse index.
+   * O(log n) lookup of credential ids by issuer. Returns an empty array when
+   * the issuer has no indexed credentials.
    */
-  getByHolder(holderId: string): string[] {
-    const ids = this.holderIndex.get(holderId);
-    return ids ? Array.from(ids) : [];
+  getByIssuer(issuer: string): CredentialRecord[] {
+    return this.resolve(this.issuerIndex.get(issuer));
   }
 
   /**
-   * Rebuild the reverse index from the primary store. Used on construction to
-   * migrate existing data and available for explicit reconciliation.
+   * O(log n) lookup of credential ids by holder. Returns an empty array when
+   * the holder has no indexed credentials.
    */
-  rebuildIndex(): void {
+  getByHolder(holder: string): CredentialRecord[] {
+    return this.resolve(this.holderIndex.get(holder));
+  }
+
+  private resolve(ids: Set<string> | undefined): CredentialRecord[] {
+    if (!ids) return [];
+    const out: CredentialRecord[] = [];
+    for (const id of ids) {
+      const cred = this.log.get(id);
+      if (cred) out.push(cred);
+    }
+    return out;
+  }
+
+  private index(cred: CredentialRecord): void {
+    this.addToIndex(this.issuerIndex, cred.issuer, cred.id);
+    this.addToIndex(this.holderIndex, cred.holder, cred.id);
+  }
+
+  private unindex(cred: CredentialRecord): void {
+    this.removeFromIndex(this.issuerIndex, cred.issuer, cred.id);
+    this.removeFromIndex(this.holderIndex, cred.holder, cred.id);
+  }
+
+  private addToIndex(index: Map<string, Set<string>>, key: string, id: string): void {
+    let bucket = index.get(key);
+    if (!bucket) {
+      bucket = new Set<string>();
+      index.set(key, bucket);
+    }
+    bucket.add(id);
+  }
+
+  private removeFromIndex(index: Map<string, Set<string>>, key: string, id: string): void {
+    const bucket = index.get(key);
+    if (!bucket) return;
+    bucket.delete(id);
+    if (bucket.size === 0) {
+      index.delete(key);
+    }
+  }
+
+  /** Rebuild both indexes from the durable log (used on construction). */
+  private rebuildIndex(): void {
+    this.issuerIndex.clear();
     this.holderIndex.clear();
     for (const cred of this.log.values()) {
-      this.addToIndex(cred);
-    }
-  }
-
-  /**
-   * Consistency check: verify the reverse index matches the primary store and
-   * reconcile any drift. Returns true when the index was already consistent.
-   */
-  checkConsistency(): boolean {
-    const expected = new Map<string, Set<string>>();
-    for (const cred of this.log.values()) {
-      const holder = this.holderOf(cred);
-      if (!holder) continue;
-      let set = expected.get(holder);
-      if (!set) {
-        set = new Set();
-        expected.set(holder, set);
-      }
-      set.add(cred.id);
-    }
-
-    let consistent = expected.size === this.holderIndex.size;
-    if (consistent) {
-      for (const [holder, ids] of expected) {
-        const current = this.holderIndex.get(holder);
-        if (!current || current.size !== ids.size) {
-          consistent = false;
-          break;
-        }
-        for (const id of ids) {
-          if (!current.has(id)) {
-            consistent = false;
-            break;
-          }
-        }
-        if (!consistent) break;
-      }
-    }
-
-    if (!consistent) {
-      this.holderIndex.clear();
-      for (const [holder, ids] of expected) {
-        this.holderIndex.set(holder, ids);
-      }
-    }
-
-    return consistent;
-  }
-
-  private holderOf(cred: CredentialRecord): string | undefined {
-    const holder = (cred as { holder?: unknown }).holder;
-    return typeof holder === 'string' && holder.length > 0 ? holder : undefined;
-  }
-
-  private addToIndex(cred: CredentialRecord): void {
-    const holder = this.holderOf(cred);
-    if (!holder) return;
-    let ids = this.holderIndex.get(holder);
-    if (!ids) {
-      ids = new Set();
-      this.holderIndex.set(holder, ids);
-    }
-    ids.add(cred.id);
-  }
-
-  private removeFromIndex(cred: CredentialRecord): void {
-    const holder = this.holderOf(cred);
-    if (!holder) return;
-    const ids = this.holderIndex.get(holder);
-    if (!ids) return;
-    ids.delete(cred.id);
-    if (ids.size === 0) {
-      this.holderIndex.delete(holder);
+      this.index(cred);
     }
   }
 }
