@@ -199,6 +199,9 @@ app.use('/api/admin', adminRouter);
 // #1307: Distributed tracing
 app.use('/api/tracing', tracingRouter);
 
+// #1605 WebSocket event information and history
+app.use('/api/events', createEventsRouter());
+
 app.get('/ws/metrics', (_req, res) => {
   res.json(getWsMetrics());
 });
