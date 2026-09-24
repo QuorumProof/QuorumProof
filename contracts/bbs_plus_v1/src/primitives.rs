@@ -245,6 +245,24 @@ impl Gt {
     pub fn identity() -> Self {
         Gt(bls12_381::Gt::identity())
     }
+
+    /// Return the underlying `bls12_381::Gt` value.
+    pub fn inner(&self) -> bls12_381::Gt {
+        self.0
+    }
+}
+
+impl core::ops::Add<Gt> for Gt {
+    type Output = Gt;
+    fn add(self, rhs: Gt) -> Gt {
+        Gt(self.0 + rhs.0)
+    }
+}
+
+impl core::ops::AddAssign<Gt> for Gt {
+    fn add_assign(&mut self, rhs: Gt) {
+        self.0 = self.0 + rhs.0;
+    }
 }
 
 /// Linear combination: compute a * P + b * Q
