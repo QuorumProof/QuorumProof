@@ -274,8 +274,5 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 ## Handsoff notes
 
-<!-- handsoff-issue-1560 -->
-- #1560: Add Query Result Pagination with Cursor
-
-<!-- handsoff-issue-1561 -->
-- #1561: Optimize BBS+ Signature Generation
+<!-- handsoff-issue-1555 -->
+- #1555: Implement Credential Caching Layer with TTL
