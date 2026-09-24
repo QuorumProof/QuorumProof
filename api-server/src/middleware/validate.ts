@@ -237,6 +237,88 @@ export function noDuplicatesValidator(fieldName: string): CustomValidator {
 }
 
 // ---------------------------------------------------------------------------
+// Credential query filtering (Issue #1563)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fields that may be used as server-side credential query filters.  Only these
+ * fields are accepted; anything else is rejected to prevent unbounded or
+ * injection-prone queries.  `credential_type` and `status` are the common,
+ * indexed fields.
+ */
+export const CREDENTIAL_FILTER_FIELDS = ['credential_type', 'status'] as const;
+
+export type CredentialFilterField = (typeof CREDENTIAL_FILTER_FIELDS)[number];
+
+/**
+ * Allowed values per filter field.  Values are validated against this map so
+ * that only known, safe values reach the query layer.
+ */
+export const CREDENTIAL_FILTER_VALUES: Record<CredentialFilterField, readonly string[]> = {
+  credential_type: ['PE', 'EX', 'AC', 'DE'],
+  status: ['active', 'revoked', 'expired', 'pending'],
+};
+
+/**
+ * A single parsed credential filter, e.g. `{ field: 'credential_type', value: 'PE' }`.
+ */
+export interface CredentialFilter {
+  field: CredentialFilterField;
+  value: string;
+}
+
+/**
+ * Parses and validates credential query filters from a request query object.
+ *
+ * Supported syntax: `?credential_type=PE&status=active`.  Unknown fields,
+ * non-string values, and values outside the allow-list are rejected.
+ *
+ * Returns `{ filters }` on success or `{ error }` with a human-readable
+ * message on failure.  The returned filters are safe to pass to the query
+ * layer (parameterised), never interpolated into SQL.
+ */
+export function parseCredentialFilters(
+  query: unknown,
+): { filters: CredentialFilter[] } | { error: string } {
+  if (typeof query !== 'object' || query === null) {
+    return { filters: [] };
+  }
+
+  const filters: CredentialFilter[] = [];
+  const record = query as Record<string, unknown>;
+
+  for (const key of Object.keys(record)) {
+    if (!(CREDENTIAL_FILTER_FIELDS as readonly string[]).includes(key)) {
+      return { error: `Unknown filter field: ${key}` };
+    }
+
+    const raw = record[key];
+    if (typeof raw !== 'string') {
+      return { error: `Filter ${key} must be a single string value` };
+    }
+
+    const field = key as CredentialFilterField;
+    const allowed = CREDENTIAL_FILTER_VALUES[field];
+    if (!allowed.includes(raw)) {
+      return { error: `Invalid value for ${key}: ${raw}` };
+    }
+
+    filters.push({ field, value: raw });
+  }
+
+  return { filters };
+}
+
+/**
+ * Custom validator for the credential query endpoint.  Rejects unknown filter
+ * fields and invalid values before the handler runs.
+ */
+export const credentialFilterValidator: CustomValidator = (data) => {
+  const result = parseCredentialFilters(data);
+  return 'error' in result ? result.error : true;
+};
+
+// ---------------------------------------------------------------------------
 // Shared schemas
 // ---------------------------------------------------------------------------
 
@@ -247,128 +329,6 @@ export const schemas = {
       properties: {
         credential_ids: {
           type: 'array',
-          items: { type: 'integer', minimum: 1 },
-          minItems: 1,
-          maxItems: 50,
-        },
-        slice_id: { type: 'integer', minimum: 1 },
-      },
-      required: ['credential_ids', 'slice_id'],
-      additionalProperties: false,
-    },
-  },
+       
 
-  verifyBatchClaims: {
-    body: {
-      type: 'object',
-      properties: {
-        items: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 100,
-          items: {
-            type: 'object',
-            properties: {
-              credential_id: { type: 'integer', minimum: 1 },
-              claim_type: { type: 'string', minLength: 1, maxLength: 64 },
-            },
-            required: ['credential_id', 'claim_type'],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ['items'],
-      additionalProperties: false,
-    },
-  },
-
-  notificationPreferences: {
-    body: {
-      type: 'object',
-      properties: {
-        address: { type: 'string', minLength: 1 },
-        email: { type: 'string' },
-        phone: { type: 'string' },
-        channels: {
-          type: 'array',
-          items: { type: 'string', enum: ['email', 'sms'] },
-          minItems: 1,
-        },
-        events: {
-          type: 'array',
-          items: {
-            type: 'string',
-            enum: [
-              'credential_issued', 'credential_revoked', 'credential_suspended',
-              'credential_attested', 'credential_expiring',
-            ],
-          },
-          minItems: 1,
-        },
-        /** #928: optional per-type filter; 1=Degree, 2=License, 3=Employment */
-        credential_type_filters: {
-          type: 'array',
-          items: { type: 'integer', minimum: 1 },
-        },
-        enabled: { type: 'boolean' },
-      },
-      required: ['address', 'channels', 'events'],
-      additionalProperties: false,
-    },
-  },
-
-  notificationSend: {
-    body: {
-      type: 'object',
-      properties: {
-        address: { type: 'string', minLength: 1 },
-        event: {
-          type: 'string',
-          enum: [
-            'credential_issued', 'credential_revoked', 'credential_suspended',
-            'credential_attested', 'credential_expiring',
-          ],
-        },
-        credential_id: { type: 'integer', minimum: 1 },
-        /** #928: optional credential type for per-type preference filtering */
-        credential_type: { type: 'integer', minimum: 1 },
-        issuer: { type: 'string' },
-        holder: { type: 'string' },
-      },
-      required: ['address', 'event', 'credential_id'],
-      additionalProperties: false,
-    },
-  },
-
-  analyticsEvent: {
-    body: {
-      type: 'object',
-      properties: {
-        type: {
-          type: 'string',
-          enum: ['issued', 'attested', 'revoked', 'suspended', 'verified'],
-        },
-        credential_id: { type: 'string', minLength: 1 },
-        timestamp: { type: 'string', minLength: 1 },
-        issuer: { type: 'string' },
-        subject: { type: 'string' },
-        attestor: { type: 'string' },
-      },
-      required: ['type', 'credential_id', 'timestamp'],
-      additionalProperties: false,
-    },
-  },
-
-  auditVerify: {
-    body: {
-      type: 'object',
-      properties: {
-        batch_id: { type: 'integer', minimum: 1 },
-      },
-      required: ['batch_id'],
-      additionalProperties: false,
-    },
-  },
-};
-
-export default validate;
+/* … truncated 3359 chars — edit only what you need near the top … */
