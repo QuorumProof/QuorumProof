@@ -1,5 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { getPool } from '../db.js';
+import {
+  publishTierAdvancedEvent,
+  publishTierPointsAccruedEvent,
+} from '../services/tierRedemptionEvents.js';
 
 export type CredentialTier = 'bronze' | 'silver' | 'gold';
 
@@ -145,6 +149,9 @@ export function createCredentialTiersRouter() {
 
         await client.query('COMMIT');
 
+        // Publish tier advancement event for real-time notifications
+        publishTierAdvancedEvent(parseInt(id, 10), currentTier, nextTier, points);
+
         res.json({
           credential_id: id,
           from_tier: currentTier,
@@ -193,6 +200,15 @@ export function createCredentialTiersRouter() {
       }
 
       const row = result.rows[0];
+
+      // Publish tier points accrued event for real-time notifications
+      publishTierPointsAccruedEvent(
+        row.credential_id,
+        points,
+        row.tier,
+        row.tier_points
+      );
+
       res.json({
         credential_id: row.credential_id,
         tier: row.tier,

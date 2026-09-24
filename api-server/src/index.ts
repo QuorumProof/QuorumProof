@@ -55,6 +55,7 @@ import { createGracefulShutdown } from './services/gracefulShutdown.js';
 import * as Soroban from './soroban.js';
 import { createCredentialTiersRouter } from './routes/credentialTiers.js';
 import { createCredentialRedemptionRouter } from './routes/credentialRedemption.js';
+import { initTierRedemptionEvents } from './services/tierRedemptionEvents.js';
 
 const app = express();
 
@@ -311,6 +312,9 @@ function broadcastEvent(...args: Parameters<typeof _wsServerBroadcastEvent>) {
   }
   return result;
 }
+
+// #1605: Initialize tier/redemption events broadcaster for real-time push notifications
+initTierRedemptionEvents(broadcastEvent);
 
 export { broadcastEvent };
 export default app;

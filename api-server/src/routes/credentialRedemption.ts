@@ -1,5 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { getPool } from '../db.js';
+import {
+  publishRedemptionRequestedEvent,
+  publishRedemptionClaimedEvent,
+} from '../services/tierRedemptionEvents.js';
 
 type RedemptionStatus = 'pending' | 'approved' | 'claimed' | 'expired' | 'cancelled';
 
@@ -201,6 +205,14 @@ export function createCredentialRedemptionRouter() {
           submitted_at: redempReq.submitted_at,
         };
 
+        // Publish redemption requested event for real-time notifications
+        publishRedemptionRequestedEvent(
+          parseInt(id, 10),
+          redempReq.id,
+          redempReq.amount,
+          destination_address
+        );
+
         res.status(201).json(redemptionReq);
       } catch (err) {
         await client.query('ROLLBACK');
@@ -309,6 +321,9 @@ export function createCredentialRedemptionRouter() {
         );
 
         await client.query('COMMIT');
+
+        // Publish redemption claimed event for real-time notifications
+        publishRedemptionClaimedEvent(parseInt(id, 10), parseInt(requestId, 10), req_row.amount);
 
         res.json(updateResult.rows[0]);
       } catch (err) {
