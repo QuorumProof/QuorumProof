@@ -31030,6 +31030,22 @@ mod integration_nested_slices;
 #[path = "migration_tests.rs"]
 mod migration_tests;
 
+#[cfg(test)]
+#[path = "tests_issue_1594.rs"]
+mod tests_issue_1594;
+
+#[cfg(test)]
+#[path = "tests_issue_1595.rs"]
+mod tests_issue_1595;
+
+#[cfg(test)]
+#[path = "tests_issue_1596.rs"]
+mod tests_issue_1596;
+
+#[cfg(test)]
+#[path = "tests_issue_1597.rs"]
+mod tests_issue_1597;
+
 mod circuit_breaker;
 mod migration;
 mod state_metrics;
