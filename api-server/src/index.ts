@@ -53,6 +53,8 @@ import { broadcastEvent as _wsServerBroadcastEvent, getConnectionCount, closeWsS
 import { dispatchWebhookEvent } from './services/webhooks.js';
 import { createGracefulShutdown } from './services/gracefulShutdown.js';
 import * as Soroban from './soroban.js';
+import { createCredentialTiersRouter } from './routes/credentialTiers.js';
+import { createCredentialRedemptionRouter } from './routes/credentialRedemption.js';
 
 const app = express();
 
@@ -130,9 +132,11 @@ app.use(cacheControl);
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
 app.use('/api/credentials', credentialExportRouter); // #1000 credential export (json/pdf/qrcode)
-app.use('/api/verify', verifyRouter);
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
+app.use('/api/credentials', createCredentialTiersRouter()); // #1602 credential tiering
+app.use('/api/credentials', createCredentialRedemptionRouter()); // #1603 credential redemption
+app.use('/api/verify', verifyRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
