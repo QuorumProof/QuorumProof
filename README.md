@@ -276,3 +276,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <!-- handsoff-issue-1560 -->
 - #1560: Add Query Result Pagination with Cursor
+
+<!-- handsoff-issue-1561 -->
+- #1561: Optimize BBS+ Signature Generation
