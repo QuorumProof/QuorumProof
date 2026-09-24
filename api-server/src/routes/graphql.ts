@@ -1,110 +1,10 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
-
-export type SorobanClient = {
-  simulateCall: typeof SimulateCallType;
-  u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
-  addressVal: (a: string) => ReturnType<typeof SimulateCallType>;
-};
-
-function serializeBigInt(value: unknown): unknown {
-  if (typeof value === 'bigint') return value.toString();
-  if (Array.isArray(value)) return value.map(serializeBigInt);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, serializeBigInt(v)])
-    );
-  }
-  return value;
-}
-
-// Minimal introspection schema returned for __schema queries
-const SCHEMA_DESCRIPTION = {
-  types: [
-    {
-      name: 'Query',
-      kind: 'OBJECT',
-      fields: [
-        { name: 'credential', description: 'Fetch a single credential by ID' },
-        { name: 'credentials', description: 'Fetch multiple credentials by IDs' },
-        { name: 'slice', description: 'Fetch a quorum slice by ID' },
-        { name: 'credentialCount', description: 'Total number of credentials' },
-        { name: 'attestorReputation', description: 'Reputation score for an attestor address' },
-      ],
-    },
-    { name: 'Credential', kind: 'OBJECT' },
-    { name: 'Slice', kind: 'OBJECT' },
-    { name: 'AttestorReputation', kind: 'OBJECT' },
-  ],
-};
+import { GraphQLResolvers, type SorobanClient } from '../services/graphqlResolvers.js';
+import { graphqlSchema } from '../services/graphqlSchema.js';
 
 type GraphQLVariables = Record<string, unknown>;
 
-interface ResolverContext {
-  soroban: SorobanClient;
-}
-
-async function resolveCredential(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
-  const id = args['id'];
-  if (!id) throw new Error('credential requires id argument');
-  const numId = parseInt(String(id), 10);
-  if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
-  const cred = await ctx.soroban.simulateCall('get_credential', [ctx.soroban.u64Val(numId)]);
-  return serializeBigInt(cred);
-}
-
-async function resolveCredentials(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown[]> {
-  const ids = args['ids'];
-  if (!Array.isArray(ids) || ids.length === 0) throw new Error('credentials requires ids array');
-  if (ids.length > 50) throw new Error('credentials ids cannot exceed 50 items');
-  const results = await Promise.all(
-    ids.map(async (id: unknown) => {
-      try {
-        const numId = parseInt(String(id), 10);
-        if (!Number.isInteger(numId) || numId <= 0) return null;
-        const cred = await ctx.soroban.simulateCall('get_credential', [ctx.soroban.u64Val(numId)]);
-        return serializeBigInt(cred);
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return results;
-}
-
-async function resolveSlice(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
-  const id = args['id'];
-  if (!id) throw new Error('slice requires id argument');
-  const numId = parseInt(String(id), 10);
-  if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
-  const slice = await ctx.soroban.simulateCall('get_slice', [ctx.soroban.u64Val(numId)]);
-  return serializeBigInt(slice);
-}
-
-async function resolveCredentialCount(ctx: ResolverContext): Promise<number> {
-  const count: bigint = await ctx.soroban.simulateCall('get_credential_count', []);
-  return Number(count);
-}
-
-async function resolveAttestorReputation(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
-  const address = args['address'];
-  if (!address || typeof address !== 'string') throw new Error('attestorReputation requires address argument');
-  const score = await ctx.soroban.simulateCall('get_attestor_reputation', [ctx.soroban.addressVal(address)]);
-  const scoreNum = typeof score === 'bigint' ? Number(score) : (typeof score === 'number' ? score : 0);
-  return { address, score: scoreNum };
-}
 
 // Simple operation parser: extracts top-level field selections and their arguments
 // Handles patterns like:  fieldName(arg: value) { ... }  and  fieldName
@@ -171,21 +71,27 @@ function parseOperations(query: string): Array<{
 
 export function createGraphqlRouter(soroban: SorobanClient) {
   const router = Router();
-  const ctx: ResolverContext = { soroban };
 
   /**
    * POST /api/graphql
-   * #869 — GraphQL-compatible endpoint for batch queries.
+   * #1604 — GraphQL endpoint for batch queries with federation support.
    * Body: { query: string, variables?: object }
    *
    * Supported top-level fields:
    *   credential(id: ID)
    *   credentials(ids: [ID])
+   *   credentialsByIssuer(issuer: String!)
    *   slice(id: ID)
    *   credentialCount
    *   attestorReputation(address: String)
+   *   credentialTier(credentialId: ID!)
+   *   credentialRewards(credentialId: ID!, status: String)
+   *   rewardsSummary(credentialId: ID!)
+   *   searchCredentials(query: String!)
+   *   tierStats
    */
   router.post('/', async (req: Request, res: Response) => {
+    const startTime = Date.now();
     const { query, variables } = req.body as { query?: unknown; variables?: unknown };
 
     if (typeof query !== 'string' || !query.trim()) {
@@ -193,14 +99,26 @@ export function createGraphqlRouter(soroban: SorobanClient) {
       return;
     }
 
-    // Resolve variables into args for each operation
     const vars = (variables && typeof variables === 'object' && !Array.isArray(variables))
       ? (variables as GraphQLVariables)
       : {};
 
-    // Handle introspection
+    // Handle introspection queries
     if (query.includes('__schema') || query.includes('__type')) {
-      res.json({ data: { __schema: SCHEMA_DESCRIPTION } });
+      res.json({
+        data: {
+          __schema: {
+            types: [
+              { name: 'Query', kind: 'OBJECT', description: 'Root query type' },
+              { name: 'Mutation', kind: 'OBJECT', description: 'Root mutation type' },
+              { name: 'Credential', kind: 'OBJECT' },
+              { name: 'CredentialTier', kind: 'OBJECT' },
+              { name: 'Reward', kind: 'OBJECT' },
+              { name: 'TierStatistic', kind: 'OBJECT' },
+            ],
+          },
+        },
+      });
       return;
     }
 
@@ -212,28 +130,46 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
     const data: Record<string, unknown> = {};
     const errors: Array<{ message: string; path: string }> = [];
+    const resolvers = new GraphQLResolvers({ soroban, startTime });
 
     await Promise.all(
       operations.map(async ({ alias, field, args }) => {
         const key = alias ?? field;
-        // Merge query-level variables (by matching var references like $varName)
         const resolvedArgs: GraphQLVariables = { ...vars, ...args };
         try {
           switch (field) {
             case 'credential':
-              data[key] = await resolveCredential(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveCredential(resolvedArgs);
               break;
             case 'credentials':
-              data[key] = await resolveCredentials(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveCredentials(resolvedArgs);
+              break;
+            case 'credentialsByIssuer':
+              data[key] = await resolvers.resolveCredentialsByIssuer(resolvedArgs);
               break;
             case 'slice':
-              data[key] = await resolveSlice(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveSlice(resolvedArgs);
               break;
             case 'credentialCount':
-              data[key] = await resolveCredentialCount(ctx);
+              data[key] = await resolvers.resolveCredentialCount();
               break;
             case 'attestorReputation':
-              data[key] = await resolveAttestorReputation(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveAttestorReputation(resolvedArgs);
+              break;
+            case 'credentialTier':
+              data[key] = await resolvers.resolveCredentialTier(resolvedArgs);
+              break;
+            case 'credentialRewards':
+              data[key] = await resolvers.resolveCredentialRewards(resolvedArgs);
+              break;
+            case 'rewardsSummary':
+              data[key] = await resolvers.resolveRewardsSummary(resolvedArgs);
+              break;
+            case 'searchCredentials':
+              data[key] = await resolvers.resolveSearchCredentials(resolvedArgs);
+              break;
+            case 'tierStats':
+              data[key] = await resolvers.resolveTierStats();
               break;
             default:
               errors.push({ message: `Unknown field: ${field}`, path: key });
@@ -248,26 +184,57 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
     const response: Record<string, unknown> = { data };
     if (errors.length > 0) response['errors'] = errors;
+
+    const metrics = resolvers.getBenchmarkMetrics();
+    res.set('X-GraphQL-Duration-Ms', String(metrics.elapsedMs));
     res.json(response);
   });
 
   /**
    * GET /api/graphql
-   * Returns schema information for discoverability.
+   * Returns schema information and federation metadata for discoverability.
    */
   router.get('/', (_req: Request, res: Response) => {
     res.json({
       endpoint: 'POST /api/graphql',
-      description: 'GraphQL-compatible batch query endpoint',
-      supported_fields: [
-        'credential(id: ID)',
-        'credentials(ids: [ID])',
-        'slice(id: ID)',
-        'credentialCount',
-        'attestorReputation(address: String)',
-      ],
+      description: 'GraphQL endpoint with federation support (#1604)',
+      version: '2.0',
+      schema: graphqlSchema,
+      federation: {
+        enabled: true,
+        version: '2.0',
+        entities: ['Credential', 'CredentialTier', 'AttestorReputation'],
+      },
+      supported_fields: {
+        queries: [
+          'credential(id: ID!)',
+          'credentials(ids: [ID!]!)',
+          'credentialsByIssuer(issuer: String!, limit: Int, offset: Int)',
+          'slice(id: ID!)',
+          'credentialCount',
+          'attestorReputation(address: String!)',
+          'credentialTier(credentialId: ID!)',
+          'credentialRewards(credentialId: ID!, status: String)',
+          'rewardsSummary(credentialId: ID!)',
+          'searchCredentials(query: String!, limit: Int, offset: Int)',
+          'tierStats',
+        ],
+        mutations: [
+          'updateCredentialReputation(credentialId: ID!, scoreIncrement: Int!)',
+          'claimReward(credentialId: ID!, rewardId: ID!)',
+          'settleEscrow(escrowId: ID!, settlementHash: String!)',
+        ],
+      },
+      benchmarking: {
+        supported: true,
+        metricsHeader: 'X-GraphQL-Duration-Ms',
+      },
       example: {
-        query: '{ credential(id: "1") { id subject issuer } credentials(ids: ["1","2"]) { id subject } credentialCount }',
+        query: `{
+  credential(id: "1") { id subject issuer tier { tier reputationScore } }
+  tierStats { tier count avgReputation }
+  credentialCount
+}`,
       },
     });
   });
