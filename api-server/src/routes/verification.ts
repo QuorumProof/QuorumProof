@@ -212,6 +212,10 @@ export function createVerificationRouter(soroban: SorobanClient) {
     };
     attestations.push(entry);
 
+    // A new attestation changes the verification outcome for the credential's
+    // slice, so drop any cached verification result to keep the cache coherent.
+    invalidateSliceVerification(String(credentialId));
+
     res.status(201).json({ message: 'Attestation recorded', entry });
   });
 

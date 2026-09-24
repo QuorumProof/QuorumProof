@@ -19,6 +19,7 @@ import type { CredentialRecord } from '../searchIndex.js';
  */
 export class SearchIndexStore {
   private readonly log: DurableLog<CredentialRecord>;
+  private readonly holderIndex: Map<string, Set<string>> = new Map();
 
   /** Sorted index: field value -> set of credential ids. */
   private readonly issuerIndex = new Map<string, Set<string>>();
