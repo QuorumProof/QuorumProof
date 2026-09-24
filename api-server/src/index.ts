@@ -30,6 +30,8 @@ import { cacheControl } from './middleware/cacheControl.js';
 import { createCorsFromEnv } from './middleware/cors.js';
 // #1304: Adaptive rate limiter
 import { createAdaptiveRateLimiter } from './middleware/adaptiveRateLimiter.js';
+// #1566: Concurrent request limiting
+import { getDefaultConcurrentRequestLimiter } from './middleware/concurrentRequestLimiter.js';
 // #1310: API versioning
 import { createApiVersionMiddleware } from './middleware/apiVersion.js';
 import { v1Compat } from './middleware/v1Compat.js';
@@ -44,6 +46,8 @@ import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
 import { structuredLoggingMiddleware } from './middleware/structuredLogging.js';
 // #1307: Distributed tracing
 import { distributedTracingMiddleware } from './middleware/distributedTracingMiddleware.js';
+// #1569: Field selection (response size optimization)
+import fieldSelection, { CREDENTIAL_FIELD_SCHEMA, VERIFICATION_FIELD_SCHEMA } from './middleware/fieldSelection.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -127,9 +131,20 @@ const apiRateLimiter = createAdaptiveRateLimiter({
 app.use('/api', apiRateLimiter);
 app.use(cacheControl);
 
+// #1566: Concurrent request limiting — cap in-flight requests per endpoint
+// to prevent resource exhaustion.  Excess requests are queued up to the
+// configured queue depth before a 503 is returned.
+const concurrentLimiter = getDefaultConcurrentRequestLimiter();
+app.use('/api', concurrentLimiter.middleware);
+
 app.use('/api/slices', slicesRouter);
+// #1569: Field selection — apply to /api/credentials so callers can use
+// ?fields=id,status,subject to reduce response payload size.
+app.use('/api/credentials', fieldSelection({ schema: CREDENTIAL_FIELD_SCHEMA }));
 app.use('/api/credentials', credentialsRouter);
 app.use('/api/credentials', credentialExportRouter); // #1000 credential export (json/pdf/qrcode)
+// #1569: Field selection on verify responses
+app.use('/api/verify', fieldSelection({ schema: VERIFICATION_FIELD_SCHEMA }));
 app.use('/api/verify', verifyRouter);
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
@@ -184,6 +199,12 @@ app.get('/metrics/ws', (_req, res) => {
 app.get('/metrics/rpc', (_req, res) => {
   res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
+});
+
+// #1566: Concurrent request limiter metrics — gauge per endpoint group.
+app.get('/metrics/concurrent', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(concurrentLimiter.getMetricsPrometheus());
 });
 
 app.get('/rpc/circuit-breaker', (_req, res) => {

@@ -8,6 +8,12 @@ import {
 } from '../soroban.js';
 import { validate, schemas } from '../middleware/validate.js';
 import { metricsStore } from '../services/metrics.js';
+// #1568: Proof verification memoization — avoid redundant on-chain lookups
+// for the same (credential_id, claim_type, proof) tuple.
+import {
+  getDefaultProofMemoizationService,
+  buildProofCacheKey,
+} from '../services/proofMemoization.js';
 
 /**
  * Best-effort caller identity for analytics attribution — same header
@@ -118,6 +124,8 @@ function digestHex(input: string): string {
 
 export function createVerifyRouter(soroban: SorobanClient) {
   const router = Router();
+  // #1568: Proof memoization — shared across all requests in this process.
+  const proofMemo = getDefaultProofMemoizationService();
 
   /**
    * POST /api/verify/batch
@@ -297,6 +305,30 @@ export function createVerifyRouter(soroban: SorobanClient) {
               ? 'revoked'
               : 'active';
 
+          // #1568: Check memoization cache before recording analytics.
+          // The proof payload is not sent in this batch endpoint (it's a
+          // claim-type check, not a raw ZK proof submission), so we key the
+          // memo on (credentialId, claimType) without a proof blob.
+          const memoKey = buildProofCacheKey(pair.credential_id, pair.claim_type, '');
+          const memoHit = proofMemo.get(memoKey);
+          if (memoHit) {
+            return {
+              credential_id: pair.credential_id,
+              claim_type: pair.claim_type,
+              status: memoHit.verified ? 'verified' : 'failed',
+              proof: memoHit.verified
+                ? {
+                    verified_at: memoHit.cachedAt,
+                    credential_status: credentialStatus,
+                    digest: digestHex(
+                      `${pair.credential_id}\u0000${pair.claim_type}\u0000${memoHit.cachedAt}`
+                    ),
+                  }
+                : null,
+              error: null,
+            };
+          }
+
           // #1001: feed the analytics event log so /api/analytics/verifications
           // can report verification counts by claim type and verifier.
           metricsStore.recordEvent({
@@ -305,6 +337,10 @@ export function createVerifyRouter(soroban: SorobanClient) {
             timestamp: verifiedAt,
             metadata: { claim_type: pair.claim_type, verifier },
           });
+
+          // #1568: Store the result in the memoization cache so subsequent
+          // requests for the same pair skip the above work.
+          proofMemo.set(memoKey, pair.credential_id, pair.claim_type, true);
 
           return {
             credential_id: pair.credential_id,

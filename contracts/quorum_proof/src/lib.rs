@@ -24,6 +24,8 @@ pub mod upgrade_history;
 pub mod atomic_operations;
 pub mod attestation_veto;
 pub mod migration_v2;
+// #1567: Custom serialization helpers and lazy deserialization for hot paths.
+pub mod serialization;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
