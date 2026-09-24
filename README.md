@@ -75,6 +75,10 @@ Real **BLS12-381 pairing-based** Groth16 and PLONK verification is implemented i
 ./scripts/test.sh
 ```
 
+> **All scripts**: `scripts/` holds 29 operational scripts spanning build, deploy, backup/DR,
+> migration, benchmarking, and security scanning. See [scripts/README.md](scripts/README.md)
+> for a grouped index with descriptions, CI wiring, and test coverage information.
+
 ### Setup Environment
 
 Copy the example environment file:
