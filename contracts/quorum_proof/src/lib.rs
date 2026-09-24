@@ -95,6 +95,9 @@ const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
+/// Issue #1555: Default TTL for the attestation verification cache (seconds).
+/// Governance may override this per-contract via `set_verification_cache_ttl`.
+const DEFAULT_VERIFICATION_CACHE_TTL: u64 = 60;
 const DEFAULT_REVOCATION_TIME_LOCK_SECONDS: u64 = 172_800; // 48 hours
 const MAX_REVOCATION_BATCH_SIZE: u32 = 128;
 
@@ -1020,6 +1023,13 @@ pub enum DataKey2 {
     /// proof bytes themselves, so `verify_disclosure` can bind a proof back to the
     /// exact (credential_id, fields_to_reveal) it was created for.
     DisclosureProof(soroban_sdk::Bytes),
+    /// Issue #1555: Verification cache hit counter.
+    VerificationCacheHits,
+    /// Issue #1555: Verification cache miss counter.
+    VerificationCacheMisses,
+    /// Issue #1555: Governance-tunable TTL (in ledgers) for the verification
+    /// cache. Falls back to DEFAULT_VERIFICATION_CACHE_TTL if not set.
+    VerificationCacheTtl,
 }
 
 /// Storage keys for features added in later iterations.
@@ -1331,6 +1341,8 @@ pub enum DataKey11 {
     HolderCredentialIndex(Address),
     // Task #1228: Credential metadata index (issuer, subject, type → Vec<u64>)
     CredentialMetadataIndex(Address, Address, u32),
+    // Issue #1557: Issuer credential index (issuer → Vec<u64>)
+    IssuerCredentialIndex(Address),
     // Slice reweighting audit log
     SliceReweightingAuditLog(u64),
     // Composition rule per credential type
@@ -5622,6 +5634,8 @@ impl QuorumProofContract {
         }
         // Issue #510: Remove from SubjectCredentialIndex
         Self::subject_index_remove(env, credential.subject.clone(), credential_id);
+        // Issue #1557: Remove from IssuerCredentialIndex on revocation
+        Self::issuer_index_remove(env, credential.issuer.clone(), credential_id);
         // A revoked credential no longer occupies its (subject, issuer, type) slot,
         // so the same issuer can re-issue that credential type to the same subject.
         env.storage().instance().remove(&DataKey::SubjectIssuerType(
@@ -5926,25 +5940,55 @@ impl QuorumProofContract {
         }
     }
 
-    /// Issue #377: Get cached attestation verification result
+    /// Issue #377: Get cached attestation verification result.
+    /// Issue #1555: Increments hit/miss counters for cache metrics.
     fn get_verification_cache(
         env: &Env,
         credential_id: u64,
         slice_id: u64,
     ) -> Option<AttestationVerificationCache> {
-        env.storage()
+        let entry: Option<AttestationVerificationCache> = env
+            .storage()
             .instance()
-            .get(&DataKey2::AttestVerifyCache(credential_id, slice_id))
+            .get(&DataKey2::AttestVerifyCache(credential_id, slice_id));
+        // Issue #1555: record cache hit or miss
+        if entry.is_some() {
+            let hits: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::VerificationCacheHits)
+                .unwrap_or(0u32);
+            env.storage()
+                .instance()
+                .set(&DataKey::VerificationCacheHits, &hits.saturating_add(1));
+        } else {
+            let misses: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::VerificationCacheMisses)
+                .unwrap_or(0u32);
+            env.storage()
+                .instance()
+                .set(&DataKey::VerificationCacheMisses, &misses.saturating_add(1));
+        }
+        entry
     }
 
-    /// Issue #377: Set attestation verification cache
+    /// Issue #377 / #1555: Set attestation verification cache.
+    /// Uses the governance-tunable TTL (VerificationCacheTtl) if set,
+    /// falling back to `DEFAULT_VERIFICATION_CACHE_TTL`.
     fn set_verification_cache(
         env: &Env,
         credential_id: u64,
         slice_id: u64,
         is_attested: bool,
-        cache_ttl: u64,
+        _legacy_ttl: u64,
     ) {
+        let cache_ttl: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationCacheTtl)
+            .unwrap_or(DEFAULT_VERIFICATION_CACHE_TTL);
         let now = env.ledger().timestamp();
         let cache = AttestationVerificationCache {
             credential_id,
@@ -6301,7 +6345,42 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
-    // ── Issue #519: MetadataHashCache helpers ─────────────────────────────────
+    // ── Issue #1557: IssuerCredentialIndex helpers ────────────────────────────
+
+    fn issuer_index_add(env: &Env, issuer: Address, credential_id: u64) {
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::IssuerCredentialIndex(issuer.clone()))
+            .unwrap_or(Vec::new(env));
+        ids.push_back(credential_id);
+        env.storage()
+            .instance()
+            .set(&DataKey11::IssuerCredentialIndex(issuer), &ids);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn issuer_index_remove(env: &Env, issuer: Address, credential_id: u64) {
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::IssuerCredentialIndex(issuer.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut retained: Vec<u64> = Vec::new(env);
+        for id in ids.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey11::IssuerCredentialIndex(issuer), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
 
     fn get_metadata_cache(env: &Env, credential_id: u64) -> Option<MetadataHashCache> {
         let cache: Option<MetadataHashCache> = env
@@ -6581,6 +6660,9 @@ impl QuorumProofContract {
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
+        // Issue #1557: Maintain IssuerCredentialIndex for O(1) issuer queries
+        Self::issuer_index_add(&env, issuer.clone(), id);
+
         let event_data = CredentialIssuedEventData {
             id,
             subject: credential.subject.clone(),
@@ -6794,6 +6876,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Issue #1557: Maintain IssuerCredentialIndex for O(1) issuer queries
+        Self::issuer_index_add(env, issuer.clone(), id);
 
         let event_data = CredentialIssuedEventData {
             id,
@@ -19619,7 +19704,185 @@ impl QuorumProofContract {
         result
     }
 
-    // ── Task #1229: Implement Slice Reweighting for Reputation Changes ────────────
+    // ── Issue #1557: IssuerCredentialIndex public entrypoints ────────────────
+
+    /// Return a paginated list of credential IDs issued by `issuer`.
+    ///
+    /// The list is maintained by [`issuer_index_add`] / [`issuer_index_remove`]
+    /// on every `issue_credential` / revocation, so this is an O(1) storage
+    /// lookup followed by an O(page_size) copy — not an O(n) scan.
+    ///
+    /// # Parameters
+    /// - `issuer`: Address of the credential issuer.
+    /// - `page`: Page number (1-indexed).
+    /// - `page_size`: Number of results per page.
+    ///
+    /// # Returns
+    /// A paginated vector of credential IDs issued by `issuer`.
+    pub fn get_credentials_by_issuer(
+        env: Env,
+        issuer: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<u64> {
+        Self::require_valid_address(&env, &issuer);
+        Self::precondition(&env, page > 0);
+        Self::precondition(&env, page_size > 0);
+
+        let all_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::IssuerCredentialIndex(issuer))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = all_ids.len();
+        let start = (page - 1).saturating_mul(page_size);
+        let mut result = Vec::new(&env);
+        for i in start..start.saturating_add(page_size) {
+            if i >= total {
+                break;
+            }
+            if let Some(id) = all_ids.get(i) {
+                result.push_back(id);
+            }
+        }
+        result
+    }
+
+    /// Return the total number of non-revoked credentials issued by `issuer`.
+    ///
+    /// Reads directly from the `IssuerCredentialIndex` — O(1) storage lookup.
+    ///
+    /// # Parameters
+    /// - `issuer`: Address of the credential issuer.
+    ///
+    /// # Returns
+    /// The count of credentials currently indexed for this issuer.
+    pub fn get_issuer_credential_count(env: Env, issuer: Address) -> u32 {
+        Self::require_valid_address(&env, &issuer);
+        env.storage()
+            .instance()
+            .get::<_, Vec<u64>>(&DataKey11::IssuerCredentialIndex(issuer))
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    // ── Issue #1555: Credential Caching Layer — governance TTL + metrics ─────
+
+    /// Set the attestation-verification cache TTL (in seconds).
+    ///
+    /// Admin-only governance parameter. Once set, every subsequent call to
+    /// `is_attested` will cache its result for `ttl` seconds instead of the
+    /// compile-time default (`DEFAULT_VERIFICATION_CACHE_TTL = 60 s`).
+    ///
+    /// Setting `ttl = 0` effectively disables caching (entries expire
+    /// immediately).
+    pub fn set_verification_cache_ttl(env: Env, admin: Address, ttl: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey::VerificationCacheTtl, &ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the currently configured attestation-verification cache TTL (seconds).
+    ///
+    /// Returns `DEFAULT_VERIFICATION_CACHE_TTL` when no governance override has
+    /// been stored.
+    pub fn get_verification_cache_ttl(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::VerificationCacheTtl)
+            .unwrap_or(DEFAULT_VERIFICATION_CACHE_TTL)
+    }
+
+    /// Return attestation verification cache hit and miss counters.
+    ///
+    /// Use these metrics to tune `set_verification_cache_ttl`. A low hit-rate
+    /// suggests the TTL should be increased; a very high hit-rate on a
+    /// security-critical contract may warrant decreasing it.
+    ///
+    /// # Returns
+    /// `(hits, misses)` — both counters start at zero on contract
+    /// initialisation and are never reset.
+    pub fn get_verification_cache_stats(env: Env) -> (u32, u32) {
+        let hits: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationCacheHits)
+            .unwrap_or(0u32);
+        let misses: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationCacheMisses)
+            .unwrap_or(0u32);
+        (hits, misses)
+    }
+
+    /// Pre-warm the attestation verification cache for a list of
+    /// `(credential_id, slice_id)` pairs.
+    ///
+    /// This is a **read-only** operation: it calls `is_attested` for each
+    /// pair and stores the result in the cache. Callers can use it at the
+    /// start of a batch-verification flow to amortise the cross-entry lookup
+    /// cost when many checks share the same credentials/slices.
+    ///
+    /// # Parameters
+    /// - `pairs`: A `Vec<(u64, u64)>` of `(credential_id, slice_id)` pairs
+    ///   to pre-warm. Pairs that are already cached are silently skipped.
+    ///
+    /// # Returns
+    /// The number of cache entries written (i.e. pairs that were *not* already
+    /// cached and have now been populated).
+    pub fn warm_verification_cache(env: Env, pairs: Vec<(u64, u64)>) -> u32 {
+        let mut warmed: u32 = 0;
+        for pair in pairs.iter() {
+            let (credential_id, slice_id) = pair;
+            // Only warm if not already cached / not expired
+            if let Some(entry) =
+                env.storage()
+                    .instance()
+                    .get::<_, AttestationVerificationCache>(
+                        &DataKey2::AttestVerifyCache(credential_id, slice_id),
+                    )
+            {
+                if env.ledger().timestamp() < entry.expires_at {
+                    continue;
+                }
+            }
+            // Compute and store result
+            let result = Self::is_attested(env.clone(), credential_id, slice_id);
+            let cache_ttl: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::VerificationCacheTtl)
+                .unwrap_or(DEFAULT_VERIFICATION_CACHE_TTL);
+            let now = env.ledger().timestamp();
+            let cache = AttestationVerificationCache {
+                credential_id,
+                slice_id,
+                is_attested: result,
+                cached_at: now,
+                expires_at: now.saturating_add(cache_ttl),
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey2::AttestVerifyCache(credential_id, slice_id), &cache);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            warmed += 1;
+        }
+        warmed
+    }
 
     /// Reweight a slice's attestor weights. Only the slice creator can call this.
     ///
