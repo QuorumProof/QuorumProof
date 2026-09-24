@@ -164,6 +164,22 @@ const apiRateLimiter = createAdaptiveRateLimiter({
 
 app.use('/api', powRateLimiter.middleware);
 app.use('/api', apiRateLimiter);
+
+// #1566: Concurrent request handling limits. Caps in-flight requests with a
+// semaphore, queues excess requests (graceful degradation) up to a bounded
+// depth, and applies tighter per-endpoint limits for expensive routes.
+const concurrencyLimiter = createConcurrencyLimiter({
+  name: 'api',
+  maxConcurrent: parseInt(process.env.CONCURRENCY_MAX ?? '100', 10),
+  maxQueue: parseInt(process.env.CONCURRENCY_MAX_QUEUE ?? '200', 10),
+  maxWaitMs: parseInt(process.env.CONCURRENCY_MAX_WAIT_MS ?? '5000', 10),
+  pathOverrides: {
+    '/api/verify': parseInt(process.env.CONCURRENCY_VERIFY_MAX ?? '20', 10),
+    '/api/credentials': parseInt(process.env.CONCURRENCY_CREDENTIALS_MAX ?? '50', 10),
+  },
+});
+app.use('/api', concurrencyLimiter.middleware);
+
 app.use(cacheControl);
 
 app.use('/api/slices', slicesRouter);
