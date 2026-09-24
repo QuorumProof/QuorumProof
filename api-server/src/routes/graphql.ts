@@ -69,8 +69,23 @@ function parseOperations(query: string): Array<{
   return ops;
 }
 
+function maxGraphqlDepth(query: string): number {
+  let depth = 0;
+  let maxDepth = 0;
+  for (const char of query) {
+    if (char === '{') {
+      depth += 1;
+      maxDepth = Math.max(maxDepth, depth);
+    } else if (char === '}') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return maxDepth;
+}
+
 export function createGraphqlRouter(soroban: SorobanClient) {
   const router = Router();
+  const maxDepth = parseInt(process.env.GRAPHQL_MAX_DEPTH ?? '8', 10);
 
   /**
    * POST /api/graphql
@@ -96,6 +111,11 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
     if (typeof query !== 'string' || !query.trim()) {
       res.status(400).json({ errors: [{ message: 'query must be a non-empty string' }] });
+      return;
+    }
+    const depth = maxGraphqlDepth(query);
+    if (Number.isFinite(maxDepth) && depth > maxDepth) {
+      res.status(400).json({ errors: [{ message: `query depth ${depth} exceeds max depth ${maxDepth}` }] });
       return;
     }
 
