@@ -29829,6 +29829,335 @@ mod doc_tests {
         client.attest(&subject, &credential_id, &slice_id, &true, &None);
         assert!(client.is_attested(&credential_id, &slice_id));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1590: Slice Composition Templates
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_init_predefined_templates() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.init_predefined_templates(&admin);
+
+        let templates = client.list_predefined_templates();
+        assert!(templates.len() > 0, "should have predefined templates");
+
+        let pe_template = client.get_predefined_template(1u32);
+        assert!(pe_template.is_some(), "PE template should exist");
+
+        let template = pe_template.unwrap();
+        assert_eq!(template.template_id, 1u32);
+        assert_eq!(template.recommended_threshold_bps, 6600u32);
+    }
+
+    #[test]
+    fn test_get_predefined_template() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.init_predefined_templates(&admin);
+
+        let degree_template = client.get_predefined_template(2u32);
+        assert!(degree_template.is_some(), "degree template should exist");
+
+        let template = degree_template.unwrap();
+        assert_eq!(template.category, soroban_sdk::String::from_str(&env, "Education"));
+    }
+
+    #[test]
+    fn test_list_predefined_templates_all_available() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.init_predefined_templates(&admin);
+
+        let templates = client.list_predefined_templates();
+        assert_eq!(templates.len(), 4, "should have 4 predefined templates");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1591: Slice Performance Scoring
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_calculate_slice_performance_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attestor = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let creator = Address::generate(&env);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+
+        let score = client.calculate_slice_performance_score(slice_id);
+        assert_eq!(score.slice_id, slice_id);
+        assert!(score.quality_score <= 10000, "quality score should be <= 10000");
+    }
+
+    #[test]
+    fn test_get_slice_performance_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attestor = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let creator = Address::generate(&env);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+
+        client.calculate_slice_performance_score(slice_id);
+        let score = client.get_slice_performance_score(slice_id);
+        assert!(score.is_some(), "performance score should be retrievable");
+    }
+
+    #[test]
+    fn test_compare_slices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let mut attestors1 = Vec::new(&env);
+        attestors1.push_back(attestor1.clone());
+        let mut weights1 = Vec::new(&env);
+        weights1.push_back(100u32);
+        let creator1 = Address::generate(&env);
+        let slice_id_1 = client.create_slice(&creator1, &attestors1, &weights1, &100u32);
+
+        let mut attestors2 = Vec::new(&env);
+        attestors2.push_back(attestor2.clone());
+        let mut weights2 = Vec::new(&env);
+        weights2.push_back(100u32);
+        let creator2 = Address::generate(&env);
+        let slice_id_2 = client.create_slice(&creator2, &attestors2, &weights2, &100u32);
+
+        client.calculate_slice_performance_score(slice_id_1);
+        client.calculate_slice_performance_score(slice_id_2);
+
+        let (score1, score2) = client.compare_slices(slice_id_1, slice_id_2);
+        assert!(score1.is_some(), "first slice should have score");
+        assert!(score2.is_some(), "second slice should have score");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1592: Credential Derivatives
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_issue_credential_derivative() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_derivative");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64; // 1 day from now
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32, // Call option
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        assert!(derivative_id > 0, "derivative should have been issued");
+
+        let derivative = client.get_credential_derivative(derivative_id);
+        assert!(derivative.is_some(), "derivative should be retrievable");
+
+        let deriv = derivative.unwrap();
+        assert_eq!(deriv.underlying_credential, credential_id);
+        assert!(!deriv.is_exercised, "derivative should not be exercised initially");
+    }
+
+    #[test]
+    fn test_exercise_derivative() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_exercise");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64;
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32,
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        client.exercise_derivative(&holder, &derivative_id);
+
+        let derivative = client.get_credential_derivative(derivative_id).unwrap();
+        assert!(derivative.is_exercised, "derivative should be exercised");
+        assert!(derivative.settlement_time > 0, "settlement time should be set");
+    }
+
+    #[test]
+    fn test_get_credential_derivatives() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_get_derivs");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64;
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32,
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        let derivatives = client.get_credential_derivatives(credential_id);
+        assert!(derivatives.len() > 0, "should have derivatives");
+        assert_eq!(derivatives.get(0).unwrap(), derivative_id);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1593: Credential Staking
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_stake_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_stake");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &86400u64);
+
+        assert!(stake_id > 0, "stake should have been created");
+
+        let stake = client.get_credential_stake(stake_id);
+        assert!(stake.is_some(), "stake should be retrievable");
+
+        let s = stake.unwrap();
+        assert_eq!(s.credential_id, credential_id);
+        assert_eq!(s.collateral_amount, 1000u64);
+        assert!(!s.is_liquidated, "stake should not be liquidated initially");
+    }
+
+    #[test]
+    fn test_liquidate_stake() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let liquidator = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_liquidate");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &1u64);
+
+        // Advance ledger to allow liquidation
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2u64);
+
+        let recovered = client.liquidate_stake(
+            &liquidator,
+            &stake_id,
+            &soroban_sdk::String::from_str(&env, "default liquidation"),
+        );
+
+        assert_eq!(recovered, 1000u64, "should recover collateral");
+
+        let stake = client.get_credential_stake(stake_id).unwrap();
+        assert!(stake.is_liquidated, "stake should be liquidated");
+    }
+
+    #[test]
+    fn test_get_credential_staking_positions() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_positions");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &86400u64);
+
+        let positions = client.get_credential_staking_positions(credential_id);
+        assert!(positions.len() > 0, "should have staking positions");
+        assert_eq!(positions.get(0).unwrap(), stake_id);
+    }
+
+    #[test]
+    fn test_get_stake_liquidation_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let liquidator = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_history");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &1u64);
+
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2u64);
+
+        let _recovered = client.liquidate_stake(
+            &liquidator,
+            &stake_id,
+            &soroban_sdk::String::from_str(&env, "test liquidation"),
+        );
+
+        let history = client.get_stake_liquidation_history(stake_id);
+        assert!(history.len() > 0, "should have liquidation history");
+        assert_eq!(history.get(0).unwrap().stake_id, stake_id);
+    }
 }
 
 
