@@ -7,6 +7,7 @@ import credentialsRouter from './routes/credentials.js';
 import credentialExportRouter from './routes/credentialExport.js';
 import { createCredentialTieringRouter } from './routes/credentialTiering.js';
 import { createCredentialRedemptionRouter } from './routes/credentialRedemption.js';
+import { createEventsRouter } from './routes/events.js';
 import verifyRouter from './routes/verify.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
@@ -170,6 +171,9 @@ app.use('/api/admin/privilege-escalation', privilegeEscalationRouter);
 
 // #1307: Distributed tracing
 app.use('/api/tracing', tracingRouter);
+
+// #1605 WebSocket event information and history
+app.use('/api/events', createEventsRouter());
 
 app.get('/ws/metrics', (_req, res) => {
   res.json(getWsMetrics());
