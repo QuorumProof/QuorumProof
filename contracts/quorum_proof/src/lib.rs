@@ -24,6 +24,10 @@ pub mod upgrade_history;
 pub mod atomic_operations;
 pub mod attestation_veto;
 pub mod migration_v2;
+pub mod auto_renewal;
+pub mod conditional_escrow;
+pub mod cert_transparency;
+pub mod blind_credentials;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -1511,6 +1515,8 @@ pub struct Credential {
     pub required_attestations: u32,
     /// Metadata schema version for this credential (Task #1226)
     pub metadata_schema_version: u32,
+    /// Issue #1584: Auto-renewal enabled for this credential
+    pub auto_renew: bool,
 }
 
 /// W3C DID verification method key type.
@@ -2232,6 +2238,8 @@ pub struct CredentialInput {
     pub metadata_hash: soroban_sdk::Bytes,
     /// Optional expiration timestamp.
     pub expires_at: Option<u64>,
+    /// Issue #1584: Enable auto-renewal for this credential
+    pub auto_renew: bool,
 }
 
 /// Error information for batch credential issuance.
@@ -6337,6 +6345,7 @@ impl QuorumProofContract {
             renewal_status: RenewalStatus::Active,
             required_attestations: 0,
             metadata_schema_version: 0, // Default to 0 for backward compatibility
+            auto_renew: false, // Default to false for backward compatibility (Issue #1584)
         };
         env.storage()
             .instance()
@@ -6556,6 +6565,7 @@ impl QuorumProofContract {
             renewal_status: RenewalStatus::Active,
             required_attestations: 0,
             metadata_schema_version: 0, // Default to 0 for backward compatibility
+            auto_renew: false, // Default to false for backward compatibility (Issue #1584)
         };
         env.storage()
             .instance()
