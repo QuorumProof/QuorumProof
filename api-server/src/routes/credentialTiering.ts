@@ -7,7 +7,7 @@ export function createCredentialTieringRouter() {
   // Get or create tier for a credential
   router.get('/:credentialId/tier', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialId = parseInt(req.params.credentialId as string, 10);
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
         res.status(400).json({ error: 'Invalid credential ID' });
         return;
@@ -30,8 +30,24 @@ export function createCredentialTieringRouter() {
         return;
       }
 
-      const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
-      const offset = parseInt(req.query.offset as string) || 0;
+      let limitStr = '100';
+      const limitVal = req.query.limit;
+      if (typeof limitVal === 'string') {
+        limitStr = limitVal;
+      } else if (Array.isArray(limitVal)) {
+        limitStr = String(limitVal[0]);
+      }
+
+      let offsetStr = '0';
+      const offsetVal = req.query.offset;
+      if (typeof offsetVal === 'string') {
+        offsetStr = offsetVal;
+      } else if (Array.isArray(offsetVal)) {
+        offsetStr = String(offsetVal[0]);
+      }
+
+      const limit = Math.min(parseInt(limitStr || '100'), 1000);
+      const offset = parseInt(offsetStr || '0');
 
       const credentials = await credentialTieringService.getTiersByTier(tier, limit, offset);
       res.json(credentials);
@@ -55,7 +71,8 @@ export function createCredentialTieringRouter() {
   // Update reputation score
   router.post('/:credentialId/reputation', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialIdParam = Array.isArray(req.params.credentialId) ? req.params.credentialId[0] : req.params.credentialId;
+      const credentialId = parseInt(credentialIdParam, 10);
       const { scoreIncrement } = req.body as { scoreIncrement?: unknown };
 
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
@@ -79,7 +96,7 @@ export function createCredentialTieringRouter() {
   // Check and promote tier if eligible
   router.post('/:credentialId/check-promotion', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialId = parseInt(req.params.credentialId as string, 10);
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
         res.status(400).json({ error: 'Invalid credential ID' });
         return;

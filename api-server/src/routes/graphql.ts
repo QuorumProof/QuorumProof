@@ -245,6 +245,6 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 import { simulateCall, u64Val, addressVal } from '../soroban.js';
 export default createGraphqlRouter({
   simulateCall,
-  u64Val: u64Val as SorobanClient['u64Val'],
-  addressVal: addressVal as SorobanClient['addressVal'],
-});
+  u64Val: u64Val as any,
+  addressVal: addressVal as any,
+} as SorobanClient);

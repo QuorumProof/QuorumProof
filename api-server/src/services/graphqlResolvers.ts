@@ -1,14 +1,13 @@
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { credentialTieringService } from './credentialTiering.js';
 import { credentialRedemptionService } from './credentialRedemption.js';
-import { SearchIndex, type SearchOptions, type CredentialRecord as SearchCredentialRecord } from '../searchIndex.js';
-import { SearchIndexStore } from './searchIndexStore.js';
+import { SearchIndex, type SearchOptions, type CredentialRecord as SearchCredentialRecord, type SearchResult } from '../searchIndex.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
-  u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
-  u32Val: (n: number) => ReturnType<typeof SimulateCallType>;
-  addressVal: (a: string) => ReturnType<typeof SimulateCallType>;
+  u64Val: (n: number | bigint) => unknown;
+  u32Val: (n: number) => unknown;
+  addressVal: (a: string) => unknown;
 };
 
 type GraphQLVariables = Record<string, unknown>;
@@ -51,14 +50,14 @@ export class GraphQLResolvers {
     const numId = parseInt(String(id), 10);
     if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
 
-    const cred = await this.ctx.soroban.simulateCall('get_credential', [this.ctx.soroban.u64Val(numId)]);
-    const serialized = serializeBigInt(cred) as Record<string, unknown>;
+    const cred = await this.ctx.soroban.simulateCall('get_credential', [this.ctx.soroban.u64Val(numId) as any]);
+    const serialized = serializeBigInt(cred);
 
     const tier = await credentialTieringService.getTier(numId);
     const rewards = await credentialRedemptionService.getCredentialRewards(numId);
 
     return {
-      ...serialized,
+      ...(typeof serialized === 'object' && serialized !== null ? serialized : {}),
       tier,
       rewards,
     };
@@ -74,13 +73,14 @@ export class GraphQLResolvers {
         try {
           const numId = parseInt(String(id), 10);
           if (!Number.isInteger(numId) || numId <= 0) return null;
-          const cred = await this.ctx.soroban.simulateCall('get_credential', [this.ctx.soroban.u64Val(numId)]);
+          const cred = await this.ctx.soroban.simulateCall('get_credential', [this.ctx.soroban.u64Val(numId) as any]);
           const serialized = serializeBigInt(cred);
 
           const tier = await credentialTieringService.getTier(numId);
           const rewards = await credentialRedemptionService.getCredentialRewards(numId);
 
-          return { ...serialized, tier, rewards };
+          const result: Record<string, unknown> = typeof serialized === 'object' && serialized !== null ? serialized as Record<string, unknown> : {};
+          return { ...result, tier, rewards };
         } catch {
           return null;
         }
@@ -98,18 +98,17 @@ export class GraphQLResolvers {
     if (!this.ctx.searchIndex) return { edges: [], pageInfo: { hasNextPage: false }, totalCount: 0 };
 
     const searchOptions: SearchOptions = {
-      filters: [{ issuer }],
-      sort: 'relevance',
-      limit: limit + 1,
-      offset,
+      issuer,
+      limit,
+      cursor: offset > 0 ? encodePageCursor(offset, limit) : undefined,
     };
 
-    const results = this.ctx.searchIndex.search('', searchOptions);
-    const hasNextPage = results.length > limit;
-    const credentials = results.slice(0, limit);
+    const result: SearchResult = this.ctx.searchIndex.search(searchOptions);
+    const credentials = result.data;
+    const hasNextPage = result.pagination.has_more;
 
     return {
-      edges: credentials.map((cred: unknown, idx: number) => ({
+      edges: credentials.map((cred: SearchCredentialRecord, idx: number) => ({
         node: cred,
         cursor: encodePageCursor(offset + idx, limit),
       })),
@@ -119,7 +118,7 @@ export class GraphQLResolvers {
         startCursor: credentials.length > 0 ? encodePageCursor(offset, limit) : null,
         endCursor: credentials.length > 0 ? encodePageCursor(offset + credentials.length - 1, limit) : null,
       },
-      totalCount: results.length,
+      totalCount: result.pagination.total,
     };
   }
 
@@ -129,7 +128,7 @@ export class GraphQLResolvers {
     const numId = parseInt(String(id), 10);
     if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
 
-    const slice = await this.ctx.soroban.simulateCall('get_slice', [this.ctx.soroban.u64Val(numId)]);
+    const slice = await this.ctx.soroban.simulateCall('get_slice', [this.ctx.soroban.u64Val(numId) as any]);
     return serializeBigInt(slice);
   }
 
@@ -142,7 +141,7 @@ export class GraphQLResolvers {
     const address = args['address'];
     if (!address || typeof address !== 'string') throw new Error('attestorReputation requires address argument');
 
-    const score = await this.ctx.soroban.simulateCall('get_attestor_reputation', [this.ctx.soroban.addressVal(address)]);
+    const score = await this.ctx.soroban.simulateCall('get_attestor_reputation', [this.ctx.soroban.addressVal(address) as any]);
     const scoreNum = typeof score === 'bigint' ? Number(score) : (typeof score === 'number' ? score : 0);
     return { address, score: scoreNum };
   }
@@ -178,14 +177,19 @@ export class GraphQLResolvers {
 
     if (!this.ctx.searchIndex) return { results: [], totalCount: 0, hasMore: false };
 
-    const searchOptions: SearchOptions = { sort: 'relevance', limit: limit + 1, offset };
-    const results = this.ctx.searchIndex.search(query, searchOptions);
-    const hasMore = results.length > limit;
+    const searchOptions: SearchOptions = {
+      query,
+      sort_by: 'relevance',
+      limit,
+      cursor: offset > 0 ? encodePageCursor(offset, limit) : undefined,
+    };
+
+    const result: SearchResult = this.ctx.searchIndex.search(searchOptions);
 
     return {
-      results: results.slice(0, limit),
-      totalCount: results.length,
-      hasMore,
+      results: result.data,
+      totalCount: result.pagination.total,
+      hasMore: result.pagination.has_more,
     };
   }
 

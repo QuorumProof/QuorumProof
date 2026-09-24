@@ -7,13 +7,19 @@ export function createCredentialRedemptionRouter() {
   // Get all rewards for a credential
   router.get('/:credentialId/rewards', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialId = parseInt(req.params.credentialId as string, 10);
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
         res.status(400).json({ error: 'Invalid credential ID' });
         return;
       }
 
-      const status = req.query.status as string | undefined;
+      let status: string | undefined;
+      const statusVal = req.query.status;
+      if (typeof statusVal === 'string') {
+        status = statusVal;
+      } else if (Array.isArray(statusVal)) {
+        status = String(statusVal[0]);
+      }
       const rewards = await credentialRedemptionService.getCredentialRewards(credentialId, status);
       res.json(rewards);
     } catch (err) {
@@ -25,7 +31,8 @@ export function createCredentialRedemptionRouter() {
   // Get reward details
   router.get('/rewards/:rewardId', async (req: Request, res: Response) => {
     try {
-      const reward = await credentialRedemptionService.getReward(req.params.rewardId);
+      const rewardId = Array.isArray(req.params.rewardId) ? req.params.rewardId[0] : (req.params.rewardId as string);
+      const reward = await credentialRedemptionService.getReward(rewardId);
       if (!reward) {
         res.status(404).json({ error: 'Reward not found' });
         return;
@@ -40,13 +47,14 @@ export function createCredentialRedemptionRouter() {
   // Claim a reward (moves to escrow)
   router.post('/:credentialId/rewards/:rewardId/claim', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialId = parseInt(req.params.credentialId as string, 10);
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
         res.status(400).json({ error: 'Invalid credential ID' });
         return;
       }
 
-      const escrow = await credentialRedemptionService.claimReward(req.params.rewardId);
+      const rewardId = Array.isArray(req.params.rewardId) ? req.params.rewardId[0] : (req.params.rewardId as string);
+      const escrow = await credentialRedemptionService.claimReward(rewardId);
       res.json(escrow);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -57,13 +65,19 @@ export function createCredentialRedemptionRouter() {
   // Get escrow entries for a credential
   router.get('/:credentialId/escrow', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialId = parseInt(req.params.credentialId as string, 10);
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
         res.status(400).json({ error: 'Invalid credential ID' });
         return;
       }
 
-      const status = req.query.status as string | undefined;
+      let status: string | undefined;
+      const statusVal = req.query.status;
+      if (typeof statusVal === 'string') {
+        status = statusVal;
+      } else if (Array.isArray(statusVal)) {
+        status = String(statusVal[0]);
+      }
       const escrow = await credentialRedemptionService.getCredentialEscrow(credentialId, status);
       res.json(escrow);
     } catch (err) {
@@ -81,7 +95,8 @@ export function createCredentialRedemptionRouter() {
         return;
       }
 
-      const escrow = await credentialRedemptionService.settleEscrow(req.params.escrowId, settlementHash);
+      const escrowId = Array.isArray(req.params.escrowId) ? req.params.escrowId[0] : (req.params.escrowId as string);
+      const escrow = await credentialRedemptionService.settleEscrow(escrowId, settlementHash);
       res.json(escrow);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -92,7 +107,8 @@ export function createCredentialRedemptionRouter() {
   // Refund escrow (return reward to pending)
   router.post('/escrow/:escrowId/refund', async (req: Request, res: Response) => {
     try {
-      const escrow = await credentialRedemptionService.refundEscrow(req.params.escrowId);
+      const escrowId = Array.isArray(req.params.escrowId) ? req.params.escrowId[0] : (req.params.escrowId as string);
+      const escrow = await credentialRedemptionService.refundEscrow(escrowId);
       res.json(escrow);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -103,7 +119,7 @@ export function createCredentialRedemptionRouter() {
   // Get total rewards summary
   router.get('/:credentialId/rewards/summary', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialId = parseInt(req.params.credentialId as string, 10);
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
         res.status(400).json({ error: 'Invalid credential ID' });
         return;
@@ -120,14 +136,30 @@ export function createCredentialRedemptionRouter() {
   // Get redemption history
   router.get('/:credentialId/redemption-history', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId, 10);
+      const credentialId = parseInt(req.params.credentialId as string, 10);
       if (!Number.isInteger(credentialId) || credentialId <= 0) {
         res.status(400).json({ error: 'Invalid credential ID' });
         return;
       }
 
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
-      const offset = parseInt(req.query.offset as string) || 0;
+      let limitStr = '50';
+      const limitVal = req.query.limit;
+      if (typeof limitVal === 'string') {
+        limitStr = limitVal;
+      } else if (Array.isArray(limitVal)) {
+        limitStr = String(limitVal[0]);
+      }
+
+      let offsetStr = '0';
+      const offsetVal = req.query.offset;
+      if (typeof offsetVal === 'string') {
+        offsetStr = offsetVal;
+      } else if (Array.isArray(offsetVal)) {
+        offsetStr = String(offsetVal[0]);
+      }
+
+      const limit = Math.min(parseInt(limitStr || '50') || 50, 500);
+      const offset = parseInt(offsetStr || '0') || 0;
 
       const history = await credentialRedemptionService.getRedemptionHistory(credentialId, limit, offset);
       res.json(history);
