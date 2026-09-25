@@ -49,71 +49,6 @@ const SCHEMA_DESCRIPTION = {
 
 type GraphQLVariables = Record<string, unknown>;
 
-interface ResolverContext {
-  soroban: SorobanClient;
-}
-
-async function resolveCredential(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
-  const id = args['id'];
-  if (!id) throw new Error('credential requires id argument');
-  const numId = parseInt(String(id), 10);
-  if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
-  const cred = await ctx.soroban.simulateCall('get_credential', [ctx.soroban.u64Val(numId)]);
-  return serializeBigInt(cred);
-}
-
-async function resolveCredentials(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown[]> {
-  const ids = args['ids'];
-  if (!Array.isArray(ids) || ids.length === 0) throw new Error('credentials requires ids array');
-  if (ids.length > 50) throw new Error('credentials ids cannot exceed 50 items');
-  const results = await Promise.all(
-    ids.map(async (id: unknown) => {
-      try {
-        const numId = parseInt(String(id), 10);
-        if (!Number.isInteger(numId) || numId <= 0) return null;
-        const cred = await ctx.soroban.simulateCall('get_credential', [ctx.soroban.u64Val(numId)]);
-        return serializeBigInt(cred);
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return results;
-}
-
-async function resolveSlice(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
-  const id = args['id'];
-  if (!id) throw new Error('slice requires id argument');
-  const numId = parseInt(String(id), 10);
-  if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
-  const slice = await ctx.soroban.simulateCall('get_slice', [ctx.soroban.u64Val(numId)]);
-  return serializeBigInt(slice);
-}
-
-async function resolveCredentialCount(ctx: ResolverContext): Promise<number> {
-  const count: bigint = await ctx.soroban.simulateCall('get_credential_count', []);
-  return Number(count);
-}
-
-async function resolveAttestorReputation(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
-  const address = args['address'];
-  if (!address || typeof address !== 'string') throw new Error('attestorReputation requires address argument');
-  const score = await ctx.soroban.simulateCall('get_attestor_reputation', [ctx.soroban.addressVal(address)]);
-  const scoreNum = typeof score === 'bigint' ? Number(score) : (typeof score === 'number' ? score : 0);
-  return { address, score: scoreNum };
-}
 
 async function resolveCredentialTier(
   args: GraphQLVariables,
@@ -288,21 +223,27 @@ function parseOperations(query: string): Array<{
 
 export function createGraphqlRouter(soroban: SorobanClient) {
   const router = Router();
-  const ctx: ResolverContext = { soroban };
 
   /**
    * POST /api/graphql
-   * #869 — GraphQL-compatible endpoint for batch queries.
+   * #1604 — GraphQL endpoint for batch queries with federation support.
    * Body: { query: string, variables?: object }
    *
    * Supported top-level fields:
    *   credential(id: ID)
    *   credentials(ids: [ID])
+   *   credentialsByIssuer(issuer: String!)
    *   slice(id: ID)
    *   credentialCount
    *   attestorReputation(address: String)
+   *   credentialTier(credentialId: ID!)
+   *   credentialRewards(credentialId: ID!, status: String)
+   *   rewardsSummary(credentialId: ID!)
+   *   searchCredentials(query: String!)
+   *   tierStats
    */
   router.post('/', async (req: Request, res: Response) => {
+    const startTime = Date.now();
     const { query, variables } = req.body as { query?: unknown; variables?: unknown };
 
     if (typeof query !== 'string' || !query.trim()) {
@@ -310,14 +251,26 @@ export function createGraphqlRouter(soroban: SorobanClient) {
       return;
     }
 
-    // Resolve variables into args for each operation
     const vars = (variables && typeof variables === 'object' && !Array.isArray(variables))
       ? (variables as GraphQLVariables)
       : {};
 
-    // Handle introspection
+    // Handle introspection queries
     if (query.includes('__schema') || query.includes('__type')) {
-      res.json({ data: { __schema: SCHEMA_DESCRIPTION } });
+      res.json({
+        data: {
+          __schema: {
+            types: [
+              { name: 'Query', kind: 'OBJECT', description: 'Root query type' },
+              { name: 'Mutation', kind: 'OBJECT', description: 'Root mutation type' },
+              { name: 'Credential', kind: 'OBJECT' },
+              { name: 'CredentialTier', kind: 'OBJECT' },
+              { name: 'Reward', kind: 'OBJECT' },
+              { name: 'TierStatistic', kind: 'OBJECT' },
+            ],
+          },
+        },
+      });
       return;
     }
 
@@ -329,28 +282,46 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
     const data: Record<string, unknown> = {};
     const errors: Array<{ message: string; path: string }> = [];
+    const resolvers = new GraphQLResolvers({ soroban, startTime });
 
     await Promise.all(
       operations.map(async ({ alias, field, args }) => {
         const key = alias ?? field;
-        // Merge query-level variables (by matching var references like $varName)
         const resolvedArgs: GraphQLVariables = { ...vars, ...args };
         try {
           switch (field) {
             case 'credential':
-              data[key] = await resolveCredential(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveCredential(resolvedArgs);
               break;
             case 'credentials':
-              data[key] = await resolveCredentials(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveCredentials(resolvedArgs);
+              break;
+            case 'credentialsByIssuer':
+              data[key] = await resolvers.resolveCredentialsByIssuer(resolvedArgs);
               break;
             case 'slice':
-              data[key] = await resolveSlice(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveSlice(resolvedArgs);
               break;
             case 'credentialCount':
-              data[key] = await resolveCredentialCount(ctx);
+              data[key] = await resolvers.resolveCredentialCount();
               break;
             case 'attestorReputation':
-              data[key] = await resolveAttestorReputation(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveAttestorReputation(resolvedArgs);
+              break;
+            case 'credentialTier':
+              data[key] = await resolvers.resolveCredentialTier(resolvedArgs);
+              break;
+            case 'credentialRewards':
+              data[key] = await resolvers.resolveCredentialRewards(resolvedArgs);
+              break;
+            case 'rewardsSummary':
+              data[key] = await resolvers.resolveRewardsSummary(resolvedArgs);
+              break;
+            case 'searchCredentials':
+              data[key] = await resolvers.resolveSearchCredentials(resolvedArgs);
+              break;
+            case 'tierStats':
+              data[key] = await resolvers.resolveTierStats();
               break;
             case 'credentialTier':
               data[key] = await resolveCredentialTier(resolvedArgs, ctx);
@@ -377,12 +348,15 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
     const response: Record<string, unknown> = { data };
     if (errors.length > 0) response['errors'] = errors;
+
+    const metrics = resolvers.getBenchmarkMetrics();
+    res.set('X-GraphQL-Duration-Ms', String(metrics.elapsedMs));
     res.json(response);
   });
 
   /**
    * GET /api/graphql
-   * Returns schema information for discoverability.
+   * Returns schema information and federation metadata for discoverability.
    */
   router.get('/', (_req: Request, res: Response) => {
     res.json({
@@ -411,6 +385,6 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 import { simulateCall, u64Val, addressVal } from '../soroban.js';
 export default createGraphqlRouter({
   simulateCall,
-  u64Val: u64Val as SorobanClient['u64Val'],
-  addressVal: addressVal as SorobanClient['addressVal'],
-});
+  u64Val: u64Val as any,
+  addressVal: addressVal as any,
+} as SorobanClient);

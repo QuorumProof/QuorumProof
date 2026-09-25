@@ -188,6 +188,9 @@ pub enum DataKey {
     /// A co-owner candidate proposed by an SBT's owner, awaiting the
     /// candidate's acceptance.
     CoOwnerProposal(u64),
+    /// Issue #1509: Governance-tunable credential-revocation cache TTL (in ledgers).
+    /// Overrides the compile-time CREDENTIAL_CACHE_TTL_LEDGERS when set.
+    GovernanceCacheTtl,
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -640,12 +643,19 @@ impl SbtRegistryContract {
             .expect("not initialized");
         // Issue #516: Check credential cache before making a cross-contract call.
         let current_ledger = env.ledger().sequence();
+        // Issue #1509: Use governance-tunable TTL if configured, else fall back to
+        // the compile-time default (CREDENTIAL_CACHE_TTL_LEDGERS = 720 ledgers ≈ 1 h).
+        let effective_cache_ttl: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernanceCacheTtl)
+            .unwrap_or(CREDENTIAL_CACHE_TTL_LEDGERS);
         let revoked: bool = if let Some(entry) = env
             .storage()
             .persistent()
             .get::<_, CredentialCacheEntry>(&DataKey::CredentialCache(credential_id))
         {
-            if current_ledger.saturating_sub(entry.cached_at) < CREDENTIAL_CACHE_TTL_LEDGERS {
+            if current_ledger.saturating_sub(entry.cached_at) < effective_cache_ttl {
                 // Cache hit: use cached value, skip cross-contract call.
                 entry.revoked
             } else {
@@ -1103,6 +1113,56 @@ impl SbtRegistryContract {
         let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
         topics.push_back(topic);
         env.events().publish(topics, event_data);
+    }
+
+    // ── Issue #1509: Governance-tunable revocation-cache TTL ─────────────────
+
+    /// Set the credential-revocation cache TTL in ledgers (admin-only).
+    ///
+    /// At Stellar's default 5 s/ledger cadence the staleness window is:
+    ///
+    /// | `ttl_ledgers` | Approx. wall-clock staleness |
+    /// |---------------|------------------------------|
+    /// | 0             | No caching — always live     |
+    /// | 120           | ~10 minutes                  |
+    /// | 720 (default) | ~1 hour                      |
+    /// | 1440          | ~2 hours                     |
+    ///
+    /// Setting `ttl_ledgers = 0` disables the cache: every `mint` call will
+    /// always make the cross-contract `is_revoked` call.
+    ///
+    /// # Security trade-off
+    ///
+    /// A higher TTL reduces RPC/gas costs but widens the window in which a
+    /// credential that was revoked in `quorum_proof` can still be used to
+    /// mint a new SBT in `sbt_registry`. See `docs/threat-model.md §3.10`
+    /// for the accepted-risk analysis.
+    ///
+    /// # Panics
+    /// - If caller is not the stored admin.
+    pub fn set_credential_cache_ttl(env: Env, admin: Address, ttl_ledgers: u32) {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernanceCacheTtl, &ttl_ledgers);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the currently active credential-revocation cache TTL in ledgers.
+    ///
+    /// Returns the compile-time default (`CREDENTIAL_CACHE_TTL_LEDGERS = 720`)
+    /// when no governance override has been stored.
+    pub fn get_credential_cache_ttl(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::GovernanceCacheTtl)
+            .unwrap_or(CREDENTIAL_CACHE_TTL_LEDGERS)
     }
 
     /// Repoint the quorum_proof contract address, emitting a `ContractAddressUpdated` event.
@@ -5365,7 +5425,80 @@ mod tests {
         client.mint(&owner, &cred_id, &uri); // must panic — credential is revoked
     }
 
-    // ── Reputation tests ──────────────────────────────────────────────────────
+    // ── Issue #1509: Stale-cache behaviour tests ──────────────────────────────
+
+    /// Verify that a mint SUCCEEDS when the revocation cache was populated with
+    /// `revoked = false` and the TTL has NOT yet elapsed — even after the
+    /// credential has been revoked in quorum_proof.
+    ///
+    /// This is the documented accepted risk: the cache prevents the cross-contract
+    /// `is_revoked` call, so a recently-revoked credential can still be used to
+    /// mint an SBT within the cache's staleness window.
+    ///
+    /// See `docs/threat-model.md §3.10` for the full risk analysis.
+    #[test]
+    fn test_stale_cache_allows_mint_within_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        // Reduce the cache TTL to 10 ledgers so the test is precise.
+        client.set_credential_cache_ttl(&admin, &10u32);
+        assert_eq!(client.get_credential_cache_ttl(), 10u32);
+
+        // Issue the credential and mint a first SBT — this populates the cache
+        // with `revoked = false` at ledger N.
+        let cred_id = qp_client.issue_credential(&issuer, &owner1, &1u32, &meta, &None, &0u64);
+        client.mint(&owner1, &cred_id, &uri);
+
+        // Revoke the credential in quorum_proof.
+        qp_client.revoke_credential(&issuer, &cred_id, &None);
+
+        // owner2 attempts to mint the same credential before the cache expires.
+        // The cache was written at ledger N with `revoked = false`; since no ledgers
+        // have advanced, `current_ledger - cached_at < 10`, so the cache is still
+        // valid and the mint succeeds — this is the expected stale-cache behaviour.
+        //
+        // NOTE: This is intentional behaviour, NOT a bug.  Consumers that require
+        // stronger freshness guarantees must call is_revoked directly or set
+        // `ttl_ledgers = 0` via `set_credential_cache_ttl`.
+        let token_id = client.mint(&owner2, &cred_id, &uri);
+        assert!(token_id > 0, "mint should succeed while cache is still warm");
+    }
+
+    /// Verify that once the cache TTL expires a mint on a revoked credential IS
+    /// rejected (the live cross-contract call is made again).
+    #[test]
+    #[should_panic]
+    fn test_stale_cache_rejected_after_ttl_expires() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"QmTestHash000000000000000000000000");
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+
+        // Set TTL to 0 ledgers so the cache is never considered valid.
+        client.set_credential_cache_ttl(&admin, &0u32);
+
+        let cred_id = qp_client.issue_credential(&issuer, &owner1, &1u32, &meta, &None, &0u64);
+        client.mint(&owner1, &cred_id, &uri);
+
+        qp_client.revoke_credential(&issuer, &cred_id, &None);
+
+        // TTL = 0 means any cached entry is immediately stale → live call made
+        // → panics because the credential is revoked.
+        client.mint(&owner2, &cred_id, &uri);
+    }
 
     #[test]
     fn test_reputation_zero_for_new_holder() {
