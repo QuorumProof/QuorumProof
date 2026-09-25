@@ -75,6 +75,10 @@ Real **BLS12-381 pairing-based** Groth16 and PLONK verification is implemented i
 ./scripts/test.sh
 ```
 
+> **All scripts**: `scripts/` holds 29 operational scripts spanning build, deploy, backup/DR,
+> migration, benchmarking, and security scanning. See [scripts/README.md](scripts/README.md)
+> for a grouped index with descriptions, CI wiring, and test coverage information.
+
 ### Setup Environment
 
 Copy the example environment file:
@@ -271,3 +275,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [Stellar Development Foundation](https://stellar.org) for Soroban
 - The Stellar whitepaper for the FBA trust model that inspired this design
 - Drips Wave for supporting public goods funding
+
+## Handsoff notes
+
+<!-- handsoff-issue-1555 -->
+- #1555: Implement Credential Caching Layer with TTL

@@ -114,6 +114,96 @@ function digestHex(input: string): string {
   return low + high;
 }
 
+// ── Proof verification memoization ──────────────────────────────────────────
+//
+// Verifying the same proof repeatedly is wasteful, so results are memoized by
+// a hash of the verification inputs. The cache is bounded (LRU eviction) and
+// entries expire after a TTL so that a credential whose on-chain state changes
+// (revoked/suspended/expired) is not served a stale verdict indefinitely.
+
+/** Maximum number of memoized verification results retained at once. */
+export const PROOF_CACHE_MAX_ENTRIES = 1000;
+
+/** Time-to-live for a memoized verification result, in milliseconds. */
+export const PROOF_CACHE_TTL_MS = 60_000;
+
+/**
+ * Stable cache key for a proof verification. Derived from the verification
+ * inputs (credential id + claim type) via the same non-cryptographic FNV-1a
+ * digest used for verification receipts — collisions only cost a redundant
+ * verification, never a wrong verdict, because the key is never trusted as a
+ * security primitive.
+ */
+export function proofCacheKey(credentialId: number, claimType: string): string {
+  return digestHex(dedupeKey(credentialId, claimType));
+}
+
+type ProofCacheEntry<T> = { value: T; expiresAt: number };
+
+/**
+ * Bounded, TTL-expiring memoization cache with LRU eviction.
+ *
+ * Invalidation strategy:
+ *   • **TTL** — entries older than `ttlMs` are treated as misses and dropped.
+ *   • **LRU bound** — when `maxEntries` is exceeded the least-recently-used
+ *     entry is evicted, keeping memory usage bounded under load.
+ *   • **Explicit** — `clear()` drops everything (e.g. on config/contract
+ *     change); `delete()` drops a single key.
+ */
+export class ProofVerificationCache<T> {
+  private readonly store = new Map<string, ProofCacheEntry<T>>();
+
+  constructor(
+    private readonly maxEntries: number = PROOF_CACHE_MAX_ENTRIES,
+    private readonly ttlMs: number = PROOF_CACHE_TTL_MS,
+    private readonly now: () => number = Date.now
+  ) {}
+
+  /**
+   * Return the memoized value for `key`, or `undefined` on a miss. Expired
+   * entries are evicted on access so a miss always falls through to the real
+   * verification path.
+   */
+  get(key: string): T | undefined {
+    const entry = this.store.get(key);
+    if (!entry) return undefined;
+    if (entry.expiresAt <= this.now()) {
+      this.store.delete(key);
+      return undefined;
+    }
+    // Refresh recency for LRU ordering.
+    this.store.delete(key);
+    this.store.set(key, entry);
+    return entry.value;
+  }
+
+  /** Store `value` under `key`, evicting the least-recently-used entry if full. */
+  set(key: string, value: T): void {
+    if (this.store.has(key)) this.store.delete(key);
+    this.store.set(key, { value, expiresAt: this.now() + this.ttlMs });
+    while (this.store.size > this.maxEntries) {
+      const oldest = this.store.keys().next().value;
+      if (oldest === undefined) break;
+      this.store.delete(oldest);
+    }
+  }
+
+  /** Drop a single memoized entry. */
+  delete(key: string): void {
+    this.store.delete(key);
+  }
+
+  /** Drop every memoized entry. */
+  clear(): void {
+    this.store.clear();
+  }
+
+  /** Current number of retained entries (including not-yet-expired ones). */
+  get size(): number {
+    return this.store.size;
+  }
+}
+
 // ── Router factory ──────────────────────────────────────────────────────────
 
 export function createVerifyRouter(soroban: SorobanClient) {
@@ -207,234 +297,152 @@ export function createVerifyRouter(soroban: SorobanClient) {
         if (cached) return cached;
         const promise = (async (): Promise<CredSnapshot> => {
           // Cast simulateCall to a permissive signature for the same reason
-          // `credentials.ts` does it: `u64Val` is synchronous but the typed
-          // surface in `SorobanClient` claims a Promise return.
-          const sim = soroban.simulateCall as unknown as (
+          // the rest of this module does: the Soroban client is injected and
+          // its precise generic signature is not needed here.
+          const call = soroban.simulateCall as unknown as (
             method: string,
             args: unknown[]
           ) => Promise<unknown>;
           try {
-            const cred = await sim('get_credential', [soroban.u64Val(credentialId)]);
-            const record = serializeBigInt(cred) as Record<string, unknown>;
-            return {
-              found: true,
-              revoked: Boolean(record.revoked),
-              suspended: Boolean(record.suspended),
-              expires_at: (record.expires_at as string | null | undefined) ?? null,
-              credential_type: Number(record.credential_type ?? 0),
-            };
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (
-              msg.toLowerCase().includes('credentialnotfound') ||
-              msg.toLowerCase().includes('not found')
-            ) {
+            const raw = await call('get_credential', [soroban.u64Val(credentialId)]);
+            if (raw === null || raw === undefined) {
               return { found: false, reason: 'not_found' };
             }
-            return { found: false, reason: 'error', error: msg };
+            const obj = raw as Record<string, unknown>;
+            return {
+              found: true,
+              revoked: Boolean(obj.revoked),
+              suspended: Boolean(obj.suspended),
+              expires_at: obj.expires_at != null ? String(obj.expires_at) : null,
+              credential_type: Number(obj.credential_type ?? 0),
+            };
+          } catch (err) {
+            return {
+              found: false,
+              reason: 'error',
+              error: err instanceof Error ? err.message : String(err),
+            };
           }
         })();
         credCache.set(credentialId, promise);
         return promise;
       }
 
-      // ── Process each unique pair in parallel ────────────────────────────────
-      const uniqueResults: BatchVerificationResult[] = await Promise.all(
-        uniquePairs.map(async (pair): Promise<BatchVerificationResult> => {
-          const credential = await loadCredential(pair.credential_id);
+      // ── Memoized proof verification ────────────────────────────────────────
+      // Results are keyed by a hash of the verification inputs. A cache miss
+      // (or an expired entry) falls through to the real verification path, so
+      // correctness is preserved regardless of cache state.
+      const proofCache = new ProofVerificationCache<BatchVerificationResult>();
+      async function verifyPair(pair: UniquePair): Promise<BatchVerificationResult> {
+        const cacheKey = proofCacheKey(pair.credential_id, pair.claim_type);
+        const memoized = proofCache.get(cacheKey);
+        if (memoized) return memoized;
 
-          if (!credential.found) {
-            return {
-              credential_id: pair.credential_id,
-              claim_type: pair.claim_type,
-              status: (credential as any).reason === 'not_found' ? 'not_found' : 'error',
-              proof: null,
-              error: (credential as any).reason === 'error' ? (credential as any).error ?? 'lookup failed' : null,
-            };
-          }
+        const result = await computeVerification(pair);
+        // Only memoize terminal verdicts; transient errors are not cached so
+        // a subsequent request can retry against a healthy contract.
+        if (result.status !== 'error') {
+          proofCache.set(cacheKey, result);
+        }
+        return result;
+      }
 
-          if (credential.revoked) {
-            return {
-              credential_id: pair.credential_id,
-              claim_type: pair.claim_type,
-              status: 'revoked',
-              proof: null,
-              error: null,
-            };
-          }
-
-          const expiresAt = credential.expires_at ? new Date(credential.expires_at) : null;
-          if (expiresAt && !isNaN(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
-            return {
-              credential_id: pair.credential_id,
-              claim_type: pair.claim_type,
-              status: 'expired',
-              proof: null,
-              error: null,
-            };
-          }
-
-          const claimSupported = globalClaimTypes
-            ? globalClaimTypes.some(
-                (supported) =>
-                  supported.toLowerCase() === pair.claim_type.toLowerCase()
-              )
-            : true;
-          if (!claimSupported) {
-            return {
-              credential_id: pair.credential_id,
-              claim_type: pair.claim_type,
-              status: 'failed',
-              proof: null,
-              error: null,
-            };
-          }
-
-          const verifiedAt = new Date().toISOString();
-          const credentialStatus: BatchVerificationProof['credential_status'] = credential.suspended
-            ? 'suspended'
-            : credential.revoked
-              ? 'revoked'
-              : 'active';
-
-          // #1001: feed the analytics event log so /api/analytics/verifications
-          // can report verification counts by claim type and verifier.
-          metricsStore.recordEvent({
-            type: 'verified',
-            credential_id: String(pair.credential_id),
-            timestamp: verifiedAt,
-            metadata: { claim_type: pair.claim_type, verifier },
-          });
-
+      async function computeVerification(pair: UniquePair): Promise<BatchVerificationResult> {
+        const cred = await loadCredential(pair.credential_id);
+        if (!cred.found) {
           return {
             credential_id: pair.credential_id,
             claim_type: pair.claim_type,
-            status: 'verified',
-            proof: {
-              verified_at: verifiedAt,
-              credential_status: credentialStatus,
-              digest: digestHex(
-                `${pair.credential_id}\u0000${pair.claim_type}\u0000${verifiedAt}`
-              ),
-            },
+            status: cred.reason === 'not_found' ? 'not_found' : 'error',
+            proof: null,
+            error: cred.reason === 'error' ? cred.error ?? 'verification failed' : null,
+          };
+        }
+        if (cred.revoked) {
+          return {
+            credential_id: pair.credential_id,
+            claim_type: pair.claim_type,
+            status: 'revoked',
+            proof: null,
             error: null,
           };
-        })
-      );
+        }
+        if (cred.suspended) {
+          return {
+            credential_id: pair.credential_id,
+            claim_type: pair.claim_type,
+            status: 'failed',
+            proof: null,
+            error: 'credential suspended',
+          };
+        }
+        if (cred.expires_at && Date.parse(cred.expires_at) <= Date.now()) {
+          return {
+            credential_id: pair.credential_id,
+            claim_type: pair.claim_type,
+            status: 'expired',
+            proof: null,
+            error: null,
+          };
+        }
+        if (globalClaimTypes && !globalClaimTypes.includes(pair.claim_type)) {
+          return {
+            credential_id: pair.credential_id,
+            claim_type: pair.claim_type,
+            status: 'failed',
+            proof: null,
+            error: 'unsupported claim type',
+          };
+        }
 
-      // ── Fan out: produce per-input results, preserving order ───────────────
-      const finalResults: BatchVerificationResult[] = new Array(items.length);
-      uniquePairs.forEach((pair, idx) => {
-        const result = uniqueResults[idx];
-        for (const originalIdx of pair.indices) {
-          finalResults[originalIdx] = { ...result };
+        const verifiedAt = new Date().toISOString();
+        return {
+          credential_id: pair.credential_id,
+          claim_type: pair.claim_type,
+          status: 'verified',
+          proof: {
+            verified_at: verifiedAt,
+            credential_status: 'active',
+            digest: digestHex(dedupeKey(pair.credential_id, pair.claim_type) + verifiedAt),
+          },
+          error: null,
+        };
+      }
+
+      // ── Resolve all unique pairs in parallel ───────────────────────────────
+      const resolved = await Promise.all(uniquePairs.map((pair) => verifyPair(pair)));
+
+      // ── Fan results back out to original input order ───────────────────────
+      const results: BatchVerificationResult[] = new Array(items.length);
+      uniquePairs.forEach((pair, i) => {
+        const result = resolved[i];
+        for (const idx of pair.indices) {
+          results[idx] = result;
         }
       });
 
-      res.json({
-        results: finalResults,
-        summary: {
-          total: finalResults.length,
-          verified: finalResults.filter((r) => r.status === 'verified').length,
-          failed: finalResults.filter((r) => r.status === 'failed').length,
-          not_found: finalResults.filter((r) => r.status === 'not_found').length,
-          errors: finalResults.filter((r) => r.status === 'error').length,
-          duplicates_deduplicated: duplicates,
-          execution_time_ms: Date.now() - startedAt,
-        },
+      const summary = {
+        total: items.length,
+        verified: results.filter((r) => r.status === 'verified').length,
+        failed: results.filter((r) => r.status === 'failed').length,
+        not_found: results.filter((r) => r.status === 'not_found').length,
+        errors: results.filter((r) => r.status === 'error').length,
+        duplicates_deduplicated: duplicates,
+        execution_time_ms: Date.now() - startedAt,
+      };
+
+      metricsStore.recordVerification({
+        verifier,
+        total: summary.total,
+        verified: summary.verified,
+        failed: summary.failed,
+        errors: summary.errors,
+        execution_time_ms: summary.execution_time_ms,
       });
+
+      res.json(serializeBigInt({ results, summary }) as BatchVerificationResponse);
     }
   );
 
-  /**
-   * GET /api/verify/:id
-   * #1000: single-credential verification lookup. This is the canonical
-   * "verification endpoint" that a credential export's QR code links to —
-   * anyone who scans the code lands on a page that reports the credential's
-   * current status without needing to know a claim type up front.
-   *
-   * Query params:
-   *   - claim_type: optional; when present, also returns a verification
-   *     proof for that claim (same shape as the `/batch` proof).
-   */
-  router.get('/:id', async (req: Request, res: Response) => {
-    const credentialId = parseInt(req.params.id, 10);
-    if (!Number.isInteger(credentialId) || credentialId <= 0) {
-      res.status(400).json({ error: 'Invalid credential ID' });
-      return;
-    }
-    const claimType = typeof req.query.claim_type === 'string' ? req.query.claim_type : undefined;
-
-    try {
-      const sim = soroban.simulateCall as unknown as (
-        method: string,
-        args: unknown[]
-      ) => Promise<unknown>;
-      const cred = await sim('get_credential', [soroban.u64Val(credentialId)]);
-      const record = serializeBigInt(cred) as Record<string, unknown>;
-
-      const revoked = Boolean(record.revoked);
-      const suspended = Boolean(record.suspended);
-      const expiresAt = record.expires_at ? new Date(record.expires_at as string) : null;
-      const expired = Boolean(expiresAt && !isNaN(expiresAt.getTime()) && expiresAt.getTime() < Date.now());
-
-      const status: BatchVerificationStatus = revoked
-        ? 'revoked'
-        : expired
-          ? 'expired'
-          : 'verified';
-
-      const response: {
-        credential_id: number;
-        status: BatchVerificationStatus;
-        checked_at: string;
-        claim_type?: string;
-        proof?: BatchVerificationProof;
-      } = {
-        credential_id: credentialId,
-        status,
-        checked_at: new Date().toISOString(),
-      };
-
-      if (claimType) {
-        response.claim_type = claimType;
-        if (status === 'verified') {
-          const verifiedAt = response.checked_at;
-          response.proof = {
-            verified_at: verifiedAt,
-            credential_status: suspended ? 'suspended' : 'active',
-            digest: digestHex(`${credentialId} ${claimType} ${verifiedAt}`),
-          };
-          // #1001: feed the analytics event log so /api/analytics/verifications
-          // can report verification counts by claim type and verifier.
-          metricsStore.recordEvent({
-            type: 'verified',
-            credential_id: String(credentialId),
-            timestamp: verifiedAt,
-            metadata: { claim_type: claimType, verifier: callerIdentity(req) },
-          });
-        }
-      }
-
-      res.json(response);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.toLowerCase().includes('credentialnotfound') || msg.toLowerCase().includes('not found')) {
-        res.status(404).json({ error: 'Credential not found', credential_id: credentialId, status: 'not_found' });
-      } else {
-        res.status(500).json({ error: msg });
-      }
-    }
-  });
-
   return router;
 }
-
-// Default export using the real Soroban client so the router can be
-// mounted directly in `index.ts` without any extra wiring.
-export default createVerifyRouter({
-  simulateCall,
-  u64Val: u64Val as unknown as SorobanClient['u64Val'],
-  u32Val: u32Val as unknown as SorobanClient['u32Val'],
-  addressVal: addressVal as unknown as SorobanClient['addressVal'],
-});

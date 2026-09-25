@@ -518,3 +518,125 @@ async function rotateKeys(userId: string): Promise<void> {
 - [OWASP Secure Coding Practices](https://owasp.org/www-project-secure-coding-practices-quick-reference-guide/)
 - [CWE/SANS Top 25](https://cwe.mitre.org/top25/)
 - [Stellar Security Best Practices](https://developers.stellar.org/docs/learn/security)
+
+---
+
+## Admin-Key Topology and Multi-Sig / Timelock Policy
+
+> Added by issue #1508. This section documents the current per-contract admin key
+> topology, the threat model that justifies upgrading to a multi-sig / timelock
+> scheme, and the design decision for the v1.1 roadmap item.
+
+### Current Topology (v1.0)
+
+Each of the three deployed contracts — `quorum_proof`, `sbt_registry`, and
+`zk_verifier` — stores a single `DataKey::Admin` address checked with a direct
+equality assertion on every sensitive operation:
+
+```rust
+// Pattern repeated in all three contracts
+let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+assert!(stored_admin == admin, "unauthorized");
+```
+
+Operations gated by this pattern include:
+
+| Contract | Gated operations |
+|---|---|
+| `quorum_proof` | `upgrade`, `set_admin`, `pause`/`resume`, `emergency_pause`/`emergency_degrade` |
+| `sbt_registry` | `upgrade`, `set_admin`, `pause`/`unpause`, `revoke_credential` |
+| `zk_verifier` | `upgrade`, `set_admin`, `pause`/`unpause`, `rotate_verifying_key` |
+
+**Key observations:**
+- The three admin keys are independent — there is no shared key or on-chain relationship between them.
+- A single EOA key compromise is a full, immediate compromise of that contract's trust guarantees.
+- Because the three keys are independent, an attacker only needs to compromise the weakest one to own one contract outright. If the three keys share a common secret store (e.g. the same GitHub Actions secret or the same hardware wallet derivation path), a single secrets-management failure compromises all three.
+- There is no on-chain delay between `set_admin` and the new admin gaining full privileges — an attacker with the key can upgrade, pause, or rotate the verifying key in a single transaction.
+
+### Threat Model
+
+The primary threats addressed by upgrading the admin scheme are:
+
+1. **Single-key compromise** — stolen or leaked `STELLAR_SECRET_KEY` gives an attacker full admin rights on all admin-gated operations with no time window for detection and response.
+2. **Supply-chain / CI compromise** — a compromised GitHub Actions runner can exfiltrate `secrets.STELLAR_DEPLOY_SECRET_KEY` and immediately use it.
+3. **Insider threat** — any team member with access to the secret can unilaterally upgrade or pause a contract.
+4. **Irreversible upgrades** — there is no on-chain delay between `upgrade` being called and the new WASM taking effect, so a malicious upgrade cannot be cancelled once submitted.
+
+### Design Decision: Multi-Sig / Timelock Scheme (v1.1 Scope)
+
+A full multi-sig / timelock implementation is **scoped to v1.1** rather than
+implemented in v1.0 for the following reasons:
+
+- Soroban does not have a native multi-sig primitive at the contract level; a
+  correct implementation requires either an off-chain aggregator or an on-chain
+  pending-approval store, both of which add non-trivial complexity and gas cost.
+- The existing pause/emergency-pause mechanism (§1.7 in `docs/disaster-recovery.md`)
+  already provides an emergency stop that can be used to freeze a compromised
+  contract while a key-rotation recovery is performed.
+- The `set_admin` function already exists as the rotation mechanism; adding a
+  timelock on top of it is additive, not a redesign.
+
+**Chosen scheme for v1.1:**
+
+An `AdminProposal` pattern modelled on OpenZeppelin's `TimelockController`:
+
+1. **Propose** — the current admin submits a proposal (`propose_admin_change(new_admin, eta)`) that is stored on-chain with a mandatory delay (`eta ≥ now + TIMELOCK_DELAY`). `TIMELOCK_DELAY` is a contract constant, initially set to 48 hours for `mainnet` and 1 hour for `testnet`.
+2. **Queue** — the proposal sits in a `PendingAdminChange` storage entry during the delay window. Any on-chain observer (exporter, monitoring) can detect and alert on it.
+3. **Execute** — after `eta` passes, any caller can invoke `execute_admin_change(proposal_id)` which atomically sets the new admin and removes the proposal. The executing caller does not need to be the admin.
+4. **Cancel** — the current admin can cancel a pending proposal before `eta` with `cancel_admin_change(proposal_id)`. This is the recovery mechanism if a proposal was submitted by a compromised key.
+
+The same `AdminProposal` mechanism is applied to `upgrade` and `rotate_verifying_key`. The `pause`/`emergency_pause` operations are **exempt from the timelock** because they must be usable immediately during an incident.
+
+**Multi-sig requirement (also v1.1):**
+
+Rather than a full m-of-n on-chain multi-sig (which would require a separate
+multi-sig contract or Stellar account with multiple signers), the v1.1 approach
+uses **Stellar account-level multi-sig** for the admin address:
+
+- The admin `Address` stored in each contract points to a **Stellar account with
+  a 2-of-3 signer set** (three hardware-wallet-backed keys, any two sufficient).
+- Stellar's native transaction signing policy enforces the 2-of-3 requirement
+  before the transaction is accepted by the network — no on-contract code change
+  is required for the multi-sig enforcement itself.
+- This approach reuses Stellar's existing multi-sig infrastructure and avoids
+  implementing a custom on-chain aggregator.
+
+**Why unsound/yanked denial does not affect this change:**
+The multi-sig mechanism operates at the Stellar account layer, not via a new Rust
+dependency, so the `deny.toml` tightening in issue #1490 has no interaction with
+this design.
+
+**Rationale for keeping `pause` exempt from timelock:**
+An emergency pause is a harm-reduction measure that must not be slowed by a 48-hour
+delay. The worst-case abuse of an untimelocked pause is a service disruption
+(contract frozen), not a funds loss or a privilege escalation. An attacker who
+controls the admin key can already cause more damage via `upgrade` — and `upgrade`
+*is* timelocked — so the pause exemption does not meaningfully widen the attack
+surface.
+
+**Same-transaction admin-then-upgrade guard:**
+The `AdminProposal` design inherently blocks a same-transaction admin-then-upgrade
+attack: the admin change proposal must be submitted in one transaction, the timelock
+delay must elapse (≥ 48 hours on mainnet), and the upgrade must be submitted in a
+separate transaction after the new admin is confirmed. There is no path to combine
+both in a single transaction.
+
+### Wiring to Existing Infrastructure
+
+- The monitoring exporter (`monitoring/exporter/exporter.py`) should expose a
+  `quorumproof_pending_admin_proposal{contract="..."}` gauge once the v1.1
+  `AdminProposal` storage entry is available, so `monitoring/prometheus/alerts.yml`
+  can fire an alert whenever a proposal is queued.
+- The `docs/disaster-recovery.md` key-rotation runbook (§1.1 and the new
+  `§1.9 Key Rotation Runbook`) is the operational procedure for exercising the
+  `AdminProposal` flow.
+
+### Current Interim Mitigations (v1.0)
+
+Until v1.1 lands, the following controls reduce the single-key risk:
+
+1. **Hardware wallet** — the deployer key is stored on a hardware wallet, not in a software keystore.
+2. **GitHub Actions secret isolation** — `STELLAR_DEPLOY_SECRET_KEY` is scoped to the `environment: testnet` / `environment: mainnet` contexts with required reviewers, not accessible to all workflow runs.
+3. **Separate keys per environment** — testnet and mainnet use distinct key pairs, so a testnet secrets leak does not affect mainnet.
+4. **90-day rotation policy** — the deployer key is rotated every 90 days per `docs/disaster-recovery.md` §2 backup strategy.
+5. **Emergency pause** — if a key compromise is suspected, the contract can be paused immediately via `emergency_pause` while the key rotation is executed (see §1.7 in `docs/disaster-recovery.md`).

@@ -5,6 +5,9 @@ import { createCompressionFromEnv } from './middleware/compression.js';
 import slicesRouter from './routes/slices.js';
 import credentialsRouter from './routes/credentials.js';
 import credentialExportRouter from './routes/credentialExport.js';
+import { createHolderAttestationRouter } from './routes/holderAttestation.js';
+import { createEncryptedCredentialsRouter } from './routes/encryptedCredentials.js';
+import { createAuditRouter } from './routes/credentialAudit.js';
 import verifyRouter from './routes/verify.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
@@ -22,6 +25,7 @@ import oauth2Router from './routes/oauth2.js';
 import healthRouter from './routes/health.js';
 import privilegeEscalationRouter from './routes/privilegeEscalation.js';
 import tracingRouter from './routes/tracing.js';
+import adminRouter from './routes/admin.js';
 // #1309: Auto-generated OpenAPI docs (Swagger UI / ReDoc)
 import docsRouter from './routes/docs.js';
 import { createDashboardRouter } from './routes/dashboard.js';
@@ -40,10 +44,14 @@ import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
+// #1570: PoW-based rate limiting
+import { createPoWRateLimiter } from './middleware/powRateLimiter.js';
 // #1306: Structured logging
 import { structuredLoggingMiddleware } from './middleware/structuredLogging.js';
 // #1307: Distributed tracing
 import { distributedTracingMiddleware } from './middleware/distributedTracingMiddleware.js';
+// #1577: IP-based access control for sensitive endpoints
+import { createIPWhitelistMiddleware, loadWhitelistFromEnv } from './middleware/ipWhitelist.js';
 import { createWsServer } from './ws/server.js';
 import { getSubscriberCount } from './ws/subscriptions.js';
 import { getWsMetrics, getWsMetricsPrometheus } from './ws/metrics.js';
@@ -52,6 +60,8 @@ import { getDefaultCriticalEventListener } from './services/criticalEventListene
 import { broadcastEvent as _wsServerBroadcastEvent, getConnectionCount, closeWsServer } from './ws/server.js';
 import { dispatchWebhookEvent } from './services/webhooks.js';
 import { createGracefulShutdown } from './services/gracefulShutdown.js';
+// #1559: Connection pooling for the API server.
+import { createConnectionPool, createConnectionPoolMiddleware } from './services/connectionPool.js';
 import * as Soroban from './soroban.js';
 
 const app = express();
@@ -59,6 +69,17 @@ const app = express();
 // #1311: Create the HTTP server early so the graceful shutdown service can
 // reference it before httpServer.listen() is called.
 const httpServer = createServer(app);
+
+// #1559: Connection pool — reuses upstream connections across requests to
+// reduce per-request connection overhead. Size and wait behaviour are
+// configurable via env vars; when the pool is exhausted callers wait up to
+// POOL_MAX_WAIT_MS before degrading gracefully instead of blocking forever.
+const connectionPool = createConnectionPool({
+  maxSize: parseInt(process.env.POOL_MAX_SIZE ?? '20', 10),
+  minSize: parseInt(process.env.POOL_MIN_SIZE ?? '2', 10),
+  maxWaitMs: parseInt(process.env.POOL_MAX_WAIT_MS ?? '5000', 10),
+  idleTimeoutMs: parseInt(process.env.POOL_IDLE_TIMEOUT_MS ?? '30000', 10),
+});
 
 // #1311: Graceful shutdown — drains in-flight requests before exiting.
 // The drain timeout defaults to 30 s and is overridable via env var so
@@ -87,6 +108,10 @@ app.use(distributedTracingMiddleware);
 
 app.use(express.json({ limit: '100kb' }));
 
+// #1559: Acquire a pooled connection for the request lifetime and release it
+// back to the pool on response finish so it can be reused.
+app.use(createConnectionPoolMiddleware(connectionPool));
+
 // #1311: Track in-flight HTTP requests. Must come after body parsers so
 // the counter includes the full request lifetime, and early enough that
 // every /api route is covered.
@@ -102,10 +127,23 @@ const requestDeduplication = createRequestDeduplication({ ttlMs: 100, enabled: t
 app.use('/api', requestDeduplication);
 app.use('/api', requestSigning);
 
+// #1577: Initialize IP whitelist from environment and apply middleware
+loadWhitelistFromEnv();
+const ipWhitelistMiddleware = createIPWhitelistMiddleware();
+app.use('/api/admin', ipWhitelistMiddleware);
+app.use('/api', ipWhitelistMiddleware);
+
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10);
 const RATE_LIMIT_BACKOFF = parseInt(process.env.RATE_LIMIT_BACKOFF ?? '2', 10);
 const RATE_LIMIT_MAX_VIOLATIONS = parseInt(process.env.RATE_LIMIT_MAX_VIOLATIONS ?? '5', 10);
+
+// #1570: PoW-based rate limiting
+const powRateLimiter = createPoWRateLimiter({
+  enablePoW: process.env.POW_RATE_LIMITING_ENABLED !== 'false',
+  powExemptDuration: parseInt(process.env.POW_EXEMPT_DURATION_MS ?? '3600000', 10),
+  powEnabled: true,
+});
 
 // #1304: Use adaptive rate limiter with anomaly detection.
 // Falls back gracefully — the base createRateLimiter is kept for
@@ -124,12 +162,32 @@ const apiRateLimiter = createAdaptiveRateLimiter({
   },
 });
 
+app.use('/api', powRateLimiter.middleware);
 app.use('/api', apiRateLimiter);
+
+// #1566: Concurrent request handling limits. Caps in-flight requests with a
+// semaphore, queues excess requests (graceful degradation) up to a bounded
+// depth, and applies tighter per-endpoint limits for expensive routes.
+const concurrencyLimiter = createConcurrencyLimiter({
+  name: 'api',
+  maxConcurrent: parseInt(process.env.CONCURRENCY_MAX ?? '100', 10),
+  maxQueue: parseInt(process.env.CONCURRENCY_MAX_QUEUE ?? '200', 10),
+  maxWaitMs: parseInt(process.env.CONCURRENCY_MAX_WAIT_MS ?? '5000', 10),
+  pathOverrides: {
+    '/api/verify': parseInt(process.env.CONCURRENCY_VERIFY_MAX ?? '20', 10),
+    '/api/credentials': parseInt(process.env.CONCURRENCY_CREDENTIALS_MAX ?? '50', 10),
+  },
+});
+app.use('/api', concurrencyLimiter.middleware);
+
 app.use(cacheControl);
 
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
 app.use('/api/credentials', credentialExportRouter); // #1000 credential export (json/pdf/qrcode)
+app.use('/api/credentials', createHolderAttestationRouter()); // #1571 holder attestation
+app.use('/api/credentials', createEncryptedCredentialsRouter()); // #1572 threshold encryption
+app.use('/api/credentials', createAuditRouter()); // #1573 audit trail
 app.use('/api/verify', verifyRouter);
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
@@ -158,14 +216,24 @@ app.use('/api/me', createDashboardRouter(sorobanClient));
 // #1308: Health check endpoints
 app.use('/health', healthRouter);
 
+// #1570: PoW-based rate limiting endpoints
+app.post('/api/pow/challenge', powRateLimiter.requestChallenge);
+app.post('/api/pow/verify', powRateLimiter.submitSolution);
+
 // #1309: Auto-generated OpenAPI 3.1 docs — JSON spec, Swagger UI, ReDoc.
 app.use('/api-docs', docsRouter);
 
 // #1305: Privilege escalation prevention
 app.use('/api/admin/privilege-escalation', privilegeEscalationRouter);
 
+// #1577: IP-based access control management
+app.use('/api/admin', adminRouter);
+
 // #1307: Distributed tracing
 app.use('/api/tracing', tracingRouter);
+
+// #1605 WebSocket event information and history
+app.use('/api/events', createEventsRouter());
 
 app.get('/ws/metrics', (_req, res) => {
   res.json(getWsMetrics());
@@ -188,6 +256,29 @@ app.get('/metrics/rpc', (_req, res) => {
 
 app.get('/rpc/circuit-breaker', (_req, res) => {
   res.json(getDefaultRpcCircuitBreaker().getMetrics());
+});
+
+// Issue #1559: Database connection-pool metrics in both JSON and Prometheus
+// text-format expositions.  The pool must be initialised before this is
+// called (i.e. DATABASE_URL must be set); if not, a 503 is returned so
+// health-check tooling knows the pool is not yet ready.
+app.get('/metrics/db', (_req, res) => {
+  try {
+    const { getPoolMetricsPrometheus } = require('./db.js');
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(getPoolMetricsPrometheus());
+  } catch {
+    res.status(503).send('# Database pool not initialised\n');
+  }
+});
+
+app.get('/metrics/db/json', (_req, res) => {
+  try {
+    const { getPoolMetrics } = require('./db.js');
+    res.json(getPoolMetrics());
+  } catch {
+    res.status(503).json({ error: 'Database pool not initialised' });
+  }
 });
 
 // Critical contract event monitoring & alerting (issue #3). See
@@ -308,5 +399,4 @@ function broadcastEvent(...args: Parameters<typeof _wsServerBroadcastEvent>) {
   return result;
 }
 
-export { broadcastEvent };
-export default app;
+/* … truncated 5498 chars — edit only what you need near the top … */

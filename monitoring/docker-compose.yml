@@ -78,12 +78,36 @@ services:
       - loki
     restart: unless-stopped
 
+  # Issue #1486 — render alertmanager config before starting Alertmanager.
+  # Substitutes ${SLACK_ALERT_WEBHOOK_URL} and ${PAGERDUTY_ROUTING_KEY} from
+  # the environment so Alertmanager never posts to a literal ${...} URL.
+  # Run `scripts/render_alertmanager_config.sh` (or `docker compose run
+  # render-alertmanager-config`) before `docker compose up alertmanager`.
+  render-alertmanager-config:
+    image: bhgedigital/envsubst:latest
+    volumes:
+      - ./prometheus/alertmanager.yml:/input/alertmanager.yml:ro
+      - ./prometheus:/output
+    environment:
+      SLACK_ALERT_WEBHOOK_URL: ${SLACK_ALERT_WEBHOOK_URL:?SLACK_ALERT_WEBHOOK_URL must be set — see docs/deployment-guide.md}
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:?PAGERDUTY_ROUTING_KEY must be set — see docs/deployment-guide.md}
+    command: >
+      sh -c "envsubst '$$SLACK_ALERT_WEBHOOK_URL $$PAGERDUTY_ROUTING_KEY'
+             < /input/alertmanager.yml
+             > /output/alertmanager.rendered.yml
+             && echo 'Rendered alertmanager config → /output/alertmanager.rendered.yml'"
+
   alertmanager:
     image: prom/alertmanager:v0.27.0
     ports:
       - "9093:9093"
     volumes:
-      - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Mount the rendered (secrets-substituted) config, not the template.
+      # Run the render-alertmanager-config service first, or call
+      # scripts/render_alertmanager_config.sh directly.
+      - ./prometheus/alertmanager.rendered.yml:/etc/alertmanager/alertmanager.yml:ro
+    depends_on:
+      - render-alertmanager-config
     restart: unless-stopped
 
   # #586 — Log aggregation
