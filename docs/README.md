@@ -51,10 +51,12 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [ci-testnet-deployment.md](./ci-testnet-deployment.md) | How the automated testnet deployment pipeline works. |
 | [cicd-pipeline.md](./cicd-pipeline.md) | Overview of the CI/CD pipeline stages and gates. |
 | [multi-region-deployment.md](./multi-region-deployment.md) | Running the API server across multiple regions. |
+| [blue-green-deployment.md](./blue-green-deployment.md) | Zero-downtime api-server releases: blue/green slots, health-check validation, traffic switching, rollback. |
 | [capacity-planning.md](./capacity-planning.md) | Sizing guidance for throughput, storage, and RPC load. |
 | [cost-optimization-guide.md](./cost-optimization-guide.md) | Reducing on-chain fees and infrastructure cost. |
 | [database-migrations.md](./database-migrations.md) | Running and authoring API-server database migrations. |
 | [backup-system.md](./backup-system.md) | Backup architecture, schedule, and restore procedure. |
+| [backup-verification.md](./backup-verification.md) | Automated backup verification, integrity checks, and restoring from a verified backup. |
 | [disaster-recovery.md](./disaster-recovery.md) | Emergency pause/redeploy and credential-restoration procedures. |
 | [DR_PLAN_IMPLEMENTATION.md](./DR_PLAN_IMPLEMENTATION.md) | Implementation notes for the disaster-recovery plan. |
 | [resilience.md](./resilience.md) | Resilience requirements and chaos-testing approach (issue #1003). |
@@ -74,6 +76,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [critical-event-alerting.md](./critical-event-alerting.md) | Critical-event metrics and the Prometheus alert rules that fire on them. |
 | [operator-health-metrics.md](./operator-health-metrics.md) | Health metrics exposed for operators and their meaning. |
 | [perf-regression.md](./perf-regression.md) | Performance-regression benchmarking and thresholds. |
+| [performance-tuning-guide.md](./performance-tuning-guide.md) | Bottlenecks, tuning parameters, benchmark methodology, and performance monitoring. |
 
 ---
 
@@ -134,6 +137,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [interoperability-guide.md](./interoperability-guide.md) | Interoperating with external credential systems. |
 | [government-licensing-integration.md](./government-licensing-integration.md) | Protocol for licensing bodies to integrate as verified issuers. |
 | [websocket-scaling.md](./websocket-scaling.md) | Scaling WebSocket delivery across multiple API-server replicas. |
+| [plugin-development-guide.md](./plugin-development-guide.md) | Writing, testing, and distributing API-server plugins. |
 
 See also [`../api-server/docs/API_DOCUMENTATION.md`](../api-server/docs/API_DOCUMENTATION.md)
 for the auto-generated OpenAPI / Swagger reference.
