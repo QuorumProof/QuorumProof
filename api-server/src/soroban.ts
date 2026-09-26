@@ -92,6 +92,8 @@ export function deserializeContractState(retval: Parameters<typeof scValToNative
  * Every successful simulation's `minResourceFee` (the resource/gas cost
  * Soroban computed for this call) is recorded against the operation name
  * by the gas cost tracker (issue #4) — see services/gasCostTracker.ts.
+ *
+ * Design rationale: docs/adr/adr-015-read-only-api-server-via-simulation.md
  */
 export async function simulateCall(method: string, args: ReturnType<typeof nativeToScVal>[] = []) {
   if (!CONTRACT_ID) throw new Error('CONTRACT_QUORUM_PROOF env var not set');

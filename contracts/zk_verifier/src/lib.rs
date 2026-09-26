@@ -691,6 +691,7 @@ pub const EVENT_SET_GROTH16_VK: &str = "zk:set_groth16_verifying_key";
 pub const EVENT_SET_CIRCUIT_PARAMS: &str = "zk:set_circuit_parameters";
 
 #[contract]
+/// Design rationale: docs/adr/adr-003-zk-verification.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct ZkVerifierContract;
 
 #[contractimpl]
@@ -1305,8 +1306,20 @@ impl ZkVerifierContract {
     }
 
     /// Admin-only contract upgrade to new WASM.
+    ///
+    /// Issue #1630: verifies the caller is the stored admin (previously any
+    /// address that signed could upgrade) and rejects an all-zero hash.
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        let zero = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
+        assert!(new_wasm_hash != zero, "invalid wasm hash");
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 

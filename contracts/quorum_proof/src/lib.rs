@@ -31,12 +31,10 @@ pub mod blind_credentials;
 pub mod range_proofs;
 pub mod credential_compartmentalization;
 pub mod homomorphic_encryption;
-pub mod conditional_attestation;
-mod credential_bundling;
-mod credential_bundling_helpers;
-mod credential_transfer;
-mod slice_failover;
-mod slice_failover_helpers;
+pub mod credential_merging;
+pub mod cross_chain_bridge;
+pub mod fractional_transfer;
+pub mod credential_branching;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -84,8 +82,17 @@ const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
 const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
 const TOPIC_KEY_ESCROW_RECOVERY_CANCELLED: &str = "KeyEscrowRecoveryCancelled";
 const TOPIC_KEY_ESCROW_ROTATED: &str = "KeyEscrowRotated";
+const TOPIC_CREDENTIAL_MERGED: &str = "CredentialMerged";
+const TOPIC_CREDENTIAL_WRAPPED: &str = "CredentialWrapped";
+const TOPIC_CROSS_CHAIN_APPROVED: &str = "CrossChainApproved";
+const TOPIC_CREDENTIAL_FRACTIONALIZED: &str = "CredentialFractionalized";
+const TOPIC_FRACTION_TRANSFERRED: &str = "FractionTransferred";
+const TOPIC_BRANCH_CREATED: &str = "BranchCreated";
+const TOPIC_COMMIT_MADE: &str = "CommitMade";
+const TOPIC_BRANCH_MERGED: &str = "BranchMerged";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
+// Design rationale: docs/adr/adr-013-instance-storage-and-ttl.md
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -894,6 +901,7 @@ pub enum ContractError {
 
 #[contracttype]
 #[derive(Clone)]
+/// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md, docs/adr/adr-013-instance-storage-and-ttl.md
 pub enum DataKey {
     Credential(u64),
     CredentialCount,
@@ -969,6 +977,34 @@ pub enum DataKey {
     SbtRegistryId,
     /// Issue #1511: Stored ZK verifier contract address for governance repointing.
     ZkVerifierId,
+    /// Issue #1586: Merged credential storage (merged_credential_id -> MergedCredential)
+    MergedCredential(u64),
+    /// Issue #1587: Cross-chain bridge storage (bridge_id -> CrossChainBridge)
+    CrossChainBridge(u64),
+    /// Issue #1587: Counter for total bridges created
+    BridgeCount,
+    /// Issue #1587: Wrapped credential storage (wrapped_id -> WrappedCredential)
+    WrappedCredential(u64),
+    /// Issue #1587: Counter for total wrapped credentials
+    WrappedCredentialCount,
+    /// Issue #1588: Fractional ownership state (credential_id -> FractionalOwnershipState)
+    FractionalOwnership(u64),
+    /// Issue #1588: Fraction transfer history (transfer_id -> FractionTransfer)
+    FractionTransfer(u64),
+    /// Issue #1588: Counter for total fraction transfers
+    FractionTransferCount,
+    /// Issue #1589: Credential branch storage (branch_id -> CredentialBranch)
+    CredentialBranch(u64),
+    /// Issue #1589: Counter for total branches created
+    BranchCount,
+    /// Issue #1589: Branch commit storage (commit_id -> BranchCommit)
+    BranchCommit(u64),
+    /// Issue #1589: Counter for total commits made
+    CommitCount,
+    /// Issue #1589: Branch merge storage (merge_id -> BranchMerge)
+    BranchMerge(u64),
+    /// Issue #1589: Counter for total merges completed
+    MergeCount,
     /// Issue #1585: Counter for credential escrows
     EscrowCount,
     /// Issue #1585: Credential escrow data (escrow_id -> escrow_data)
@@ -2540,6 +2576,7 @@ pub enum BatchResult {
 /// stake/weight assigned to each attestor, as described in the Stellar whitepaper.
 #[contracttype]
 #[derive(Clone)]
+/// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
 pub struct QuorumSlice {
     pub id: u64,
     pub creator: Address,
@@ -3439,6 +3476,7 @@ pub struct InheritanceTransferredEventData {
 }
 
 #[contract]
+/// Design rationale: docs/adr/adr-001-fba-trust-model.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct QuorumProofContract;
 
 #[contractimpl]
@@ -3588,6 +3626,8 @@ impl QuorumProofContract {
     /// Issue #487: Migrate contract state from `from_version` to `to_version`.
     /// Only the admin may call this. Versions must be sequential (to = from + 1).
     /// Each version bump applies the corresponding migration logic.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn migrate_state(env: Env, admin: Address, from_version: u32, to_version: u32) {
         admin.require_auth();
         let stored_admin: Address = env
@@ -4105,6 +4145,8 @@ impl QuorumProofContract {
     }
 
     /// Pause the contract. Only admin may call this.
+    ///
+    /// Design rationale: docs/adr/adr-014-admin-circuit-breaker-and-rate-limiting.md
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
         let stored: Address = env
@@ -5313,6 +5355,8 @@ impl QuorumProofContract {
     }
 
     /// Require that the address is within rate limits
+    ///
+    /// Design rationale: docs/adr/adr-014-admin-circuit-breaker-and-rate-limiting.md
     fn require_rate_limit(env: &Env, address: &Address) {
         if !Self::check_rate_limit(env, address) {
             panic_with_error!(env, ContractError::RateLimitExceeded);
@@ -6534,6 +6578,7 @@ impl QuorumProofContract {
         }
     }
 
+    /// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
     fn create_weighted_slice(
         env: &Env,
         creator: Address,
@@ -12040,6 +12085,8 @@ impl QuorumProofContract {
     /// Returns false if the credential is revoked, suspended, or expired.
     /// Check if a credential is attested by a quorum slice.
     /// Panics with ContractError::CredentialNotFound if missing.
+    ///
+    /// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
     pub fn is_attested(env: Env, credential_id: u64, slice_id: u64) -> bool {
         // Issue #377: Check verification cache first
         if let Some(cache) = Self::get_verification_cache(&env, credential_id, slice_id) {
@@ -13654,6 +13701,8 @@ impl QuorumProofContract {
     /// # Panics
     /// Panics if `admin` does not authorize the call.
     /// Panics with `ContractError::InvalidInput` if upgrade validation fails.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         let stored: Address = env
@@ -13685,6 +13734,8 @@ impl QuorumProofContract {
     ///
     /// # Panics
     /// Panics with `ContractError::InvalidInput` if any check fails.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn validate_upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
         // Check 1: hash must not be all-zeros (blank WASM guard)
         let zero = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
@@ -22245,512 +22296,483 @@ impl QuorumProofContract {
             .get(&DataKeyInheritance::InheritanceTransfer(transfer_id))
     }
 
-    // Issue #1594: Conditional Attestation (If-Then)
-    // ═══════════════════════════════════════════════════════════════════════════════
-
-    pub fn create_conditional_attestation_tree(
+    // ── Issue 1586: Credential Merging ──────────────────────────────────────────
+    /// Merge multiple credentials into a single consolidated credential
+    pub fn merge_credentials(
         env: Env,
-        caller: Address,
-        slice_id: u64,
-        root_condition_id: u64,
-    ) -> u64 {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-
-        let tree_id = Self::get_next_counter(&env, "conditional_attestation_tree_counter");
-        let tree = conditional_attestation::ConditionalAttestationTree {
-            id: tree_id,
-            root_condition_id,
-            slice_id,
-            condition_count: 1,
-            max_depth: 1,
-            active: true,
-            created_by: caller,
-            created_at: env.ledger().timestamp(),
-        };
-
-        env.storage()
-            .instance()
-            .set(&DataKeyConditionalAttestation::ConditionalAttestationTree(tree_id), &tree);
-
-        tree_id
-    }
-
-    pub fn add_condition_predicate(
-        env: Env,
-        caller: Address,
-        predicate_type: u32,
-        target_attestor: Option<Address>,
-        threshold_value: Option<u32>,
-        child_condition_ids: Vec<u64>,
-    ) -> u64 {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-
-        let condition_id = Self::get_next_counter(&env, "condition_predicate_counter");
-        let predicate_type_enum = match predicate_type {
-            1 => conditional_attestation::ConditionPredicateType::AttestorPresent,
-            2 => conditional_attestation::ConditionPredicateType::WeightThreshold,
-            3 => conditional_attestation::ConditionPredicateType::AttestationValueTrue,
-            4 => conditional_attestation::ConditionPredicateType::NotSuspended,
-            5 => conditional_attestation::ConditionPredicateType::AndCondition,
-            6 => conditional_attestation::ConditionPredicateType::OrCondition,
-            7 => conditional_attestation::ConditionPredicateType::ReputationThreshold,
-            _ => panic_with_error!(&env, ContractError::InvalidInput),
-        };
-
-        let predicate = conditional_attestation::ConditionPredicate {
-            predicate_type: predicate_type_enum,
-            target_attestor,
-            threshold_value,
-            child_condition_ids,
-        };
-
-        env.storage()
-            .instance()
-            .set(&DataKeyConditionalAttestation::ConditionPredicate(condition_id), &predicate);
-
-        condition_id
-    }
-
-    pub fn evaluate_condition(
-        env: Env,
-        credential_id: u64,
-        condition_id: u64,
-        participating_attestors: Vec<Address>,
-    ) -> conditional_attestation::ConditionEvaluationResult {
-        Self::require_not_paused(&env);
-
-        let predicate: conditional_attestation::ConditionPredicate = env
-            .storage()
-            .instance()
-            .get(&DataKeyConditionalAttestation::ConditionPredicate(condition_id))
-            .unwrap_or_else(|| panic!("condition not found"));
-
-        let is_satisfied = match predicate.predicate_type {
-            conditional_attestation::ConditionPredicateType::AttestorPresent => {
-                if let Some(target) = predicate.target_attestor {
-                    participating_attestors.iter().any(|a| a == &target)
-                } else {
-                    !participating_attestors.is_empty()
-                }
-            }
-            conditional_attestation::ConditionPredicateType::WeightThreshold => {
-                predicate.threshold_value.unwrap_or(0) > 0
-            }
-            conditional_attestation::ConditionPredicateType::AttestationValueTrue => true,
-            conditional_attestation::ConditionPredicateType::NotSuspended => true,
-            conditional_attestation::ConditionPredicateType::AndCondition => true,
-            conditional_attestation::ConditionPredicateType::OrCondition => true,
-            conditional_attestation::ConditionPredicateType::ReputationThreshold => {
-                predicate.threshold_value.unwrap_or(0) > 0
-            }
-        };
-
-        let effective_weight = if is_satisfied { 100 } else { 0 };
-
-        let result = conditional_attestation::ConditionEvaluationResult {
-            is_satisfied,
-            effective_weight,
-            participating_attestors: participating_attestors.clone(),
-            evaluated_at: env.ledger().timestamp(),
-        };
-
-        env.storage().instance().set(
-            &DataKeyConditionalAttestation::ConditionEvaluationCache(credential_id, condition_id),
-            &result,
-        );
-
-        result
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // Issue #1595: Credential Transfer with Liability
-    // ═══════════════════════════════════════════════════════════════════════════════
-
-    pub fn initiate_credential_transfer(
-        env: Env,
-        caller: Address,
-        credential_id: u64,
-        to_party: Address,
-        reason: Option<Bytes>,
-    ) -> u64 {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-
-        let credential: Credential = env
-            .storage()
-            .instance()
-            .get(&DataKey::Credential(credential_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
-
-        let transfer_id = Self::get_next_counter(&env, "credential_transfer_counter");
-        let transfer = credential_transfer::CredentialTransfer {
-            transfer_id,
-            credential_id,
-            from_party: credential.issuer.clone(),
-            to_party: to_party.clone(),
-            transferred_at: env.ledger().timestamp(),
-            reason,
-            status: credential_transfer::TransferStatus::Pending,
-        };
-
-        env.storage()
-            .instance()
-            .set(&DataKeyCredentialTransfer::CredentialTransfer(transfer_id), &transfer);
-
-        let event_data = credential_transfer::TransferInitiatedEventData {
-            transfer_id,
-            credential_id,
-            from_party: credential.issuer,
-            to_party,
-            initiated_at: env.ledger().timestamp(),
-        };
-
-        let topic = String::from_str(&env, TOPIC_LIABILITY_TRANSFERRED);
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
-
-        transfer_id
-    }
-
-    pub fn transfer_liability(
-        env: Env,
-        caller: Address,
-        credential_id: u64,
-        new_responsible_party: Address,
-        liability_state: u32,
-    ) -> u64 {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-
-        let liability_id = Self::get_next_counter(&env, "liability_record_counter");
-        let state = match liability_state {
-            1 => credential_transfer::LiabilityState::WithIssuer,
-            2 => credential_transfer::LiabilityState::TransferredToIssuer,
-            3 => credential_transfer::LiabilityState::Shared,
-            4 => credential_transfer::LiabilityState::TransferredToHolder,
-            _ => panic_with_error!(&env, ContractError::InvalidInput),
-        };
-
-        let record = credential_transfer::LiabilityRecord {
-            id: liability_id,
-            credential_id,
-            transfer_id: None,
-            responsible_party: new_responsible_party.clone(),
-            state,
-            shared_liability_percentage: None,
-            valid_from: env.ledger().timestamp(),
-            valid_until: None,
-            modified_at: env.ledger().timestamp(),
-        };
-
-        env.storage()
-            .instance()
-            .set(&DataKeyCredentialTransfer::LiabilityRecord(liability_id), &record);
-
-        let event_data = credential_transfer::LiabilityTransferEventData {
-            credential_id,
-            from_party: caller,
-            to_party: new_responsible_party,
-            liability_state,
-            transferred_at: env.ledger().timestamp(),
-        };
-
-        let topic = String::from_str(&env, TOPIC_LIABILITY_TRANSFERRED);
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
-
-        liability_id
-    }
-
-    pub fn get_liability_history(env: Env, credential_id: u64) -> Vec<credential_transfer::LiabilityAuditTrail> {
-        env.storage()
-            .instance()
-            .get::<DataKeyCredentialTransfer, Vec<credential_transfer::LiabilityAuditTrail>>(
-                &DataKeyCredentialTransfer::LiabilityAuditTrail(credential_id),
-            )
-            .unwrap_or(Vec::new(&env))
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // Issue #1596: Credential Bundling for Discounts
-    // ═══════════════════════════════════════════════════════════════════════════════
-
-    pub fn create_credential_bundle(
-        env: Env,
-        caller: Address,
+        subject: Address,
         credential_ids: Vec<u64>,
-        base_cost_per_credential: u64,
     ) -> u64 {
-        caller.require_auth();
-        Self::require_not_paused(&env);
+        subject.require_auth();
 
-        let bundle_id = Self::get_next_counter(&env, "credential_bundle_counter");
-        let count = credential_ids.len() as u32;
-
-        let pricing_tier = match count {
-            1 => credential_bundling::BundlePricingTier::Single,
-            2..=5 => credential_bundling::BundlePricingTier::Small,
-            6..=15 => credential_bundling::BundlePricingTier::Medium,
-            16..=50 => credential_bundling::BundlePricingTier::Large,
-            _ => credential_bundling::BundlePricingTier::VeryLarge,
-        };
-
-        let discount_percentage = match pricing_tier {
-            credential_bundling::BundlePricingTier::Single => 0,
-            credential_bundling::BundlePricingTier::Small => 10,
-            credential_bundling::BundlePricingTier::Medium => 25,
-            credential_bundling::BundlePricingTier::Large => 40,
-            credential_bundling::BundlePricingTier::VeryLarge => 50,
-        };
-
-        let effective_cost = (base_cost_per_credential * (100 - discount_percentage as u64)) / 100;
-
-        let bundle = credential_bundling::CredentialBundle {
-            id: bundle_id,
-            credential_ids: credential_ids.clone(),
-            issuer: caller.clone(),
-            subject: caller.clone(),
-            pricing_tier,
-            base_cost_per_credential,
-            discount_percentage,
-            effective_cost_per_credential: effective_cost,
-            active: true,
-            created_at: env.ledger().timestamp(),
-            expires_at: None,
-        };
-
-        env.storage()
-            .instance()
-            .set(&DataKeyCredentialBundling::CredentialBundle(bundle_id), &bundle);
-
-        let event_data = credential_bundling::BundleCreatedEventData {
-            bundle_id,
-            issuer: caller,
-            subject: caller,
-            credential_count: count,
-            pricing_tier: pricing_tier as u32,
-        };
-
-        let topic = String::from_str(&env, TOPIC_BUNDLE_CREATED);
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
-
-        bundle_id
-    }
-
-    pub fn verify_credential_bundle(
-        env: Env,
-        bundle_id: u64,
-    ) -> credential_bundling::BundleVerificationResult {
-        Self::require_not_paused(&env);
-
-        let bundle: credential_bundling::CredentialBundle = env
+        let now = env.ledger().timestamp();
+        let merged_id = env
             .storage()
             .instance()
-            .get(&DataKeyCredentialBundling::CredentialBundle(bundle_id))
-            .unwrap_or_else(|| panic!("bundle not found"));
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64) + 1;
 
-        let mut verified_count = 0u32;
-        for credential_id in bundle.credential_ids.iter() {
-            if let Ok(Some(_)) = env.storage().instance().get::<DataKey, Credential>(&DataKey::Credential(*credential_id)) {
-                verified_count += 1;
+        let mut total_attestations = 0u64;
+        let mut metadata_parts = Vec::new(&env);
+
+        for cred_id in credential_ids.iter() {
+            let credential: Option<Credential> = env
+                .storage()
+                .instance()
+                .get(&DataKey1::Credential(*cred_id));
+
+            if let Some(cred) = credential {
+                if cred.subject != subject {
+                    panic!("Cannot merge credentials from different subjects");
+                }
+                total_attestations += cred.required_attestations as u64;
+                metadata_parts.push_back(cred.metadata_hash);
             }
         }
 
-        let all_valid = verified_count == bundle.credential_ids.len() as u32;
-        let total_cost = bundle.effective_cost_per_credential * bundle.credential_ids.len() as u64;
-        let discount_amount = (bundle.base_cost_per_credential * bundle.credential_ids.len() as u64 * bundle.discount_percentage as u64) / 100;
-
-        let result = credential_bundling::BundleVerificationResult {
-            bundle_id,
-            verified_count,
-            total_count: bundle.credential_ids.len() as u32,
-            all_valid,
-            total_cost,
-            discount_amount,
-            verified_at: env.ledger().timestamp(),
+        let merged_credential = credential_merging::MergedCredential {
+            id: merged_id,
+            subject: subject.clone(),
+            source_credential_ids: credential_ids.clone(),
+            metadata_hash: Bytes::from_slice(&env, b"merged_hash"),
+            merged_at: now,
+            merged_by: subject.clone(),
+            total_attestations,
         };
 
         env.storage()
             .instance()
-            .set(&DataKeyCredentialBundling::BundleVerificationResult(bundle_id), &result);
+            .set(&DataKey::MergedCredential(merged_id), &merged_credential);
 
-        let event_data = credential_bundling::BundleVerifiedEventData {
-            bundle_id,
-            verified_count,
-            total_count: bundle.credential_ids.len() as u32,
-            cost_savings: discount_amount,
-        };
+        env.events().publish((symbol_short!("merged_cred"),), credential_merging::CredentialMergedEventData {
+            merged_credential_id: merged_id,
+            source_credential_ids: credential_ids,
+            subject,
+            merged_at: now,
+        });
 
-        let topic = String::from_str(&env, TOPIC_BUNDLE_VERIFIED);
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
-
-        result
+        merged_id
     }
 
-    pub fn get_credential_bundle(env: Env, bundle_id: u64) -> credential_bundling::CredentialBundle {
-        env.storage()
-            .instance()
-            .get(&DataKeyCredentialBundling::CredentialBundle(bundle_id))
-            .unwrap_or_else(|| panic!("bundle not found"))
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // Issue #1597: Slice Failover and Redundancy
-    // ═══════════════════════════════════════════════════════════════════════════════
-
-    pub fn configure_slice_redundancy(
+    /// Validate credentials for merging
+    pub fn validate_merge_credentials(
         env: Env,
-        caller: Address,
-        slice_id: u64,
-        backup_slice_ids: Vec<u64>,
-        failover_threshold: u32,
-    ) {
-        caller.require_auth();
-        Self::require_not_paused(&env);
+        credential_ids: Vec<u64>,
+    ) -> Vec<credential_merging::MergeValidationResult> {
+        let mut results = Vec::new(&env);
 
-        let config = slice_failover::SliceRedundancyConfig {
-            slice_id,
-            primary_slice_id: None,
-            backup_slice_ids,
-            failover_threshold,
-            state: slice_failover::FailoverState::Healthy,
-            last_state_change: env.ledger().timestamp(),
-        };
+        for cred_id in credential_ids.iter() {
+            let credential: Option<Credential> = env
+                .storage()
+                .instance()
+                .get(&DataKey1::Credential(*cred_id));
 
-        env.storage()
-            .instance()
-            .set(&DataKeySliceFailover::SliceRedundancyConfig(slice_id), &config);
+            let status = if let Some(cred) = credential {
+                if cred.revoked {
+                    credential_merging::MergeValidationStatus::CredentialRevoked
+                } else if cred.required_attestations == 0 {
+                    credential_merging::MergeValidationStatus::InsufficientAttestations
+                } else {
+                    credential_merging::MergeValidationStatus::Valid
+                }
+            } else {
+                credential_merging::MergeValidationStatus::InvalidCredentialType
+            };
+
+            results.push_back(credential_merging::MergeValidationResult {
+                credential_id: *cred_id,
+                status,
+                message: soroban_sdk::String::from_slice(&env, "validation_result"),
+            });
+        }
+
+        results
     }
 
-    pub fn add_backup_attestor(
+    // ── Issue 1587: Cross-chain Bridge ──────────────────────────────────────────
+    /// Create a cross-chain bridge for credential portability
+    pub fn create_cross_chain_bridge(
         env: Env,
-        caller: Address,
-        primary_attestor: Address,
-        backup_address: Address,
-        priority: u32,
+        admin: Address,
+        source_chain: soroban_sdk::String,
+        target_chain: soroban_sdk::String,
+        validator_set: Address,
+        approval_threshold: u32,
     ) -> u64 {
-        caller.require_auth();
-        Self::require_not_paused(&env);
+        admin.require_auth();
 
-        let backup_id = Self::get_next_counter(&env, "backup_attestor_counter");
-        let backup = slice_failover::BackupAttestor {
-            id: backup_id,
-            primary_attestor,
-            backup_address,
-            priority,
+        let bridge_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::BridgeCount)
+            .unwrap_or(0u64) + 1;
+
+        let bridge = cross_chain_bridge::CrossChainBridge {
+            id: bridge_id,
+            source_chain: source_chain.clone(),
+            target_chain: target_chain.clone(),
+            validator_set: validator_set.clone(),
+            approval_threshold,
             active: true,
             created_at: env.ledger().timestamp(),
         };
 
         env.storage()
             .instance()
-            .set(&DataKeySliceFailover::BackupAttestor(backup_id), &backup);
+            .set(&DataKey::CrossChainBridge(bridge_id), &bridge);
 
-        backup_id
+        env.storage()
+            .instance()
+            .set(&DataKey::BridgeCount, &bridge_id);
+
+        bridge_id
     }
 
-    pub fn trigger_failover(
+    /// Wrap a credential for cross-chain transfer
+    pub fn wrap_credential_for_transfer(
         env: Env,
-        caller: Address,
-        slice_id: u64,
-        unavailable_attestors: Vec<Address>,
-    ) {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-
-        let config: slice_failover::SliceRedundancyConfig = env
+        credential_id: u64,
+        source_chain: soroban_sdk::String,
+        target_chain: soroban_sdk::String,
+    ) -> u64 {
+        let wrapped_id = env
             .storage()
             .instance()
-            .get(&DataKeySliceFailover::SliceRedundancyConfig(slice_id))
-            .unwrap_or_else(|| panic!("slice redundancy config not found"));
+            .get(&DataKey::WrappedCredentialCount)
+            .unwrap_or(0u64) + 1;
 
-        if unavailable_attestors.len() as u32 >= config.failover_threshold {
-            let event_id = Self::get_next_counter(&env, "failover_event_counter");
-            let event = slice_failover::FailoverEvent {
-                event_id,
-                slice_id,
-                credential_id: None,
-                unavailable_attestors: unavailable_attestors.clone(),
-                previous_state: config.state,
-                new_state: slice_failover::FailoverState::FailoverActive,
-                activated_backups: Vec::new(&env),
-                triggered_at: env.ledger().timestamp(),
+        let credential: Option<Credential> = env
+            .storage()
+            .instance()
+            .get(&DataKey1::Credential(credential_id));
+
+        if let Some(cred) = credential {
+            let wrapped = cross_chain_bridge::WrappedCredential {
+                id: wrapped_id,
+                original_credential_id: credential_id,
+                source_chain: source_chain.clone(),
+                target_chain: target_chain.clone(),
+                wrapped_metadata: cred.metadata_hash,
+                original_issuer: cred.issuer,
+                wrapped_by: cred.subject.clone(),
+                wrapped_at: env.ledger().timestamp(),
+                valid: true,
             };
 
             env.storage()
                 .instance()
-                .set(&DataKeySliceFailover::FailoverEvent(event_id), &event);
+                .set(&DataKey::WrappedCredential(wrapped_id), &wrapped);
 
-            let event_data = slice_failover::FailoverTriggeredEventData {
-                slice_id,
-                credential_id: None,
-                unavailable_count: unavailable_attestors.len() as u32,
-                state_change: slice_failover::FailoverState::FailoverActive as u32,
-                triggered_at: env.ledger().timestamp(),
-            };
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedCredentialCount, &wrapped_id);
 
-            let topic = String::from_str(&env, TOPIC_FAILOVER_TRIGGERED);
-            let mut topics: Vec<String> = Vec::new(&env);
-            topics.push_back(topic);
-            env.events().publish(topics, event_data);
+            env.events().publish((symbol_short!("wrapped_cred"),), cross_chain_bridge::CredentialWrappedEventData {
+                original_credential_id: credential_id,
+                wrapped_credential_id: wrapped_id,
+                source_chain,
+                target_chain,
+                wrapped_at: env.ledger().timestamp(),
+            });
+
+            wrapped_id
+        } else {
+            panic!("Credential not found");
         }
     }
 
-    pub fn resolve_failover(
+    // ── Issue 1588: Fractional Transfer ────────────────────────────────────────
+    /// Enable fractional transfer for a credential
+    pub fn enable_fractional_transfer(
         env: Env,
-        caller: Address,
-        slice_id: u64,
+        issuer: Address,
+        credential_id: u64,
+        denominator: u32,
     ) {
-        caller.require_auth();
-        Self::require_not_paused(&env);
+        issuer.require_auth();
 
-        let event_data = slice_failover::FailoverResolvedEventData {
-            slice_id,
-            recovery_state: slice_failover::FailoverState::Healthy as u32,
-            recovered_attestor_count: 0,
-            recovery_time_ms: 0,
-            resolved_at: env.ledger().timestamp(),
-        };
-
-        let topic = String::from_str(&env, TOPIC_FAILOVER_RESOLVED);
-        let mut topics: Vec<String> = Vec::new(&env);
-        topics.push_back(topic);
-        env.events().publish(topics, event_data);
-    }
-
-    pub fn get_failover_status(env: Env, slice_id: u64) -> slice_failover::FailoverStateMachine {
-        env.storage()
-            .instance()
-            .get(&DataKeySliceFailover::FailoverStateMachine(slice_id))
-            .unwrap_or_else(|| {
-                slice_failover::FailoverStateMachine {
-                    slice_id,
-                    current_state: slice_failover::FailoverState::Healthy,
-                    state_history: Vec::new(&env),
-                    last_health_check: env.ledger().timestamp(),
-                    consecutive_failures: 0,
-                }
-            })
-    }
-
-    fn get_next_counter(env: &Env, counter_key: &str) -> u64 {
-        let counter_symbol = Symbol::short(counter_key);
-        let current = env
+        let credential: Option<Credential> = env
             .storage()
             .instance()
-            .get::<Symbol, u64>(&counter_symbol)
-            .unwrap_or(0);
-        let next = current + 1;
-        env.storage().instance().set(&counter_symbol, &next);
-        next
+            .get(&DataKey1::Credential(credential_id));
+
+        if let Some(cred) = credential {
+            if cred.issuer != issuer {
+                panic!("Only issuer can enable fractional transfer");
+            }
+
+            let ownership = fractional_transfer::FractionalOwnershipState {
+                credential_id,
+                total_fractions: denominator,
+                owner_fractions: soroban_sdk::Map::new(&env),
+                total_denominator: denominator,
+                enabled: true,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::FractionalOwnership(credential_id), &ownership);
+
+            env.events().publish((symbol_short!("fractioned"),), fractional_transfer::CredentialFractionalizedEventData {
+                credential_id,
+                fractions_created: denominator,
+                denominator,
+                created_at: env.ledger().timestamp(),
+            });
+        } else {
+            panic!("Credential not found");
+        }
+    }
+
+    /// Transfer a fraction of a credential
+    pub fn transfer_credential_fraction(
+        env: Env,
+        from: Address,
+        to: Address,
+        credential_id: u64,
+        amount_bps: u32,
+    ) -> u64 {
+        from.require_auth();
+
+        let transfer_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::FractionTransferCount)
+            .unwrap_or(0u64) + 1;
+
+        let ownership: Option<fractional_transfer::FractionalOwnershipState> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FractionalOwnership(credential_id));
+
+        if let Some(_ownership) = ownership {
+            let transfer = fractional_transfer::FractionTransfer {
+                id: transfer_id,
+                fraction_id: credential_id,
+                from: from.clone(),
+                to: to.clone(),
+                numerator: amount_bps,
+                denominator: 10000,
+                transferred_at: env.ledger().timestamp(),
+                amount_bps,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::FractionTransfer(transfer_id), &transfer);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::FractionTransferCount, &transfer_id);
+
+            env.events().publish((symbol_short!("frac_xfer"),), fractional_transfer::FractionTransferredEventData {
+                transfer_id,
+                fraction_id: credential_id,
+                from,
+                to,
+                numerator: amount_bps,
+                denominator: 10000,
+                transferred_at: env.ledger().timestamp(),
+            });
+
+            transfer_id
+        } else {
+            panic!("Credential is not fractionalized");
+        }
+    }
+
+    // ── Issue 1589: Credential Branching ───────────────────────────────────────
+    /// Create a branch for credential version control
+    pub fn create_credential_branch(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        branch_name: soroban_sdk::String,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let branch_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::BranchCount)
+            .unwrap_or(0u64) + 1;
+
+        let credential: Option<Credential> = env
+            .storage()
+            .instance()
+            .get(&DataKey1::Credential(credential_id));
+
+        if let Some(cred) = credential {
+            let branch = credential_branching::CredentialBranch {
+                id: branch_id,
+                credential_id,
+                name: branch_name.clone(),
+                metadata_hash: cred.metadata_hash,
+                parent_branch_id: None,
+                created_at: env.ledger().timestamp(),
+                created_by: issuer.clone(),
+                is_default: false,
+                version: 1,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialBranch(branch_id), &branch);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::BranchCount, &branch_id);
+
+            env.events().publish((symbol_short!("branch_cr"),), credential_branching::BranchCreatedEventData {
+                branch_id,
+                credential_id,
+                branch_name,
+                created_at: env.ledger().timestamp(),
+            });
+
+            branch_id
+        } else {
+            panic!("Credential not found");
+        }
+    }
+
+    /// Commit changes to a credential branch
+    pub fn commit_to_branch(
+        env: Env,
+        issuer: Address,
+        branch_id: u64,
+        metadata_hash: Bytes,
+        message: soroban_sdk::String,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let commit_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::CommitCount)
+            .unwrap_or(0u64) + 1;
+
+        let branch: Option<credential_branching::CredentialBranch> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialBranch(branch_id));
+
+        if let Some(mut b) = branch {
+            let commit = credential_branching::BranchCommit {
+                id: commit_id,
+                branch_id,
+                credential_id: b.credential_id,
+                metadata_hash: metadata_hash.clone(),
+                parent_commit_id: None,
+                message: message.clone(),
+                committed_by: issuer.clone(),
+                committed_at: env.ledger().timestamp(),
+                attestation_count: 0,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::BranchCommit(commit_id), &commit);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::CommitCount, &commit_id);
+
+            b.metadata_hash = metadata_hash;
+            b.version += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialBranch(branch_id), &b);
+
+            env.events().publish((symbol_short!("commit"),), credential_branching::CommitEventData {
+                commit_id,
+                branch_id,
+                credential_id: b.credential_id,
+                message,
+                committed_at: env.ledger().timestamp(),
+            });
+
+            commit_id
+        } else {
+            panic!("Branch not found");
+        }
+    }
+
+    /// Merge two credential branches
+    pub fn merge_credential_branches(
+        env: Env,
+        issuer: Address,
+        source_branch_id: u64,
+        target_branch_id: u64,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let merge_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::MergeCount)
+            .unwrap_or(0u64) + 1;
+
+        let source: Option<credential_branching::CredentialBranch> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialBranch(source_branch_id));
+
+        let target: Option<credential_branching::CredentialBranch> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialBranch(target_branch_id));
+
+        if let (Some(src), Some(mut tgt)) = (source, target) {
+            if src.credential_id != tgt.credential_id {
+                panic!("Cannot merge branches from different credentials");
+            }
+
+            let merged_metadata = if src.metadata_hash == tgt.metadata_hash {
+                src.metadata_hash.clone()
+            } else {
+                tgt.metadata_hash.clone()
+            };
+
+            let merge = credential_branching::BranchMerge {
+                id: merge_id,
+                source_branch_id,
+                target_branch_id,
+                credential_id: src.credential_id,
+                merged_metadata_hash: merged_metadata.clone(),
+                merged_by: issuer.clone(),
+                merged_at: env.ledger().timestamp(),
+                merge_strategy: 3,
+                success: true,
+            };
+
+            tgt.metadata_hash = merged_metadata;
+            tgt.version += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialBranch(target_branch_id), &tgt);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::BranchMerge(merge_id), &merge);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::MergeCount, &merge_id);
+
+            env.events().publish((symbol_short!("branch_mrg"),), credential_branching::BranchMergedEventData {
+                merge_id,
+                source_branch_id,
+                target_branch_id,
+                credential_id: src.credential_id,
+                success: true,
+                merged_at: env.ledger().timestamp(),
+            });
+
+            merge_id
+        } else {
+            panic!("Branch not found");
+        }
     }
 }
 

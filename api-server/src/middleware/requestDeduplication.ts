@@ -100,12 +100,16 @@ export function createRequestDeduplication(config: RequestDeduplicationConfig = 
     const fingerprint = buildFingerprint(req);
     const cached = cache.get(fingerprint);
     if (cached && now - cached.createdAt < ttlMs) {
+      res.setHeader('X-Request-Dedup', 'hit');
+      res.setHeader('X-Request-Dedup-Key', fingerprint);
       respondFromCache(res, cached);
       return;
     }
 
     const pending = pendingByKey.get(fingerprint);
     if (pending) {
+      res.setHeader('X-Request-Dedup', 'wait');
+      res.setHeader('X-Request-Dedup-Key', fingerprint);
       pending.waiters.push(res);
       return;
     }
@@ -139,6 +143,8 @@ export function createRequestDeduplication(config: RequestDeduplicationConfig = 
       },
     };
     pendingByKey.set(fingerprint, pendingEntry);
+    res.setHeader('X-Request-Dedup', 'miss');
+    res.setHeader('X-Request-Dedup-Key', fingerprint);
 
     const originalSetHeader = res.setHeader.bind(res);
     const originalStatus = res.status.bind(res);

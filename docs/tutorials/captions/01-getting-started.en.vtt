@@ -1,0 +1,166 @@
+WEBVTT
+Kind: captions
+Language: en
+
+NOTE
+Tutorial 1 — Getting Started: Build, Deploy, and Run QuorumProof.
+Planning timestamps generated from the script's scene budgets.
+Re-time against the final edit before publishing (see docs/video-tutorials.md).
+
+1
+00:00:00.500 --> 00:00:03.938
+Welcome to QuorumProof.
+
+2
+00:00:04.038 --> 00:00:10.938
+In this video we'll go from a fresh clone
+to a running local stack in about
+
+3
+00:00:11.038 --> 00:00:13.092
+eight minutes.
+
+4
+00:00:13.192 --> 00:00:20.092
+QuorumProof verifies engineering credentials
+using quorum slices: a university,
+
+5
+00:00:20.192 --> 00:00:27.092
+a licensing body, and past employers co-
+sign a soulbound token on Stellar.
+
+6
+00:00:27.192 --> 00:00:30.323
+Let's get it running.
+
+7
+00:00:45.500 --> 00:00:52.400
+The project has three core Soroban
+contracts.
+
+8
+00:00:52.500 --> 00:00:59.400
+quorum_proof holds credentials, quorum
+slices, and attestations.
+
+9
+00:00:59.500 --> 00:01:06.400
+sbt_registry mints the non-transferable
+soulbound tokens.
+
+10
+00:01:06.500 --> 00:01:13.400
+zk_verifier checks zero-knowledge proofs
+so holders can prove a claim without
+
+11
+00:01:13.500 --> 00:01:19.010
+revealing the whole credential.
+
+12
+00:01:19.110 --> 00:01:26.010
+The architecture doc explains how they fit
+together.
+
+13
+00:01:45.500 --> 00:01:52.400
+Clone the repository and add the
+WebAssembly target.
+
+14
+00:01:52.500 --> 00:01:59.400
+The build script compiles every contract
+to WASM.
+
+15
+00:01:59.500 --> 00:02:06.400
+Then run cargo test.
+
+16
+00:02:06.500 --> 00:02:13.400
+The first build takes a few minutes; after
+that it's incremental.
+
+17
+00:02:13.500 --> 00:02:20.400
+All tests should pass before you change
+anything.
+
+18
+00:03:30.500 --> 00:03:37.400
+Next, create a testnet identity called
+deployer.
+
+19
+00:03:37.500 --> 00:03:44.400
+The Stellar CLI generates a key and funds
+it from Friendbot.
+
+20
+00:03:44.500 --> 00:03:51.400
+Never reuse this key on mainnet, and never
+paste a secret key into a terminal
+
+21
+00:03:51.500 --> 00:03:56.365
+you're recording.
+
+22
+00:04:30.500 --> 00:04:35.721
+Now deploy.
+
+23
+00:04:35.821 --> 00:04:42.721
+The script uploads each contract,
+initializes it, and wires them together.
+
+24
+00:04:42.821 --> 00:04:49.721
+At the end it prints the contract IDs.
+
+25
+00:04:49.821 --> 00:04:56.721
+Copy them; the API server needs them in
+its environment file.
+
+26
+00:06:00.500 --> 00:06:07.400
+Copy the example environment file at the
+repository root and paste in the
+
+27
+00:06:07.500 --> 00:06:11.517
+contract IDs.
+
+28
+00:06:11.617 --> 00:06:18.517
+Then move into the api-server folder,
+install dependencies, and start the dev
+
+29
+00:06:18.617 --> 00:06:20.735
+server.
+
+30
+00:06:20.835 --> 00:06:27.735
+Finally, call the health endpoint.
+
+31
+00:06:27.835 --> 00:06:34.735
+A healthy status means the server can
+reach the database and the Soroban RPC.
+
+32
+00:07:30.500 --> 00:07:32.532
+That's it.
+
+33
+00:07:32.632 --> 00:07:39.532
+You built the contracts, deployed them to
+testnet, and started the API.
+
+34
+00:07:39.632 --> 00:07:46.532
+In the next video we'll create your first
+quorum slice.

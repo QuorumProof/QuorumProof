@@ -586,6 +586,7 @@ pub struct PossessionCommitmentRecord {
 }
 
 #[contract]
+/// Design rationale: docs/adr/adr-002-sbt-non-transferability.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct SbtRegistryContract;
 
 #[contractimpl]
@@ -635,6 +636,7 @@ impl SbtRegistryContract {
         }
 
         // Cross-contract: verify credential exists and is not revoked.
+        // Design rationale: docs/adr/adr-010-three-contract-architecture.md
         // Uses env.invoke_contract to avoid a circular crate dependency with quorum_proof.
         let qp_id: Address = env
             .storage()
@@ -1740,9 +1742,21 @@ impl SbtRegistryContract {
             .extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
     }
 
-    /// Admin-only contract upgrade to new WASM. Uses deployer convention for auth.
+    /// Admin-only contract upgrade to new WASM.
+    ///
+    /// Issue #1630: verifies the caller is the stored admin (previously any
+    /// address that signed could upgrade) and rejects an all-zero hash.
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        let zero = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
+        assert!(new_wasm_hash != zero, "invalid wasm hash");
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
@@ -4715,8 +4729,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "HostError")]
+    #[should_panic(expected = "unauthorized")]
     fn test_upgrade_unauthorized_panics() {
+        // Issue #1630: upgrade now checks the caller against the stored admin.
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, SbtRegistryContract);
@@ -4724,13 +4739,11 @@ mod tests {
 
         let admin = Address::generate(&env);
         let unpriv = Address::generate(&env);
-        let wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let qp_id = Address::generate(&env);
+        let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
 
-        client.upgrade(&admin, &wasm_hash);
-
-        env.as_contract(&contract_id, || {
-            client.upgrade(&unpriv, &wasm_hash);
-        });
+        client.initialize(&admin, &qp_id);
+        client.upgrade(&unpriv, &wasm_hash);
     }
 
     #[test]
