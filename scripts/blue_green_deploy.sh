@@ -119,7 +119,8 @@ validate_slot() {
 error_rate() {
   local slot="$1"
   [[ -z "$PROMETHEUS_URL" ]] && { echo 0; return; }
-  local q="sum(rate(http_requests_total{slot=\"$slot\",status=~\"5..\"}[1m])) / clamp_min(sum(rate(http_requests_total{slot=\"$slot\"}[1m])), 1)"
+  # Same series as the api-latency dashboard, filtered to this slot's pods.
+  local q="sum(rate(quorumproof_api_errors_total{slot=\"$slot\"}[1m])) / clamp_min(sum(rate(quorumproof_api_request_duration_seconds_count{slot=\"$slot\"}[1m])), 1)"
   curl -sf --get "$PROMETHEUS_URL/api/v1/query" --data-urlencode "query=$q" \
     | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo 0
 }
