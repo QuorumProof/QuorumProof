@@ -71,6 +71,8 @@ import * as Soroban from './soroban.js';
 import { createCredentialTiersRouter } from './routes/credentialTiers.js';
 import { createCredentialRedemptionRouter } from './routes/credentialRedemption.js';
 import { initTierRedemptionEvents } from './services/tierRedemptionEvents.js';
+// #1647: Plugin system — see docs/plugin-development-guide.md.
+import { pluginRegistry, loadPluginsFromEnv } from './plugins/index.js';
 
 const app = express();
 
@@ -224,6 +226,7 @@ app.use('/api/gdpr', gdprRouter);
 app.use('/api/api-keys', apiKeysRouter); // #999 API key management
 app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation (spec-mandated path)
 app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
+app.use('/api/plugins', pluginRegistry.router); // #1647 plugin routes (/api/plugins/<name>/...)
 
 // #997 Credential Holder Dashboard API
 app.use('/api/me', createDashboardRouter(sorobanClient));
@@ -354,6 +357,8 @@ gracefulShutdown.addCleanupTask(() => {
 gracefulShutdown.addCleanupTask(() => {
   regionFailoverDetector.stop();
 });
+// #1647: give plugins a chance to flush/close their resources.
+gracefulShutdown.addCleanupTask(() => pluginRegistry.teardownAll());
 
 // #1311: Attach SIGTERM / SIGINT handlers. This is idempotent; the
 // handlers are registered with process.once so they fire at most once.
@@ -398,6 +403,15 @@ async function runStartupMigrations(): Promise<void> {
     process.exit(1);
     return;
   }
+  // #1647: load plugins before accepting traffic so their routes and health
+  // checks are in place. Failures only abort startup when PLUGINS_STRICT=true.
+  try {
+    await loadPluginsFromEnv();
+  } catch (err) {
+    console.error('Plugin loading failed, refusing to start:', err);
+    process.exit(1);
+    return;
+  }
   httpServer.listen(PORT, () =>
     console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
   );
@@ -426,6 +440,7 @@ async function runStartupMigrations(): Promise<void> {
 function broadcastEvent(...args: Parameters<typeof _wsServerBroadcastEvent>) {
   const result = _wsServerBroadcastEvent(...args);
   const [event] = args;
+  pluginRegistry.emit(event); // #1647: fan out to plugins (async, isolated)
   const webhookEvents = ['credential_issued', 'credential_attested', 'credential_revoked'] as const;
   if (webhookEvents.includes(event.type as typeof webhookEvents[number])) {
     dispatchWebhookEvent({

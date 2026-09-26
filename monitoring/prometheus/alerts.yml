@@ -221,3 +221,52 @@ groups:
         annotations:
           summary: "Region {{ $labels.region }} cannot reach its peer region"
           description: "{{ $labels.region }} ({{ $labels.role }}) has seen its peer region as unhealthy for 5 minutes. If this is the primary, failover capacity is lost."
+
+  # Issue #1646: performance alerts. Thresholds and the tuning response to
+  # each are documented in docs/performance-tuning-guide.md (section 4).
+  - name: quorumproof-performance
+    rules:
+      - alert: ApiLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(quorumproof_api_request_duration_seconds_bucket[5m]))) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API p95 latency above 500ms"
+          description: "p95 is {{ $value | humanizeDuration }}. See docs/performance-tuning-guide.md section 4.2."
+
+      - alert: ApiLatencyP99Critical
+        expr: histogram_quantile(0.99, sum by (le) (rate(quorumproof_api_request_duration_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API p99 latency above 2s"
+          description: "p99 is {{ $value | humanizeDuration }}. Check RPC breaker and concurrency queue first."
+
+      - alert: RpcCircuitBreakerOpen
+        expr: quorumproof_rpc_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Soroban RPC circuit breaker is open"
+          description: "Verification is being served from cache or failing fast. See docs/performance-tuning-guide.md section 4.2."
+
+      - alert: DbPoolSaturated
+        expr: quorumproof_db_pool_utilization_pct > 90 or quorumproof_db_pool_waiting > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection pool saturated"
+          description: "Pool utilisation {{ $value }}. See docs/performance-tuning-guide.md section 4.2."
+
+      - alert: WsMessagesDropping
+        expr: rate(quorumproof_ws_messages_dropped_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket messages are being dropped"
+          description: "Slow consumers are overflowing send queues. See docs/performance-tuning-guide.md section 4.2."
