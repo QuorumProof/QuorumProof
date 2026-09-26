@@ -1,0 +1,459 @@
+<!doctype html>
+<!--
+  QuorumProof Interactive Documentation (issue #1635).
+  Self-contained: no build step, no external scripts. Serve the docs/ folder
+  over HTTP (see docs/interactive-documentation.md) and open /interactive/.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuorumProof Interactive Docs</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1c1c1e; --muted: #5f6368;
+    --line: #e2e2de; --accent: #2f5bd3; --ok: #1f7a4d; --bad: #b3261e; --warn: #9a6700;
+    --code: #f0f0ec; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151517; --panel: #1e1e21; --ink: #ececec; --muted: #a0a0a6;
+      --line: #333338; --accent: #8aa8ff; --ok: #5cc98f; --bad: #ff8a80; --warn: #e3b341;
+      --code: #26262a; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 20px 16px 0; max-width: 1040px; margin: 0 auto; }
+  header h1 { margin: 0 0 4px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); }
+  nav { display: flex; flex-wrap: wrap; gap: 4px; max-width: 1040px; margin: 16px auto 0;
+        padding: 0 16px; border-bottom: 1px solid var(--line); }
+  nav button { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+               padding: 8px 12px; font: inherit; cursor: pointer; }
+  nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  main { max-width: 1040px; margin: 0 auto; padding: 16px; }
+  section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+                 padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 17px; margin: 0 0 8px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 8px 0 4px; }
+  input, select, textarea { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
+                            background: var(--bg); color: var(--ink); font: inherit; }
+  textarea, pre, code, .mono { font-family: var(--mono); font-size: 13px; }
+  textarea { min-height: 140px; resize: vertical; }
+  pre { background: var(--code); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0 0;
+        white-space: pre-wrap; word-break: break-word; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .row > * { flex: 1 1 200px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  button.primary, button.secondary { padding: 8px 14px; border-radius: 6px; font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+  button.secondary { background: none; color: var(--ink); border: 1px solid var(--line); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .result { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .result:last-child { border-bottom: 0; }
+  .result a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .result mark { background: color-mix(in srgb, var(--accent) 25%, transparent); color: inherit; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+  td input[type="checkbox"] { width: auto; }
+  .meter { height: 10px; background: var(--code); border-radius: 5px; overflow: hidden; position: relative; margin-top: 8px; }
+  .meter > span { display: block; height: 100%; background: var(--accent); }
+  .meter > i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); }
+  .table-wrap { overflow-x: auto; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>QuorumProof Interactive Docs</h1>
+  <p>Search the documentation, try API calls, and experiment with quorum slices — all in your browser.</p>
+</header>
+
+<nav role="tablist" aria-label="Sections">
+  <button role="tab" data-tab="search" aria-selected="true">Search</button>
+  <button role="tab" data-tab="api" aria-selected="false">API playground</button>
+  <button role="tab" data-tab="slice" aria-selected="false">Quorum slice simulator</button>
+  <button role="tab" data-tab="hash" aria-selected="false">Metadata hash</button>
+  <button role="tab" data-tab="feedback" aria-selected="false">Feedback</button>
+</nav>
+
+<main>
+  <!-- ───────────── Search ───────────── -->
+  <div data-panel="search">
+    <section class="card">
+      <h2>Search documentation</h2>
+      <input id="q" type="search" placeholder="e.g. threshold, share link, revoke, groth16" autocomplete="off" aria-label="Search docs">
+      <p class="muted" id="search-status">Loading index…</p>
+      <div id="results"></div>
+    </section>
+  </div>
+
+  <!-- ───────────── API playground ───────────── -->
+  <div data-panel="api" hidden>
+    <section class="card">
+      <h2>API playground</h2>
+      <p class="muted">Send real requests to an API server, or use <strong>mock mode</strong> to see the documented example responses
+        from <code>api-response-examples.md</code> without a server.</p>
+      <div class="row">
+        <div><label for="base">Base URL</label><input id="base" value="http://localhost:3000"></div>
+        <div><label for="apikey">API key (x-api-key, optional)</label><input id="apikey" type="password" autocomplete="off"></div>
+      </div>
+      <div class="row">
+        <div><label for="preset">Example</label><select id="preset"></select></div>
+        <div style="flex:0 1 120px"><label for="method">Method</label>
+          <select id="method"><option>GET</option><option>POST</option><option>DELETE</option></select></div>
+        <div style="flex:2 1 300px"><label for="path">Path</label><input id="path" class="mono"></div>
+      </div>
+      <label for="body">Request body (JSON)</label>
+      <textarea id="body" spellcheck="false"></textarea>
+      <label><input id="mock" type="checkbox" style="width:auto" checked> Mock mode (no network)</label>
+      <div class="btns">
+        <button class="primary" id="send">Send request</button>
+        <button class="secondary" id="curl">Show as curl</button>
+      </div>
+      <p class="muted" id="api-status"></p>
+      <pre id="api-out" hidden></pre>
+    </section>
+  </div>
+
+  <!-- ───────────── Quorum slice simulator ───────────── -->
+  <div data-panel="slice" hidden>
+    <section class="card">
+      <h2>Quorum slice simulator</h2>
+      <p class="muted">Model a weighted slice (weights 1–100). Tick the attestors who have signed to see whether quorum is reached.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Attestor</th><th>Weight</th><th>Attested</th><th></th></tr></thead>
+          <tbody id="attestors"></tbody>
+        </table>
+      </div>
+      <div class="row">
+        <div><label for="threshold">Threshold</label><input id="threshold" type="number" min="1" value="60"></div>
+        <div><label for="qp-id">quorum_proof contract ID (for generated command)</label><input id="qp-id" class="mono" value="$QP"></div>
+      </div>
+      <div class="btns"><button class="secondary" id="add-attestor">Add attestor</button></div>
+      <div class="meter" aria-hidden="true"><span id="meter-fill"></span><i id="meter-mark"></i></div>
+      <p id="slice-verdict"></p>
+      <ul id="slice-warnings" class="warn"></ul>
+      <label>Generated <code>create_slice</code> command</label>
+      <pre id="slice-cmd"></pre>
+    </section>
+  </div>
+
+  <!-- ───────────── Metadata hash ───────────── -->
+  <div data-panel="hash" hidden>
+    <section class="card">
+      <h2>Metadata hash</h2>
+      <p class="muted">Credentials store only a SHA-256 hash of their metadata on-chain. Hashing happens locally in your browser — nothing is uploaded.</p>
+      <label for="meta">Metadata (JSON or any text)</label>
+      <textarea id="meta" spellcheck="false">{
+  "degree": "BEng Civil Engineering",
+  "institution": "Example University",
+  "awarded": "2024-06-30"
+}</textarea>
+      <label for="metafile">…or choose a file</label>
+      <input id="metafile" type="file">
+      <label>SHA-256</label>
+      <pre id="hash-out"></pre>
+      <label>Generated <code>issue_credential</code> command</label>
+      <pre id="issue-cmd"></pre>
+    </section>
+  </div>
+
+  <!-- ───────────── Feedback ───────────── -->
+  <div data-panel="feedback" hidden>
+    <section class="card">
+      <h2>Documentation feedback</h2>
+      <p class="muted">Tell us what was unclear. Your answer is kept in this browser and turned into a prefilled GitHub issue you can review before submitting.</p>
+      <label for="fb-page">Page</label>
+      <input id="fb-page" placeholder="docs/quorum-slice-guide.md" list="doc-list">
+      <datalist id="doc-list"></datalist>
+      <label for="fb-helpful">Was it helpful?</label>
+      <select id="fb-helpful"><option>Yes</option><option>Partly</option><option>No</option></select>
+      <label for="fb-kind">What kind of problem?</label>
+      <select id="fb-kind">
+        <option>Unclear / hard to follow</option><option>Incorrect or outdated</option>
+        <option>Missing information</option><option>Broken example or link</option><option>Other</option>
+      </select>
+      <label for="fb-details">Details</label>
+      <textarea id="fb-details" placeholder="What were you trying to do, and what would have helped?"></textarea>
+      <div class="btns">
+        <button class="primary" id="fb-open">Open GitHub issue</button>
+        <button class="secondary" id="fb-save">Save locally</button>
+      </div>
+      <p class="muted" id="fb-status"></p>
+      <h2 style="margin-top:16px">Your saved feedback</h2>
+      <div id="fb-list" class="muted">None yet.</div>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+  const REPO = 'https://github.com/QuorumProof/QuorumProof';
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
+  };
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  // ── Tabs ─────────────────────────────────────────────────────────────────
+  const tabs = document.querySelectorAll('nav button');
+  function show(name) {
+    tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === name)));
+    document.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== name; });
+    if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  }
+  tabs.forEach((t) => t.addEventListener('click', () => show(t.dataset.tab)));
+  const initial = location.hash.slice(1);
+  if ([...tabs].some((t) => t.dataset.tab === initial)) show(initial);
+
+  // ── Search ───────────────────────────────────────────────────────────────
+  let entries = [];
+  fetch('search-index.json')
+    .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then((data) => {
+      entries = data.entries.map((e) => ({ ...e, hay: (e.title + ' ' + e.heading + ' ' + e.text).toLowerCase() }));
+      const docs = [...new Set(entries.map((e) => e.doc))];
+      $('search-status').textContent = `${entries.length} sections across ${docs.length} documents.`;
+      $('doc-list').innerHTML = docs.map((d) => `<option value="docs/${esc(d)}">`).join('');
+      const q = new URLSearchParams(location.search).get('q');
+      if (q) { $('q').value = q; runSearch(); }
+    })
+    .catch(() => {
+      $('search-status').innerHTML = 'Search index not found. Run <code>python3 scripts/build_docs_search_index.py</code> and serve <code>docs/</code> over HTTP.';
+    });
+
+  function highlight(text, terms) {
+    let out = esc(text);
+    terms.forEach((t) => { out = out.replace(new RegExp('(' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi'), '<mark>$1</mark>'); });
+    return out;
+  }
+  function snippet(text, term) {
+    const i = text.toLowerCase().indexOf(term);
+    const start = Math.max(0, i - 60);
+    return (start > 0 ? '…' : '') + text.slice(start, start + 220) + (text.length > start + 220 ? '…' : '');
+  }
+  function runSearch() {
+    const terms = $('q').value.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
+    if (!terms.length) { $('results').innerHTML = ''; return; }
+    const scored = [];
+    for (const e of entries) {
+      let score = 0;
+      for (const t of terms) {
+        if (!e.hay.includes(t)) { score = 0; break; }
+        if (e.heading.toLowerCase().includes(t)) score += 5;
+        if (e.title.toLowerCase().includes(t)) score += 3;
+        score += Math.min(5, e.hay.split(t).length - 1);
+      }
+      if (score) scored.push([score, e]);
+    }
+    scored.sort((a, b) => b[0] - a[0]);
+    $('results').innerHTML = scored.slice(0, 30).map(([, e]) => {
+      const url = `${REPO}/blob/main/docs/${e.doc}${e.anchor ? '#' + e.anchor : ''}`;
+      return `<div class="result"><a href="${esc(url)}" target="_blank" rel="noopener">${highlight(e.heading || e.title, terms)}</a>
+        <div class="muted">${esc(e.title)} · docs/${esc(e.doc)}</div>
+        <div>${highlight(snippet(e.text, terms[0]), terms)}</div></div>`;
+    }).join('') || '<p class="muted">No results.</p>';
+    $('search-status').textContent = `${scored.length} matching sections.`;
+  }
+  let debounce;
+  $('q').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(runSearch, 120); });
+
+  // ── API playground ───────────────────────────────────────────────────────
+  const A = 'GBVZHJRZMJXHE3RQXEKW3KRJM45OZDXOLYG35PNZGJDAZOFMFKQLM4H';
+  const I = 'GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGZRXDMTGEYJ66SDOQ62RK';
+  const cred = { id: '42', issuer: I, subject: A, credential_type: 1,
+    metadata_hash: 'a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2', revoked: false, expires_at: null, version: 1 };
+  const notFound = (detail) => ({ status: 404, body: { type: 'https://quorumproof.io/errors/not-found', title: 'Not Found', status: 404, detail, error: detail } });
+  const PRESETS = [
+    { name: 'Health check', method: 'GET', path: '/health',
+      mock: () => ({ status: 200, body: { status: 'healthy', timestamp: new Date().toISOString(), uptime_seconds: 86400,
+        checks: { database: { status: 'healthy', latency_ms: 3 }, soroban_rpc: { status: 'healthy', latency_ms: 48 } } } }) },
+    { name: 'Get credential', method: 'GET', path: '/api/credentials/42',
+      mock: (p) => /\/42$/.test(p) ? { status: 200, body: cred } : notFound('Credential not found') },
+    { name: 'Search credentials', method: 'GET', path: '/api/credentials/search?q=engineering&limit=5',
+      mock: (p) => { const l = Number(new URL(p, 'http://x').searchParams.get('limit') ?? 20);
+        return l >= 1 && l <= 100 ? { status: 200, body: { results: [cred], total: 1, cursor: null } }
+          : { status: 400, body: { type: 'https://quorumproof.io/errors/bad-request', title: 'Bad Request', status: 400, detail: 'limit must be between 1 and 100', error: 'limit must be between 1 and 100' } }; } },
+    { name: 'List quorum slices', method: 'GET', path: '/api/slices?limit=20',
+      mock: () => ({ status: 200, body: { data: [{ id: '1', creator: A, attestors: [I, 'GDQPMRXHVK3GLR4VJMZ3YHXKJQ5Z4S6WNBTXPFXEV3OQZ5CTXV7XQ4'], weights: [60, 40], threshold: 60 }],
+        pagination: { cursor: null, next_cursor: null, limit: 20, total: 1, has_more: false } } }) },
+    { name: 'Slice verification', method: 'GET', path: '/api/slices/1/verification',
+      mock: () => ({ status: 200, body: { data: { slice_id: '1', quorum_reached: true, total_weight: 100, attested_weight: 60 }, cached: false } }) },
+    { name: 'Batch verify claims', method: 'POST', path: '/api/verify/batch',
+      body: { items: [{ credential_id: 42, claim_type: 'HasDegree' }, { credential_id: 99, claim_type: 'HasLicense' }] },
+      mock: (p, b) => {
+        if (!b || !Array.isArray(b.items) || !b.items.length) return { status: 400, body: { type: 'https://quorumproof.io/errors/bad-request', title: 'Bad Request', status: 400, detail: 'items must be a non-empty array', error: 'items must be a non-empty array' } };
+        const seen = new Set(); let dup = 0;
+        const results = b.items.map((it) => {
+          const k = it.credential_id + '\0' + it.claim_type; if (seen.has(k)) dup++; seen.add(k);
+          const ok = it.credential_id === 42;
+          return { credential_id: it.credential_id, claim_type: it.claim_type, status: ok ? 'verified' : 'not_found',
+            proof: ok ? { verified_at: new Date().toISOString(), credential_status: 'active', digest: '9f2c61a0b4e7d3c1' } : null,
+            error: ok ? null : 'Credential not found' };
+        });
+        const v = results.filter((r) => r.status === 'verified').length;
+        return { status: 200, body: { results, summary: { total: results.length, verified: v, failed: 0, not_found: results.length - v, errors: 0, duplicates_deduplicated: dup, execution_time_ms: 12 } } };
+      } },
+    { name: 'Create share link', method: 'POST', path: '/api/credentials/42/share',
+      body: { subject: A, expiry_hours: 72, permission: 'view_only' },
+      mock: (p, b) => {
+        const bad = (d) => ({ status: 400, body: { type: 'https://quorumproof.io/errors/bad-request', title: 'Bad Request', status: 400, detail: d, error: d } });
+        if (!b || !b.subject) return bad('subject (Stellar address) is required');
+        if (!Number.isInteger(b.expiry_hours) || b.expiry_hours < 1 || b.expiry_hours > 8760) return bad('expiry_hours must be an integer between 1 and 8760');
+        if (!['view_only', 'download'].includes(b.permission)) return bad('permission must be "view_only" or "download"');
+        return { status: 201, body: { token: '000000000000002a0000000068d7a3c4', expires_at: Math.floor(Date.now() / 1000) + b.expiry_hours * 3600,
+          permission: b.permission, password_protected: !!b.password, credential_id: 42 } };
+      } },
+  ];
+  $('preset').innerHTML = PRESETS.map((p, i) => `<option value="${i}">${esc(p.method + ' — ' + p.name)}</option>`).join('');
+  function loadPreset() {
+    const p = PRESETS[$('preset').value];
+    $('method').value = p.method; $('path').value = p.path;
+    $('body').value = p.body ? JSON.stringify(p.body, null, 2) : '';
+    $('api-out').hidden = true; $('api-status').textContent = '';
+  }
+  $('preset').addEventListener('change', loadPreset);
+  loadPreset();
+  const saved = store.get('qp-playground', {});
+  if (saved.base) $('base').value = saved.base;
+  $('base').addEventListener('change', () => store.set('qp-playground', { base: $('base').value }));
+
+  function parseBody() {
+    const raw = $('body').value.trim();
+    if (!raw) return { ok: true, value: undefined };
+    try { return { ok: true, value: JSON.parse(raw) }; } catch (e) { return { ok: false, error: e.message }; }
+  }
+  function render(status, body, note) {
+    $('api-status').innerHTML = `<span class="${status < 400 ? 'ok' : 'bad'}">HTTP ${status}</span>${note ? ' · ' + esc(note) : ''}`;
+    $('api-out').hidden = false;
+    $('api-out').textContent = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+  }
+  $('send').addEventListener('click', async () => {
+    const pb = parseBody();
+    if (!pb.ok) { render(0, 'Invalid JSON body: ' + pb.error); return; }
+    const method = $('method').value, path = $('path').value;
+    if ($('mock').checked) {
+      // Mock responses come from the selected example; edits to the path
+      // and body are passed through so validation errors can be explored.
+      const r = PRESETS[$('preset').value].mock(path, pb.value);
+      render(r.status, r.body, 'mock response');
+      return;
+    }
+    const headers = { accept: 'application/json' };
+    if (pb.value !== undefined) headers['content-type'] = 'application/json';
+    if ($('apikey').value) headers['x-api-key'] = $('apikey').value;
+    const started = performance.now();
+    try {
+      const res = await fetch($('base').value.replace(/\/$/, '') + path, { method, headers, body: pb.value !== undefined && method !== 'GET' ? JSON.stringify(pb.value) : undefined });
+      const text = await res.text();
+      let body; try { body = JSON.parse(text); } catch { body = text; }
+      render(res.status, body, `${Math.round(performance.now() - started)} ms`);
+    } catch (e) {
+      render(0, `Request failed: ${e.message}\n\nIs the server running, and is this page's origin in CORS_ALLOWED_ORIGINS?`);
+    }
+  });
+  $('curl').addEventListener('click', () => {
+    const pb = parseBody();
+    const parts = [`curl -X ${$('method').value} '${$('base').value.replace(/\/$/, '')}${$('path').value}'`];
+    if ($('apikey').value) parts.push(`  -H 'x-api-key: $QP_API_KEY'`);
+    if (pb.ok && pb.value !== undefined) parts.push(`  -H 'content-type: application/json'`, `  -d '${JSON.stringify(pb.value)}'`);
+    $('api-status').textContent = 'curl equivalent (API key replaced with $QP_API_KEY):';
+    $('api-out').hidden = false; $('api-out').textContent = parts.join(' \\\n');
+  });
+
+  // ── Quorum slice simulator ───────────────────────────────────────────────
+  let attestors = store.get('qp-slice', null) || [
+    { name: 'University', weight: 40, attested: true },
+    { name: 'Engineering society', weight: 40, attested: false },
+    { name: 'Employer', weight: 20, attested: true },
+  ];
+  function renderSlice() {
+    $('attestors').innerHTML = attestors.map((a, i) => `<tr>
+      <td><input data-i="${i}" data-f="name" value="${esc(a.name)}" aria-label="Attestor name"></td>
+      <td><input data-i="${i}" data-f="weight" type="number" min="1" max="100" value="${a.weight}" aria-label="Weight" style="max-width:90px"></td>
+      <td><input data-i="${i}" data-f="attested" type="checkbox" ${a.attested ? 'checked' : ''} aria-label="Attested"></td>
+      <td><button class="secondary" data-remove="${i}" aria-label="Remove">✕</button></td></tr>`).join('');
+    computeSlice();
+  }
+  function computeSlice() {
+    const threshold = Number($('threshold').value) || 0;
+    const total = attestors.reduce((s, a) => s + (Number(a.weight) || 0), 0);
+    const got = attestors.filter((a) => a.attested).reduce((s, a) => s + (Number(a.weight) || 0), 0);
+    const reached = threshold > 0 && got >= threshold;
+    $('meter-fill').style.width = (total ? Math.min(100, (got / total) * 100) : 0) + '%';
+    $('meter-mark').style.left = (total ? Math.min(100, (threshold / total) * 100) : 0) + '%';
+    $('slice-verdict').innerHTML = `Attested weight <strong>${got}</strong> of ${total} · threshold ${threshold} → `
+      + (reached ? '<strong class="ok">quorum reached</strong>' : `<strong class="bad">not reached</strong> (needs ${Math.max(0, threshold - got)} more)`);
+    const w = [];
+    if (!attestors.length) w.push('A slice needs at least one attestor.');
+    attestors.forEach((a) => { const n = Number(a.weight); if (!Number.isInteger(n) || n < 1 || n > 100) w.push(`${a.name}: weight must be an integer 1–100.`); });
+    if (threshold > total) w.push('Threshold exceeds total weight — quorum can never be reached.');
+    if (threshold < 1) w.push('Threshold must be at least 1.');
+    attestors.filter((a) => Number(a.weight) >= threshold && threshold > 0).forEach((a) => w.push(`${a.name} alone meets the threshold — a single compromised attestor can approve credentials.`));
+    $('slice-warnings').innerHTML = w.map((x) => `<li>${esc(x)}</li>`).join('');
+    const names = attestors.map((a) => `\\"$(stellar keys address ${a.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')})\\"`).join(',');
+    $('slice-cmd').textContent = `stellar contract invoke --id "${$('qp-id').value}" --source holder --network testnet \\\n  -- create_slice \\\n  --creator "$(stellar keys address holder)" \\\n  --attestors "[${names}]" \\\n  --weights '[${attestors.map((a) => Number(a.weight) || 0).join(', ')}]' \\\n  --threshold ${threshold}`;
+    store.set('qp-slice', attestors);
+  }
+  $('attestors').addEventListener('input', (e) => {
+    const t = e.target; if (!t.dataset.f) return;
+    attestors[t.dataset.i][t.dataset.f] = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value;
+    computeSlice();
+  });
+  $('attestors').addEventListener('click', (e) => {
+    const i = e.target.dataset.remove; if (i === undefined) return;
+    attestors.splice(Number(i), 1); renderSlice();
+  });
+  $('add-attestor').addEventListener('click', () => { attestors.push({ name: 'Attestor ' + (attestors.length + 1), weight: 10, attested: false }); renderSlice(); });
+  $('threshold').addEventListener('input', computeSlice);
+  $('qp-id').addEventListener('input', computeSlice);
+  renderSlice();
+
+  // ── Metadata hash ────────────────────────────────────────────────────────
+  async function sha256(buf) {
+    const d = await crypto.subtle.digest('SHA-256', buf);
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function showHash(buf) {
+    if (!window.crypto || !crypto.subtle) { $('hash-out').textContent = 'Web Crypto unavailable (serve over http://localhost or https).'; return; }
+    const h = await sha256(buf);
+    $('hash-out').textContent = h;
+    $('issue-cmd').textContent = `stellar contract invoke --id "$QP" --source university --network testnet \\\n  -- issue_credential \\\n  --issuer "$(stellar keys address university)" \\\n  --subject "$(stellar keys address holder)" \\\n  --credential_type 1 \\\n  --metadata_hash ${h} \\\n  --nonce 1`;
+  }
+  $('meta').addEventListener('input', () => showHash(new TextEncoder().encode($('meta').value)));
+  $('metafile').addEventListener('change', async () => { const f = $('metafile').files[0]; if (f) showHash(await f.arrayBuffer()); });
+  showHash(new TextEncoder().encode($('meta').value));
+
+  // ── Feedback loop ────────────────────────────────────────────────────────
+  function renderFeedback() {
+    const list = store.get('qp-feedback', []);
+    $('fb-list').innerHTML = list.length ? list.slice().reverse().map((f) =>
+      `<div class="result"><strong>${esc(f.page || '(no page)')}</strong> · ${esc(f.helpful)} · ${esc(f.kind)}<div class="muted">${esc(new Date(f.at).toLocaleString())}</div><div>${esc(f.details)}</div></div>`).join('') : 'None yet.';
+  }
+  function collect() {
+    return { page: $('fb-page').value.trim(), helpful: $('fb-helpful').value, kind: $('fb-kind').value, details: $('fb-details').value.trim(), at: Date.now() };
+  }
+  function save(f) { const list = store.get('qp-feedback', []); list.push(f); store.set('qp-feedback', list.slice(-50)); renderFeedback(); }
+  $('fb-save').addEventListener('click', () => { save(collect()); $('fb-status').textContent = 'Saved in this browser.'; });
+  $('fb-open').addEventListener('click', () => {
+    const f = collect();
+    if (!f.page || !f.details) { $('fb-status').textContent = 'Please fill in the page and details.'; return; }
+    save(f);
+    const params = new URLSearchParams({ template: 'docs-feedback.yml', title: `[Docs feedback] ${f.page}`, page: f.page, kind: f.kind, helpful: f.helpful, details: f.details });
+    window.open(`${REPO}/issues/new?${params}`, '_blank', 'noopener');
+    $('fb-status').textContent = 'Opened a prefilled issue in a new tab — review it and submit on GitHub.';
+  });
+  const pageParam = new URLSearchParams(location.search).get('page');
+  if (pageParam) $('fb-page').value = pageParam;
+  renderFeedback();
+})();
+</script>
+</body>
+</html>

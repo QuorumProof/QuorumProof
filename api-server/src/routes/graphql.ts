@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
+import { getPool } from '../db.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -30,80 +31,131 @@ const SCHEMA_DESCRIPTION = {
         { name: 'slice', description: 'Fetch a quorum slice by ID' },
         { name: 'credentialCount', description: 'Total number of credentials' },
         { name: 'attestorReputation', description: 'Reputation score for an attestor address' },
+        { name: 'credentialTier', description: 'Fetch tier information for a credential' },
+        { name: 'credentialRewards', description: 'Fetch reward balance for a credential' },
+        { name: 'tierRequirements', description: 'Fetch tier advancement requirements' },
+        { name: 'redemptionRequests', description: 'Fetch redemption requests for a credential' },
       ],
     },
     { name: 'Credential', kind: 'OBJECT' },
     { name: 'Slice', kind: 'OBJECT' },
     { name: 'AttestorReputation', kind: 'OBJECT' },
+    { name: 'CredentialTier', kind: 'OBJECT' },
+    { name: 'CredentialRewards', kind: 'OBJECT' },
+    { name: 'TierRequirement', kind: 'OBJECT' },
+    { name: 'RedemptionRequest', kind: 'OBJECT' },
   ],
 };
 
 type GraphQLVariables = Record<string, unknown>;
 
-interface ResolverContext {
-  soroban: SorobanClient;
-}
 
-async function resolveCredential(
+async function resolveCredentialTier(
   args: GraphQLVariables,
-  ctx: ResolverContext,
+  _ctx: ResolverContext,
 ): Promise<unknown> {
   const id = args['id'];
-  if (!id) throw new Error('credential requires id argument');
-  const numId = parseInt(String(id), 10);
-  if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
-  const cred = await ctx.soroban.simulateCall('get_credential', [ctx.soroban.u64Val(numId)]);
-  return serializeBigInt(cred);
+  if (!id) throw new Error('credentialTier requires id argument');
+
+  try {
+    const pool = getPool();
+    const result = await pool.query(
+      `SELECT credential_id, tier, tier_points, tier_acquired_at
+       FROM credential_tiers WHERE credential_id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) return null;
+
+    const tierRow = result.rows[0];
+    const benefitsResult = await pool.query(
+      `SELECT benefit_name, benefit_value FROM tier_benefits WHERE tier = $1`,
+      [tierRow.tier]
+    );
+
+    const benefits: Record<string, string> = {};
+    for (const benefit of benefitsResult.rows) {
+      benefits[benefit.benefit_name] = benefit.benefit_value;
+    }
+
+    return {
+      credential_id: tierRow.credential_id,
+      tier: tierRow.tier,
+      tier_points: tierRow.tier_points,
+      tier_acquired_at: tierRow.tier_acquired_at,
+      benefits,
+    };
+  } catch {
+    return null;
+  }
 }
 
-async function resolveCredentials(
+async function resolveCredentialRewards(
   args: GraphQLVariables,
-  ctx: ResolverContext,
+  _ctx: ResolverContext,
+): Promise<unknown> {
+  const id = args['id'];
+  if (!id) throw new Error('credentialRewards requires id argument');
+
+  try {
+    const pool = getPool();
+    const result = await pool.query(
+      `SELECT credential_id, reward_points, accumulated_value
+       FROM credential_rewards WHERE credential_id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      credential_id: row.credential_id,
+      reward_points: row.reward_points,
+      accumulated_value: row.accumulated_value,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveTierRequirements(
+  _args: GraphQLVariables,
+  _ctx: ResolverContext,
 ): Promise<unknown[]> {
-  const ids = args['ids'];
-  if (!Array.isArray(ids) || ids.length === 0) throw new Error('credentials requires ids array');
-  if (ids.length > 50) throw new Error('credentials ids cannot exceed 50 items');
-  const results = await Promise.all(
-    ids.map(async (id: unknown) => {
-      try {
-        const numId = parseInt(String(id), 10);
-        if (!Number.isInteger(numId) || numId <= 0) return null;
-        const cred = await ctx.soroban.simulateCall('get_credential', [ctx.soroban.u64Val(numId)]);
-        return serializeBigInt(cred);
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return results;
+  try {
+    const pool = getPool();
+    const result = await pool.query(
+      `SELECT tier, min_points, min_attestations, min_age_days
+       FROM tier_requirements ORDER BY min_points ASC`
+    );
+    return result.rows;
+  } catch {
+    return [];
+  }
 }
 
-async function resolveSlice(
+async function resolveRedemptionRequests(
   args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
+  _ctx: ResolverContext,
+): Promise<unknown[]> {
   const id = args['id'];
-  if (!id) throw new Error('slice requires id argument');
-  const numId = parseInt(String(id), 10);
-  if (!Number.isInteger(numId) || numId <= 0) throw new Error('id must be a positive integer');
-  const slice = await ctx.soroban.simulateCall('get_slice', [ctx.soroban.u64Val(numId)]);
-  return serializeBigInt(slice);
-}
+  if (!id) throw new Error('redemptionRequests requires id argument');
 
-async function resolveCredentialCount(ctx: ResolverContext): Promise<number> {
-  const count: bigint = await ctx.soroban.simulateCall('get_credential_count', []);
-  return Number(count);
-}
+  try {
+    const pool = getPool();
+    const limit = Math.min(parseInt(String(args['limit'] ?? '50'), 10), 100);
 
-async function resolveAttestorReputation(
-  args: GraphQLVariables,
-  ctx: ResolverContext,
-): Promise<unknown> {
-  const address = args['address'];
-  if (!address || typeof address !== 'string') throw new Error('attestorReputation requires address argument');
-  const score = await ctx.soroban.simulateCall('get_attestor_reputation', [ctx.soroban.addressVal(address)]);
-  const scoreNum = typeof score === 'bigint' ? Number(score) : (typeof score === 'number' ? score : 0);
-  return { address, score: scoreNum };
+    const result = await pool.query(
+      `SELECT id, credential_id, amount, destination_address, status, submitted_at, processed_at
+       FROM redemption_requests WHERE credential_id = $1
+       ORDER BY submitted_at DESC LIMIT $2`,
+      [id, limit]
+    );
+
+    return result.rows;
+  } catch {
+    return [];
+  }
 }
 
 // Simple operation parser: extracts top-level field selections and their arguments
@@ -169,38 +221,76 @@ function parseOperations(query: string): Array<{
   return ops;
 }
 
+function maxGraphqlDepth(query: string): number {
+  let depth = 0;
+  let maxDepth = 0;
+  for (const char of query) {
+    if (char === '{') {
+      depth += 1;
+      maxDepth = Math.max(maxDepth, depth);
+    } else if (char === '}') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return maxDepth;
+}
+
 export function createGraphqlRouter(soroban: SorobanClient) {
   const router = Router();
-  const ctx: ResolverContext = { soroban };
+  const maxDepth = parseInt(process.env.GRAPHQL_MAX_DEPTH ?? '8', 10);
 
   /**
    * POST /api/graphql
-   * #869 — GraphQL-compatible endpoint for batch queries.
+   * #1604 — GraphQL endpoint for batch queries with federation support.
    * Body: { query: string, variables?: object }
    *
    * Supported top-level fields:
    *   credential(id: ID)
    *   credentials(ids: [ID])
+   *   credentialsByIssuer(issuer: String!)
    *   slice(id: ID)
    *   credentialCount
    *   attestorReputation(address: String)
+   *   credentialTier(credentialId: ID!)
+   *   credentialRewards(credentialId: ID!, status: String)
+   *   rewardsSummary(credentialId: ID!)
+   *   searchCredentials(query: String!)
+   *   tierStats
    */
   router.post('/', async (req: Request, res: Response) => {
+    const startTime = Date.now();
     const { query, variables } = req.body as { query?: unknown; variables?: unknown };
 
     if (typeof query !== 'string' || !query.trim()) {
       res.status(400).json({ errors: [{ message: 'query must be a non-empty string' }] });
       return;
     }
+    const depth = maxGraphqlDepth(query);
+    if (Number.isFinite(maxDepth) && depth > maxDepth) {
+      res.status(400).json({ errors: [{ message: `query depth ${depth} exceeds max depth ${maxDepth}` }] });
+      return;
+    }
 
-    // Resolve variables into args for each operation
     const vars = (variables && typeof variables === 'object' && !Array.isArray(variables))
       ? (variables as GraphQLVariables)
       : {};
 
-    // Handle introspection
+    // Handle introspection queries
     if (query.includes('__schema') || query.includes('__type')) {
-      res.json({ data: { __schema: SCHEMA_DESCRIPTION } });
+      res.json({
+        data: {
+          __schema: {
+            types: [
+              { name: 'Query', kind: 'OBJECT', description: 'Root query type' },
+              { name: 'Mutation', kind: 'OBJECT', description: 'Root mutation type' },
+              { name: 'Credential', kind: 'OBJECT' },
+              { name: 'CredentialTier', kind: 'OBJECT' },
+              { name: 'Reward', kind: 'OBJECT' },
+              { name: 'TierStatistic', kind: 'OBJECT' },
+            ],
+          },
+        },
+      });
       return;
     }
 
@@ -212,28 +302,58 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
     const data: Record<string, unknown> = {};
     const errors: Array<{ message: string; path: string }> = [];
+    const resolvers = new GraphQLResolvers({ soroban, startTime });
 
     await Promise.all(
       operations.map(async ({ alias, field, args }) => {
         const key = alias ?? field;
-        // Merge query-level variables (by matching var references like $varName)
         const resolvedArgs: GraphQLVariables = { ...vars, ...args };
         try {
           switch (field) {
             case 'credential':
-              data[key] = await resolveCredential(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveCredential(resolvedArgs);
               break;
             case 'credentials':
-              data[key] = await resolveCredentials(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveCredentials(resolvedArgs);
+              break;
+            case 'credentialsByIssuer':
+              data[key] = await resolvers.resolveCredentialsByIssuer(resolvedArgs);
               break;
             case 'slice':
-              data[key] = await resolveSlice(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveSlice(resolvedArgs);
               break;
             case 'credentialCount':
-              data[key] = await resolveCredentialCount(ctx);
+              data[key] = await resolvers.resolveCredentialCount();
               break;
             case 'attestorReputation':
-              data[key] = await resolveAttestorReputation(resolvedArgs, ctx);
+              data[key] = await resolvers.resolveAttestorReputation(resolvedArgs);
+              break;
+            case 'credentialTier':
+              data[key] = await resolvers.resolveCredentialTier(resolvedArgs);
+              break;
+            case 'credentialRewards':
+              data[key] = await resolvers.resolveCredentialRewards(resolvedArgs);
+              break;
+            case 'rewardsSummary':
+              data[key] = await resolvers.resolveRewardsSummary(resolvedArgs);
+              break;
+            case 'searchCredentials':
+              data[key] = await resolvers.resolveSearchCredentials(resolvedArgs);
+              break;
+            case 'tierStats':
+              data[key] = await resolvers.resolveTierStats();
+              break;
+            case 'credentialTier':
+              data[key] = await resolveCredentialTier(resolvedArgs, ctx);
+              break;
+            case 'credentialRewards':
+              data[key] = await resolveCredentialRewards(resolvedArgs, ctx);
+              break;
+            case 'tierRequirements':
+              data[key] = await resolveTierRequirements(resolvedArgs, ctx);
+              break;
+            case 'redemptionRequests':
+              data[key] = await resolveRedemptionRequests(resolvedArgs, ctx);
               break;
             default:
               errors.push({ message: `Unknown field: ${field}`, path: key });
@@ -248,12 +368,15 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
     const response: Record<string, unknown> = { data };
     if (errors.length > 0) response['errors'] = errors;
+
+    const metrics = resolvers.getBenchmarkMetrics();
+    res.set('X-GraphQL-Duration-Ms', String(metrics.elapsedMs));
     res.json(response);
   });
 
   /**
    * GET /api/graphql
-   * Returns schema information for discoverability.
+   * Returns schema information and federation metadata for discoverability.
    */
   router.get('/', (_req: Request, res: Response) => {
     res.json({
@@ -265,9 +388,13 @@ export function createGraphqlRouter(soroban: SorobanClient) {
         'slice(id: ID)',
         'credentialCount',
         'attestorReputation(address: String)',
+        'credentialTier(id: ID)',
+        'credentialRewards(id: ID)',
+        'tierRequirements',
+        'redemptionRequests(id: ID, limit: Int)',
       ],
       example: {
-        query: '{ credential(id: "1") { id subject issuer } credentials(ids: ["1","2"]) { id subject } credentialCount }',
+        query: '{ credential(id: "1") { id subject issuer } credentialTier(id: "1") { tier tier_points } tierRequirements { tier min_points } }',
       },
     });
   });
@@ -278,6 +405,6 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 import { simulateCall, u64Val, addressVal } from '../soroban.js';
 export default createGraphqlRouter({
   simulateCall,
-  u64Val: u64Val as SorobanClient['u64Val'],
-  addressVal: addressVal as SorobanClient['addressVal'],
-});
+  u64Val: u64Val as any,
+  addressVal: addressVal as any,
+} as SorobanClient);

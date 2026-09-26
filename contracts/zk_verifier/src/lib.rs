@@ -691,6 +691,7 @@ pub const EVENT_SET_GROTH16_VK: &str = "zk:set_groth16_verifying_key";
 pub const EVENT_SET_CIRCUIT_PARAMS: &str = "zk:set_circuit_parameters";
 
 #[contract]
+/// Design rationale: docs/adr/adr-003-zk-verification.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct ZkVerifierContract;
 
 #[contractimpl]
@@ -1305,8 +1306,20 @@ impl ZkVerifierContract {
     }
 
     /// Admin-only contract upgrade to new WASM.
+    ///
+    /// Issue #1630: verifies the caller is the stored admin (previously any
+    /// address that signed could upgrade) and rejects an all-zero hash.
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored == admin, "unauthorized");
+        let zero = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
+        assert!(new_wasm_hash != zero, "invalid wasm hash");
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
@@ -1875,7 +1888,49 @@ impl ZkVerifierContract {
         )
     }
 
-    /// Verify a PLONK proof with explicit verifying-key hash and public inputs.
+    /// Return the recommended batch size for [`Self::verify_aggregated_proofs`].
+    ///
+    /// # Batch-size optimisation (Issue #1556)
+    ///
+    /// `verify_aggregated_proofs` uses a Fiat-Shamir randomised linear-combination
+    /// pairing check (see [`groth16::verify_batch`]).  The on-chain work breaks
+    /// down into two parts:
+    ///
+    /// 1. **Fixed-per-batch overhead**: three verifying-key pairings
+    ///    (`e(α,β)`, `e(_,γ)`, `e(_,δ)`).  These are paid *once* regardless of
+    ///    batch size.
+    /// 2. **Per-proof marginal cost**: one pairing + one scalar multiplication.
+    ///
+    /// At `n = 1` the amortisation provides no benefit.  Empirically (see
+    /// `benches/tests/benchmarks.rs`), the break-even point is around
+    /// **n = 4** where the fixed overhead is split across enough proofs to
+    /// beat 4 independent single-proof calls.  The efficiency then improves
+    /// monotonically up to the hard cap of [`MAX_GROTH16_AGGREGATE_BATCH`] = 16.
+    ///
+    /// Rule of thumb:
+    /// - `n < 4`  → use `verify_groth16_proof` individually (lower latency,
+    ///   same gas per-proof).
+    /// - `4 ≤ n ≤ 16` → use `verify_aggregated_proofs` (30–50 % gas saving
+    ///   over individual calls at the higher end of the range).
+    /// - `n > 16` → split into chunks of 16 and call `verify_aggregated_proofs`
+    ///   repeatedly, or use `verify_batch_proofs` for per-proof results.
+    ///
+    /// This function returns the cap so callers can chunk their own batches
+    /// without hard-coding the constant.
+    ///
+    /// # Parameters
+    /// - `n_proofs`: The number of proofs the caller wants to verify.
+    ///
+    /// # Returns
+    /// The recommended chunk size: `min(n_proofs, MAX_GROTH16_AGGREGATE_BATCH)`.
+    pub fn optimal_batch_size(_env: Env, n_proofs: u32) -> u32 {
+        let cap = MAX_GROTH16_AGGREGATE_BATCH as u32;
+        if n_proofs <= cap {
+            n_proofs
+        } else {
+            cap
+        }
+    }
     ///
     /// This is the primary production entry point for PLONK verification.
     /// No admin auth is required to *call* this function — all verification

@@ -23,6 +23,12 @@ pub mod audit_trail;
 pub mod proof_compression;
 // ── Issue #1294: BBS+ Linkability Control ────────────────────────────────
 pub mod linkability;
+// ── Issue #1561: BBS+ Point Precomputation & Multi-Signature Batching ────
+pub mod precomputation;
+// ── Issue #1582: Certificate Transparency Logging ──────────────────────────
+pub mod cert_transparency;
+// ── Issue #1583: Blind Credentials ──────────────────────────────────────────
+pub mod blind_credentials;
 
 pub use errors::{BbsError, BbsResult};
 pub use primitives::{Fr, G1, G2, Gt, pairing, linear_combination_g1, msm_g1};
@@ -36,9 +42,16 @@ pub use escrow::{KeyShare, split_secret, reconstruct_secret};
 pub use proof_cache::{ProofTemplate, ProofTemplateRegistry, CacheStats, vk_fingerprint};
 pub use audit_trail::{AuditTrail, DisclosureRecord, AuditQuery};
 pub use proof_compression::{compress_bbs_proof, decompress_bbs_proof, benchmark_size_reduction, CompressionStats};
+pub use proof_compression::{encode_varint, decode_varint, varint_size};
 pub use linkability::{generate_nonce_with_rng, create_unlinkable_disclosure, verify_unlinkable_disclosure, UnlinkableDisclosure, NonceRegistry};
+pub use cert_transparency::{MerkleNode, InclusionProof, SignedCertificateTransparency, TransparencyLogEntry, TransparencyMerkleTree};
+pub use blind_credentials::{BlindingFactor, BlindedCommitment, BlindedSignature, UnbindingResult, BlindIssuanceRequest, BlindCredentialState};
 #[cfg(feature = "std")]
 pub use linkability::generate_nonce;
+
+pub use precomputation::{PrecomputedPoint, PointCache};
+#[cfg(feature = "std")]
+pub use precomputation::{batch_sign, batch_verify};
 
 /// Library version information
 pub const VERSION: &str = "0.1.0";

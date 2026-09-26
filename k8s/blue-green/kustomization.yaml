@@ -1,0 +1,10 @@
+# Issue #1648: blue-green api-server stack. Apply with:
+#   kubectl apply -k k8s/blue-green/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: quorumproof
+resources:
+  - deployment-blue.yaml
+  - deployment-green.yaml
+  - service.yaml
+  - service-preview.yaml

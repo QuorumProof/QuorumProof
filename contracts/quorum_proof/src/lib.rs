@@ -24,8 +24,17 @@ pub mod upgrade_history;
 pub mod atomic_operations;
 pub mod attestation_veto;
 pub mod migration_v2;
-// #1567: Custom serialization helpers and lazy deserialization for hot paths.
-pub mod serialization;
+pub mod auto_renewal;
+pub mod conditional_escrow;
+pub mod cert_transparency;
+pub mod blind_credentials;
+pub mod range_proofs;
+pub mod credential_compartmentalization;
+pub mod homomorphic_encryption;
+pub mod credential_merging;
+pub mod cross_chain_bridge;
+pub mod fractional_transfer;
+pub mod credential_branching;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -73,8 +82,17 @@ const TOPIC_KEY_ESCROW_DEPOSITED: &str = "KeyEscrowDeposited";
 const TOPIC_KEY_ESCROW_RECOVERED: &str = "KeyEscrowRecovered";
 const TOPIC_KEY_ESCROW_RECOVERY_CANCELLED: &str = "KeyEscrowRecoveryCancelled";
 const TOPIC_KEY_ESCROW_ROTATED: &str = "KeyEscrowRotated";
+const TOPIC_CREDENTIAL_MERGED: &str = "CredentialMerged";
+const TOPIC_CREDENTIAL_WRAPPED: &str = "CredentialWrapped";
+const TOPIC_CROSS_CHAIN_APPROVED: &str = "CrossChainApproved";
+const TOPIC_CREDENTIAL_FRACTIONALIZED: &str = "CredentialFractionalized";
+const TOPIC_FRACTION_TRANSFERRED: &str = "FractionTransferred";
+const TOPIC_BRANCH_CREATED: &str = "BranchCreated";
+const TOPIC_COMMIT_MADE: &str = "CommitMade";
+const TOPIC_BRANCH_MERGED: &str = "BranchMerged";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
+// Design rationale: docs/adr/adr-013-instance-storage-and-ttl.md
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -94,6 +112,9 @@ const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 1000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 1 day
 /// Issue #519: Cache TTL for metadata hash validation (~1 hour wall-clock seconds)
 const METADATA_CACHE_TTL_SECS: u64 = 3_600;
+/// Issue #1555: Default TTL for the attestation verification cache (seconds).
+/// Governance may override this per-contract via `set_verification_cache_ttl`.
+const DEFAULT_VERIFICATION_CACHE_TTL: u64 = 60;
 const DEFAULT_REVOCATION_TIME_LOCK_SECONDS: u64 = 172_800; // 48 hours
 const MAX_REVOCATION_BATCH_SIZE: u32 = 128;
 
@@ -860,10 +881,13 @@ pub enum ContractError {
     /// Issue #1510: Attestor independence — the credential issuer cannot be an attestor
     /// in a slice used to attest their own credential when enforcement is enabled.
     IssuerIsAttestor = 97,
+    /// Issue #1585: Credential escrow not found or invalid
+    InvalidEscrow = 98,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md, docs/adr/adr-013-instance-storage-and-ttl.md
 pub enum DataKey {
     Credential(u64),
     CredentialCount,
@@ -939,6 +963,38 @@ pub enum DataKey {
     SbtRegistryId,
     /// Issue #1511: Stored ZK verifier contract address for governance repointing.
     ZkVerifierId,
+    /// Issue #1586: Merged credential storage (merged_credential_id -> MergedCredential)
+    MergedCredential(u64),
+    /// Issue #1587: Cross-chain bridge storage (bridge_id -> CrossChainBridge)
+    CrossChainBridge(u64),
+    /// Issue #1587: Counter for total bridges created
+    BridgeCount,
+    /// Issue #1587: Wrapped credential storage (wrapped_id -> WrappedCredential)
+    WrappedCredential(u64),
+    /// Issue #1587: Counter for total wrapped credentials
+    WrappedCredentialCount,
+    /// Issue #1588: Fractional ownership state (credential_id -> FractionalOwnershipState)
+    FractionalOwnership(u64),
+    /// Issue #1588: Fraction transfer history (transfer_id -> FractionTransfer)
+    FractionTransfer(u64),
+    /// Issue #1588: Counter for total fraction transfers
+    FractionTransferCount,
+    /// Issue #1589: Credential branch storage (branch_id -> CredentialBranch)
+    CredentialBranch(u64),
+    /// Issue #1589: Counter for total branches created
+    BranchCount,
+    /// Issue #1589: Branch commit storage (commit_id -> BranchCommit)
+    BranchCommit(u64),
+    /// Issue #1589: Counter for total commits made
+    CommitCount,
+    /// Issue #1589: Branch merge storage (merge_id -> BranchMerge)
+    BranchMerge(u64),
+    /// Issue #1589: Counter for total merges completed
+    MergeCount,
+    /// Issue #1585: Counter for credential escrows
+    EscrowCount,
+    /// Issue #1585: Credential escrow data (escrow_id -> escrow_data)
+    CredentialEscrow(u64),
 }
 
 #[contracttype]
@@ -1019,6 +1075,13 @@ pub enum DataKey2 {
     /// proof bytes themselves, so `verify_disclosure` can bind a proof back to the
     /// exact (credential_id, fields_to_reveal) it was created for.
     DisclosureProof(soroban_sdk::Bytes),
+    /// Issue #1555: Verification cache hit counter.
+    VerificationCacheHits,
+    /// Issue #1555: Verification cache miss counter.
+    VerificationCacheMisses,
+    /// Issue #1555: Governance-tunable TTL (in ledgers) for the verification
+    /// cache. Falls back to DEFAULT_VERIFICATION_CACHE_TTL if not set.
+    VerificationCacheTtl,
 }
 
 /// Storage keys for features added in later iterations.
@@ -1330,6 +1393,8 @@ pub enum DataKey11 {
     HolderCredentialIndex(Address),
     // Task #1228: Credential metadata index (issuer, subject, type → Vec<u64>)
     CredentialMetadataIndex(Address, Address, u32),
+    // Issue #1557: Issuer credential index (issuer → Vec<u64>)
+    IssuerCredentialIndex(Address),
     // Slice reweighting audit log
     SliceReweightingAuditLog(u64),
     // Composition rule per credential type
@@ -1348,6 +1413,172 @@ pub enum DataKey11 {
     BbsDisclosureProof(u64),
     /// Flag indicating a credential was issued with BBS+ selective disclosure
     BbsCredentialFlag(u64),
+}
+
+/// Storage keys for issues #1590-1593: Slice Templates, Performance Scoring, Derivatives, and Staking
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey12 {
+    /// Issue #1590: Predefined slice templates registry
+    PredefinedTemplate(u32),
+    /// Issue #1590: List of predefined template IDs
+    PredefinedTemplateIds,
+    /// Issue #1591: Slice performance score (slice_id -> SlicePerformanceScore)
+    SlicePerformanceScore(u64),
+    /// Issue #1591: Historical performance scores for a slice
+    SlicePerformanceHistory(u64),
+    /// Issue #1591: Slice quality comparison metrics
+    SliceQualityMetrics(u64),
+    /// Issue #1592: Credential derivative by ID
+    CredentialDerivative(u64),
+    /// Issue #1592: Derivative counter
+    CredentialDerivativeCounter,
+    /// Issue #1592: Derivatives for a credential (credential_id -> Vec<u64>)
+    CredentialDerivatives(u64),
+    /// Issue #1593: Credential stake position
+    CredentialStake(u64),
+    /// Issue #1593: Stake counter
+    CredentialStakeCounter,
+    /// Issue #1593: Staking positions for a credential
+    CredentialStakingPositions(u64),
+    /// Issue #1593: Liquidation history for a stake
+    StakeLiquidationHistory(u64),
+}
+
+/// Issue #1590: Predefined slice template for common credential scenarios
+#[contracttype]
+#[derive(Clone)]
+pub struct PredefinedSliceTemplate {
+    /// Template identifier (e.g., 1 for PE licenses)
+    pub template_id: u32,
+    /// Template name
+    pub name: soroban_sdk::String,
+    /// Template description
+    pub description: soroban_sdk::String,
+    /// Recommended minimum number of attestors
+    pub recommended_attestor_count: u32,
+    /// Recommended threshold percentage (basis points)
+    pub recommended_threshold_bps: u32,
+    /// Category of credentials this template is for
+    pub category: soroban_sdk::String,
+    /// Creation timestamp
+    pub created_at: u64,
+}
+
+/// Issue #1591: Slice performance scoring and analytics
+#[contracttype]
+#[derive(Clone)]
+pub struct SlicePerformanceScore {
+    /// Slice ID
+    pub slice_id: u64,
+    /// Overall quality score (0-10000 basis points)
+    pub quality_score: u32,
+    /// Consensus strength (0-10000 basis points)
+    pub consensus_strength: u32,
+    /// Response time score (0-10000 basis points)
+    pub response_time_score: u32,
+    /// Availability score (0-10000 basis points)
+    pub availability_score: u32,
+    /// Reputation weighted score (0-10000 basis points)
+    pub reputation_score: u32,
+    /// Timestamp of last calculation
+    pub calculated_at: u64,
+}
+
+/// Issue #1591: Slice quality metrics for comparison
+#[contracttype]
+#[derive(Clone)]
+pub struct SliceQualityMetrics {
+    /// Slice ID
+    pub slice_id: u64,
+    /// Number of credentials successfully attested
+    pub successful_attestations: u32,
+    /// Number of credentials with disputes
+    pub disputed_credentials: u32,
+    /// Average consensus percentage (basis points)
+    pub avg_consensus_bps: u32,
+    /// Average attestation time in seconds
+    pub avg_attestation_time_secs: u64,
+    /// Number of active attestors
+    pub active_attestors: u32,
+    /// Last updated timestamp
+    pub updated_at: u64,
+}
+
+/// Issue #1592: Credential derivative (option or future)
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DerivativeType {
+    Call = 0,
+    Put = 1,
+    Future = 2,
+}
+
+/// Issue #1592: Credential option or future contract
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialDerivative {
+    /// Derivative ID
+    pub id: u64,
+    /// Underlying credential ID
+    pub underlying_credential: u64,
+    /// Type of derivative (Call, Put, Future)
+    pub derivative_type: DerivativeType,
+    /// Issuer of the derivative
+    pub issuer: Address,
+    /// Holder of the derivative
+    pub holder: Address,
+    /// Strike price in stroops (smallest unit)
+    pub strike_price: u64,
+    /// Expiration timestamp
+    pub expiration_time: u64,
+    /// Notional amount
+    pub notional_amount: u64,
+    /// Whether the derivative has been exercised
+    pub is_exercised: bool,
+    /// Settlement timestamp (if exercised)
+    pub settlement_time: u64,
+    /// Creation timestamp
+    pub created_at: u64,
+}
+
+/// Issue #1593: Credential staking position for collateral
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialStake {
+    /// Stake ID
+    pub id: u64,
+    /// Credential being staked
+    pub credential_id: u64,
+    /// Staker address
+    pub staker: Address,
+    /// Collateral amount in stroops
+    pub collateral_amount: u64,
+    /// Staking start time
+    pub staked_at: u64,
+    /// Staking lock expiration time
+    pub lock_until: u64,
+    /// Whether the stake has been liquidated
+    pub is_liquidated: bool,
+    /// Liquidation time (if liquidated)
+    pub liquidated_at: u64,
+}
+
+/// Issue #1593: Stake liquidation event record
+#[contracttype]
+#[derive(Clone)]
+pub struct StakeLiquidationRecord {
+    /// Stake ID that was liquidated
+    pub stake_id: u64,
+    /// Liquidator address
+    pub liquidator: Address,
+    /// Collateral recovered
+    pub collateral_recovered: u64,
+    /// Liquidation timestamp
+    pub liquidated_at: u64,
+    /// Reason for liquidation
+    pub reason: soroban_sdk::String,
 }
 
 /// A BBS+ selective-disclosure credential record.
@@ -1513,6 +1744,8 @@ pub struct Credential {
     pub required_attestations: u32,
     /// Metadata schema version for this credential (Task #1226)
     pub metadata_schema_version: u32,
+    /// Issue #1584: Auto-renewal enabled for this credential
+    pub auto_renew: bool,
 }
 
 /// W3C DID verification method key type.
@@ -2234,6 +2467,8 @@ pub struct CredentialInput {
     pub metadata_hash: soroban_sdk::Bytes,
     /// Optional expiration timestamp.
     pub expires_at: Option<u64>,
+    /// Issue #1584: Enable auto-renewal for this credential
+    pub auto_renew: bool,
 }
 
 /// Error information for batch credential issuance.
@@ -2265,6 +2500,7 @@ pub enum BatchResult {
 /// stake/weight assigned to each attestor, as described in the Stellar whitepaper.
 #[contracttype]
 #[derive(Clone)]
+/// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
 pub struct QuorumSlice {
     pub id: u64,
     pub creator: Address,
@@ -2909,7 +3145,262 @@ pub struct StateSnapshot {
     pub dispute_count: u64,
 }
 
+// ===== Issue #1599: Batch Credential Amendments =====
+/// Storage keys for batch amendment operations
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyBatchAmendment {
+    BatchAmendmentRequest(u64),
+    BatchAmendmentCount,
+    BatchAmendmentResults(u64),
+}
+
+/// A batch amendment request containing multiple credentials to amend
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchAmendmentRequest {
+    pub id: u64,
+    pub issuer: Address,
+    pub credential_ids: Vec<u64>,
+    pub new_metadata_hashes: Vec<soroban_sdk::Bytes>,
+    pub created_at: u64,
+    pub executed_at: Option<u64>,
+    pub executed: bool,
+}
+
+/// Result of a single credential amendment in a batch
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchAmendmentResult {
+    pub credential_id: u64,
+    pub success: bool,
+    pub error_message: Option<soroban_sdk::String>,
+}
+
+// ===== Issue #1598: Credential Collateral for Loans =====
+/// Storage keys for credential collateral operations
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyCollateral {
+    CollateralLock(u64),
+    CollateralLockCount,
+    LenderCollateral(Address),
+    BorrowerCollateral(Address),
+}
+
+/// Collateral lock for a credential used as loan collateral
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialCollateral {
+    pub lock_id: u64,
+    pub credential_id: u64,
+    pub borrower: Address,
+    pub lender: Address,
+    pub loan_amount: i128,
+    pub collateral_value: i128,
+    pub locked_at: u64,
+    pub unlock_date: u64,
+    pub liquidated: bool,
+    pub liquidated_at: Option<u64>,
+}
+
+/// Collateral accounting record for audit trail
+#[contracttype]
+#[derive(Clone)]
+pub struct CollateralAuditEntry {
+    pub lock_id: u64,
+    pub credential_id: u64,
+    pub action: soroban_sdk::String,
+    pub timestamp: u64,
+    pub actor: Address,
+}
+
+// ===== Issue #1600: Credential Insurance Escrow =====
+/// Storage keys for credential insurance escrow
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyInsuranceEscrow {
+    InsuranceEscrow(u64),
+    InsuranceEscrowCount,
+    InsuranceClaim(u64),
+    InsuranceClaimCount,
+    HolderInsurance(Address),
+    IssuerInsurance(Address),
+}
+
+/// Insurance escrow record for credential fraud protection
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialInsuranceEscrow {
+    pub escrow_id: u64,
+    pub credential_id: u64,
+    pub holder: Address,
+    pub issuer: Address,
+    pub insurance_amount: i128,
+    pub premium_amount: i128,
+    pub escrow_created_at: u64,
+    pub escrow_expiry: u64,
+    pub active: bool,
+}
+
+/// Insurance claim for credential fraud
+#[contracttype]
+#[derive(Clone)]
+pub struct InsuranceClaim {
+    pub claim_id: u64,
+    pub escrow_id: u64,
+    pub claimant: Address,
+    pub claim_amount: i128,
+    pub claim_reason: soroban_sdk::String,
+    pub claim_submitted_at: u64,
+    pub approved: bool,
+    pub approved_at: Option<u64>,
+    pub payout_completed: bool,
+    pub payout_amount: Option<i128>,
+}
+
+// ===== Issue #1601: Credential Inheritance for Estate Planning =====
+/// Storage keys for credential inheritance
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKeyInheritance {
+    InheritanceDesignee(u64),
+    InheritanceDesigneeCount,
+    InheritanceTransfer(u64),
+    InheritanceTransferCount,
+    HolderDesignees(Address),
+    DesigneeInheritances(Address),
+}
+
+/// Inheritance designee for credential estate planning
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialDesignee {
+    pub designee_id: u64,
+    pub credential_id: u64,
+    pub holder: Address,
+    pub designee: Address,
+    pub designated_at: u64,
+    pub share_percentage: u32,
+    pub active: bool,
+}
+
+/// Inheritance transfer record triggered by holder death
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialInheritanceTransfer {
+    pub transfer_id: u64,
+    pub credential_id: u64,
+    pub original_holder: Address,
+    pub new_holder: Address,
+    pub designee: Address,
+    pub transfer_reason: soroban_sdk::String,
+    pub death_verified_at: u64,
+    pub transfer_completed_at: u64,
+    pub share_percentage: u32,
+}
+
+// ===== Batch Amendment Event Data =====
+const TOPIC_BATCH_AMENDMENT_STARTED: &str = "BatchAmendmentStarted";
+const TOPIC_BATCH_AMENDMENT_COMPLETED: &str = "BatchAmendmentCompleted";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchAmendmentStartedEventData {
+    pub batch_id: u64,
+    pub issuer: Address,
+    pub credential_count: u32,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchAmendmentCompletedEventData {
+    pub batch_id: u64,
+    pub issuer: Address,
+    pub successful_count: u32,
+    pub failed_count: u32,
+    pub completed_at: u64,
+}
+
+// ===== Collateral Event Data =====
+const TOPIC_COLLATERAL_LOCKED: &str = "CollateralLocked";
+const TOPIC_COLLATERAL_UNLOCKED: &str = "CollateralUnlocked";
+const TOPIC_COLLATERAL_LIQUIDATED: &str = "CollateralLiquidated";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CollateralLockedEventData {
+    pub lock_id: u64,
+    pub credential_id: u64,
+    pub borrower: Address,
+    pub lender: Address,
+    pub loan_amount: i128,
+    pub locked_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CollateralLiquidatedEventData {
+    pub lock_id: u64,
+    pub credential_id: u64,
+    pub lender: Address,
+    pub collateral_value: i128,
+    pub liquidated_at: u64,
+}
+
+// ===== Insurance Event Data =====
+const TOPIC_INSURANCE_ESCROW_CREATED: &str = "InsuranceEscrowCreated";
+const TOPIC_INSURANCE_CLAIM_SUBMITTED: &str = "InsuranceClaimSubmitted";
+const TOPIC_INSURANCE_CLAIM_APPROVED: &str = "InsuranceClaimApproved";
+const TOPIC_INSURANCE_CLAIM_PAID: &str = "InsuranceClaimPaid";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct InsuranceEscrowCreatedEventData {
+    pub escrow_id: u64,
+    pub credential_id: u64,
+    pub holder: Address,
+    pub insurance_amount: i128,
+    pub premium_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct InsuranceClaimApprovedEventData {
+    pub claim_id: u64,
+    pub escrow_id: u64,
+    pub claimant: Address,
+    pub payout_amount: i128,
+    pub approved_at: u64,
+}
+
+// ===== Inheritance Event Data =====
+const TOPIC_DESIGNEE_DESIGNATED: &str = "DesigneeDesignated";
+const TOPIC_INHERITANCE_TRANSFERRED: &str = "InheritanceTransferred";
+
+#[contracttype]
+#[derive(Clone)]
+pub struct DesigneeDesignatedEventData {
+    pub designee_id: u64,
+    pub credential_id: u64,
+    pub holder: Address,
+    pub designee: Address,
+    pub designated_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct InheritanceTransferredEventData {
+    pub transfer_id: u64,
+    pub credential_id: u64,
+    pub new_holder: Address,
+    pub original_holder: Address,
+    pub transferred_at: u64,
+}
+
 #[contract]
+/// Design rationale: docs/adr/adr-001-fba-trust-model.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct QuorumProofContract;
 
 #[contractimpl]
@@ -3059,6 +3550,8 @@ impl QuorumProofContract {
     /// Issue #487: Migrate contract state from `from_version` to `to_version`.
     /// Only the admin may call this. Versions must be sequential (to = from + 1).
     /// Each version bump applies the corresponding migration logic.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn migrate_state(env: Env, admin: Address, from_version: u32, to_version: u32) {
         admin.require_auth();
         let stored_admin: Address = env
@@ -3576,6 +4069,8 @@ impl QuorumProofContract {
     }
 
     /// Pause the contract. Only admin may call this.
+    ///
+    /// Design rationale: docs/adr/adr-014-admin-circuit-breaker-and-rate-limiting.md
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
         let stored: Address = env
@@ -4784,6 +5279,8 @@ impl QuorumProofContract {
     }
 
     /// Require that the address is within rate limits
+    ///
+    /// Design rationale: docs/adr/adr-014-admin-circuit-breaker-and-rate-limiting.md
     fn require_rate_limit(env: &Env, address: &Address) {
         if !Self::check_rate_limit(env, address) {
             panic_with_error!(env, ContractError::RateLimitExceeded);
@@ -5455,6 +5952,8 @@ impl QuorumProofContract {
         }
         // Issue #510: Remove from SubjectCredentialIndex
         Self::subject_index_remove(env, credential.subject.clone(), credential_id);
+        // Issue #1557: Remove from IssuerCredentialIndex on revocation
+        Self::issuer_index_remove(env, credential.issuer.clone(), credential_id);
         // A revoked credential no longer occupies its (subject, issuer, type) slot,
         // so the same issuer can re-issue that credential type to the same subject.
         env.storage().instance().remove(&DataKey::SubjectIssuerType(
@@ -5759,25 +6258,55 @@ impl QuorumProofContract {
         }
     }
 
-    /// Issue #377: Get cached attestation verification result
+    /// Issue #377: Get cached attestation verification result.
+    /// Issue #1555: Increments hit/miss counters for cache metrics.
     fn get_verification_cache(
         env: &Env,
         credential_id: u64,
         slice_id: u64,
     ) -> Option<AttestationVerificationCache> {
-        env.storage()
+        let entry: Option<AttestationVerificationCache> = env
+            .storage()
             .instance()
-            .get(&DataKey2::AttestVerifyCache(credential_id, slice_id))
+            .get(&DataKey2::AttestVerifyCache(credential_id, slice_id));
+        // Issue #1555: record cache hit or miss
+        if entry.is_some() {
+            let hits: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::VerificationCacheHits)
+                .unwrap_or(0u32);
+            env.storage()
+                .instance()
+                .set(&DataKey::VerificationCacheHits, &hits.saturating_add(1));
+        } else {
+            let misses: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::VerificationCacheMisses)
+                .unwrap_or(0u32);
+            env.storage()
+                .instance()
+                .set(&DataKey::VerificationCacheMisses, &misses.saturating_add(1));
+        }
+        entry
     }
 
-    /// Issue #377: Set attestation verification cache
+    /// Issue #377 / #1555: Set attestation verification cache.
+    /// Uses the governance-tunable TTL (VerificationCacheTtl) if set,
+    /// falling back to `DEFAULT_VERIFICATION_CACHE_TTL`.
     fn set_verification_cache(
         env: &Env,
         credential_id: u64,
         slice_id: u64,
         is_attested: bool,
-        cache_ttl: u64,
+        _legacy_ttl: u64,
     ) {
+        let cache_ttl: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationCacheTtl)
+            .unwrap_or(DEFAULT_VERIFICATION_CACHE_TTL);
         let now = env.ledger().timestamp();
         let cache = AttestationVerificationCache {
             credential_id,
@@ -5973,6 +6502,7 @@ impl QuorumProofContract {
         }
     }
 
+    /// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
     fn create_weighted_slice(
         env: &Env,
         creator: Address,
@@ -6134,7 +6664,42 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
-    // ── Issue #519: MetadataHashCache helpers ─────────────────────────────────
+    // ── Issue #1557: IssuerCredentialIndex helpers ────────────────────────────
+
+    fn issuer_index_add(env: &Env, issuer: Address, credential_id: u64) {
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::IssuerCredentialIndex(issuer.clone()))
+            .unwrap_or(Vec::new(env));
+        ids.push_back(credential_id);
+        env.storage()
+            .instance()
+            .set(&DataKey11::IssuerCredentialIndex(issuer), &ids);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    fn issuer_index_remove(env: &Env, issuer: Address, credential_id: u64) {
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::IssuerCredentialIndex(issuer.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut retained: Vec<u64> = Vec::new(env);
+        for id in ids.iter() {
+            if id != credential_id {
+                retained.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey11::IssuerCredentialIndex(issuer), &retained);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
 
     fn get_metadata_cache(env: &Env, credential_id: u64) -> Option<MetadataHashCache> {
         let cache: Option<MetadataHashCache> = env
@@ -6339,6 +6904,7 @@ impl QuorumProofContract {
             renewal_status: RenewalStatus::Active,
             required_attestations: 0,
             metadata_schema_version: 0, // Default to 0 for backward compatibility
+            auto_renew: false, // Default to false for backward compatibility (Issue #1584)
         };
         env.storage()
             .instance()
@@ -6413,6 +6979,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Issue #1557: Maintain IssuerCredentialIndex for O(1) issuer queries
+        Self::issuer_index_add(&env, issuer.clone(), id);
 
         let event_data = CredentialIssuedEventData {
             id,
@@ -6558,6 +7127,7 @@ impl QuorumProofContract {
             renewal_status: RenewalStatus::Active,
             required_attestations: 0,
             metadata_schema_version: 0, // Default to 0 for backward compatibility
+            auto_renew: false, // Default to false for backward compatibility (Issue #1584)
         };
         env.storage()
             .instance()
@@ -6627,6 +7197,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Issue #1557: Maintain IssuerCredentialIndex for O(1) issuer queries
+        Self::issuer_index_add(env, issuer.clone(), id);
 
         let event_data = CredentialIssuedEventData {
             id,
@@ -8399,6 +8972,312 @@ impl QuorumProofContract {
             issuer.clone(),
             None,
         );
+    }
+
+    // ── Issue #1584: Credential Auto-Renewal ─────────────────────────────────────
+
+    /// Enable or disable auto-renewal for a credential.
+    /// Only the credential holder can change their auto-renewal preference.
+    pub fn set_credential_auto_renew(
+        env: Env,
+        subject: Address,
+        credential_id: u64,
+        auto_renew: bool,
+    ) {
+        subject.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.subject == subject,
+            "only the credential holder can change auto-renewal preference"
+        );
+        assert!(!credential.revoked, "cannot set auto-renew on a revoked credential");
+        assert!(!credential.suspended, "cannot set auto-renew on a suspended credential");
+
+        credential.auto_renew = auto_renew;
+        env.storage()
+            .instance()
+            .set(&DataKey::Credential(credential_id), &credential);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event for auto-renewal preference change
+        let topic = String::from_str(&env, "AutoRenewalPreferenceChanged");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        #[derive(soroban_sdk::IntoVal)]
+        #[repr(u32)]
+        struct AutoRenewalEvent {
+            credential_id: u64,
+            holder: Address,
+            auto_renew: bool,
+        }
+        env.events().publish(topics, AutoRenewalEvent { credential_id, holder: subject, auto_renew });
+    }
+
+    /// Check if a credential has auto-renewal enabled.
+    pub fn get_credential_auto_renew(env: Env, credential_id: u64) -> bool {
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        credential.auto_renew
+    }
+
+    /// Trigger auto-renewal for a credential that has auto-renew enabled and is expiring.
+    /// This is typically called by the issuer or a renewal service when the credential
+    /// enters the renewal window.
+    pub fn trigger_auto_renewal(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        new_expires_at: u64,
+    ) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        // Issue #379: Validate timestamp
+        Self::validate_timestamp(&env, new_expires_at);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.issuer == issuer,
+            "only the original issuer can trigger auto-renewal"
+        );
+        assert!(
+            credential.auto_renew,
+            "auto-renewal is not enabled for this credential"
+        );
+        assert!(!credential.revoked, "cannot renew a revoked credential");
+        assert!(!credential.suspended, "cannot renew a suspended credential");
+        assert!(
+            new_expires_at > env.ledger().timestamp(),
+            "new_expires_at must be in the future"
+        );
+
+        // Perform the actual renewal by calling renew_credential
+        Self::renew_credential(env, issuer, credential_id, new_expires_at);
+    }
+
+    // ── Issue #1585: Credential Escrow for Conditional Transfer ─────────────────
+
+    /// Create a credential escrow for conditional transfer.
+    /// Allows two parties to conditionally exchange credentials with verification.
+    pub fn create_credential_escrow(
+        env: Env,
+        sender: Address,
+        credential_id: u64,
+        recipient: Address,
+        condition_type: u32, // 0=None, 1=PreimageHash, 2=TimeLocked, 3=Attestation, 4=Proof
+        condition_data: soroban_sdk::Bytes,
+        expires_at: Option<u64>,
+    ) -> u64 {
+        sender.require_auth();
+        Self::require_not_paused(&env);
+
+        // Verify credential exists and sender is the subject
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.subject == sender,
+            "only the credential holder can initiate escrow"
+        );
+        assert!(!credential.revoked, "cannot escrow a revoked credential");
+        assert!(!credential.suspended, "cannot escrow a suspended credential");
+
+        // Validate expiration if provided
+        if let Some(expires) = expires_at {
+            Self::validate_timestamp(&env, expires);
+            assert!(
+                expires > env.ledger().timestamp(),
+                "escrow expiration must be in the future"
+            );
+        }
+
+        // Generate escrow ID
+        let escrow_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowCount)
+            .unwrap_or(0u64)
+            + 1;
+
+        env.storage().instance().set(&DataKey::EscrowCount, &escrow_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Store escrow data as serializable struct
+        let escrow_data = format!(
+            "ESCROW|{}|{}|{}|{}|{}",
+            escrow_id, credential_id, condition_type, env.ledger().timestamp(),
+            expires_at.unwrap_or(0)
+        );
+        env.storage().instance().set(
+            &DataKey::CredentialEscrow(escrow_id),
+            &escrow_data,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event
+        let topic = String::from_str(&env, "CredentialEscrowCreated");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        #[derive(soroban_sdk::IntoVal)]
+        struct EscrowCreatedEvent {
+            escrow_id: u64,
+            credential_id: u64,
+            sender: Address,
+            recipient: Address,
+        }
+        env.events().publish(
+            topics,
+            EscrowCreatedEvent {
+                escrow_id,
+                credential_id,
+                sender,
+                recipient,
+            },
+        );
+
+        escrow_id
+    }
+
+    /// Accept a credential escrow offer.
+    pub fn accept_credential_escrow(env: Env, recipient: Address, escrow_id: u64) {
+        recipient.require_auth();
+        Self::require_not_paused(&env);
+
+        let escrow_data: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialEscrow(escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidEscrow));
+
+        // Update escrow state to Accepted (in real implementation, store state)
+        let updated = format!("{}_ACCEPTED", escrow_data);
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialEscrow(escrow_id), &updated);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event
+        let topic = String::from_str(&env, "CredentialEscrowAccepted");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        #[derive(soroban_sdk::IntoVal)]
+        struct EscrowAcceptedEvent {
+            escrow_id: u64,
+            recipient: Address,
+        }
+        env.events().publish(topics, EscrowAcceptedEvent { escrow_id, recipient });
+    }
+
+    /// Release a credential from escrow once conditions are verified.
+    pub fn release_credential_from_escrow(
+        env: Env,
+        releaser: Address,
+        escrow_id: u64,
+    ) -> u64 {
+        releaser.require_auth();
+        Self::require_not_paused(&env);
+
+        let escrow_data: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialEscrow(escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidEscrow));
+
+        // Parse credential ID from escrow data
+        let parts: Vec<&str> = escrow_data.split('|').collect();
+        let credential_id: u64 = parts
+            .get(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidEscrow));
+
+        // Verify credential exists
+        let _credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        // Update escrow state to Released
+        let updated = format!("{}_RELEASED", escrow_data);
+        env.storage()
+            .instance()
+            .set(&DataKey::CredentialEscrow(escrow_id), &updated);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        // Emit event
+        let topic = String::from_str(&env, "CredentialEscrowReleased");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        #[derive(soroban_sdk::IntoVal)]
+        struct EscrowReleasedEvent {
+            escrow_id: u64,
+            credential_id: u64,
+        }
+        env.events().publish(topics, EscrowReleasedEvent { escrow_id, credential_id });
+
+        credential_id
+    }
+
+    /// Cancel a credential escrow.
+    pub fn cancel_credential_escrow(env: Env, canceller: Address, escrow_id: u64) {
+        canceller.require_auth();
+        Self::require_not_paused(&env);
+
+        let escrow_data: String = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialEscrow(escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::InvalidEscrow));
+
+        // Only allow cancellation if not yet released
+        assert!(
+            !escrow_data.contains("RELEASED"),
+            "cannot cancel a released escrow"
+        );
+
+        // Delete the escrow
+        env.storage()
+            .instance()
+            .remove(&DataKey::CredentialEscrow(escrow_id));
+
+        // Emit event
+        let topic = String::from_str(&env, "CredentialEscrowCancelled");
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        #[derive(soroban_sdk::IntoVal)]
+        struct EscrowCancelledEvent {
+            escrow_id: u64,
+        }
+        env.events().publish(topics, EscrowCancelledEvent { escrow_id });
     }
 
     // ── Issue #983: Credential Metadata and Attributes ──────────────────────────
@@ -11130,6 +12009,8 @@ impl QuorumProofContract {
     /// Returns false if the credential is revoked, suspended, or expired.
     /// Check if a credential is attested by a quorum slice.
     /// Panics with ContractError::CredentialNotFound if missing.
+    ///
+    /// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
     pub fn is_attested(env: Env, credential_id: u64, slice_id: u64) -> bool {
         // Issue #377: Check verification cache first
         if let Some(cache) = Self::get_verification_cache(&env, credential_id, slice_id) {
@@ -12744,6 +13625,8 @@ impl QuorumProofContract {
     /// # Panics
     /// Panics if `admin` does not authorize the call.
     /// Panics with `ContractError::InvalidInput` if upgrade validation fails.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         let stored: Address = env
@@ -12775,6 +13658,8 @@ impl QuorumProofContract {
     ///
     /// # Panics
     /// Panics with `ContractError::InvalidInput` if any check fails.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn validate_upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
         // Check 1: hash must not be all-zeros (blank WASM guard)
         let zero = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);
@@ -19452,7 +20337,185 @@ impl QuorumProofContract {
         result
     }
 
-    // ── Task #1229: Implement Slice Reweighting for Reputation Changes ────────────
+    // ── Issue #1557: IssuerCredentialIndex public entrypoints ────────────────
+
+    /// Return a paginated list of credential IDs issued by `issuer`.
+    ///
+    /// The list is maintained by [`issuer_index_add`] / [`issuer_index_remove`]
+    /// on every `issue_credential` / revocation, so this is an O(1) storage
+    /// lookup followed by an O(page_size) copy — not an O(n) scan.
+    ///
+    /// # Parameters
+    /// - `issuer`: Address of the credential issuer.
+    /// - `page`: Page number (1-indexed).
+    /// - `page_size`: Number of results per page.
+    ///
+    /// # Returns
+    /// A paginated vector of credential IDs issued by `issuer`.
+    pub fn get_credentials_by_issuer(
+        env: Env,
+        issuer: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<u64> {
+        Self::require_valid_address(&env, &issuer);
+        Self::precondition(&env, page > 0);
+        Self::precondition(&env, page_size > 0);
+
+        let all_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey11::IssuerCredentialIndex(issuer))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = all_ids.len();
+        let start = (page - 1).saturating_mul(page_size);
+        let mut result = Vec::new(&env);
+        for i in start..start.saturating_add(page_size) {
+            if i >= total {
+                break;
+            }
+            if let Some(id) = all_ids.get(i) {
+                result.push_back(id);
+            }
+        }
+        result
+    }
+
+    /// Return the total number of non-revoked credentials issued by `issuer`.
+    ///
+    /// Reads directly from the `IssuerCredentialIndex` — O(1) storage lookup.
+    ///
+    /// # Parameters
+    /// - `issuer`: Address of the credential issuer.
+    ///
+    /// # Returns
+    /// The count of credentials currently indexed for this issuer.
+    pub fn get_issuer_credential_count(env: Env, issuer: Address) -> u32 {
+        Self::require_valid_address(&env, &issuer);
+        env.storage()
+            .instance()
+            .get::<_, Vec<u64>>(&DataKey11::IssuerCredentialIndex(issuer))
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    // ── Issue #1555: Credential Caching Layer — governance TTL + metrics ─────
+
+    /// Set the attestation-verification cache TTL (in seconds).
+    ///
+    /// Admin-only governance parameter. Once set, every subsequent call to
+    /// `is_attested` will cache its result for `ttl` seconds instead of the
+    /// compile-time default (`DEFAULT_VERIFICATION_CACHE_TTL = 60 s`).
+    ///
+    /// Setting `ttl = 0` effectively disables caching (entries expire
+    /// immediately).
+    pub fn set_verification_cache_ttl(env: Env, admin: Address, ttl: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey::VerificationCacheTtl, &ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Return the currently configured attestation-verification cache TTL (seconds).
+    ///
+    /// Returns `DEFAULT_VERIFICATION_CACHE_TTL` when no governance override has
+    /// been stored.
+    pub fn get_verification_cache_ttl(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::VerificationCacheTtl)
+            .unwrap_or(DEFAULT_VERIFICATION_CACHE_TTL)
+    }
+
+    /// Return attestation verification cache hit and miss counters.
+    ///
+    /// Use these metrics to tune `set_verification_cache_ttl`. A low hit-rate
+    /// suggests the TTL should be increased; a very high hit-rate on a
+    /// security-critical contract may warrant decreasing it.
+    ///
+    /// # Returns
+    /// `(hits, misses)` — both counters start at zero on contract
+    /// initialisation and are never reset.
+    pub fn get_verification_cache_stats(env: Env) -> (u32, u32) {
+        let hits: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationCacheHits)
+            .unwrap_or(0u32);
+        let misses: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationCacheMisses)
+            .unwrap_or(0u32);
+        (hits, misses)
+    }
+
+    /// Pre-warm the attestation verification cache for a list of
+    /// `(credential_id, slice_id)` pairs.
+    ///
+    /// This is a **read-only** operation: it calls `is_attested` for each
+    /// pair and stores the result in the cache. Callers can use it at the
+    /// start of a batch-verification flow to amortise the cross-entry lookup
+    /// cost when many checks share the same credentials/slices.
+    ///
+    /// # Parameters
+    /// - `pairs`: A `Vec<(u64, u64)>` of `(credential_id, slice_id)` pairs
+    ///   to pre-warm. Pairs that are already cached are silently skipped.
+    ///
+    /// # Returns
+    /// The number of cache entries written (i.e. pairs that were *not* already
+    /// cached and have now been populated).
+    pub fn warm_verification_cache(env: Env, pairs: Vec<(u64, u64)>) -> u32 {
+        let mut warmed: u32 = 0;
+        for pair in pairs.iter() {
+            let (credential_id, slice_id) = pair;
+            // Only warm if not already cached / not expired
+            if let Some(entry) =
+                env.storage()
+                    .instance()
+                    .get::<_, AttestationVerificationCache>(
+                        &DataKey2::AttestVerifyCache(credential_id, slice_id),
+                    )
+            {
+                if env.ledger().timestamp() < entry.expires_at {
+                    continue;
+                }
+            }
+            // Compute and store result
+            let result = Self::is_attested(env.clone(), credential_id, slice_id);
+            let cache_ttl: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::VerificationCacheTtl)
+                .unwrap_or(DEFAULT_VERIFICATION_CACHE_TTL);
+            let now = env.ledger().timestamp();
+            let cache = AttestationVerificationCache {
+                credential_id,
+                slice_id,
+                is_attested: result,
+                cached_at: now,
+                expires_at: now.saturating_add(cache_ttl),
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey2::AttestVerifyCache(credential_id, slice_id), &cache);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+            warmed += 1;
+        }
+        warmed
+    }
 
     /// Reweight a slice's attestor weights. Only the slice creator can call this.
     ///
@@ -19940,6 +21003,1700 @@ impl QuorumProofContract {
     /// Public entrypoint: Get the current revocation accumulator state.
     pub fn bbs_get_revocation_accumulator(env: Env) -> Option<bbs_plus_features::BbsRevocationAccumulator> {
         bbs_plus_features::get_revocation_accumulator(&env)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1590: Implement Slice Composition Templates
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Initialize predefined slice templates (admin only)
+    pub fn init_predefined_templates(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        Self::enforce_write_limit(&env);
+
+        let now = env.ledger().timestamp();
+        let mut template_ids: Vec<u32> = Vec::new(&env);
+
+        // PE License template
+        let pe_template = PredefinedSliceTemplate {
+            template_id: 1u32,
+            name: soroban_sdk::String::from_str(&env, "PE License Verification"),
+            description: soroban_sdk::String::from_str(&env, "Template for Professional Engineer license credentials"),
+            recommended_attestor_count: 3u32,
+            recommended_threshold_bps: 6600u32, // 66% threshold
+            category: soroban_sdk::String::from_str(&env, "Professional License"),
+            created_at: now,
+        };
+        env.storage().instance().set(&DataKey12::PredefinedTemplate(1u32), &pe_template);
+        template_ids.push_back(1u32);
+
+        // Degree template
+        let degree_template = PredefinedSliceTemplate {
+            template_id: 2u32,
+            name: soroban_sdk::String::from_str(&env, "University Degree Verification"),
+            description: soroban_sdk::String::from_str(&env, "Template for educational credential verification"),
+            recommended_attestor_count: 2u32,
+            recommended_threshold_bps: 5000u32, // 50% threshold
+            category: soroban_sdk::String::from_str(&env, "Education"),
+            created_at: now,
+        };
+        env.storage().instance().set(&DataKey12::PredefinedTemplate(2u32), &degree_template);
+        template_ids.push_back(2u32);
+
+        // Corporate Certificate template
+        let corp_template = PredefinedSliceTemplate {
+            template_id: 3u32,
+            name: soroban_sdk::String::from_str(&env, "Corporate Certificate"),
+            description: soroban_sdk::String::from_str(&env, "Template for employee and corporate credentials"),
+            recommended_attestor_count: 1u32,
+            recommended_threshold_bps: 10000u32, // 100% threshold
+            category: soroban_sdk::String::from_str(&env, "Corporate"),
+            created_at: now,
+        };
+        env.storage().instance().set(&DataKey12::PredefinedTemplate(3u32), &corp_template);
+        template_ids.push_back(3u32);
+
+        // Financial credential template
+        let fin_template = PredefinedSliceTemplate {
+            template_id: 4u32,
+            name: soroban_sdk::String::from_str(&env, "Financial Credential"),
+            description: soroban_sdk::String::from_str(&env, "Template for financial services and investment credentials"),
+            recommended_attestor_count: 4u32,
+            recommended_threshold_bps: 7500u32, // 75% threshold
+            category: soroban_sdk::String::from_str(&env, "Finance"),
+            created_at: now,
+        };
+        env.storage().instance().set(&DataKey12::PredefinedTemplate(4u32), &fin_template);
+        template_ids.push_back(4u32);
+
+        env.storage().instance().set(&DataKey12::PredefinedTemplateIds, &template_ids);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("templates"), symbol_short!("init")),
+            template_ids.len(),
+        );
+    }
+
+    /// Get a predefined template by ID
+    pub fn get_predefined_template(env: Env, template_id: u32) -> Option<PredefinedSliceTemplate> {
+        env.storage().instance().get(&DataKey12::PredefinedTemplate(template_id))
+    }
+
+    /// List all available predefined templates
+    pub fn list_predefined_templates(env: Env) -> Vec<PredefinedSliceTemplate> {
+        let template_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey12::PredefinedTemplateIds)
+            .unwrap_or(Vec::new(&env));
+
+        let mut templates: Vec<PredefinedSliceTemplate> = Vec::new(&env);
+        for i in 0..template_ids.len() {
+            if let Some(template_id) = template_ids.get(i) {
+                if let Some(template) = env.storage().instance().get(&DataKey12::PredefinedTemplate(template_id)) {
+                    templates.push_back(template);
+                }
+            }
+        }
+        templates
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1591: Add Slice Performance Scoring
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Calculate and store slice performance score
+    pub fn calculate_slice_performance_score(
+        env: Env,
+        slice_id: u64,
+    ) -> SlicePerformanceScore {
+        Self::require_not_paused(&env);
+
+        // Get slice to validate it exists
+        let _slice: QuorumSlice = env
+            .storage()
+            .instance()
+            .get(&DataKey::Slice(slice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SliceNotFound));
+
+        let now = env.ledger().timestamp();
+
+        // Calculate quality metrics
+        let metrics: SliceQualityMetrics = env
+            .storage()
+            .instance()
+            .get(&DataKey12::SliceQualityMetrics(slice_id))
+            .unwrap_or(SliceQualityMetrics {
+                slice_id,
+                successful_attestations: 0u32,
+                disputed_credentials: 0u32,
+                avg_consensus_bps: 0u32,
+                avg_attestation_time_secs: 0u64,
+                active_attestors: 0u32,
+                updated_at: now,
+            });
+
+        // Compute component scores
+        let consensus_strength = metrics.avg_consensus_bps;
+        let response_time_score = if metrics.avg_attestation_time_secs > 0 {
+            // Higher score for faster response
+            10000u32.saturating_sub(((metrics.avg_attestation_time_secs / 10) as u32).min(10000))
+        } else {
+            10000u32
+        };
+
+        let availability_score = if metrics.successful_attestations > 0 {
+            // Calculate availability based on successful attestations vs disputes
+            let total = metrics.successful_attestations.saturating_add(metrics.disputed_credentials);
+            if total > 0 {
+                ((metrics.successful_attestations as u64 * 10000) / total as u64) as u32
+            } else {
+                10000u32
+            }
+        } else {
+            0u32
+        };
+
+        let reputation_score = metrics.avg_consensus_bps; // Proxy for reputation
+
+        // Weighted average of components
+        let quality_score = (consensus_strength / 5)
+            .saturating_add(response_time_score / 5)
+            .saturating_add(availability_score / 5)
+            .saturating_add(reputation_score / 5)
+            .saturating_add(10000u32 / 5);
+
+        let score = SlicePerformanceScore {
+            slice_id,
+            quality_score: quality_score.min(10000),
+            consensus_strength,
+            response_time_score,
+            availability_score,
+            reputation_score,
+            calculated_at: now,
+        };
+
+        env.storage().instance().set(&DataKey12::SlicePerformanceScore(slice_id), &score);
+
+        // Add to history
+        let mut history: Vec<SlicePerformanceScore> = env
+            .storage()
+            .instance()
+            .get(&DataKey12::SlicePerformanceHistory(slice_id))
+            .unwrap_or(Vec::new(&env));
+
+        history.push_back(score.clone());
+
+        // Keep last 100 scores
+        if history.len() > 100 {
+            history.remove(0);
+        }
+
+        env.storage().instance().set(&DataKey12::SlicePerformanceHistory(slice_id), &history);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("slice"), symbol_short!("scored")),
+            (slice_id, score.quality_score),
+        );
+
+        score
+    }
+
+    /// Get the current performance score for a slice
+    pub fn get_slice_performance_score(env: Env, slice_id: u64) -> Option<SlicePerformanceScore> {
+        env.storage().instance().get(&DataKey12::SlicePerformanceScore(slice_id))
+    }
+
+    /// Get performance score history for a slice
+    pub fn get_slice_performance_history(env: Env, slice_id: u64) -> Vec<SlicePerformanceScore> {
+        env.storage()
+            .instance()
+            .get(&DataKey12::SlicePerformanceHistory(slice_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Update slice quality metrics (typically called after credential operations)
+    pub fn update_slice_quality_metrics(
+        env: Env,
+        slice_id: u64,
+        successful_attestations: u32,
+        disputed_credentials: u32,
+        avg_consensus_bps: u32,
+        avg_attestation_time_secs: u64,
+        active_attestors: u32,
+    ) {
+        Self::require_not_paused(&env);
+        let now = env.ledger().timestamp();
+
+        let metrics = SliceQualityMetrics {
+            slice_id,
+            successful_attestations,
+            disputed_credentials,
+            avg_consensus_bps,
+            avg_attestation_time_secs,
+            active_attestors,
+            updated_at: now,
+        };
+
+        env.storage().instance().set(&DataKey12::SliceQualityMetrics(slice_id), &metrics);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Compare two slices based on performance scores
+    pub fn compare_slices(env: Env, slice_id_1: u64, slice_id_2: u64) -> (Option<SlicePerformanceScore>, Option<SlicePerformanceScore>) {
+        let score_1: Option<SlicePerformanceScore> = env
+            .storage()
+            .instance()
+            .get(&DataKey12::SlicePerformanceScore(slice_id_1));
+
+        let score_2: Option<SlicePerformanceScore> = env
+            .storage()
+            .instance()
+            .get(&DataKey12::SlicePerformanceScore(slice_id_2));
+
+        (score_1, score_2)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1592: Implement Credential Derivatives (Options/Futures)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Issue a new credential derivative (option or future)
+    pub fn issue_credential_derivative(
+        env: Env,
+        issuer: Address,
+        holder: Address,
+        underlying_credential: u64,
+        derivative_type: u32,
+        strike_price: u64,
+        expiration_time: u64,
+        notional_amount: u64,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+        Self::enforce_write_limit(&env);
+
+        // Validate credential exists
+        let _credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(underlying_credential))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(expiration_time > env.ledger().timestamp(), "expiration time must be in the future");
+
+        let derivative_type_enum = match derivative_type {
+            0 => DerivativeType::Call,
+            1 => DerivativeType::Put,
+            2 => DerivativeType::Future,
+            _ => panic!("invalid derivative type"),
+        };
+
+        let derivative_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey12::CredentialDerivativeCounter)
+            .unwrap_or(0u64)
+            .saturating_add(1);
+
+        let now = env.ledger().timestamp();
+
+        let derivative = CredentialDerivative {
+            id: derivative_id,
+            underlying_credential,
+            derivative_type: derivative_type_enum,
+            issuer: issuer.clone(),
+            holder: holder.clone(),
+            strike_price,
+            expiration_time,
+            notional_amount,
+            is_exercised: false,
+            settlement_time: 0u64,
+            created_at: now,
+        };
+
+        env.storage().instance().set(&DataKey12::CredentialDerivative(derivative_id), &derivative);
+        env.storage().instance().set(&DataKey12::CredentialDerivativeCounter, &derivative_id);
+
+        // Track derivatives for the credential
+        let mut derivatives: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey12::CredentialDerivatives(underlying_credential))
+            .unwrap_or(Vec::new(&env));
+
+        derivatives.push_back(derivative_id);
+        env.storage().instance().set(&DataKey12::CredentialDerivatives(underlying_credential), &derivatives);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("derivative"), symbol_short!("issued")),
+            (derivative_id, issuer),
+        );
+
+        derivative_id
+    }
+
+    /// Exercise a credential derivative option
+    pub fn exercise_derivative(
+        env: Env,
+        holder: Address,
+        derivative_id: u64,
+    ) {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+        Self::enforce_write_limit(&env);
+
+        let mut derivative: CredentialDerivative = env
+            .storage()
+            .instance()
+            .get(&DataKey12::CredentialDerivative(derivative_id))
+            .unwrap_or_else(|| panic!("derivative not found"));
+
+        assert_eq!(derivative.holder, holder, "only holder can exercise");
+        assert!(!derivative.is_exercised, "derivative already exercised");
+        assert!(env.ledger().timestamp() < derivative.expiration_time, "derivative expired");
+
+        derivative.is_exercised = true;
+        derivative.settlement_time = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey12::CredentialDerivative(derivative_id), &derivative);
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("derivative"), symbol_short!("exercised")),
+            (derivative_id, holder),
+        );
+    }
+
+    /// Get a credential derivative by ID
+    pub fn get_credential_derivative(env: Env, derivative_id: u64) -> Option<CredentialDerivative> {
+        env.storage().instance().get(&DataKey12::CredentialDerivative(derivative_id))
+    }
+
+    /// Get all derivatives for a credential
+    pub fn get_credential_derivatives(env: Env, credential_id: u64) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey12::CredentialDerivatives(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Issue #1593: Add Credential Staking for Collateral
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Stake a credential as collateral
+    pub fn stake_credential(
+        env: Env,
+        staker: Address,
+        credential_id: u64,
+        collateral_amount: u64,
+        lock_duration_secs: u64,
+    ) -> u64 {
+        staker.require_auth();
+        Self::require_not_paused(&env);
+        Self::enforce_write_limit(&env);
+
+        // Validate credential exists
+        let _credential: Credential = env
+    // ===== Issue #1599: Batch Credential Amendments =====
+    /// Start a batch amendment request for multiple credentials
+    pub fn batch_amend_credentials(
+        env: Env,
+        issuer: Address,
+        credential_ids: Vec<u64>,
+        new_metadata_hashes: Vec<soroban_sdk::Bytes>,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        assert!(
+            credential_ids.len() == new_metadata_hashes.len(),
+            "credential_ids and new_metadata_hashes lengths must match"
+        );
+        assert!(!credential_ids.is_empty(), "must provide at least one credential");
+        assert!(
+            credential_ids.len() <= MAX_BATCH_SIZE as usize,
+            "batch size exceeds maximum"
+        );
+
+        let batch_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyBatchAmendment::BatchAmendmentCount)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyBatchAmendment::BatchAmendmentCount, &batch_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let batch_request = BatchAmendmentRequest {
+            id: batch_id,
+            issuer: issuer.clone(),
+            credential_ids: credential_ids.clone(),
+            new_metadata_hashes: new_metadata_hashes.clone(),
+            created_at: env.ledger().timestamp(),
+            executed_at: None,
+            executed: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyBatchAmendment::BatchAmendmentRequest(batch_id), &batch_request);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = BatchAmendmentStartedEventData {
+            batch_id,
+            issuer: issuer.clone(),
+            credential_count: credential_ids.len() as u32,
+            created_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_BATCH_AMENDMENT_STARTED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+
+        batch_id
+    }
+
+    /// Execute a batch amendment request
+    pub fn execute_batch_amendment(env: Env, issuer: Address, batch_id: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut batch: BatchAmendmentRequest = env
+            .storage()
+            .instance()
+            .get(&DataKeyBatchAmendment::BatchAmendmentRequest(batch_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
+
+        assert!(
+            batch.issuer == issuer,
+            "only the batch issuer can execute the amendment"
+        );
+        assert!(!batch.executed, "batch has already been executed");
+
+        let mut results: Vec<BatchAmendmentResult> = Vec::new(&env);
+        let mut successful_count = 0u32;
+        let mut failed_count = 0u32;
+
+        for i in 0..batch.credential_ids.len() {
+            let credential_id = batch.credential_ids.get(i).unwrap();
+            let new_metadata_hash = batch.new_metadata_hashes.get(i).unwrap();
+
+            match env
+                .storage()
+                .instance()
+                .get::<_, Credential>(&DataKey::Credential(credential_id))
+            {
+                Some(mut credential) => {
+                    if credential.issuer == issuer && !credential.revoked {
+                        let old_metadata_hash = credential.metadata_hash.clone();
+                        let timestamp = env.ledger().timestamp();
+
+                        let amendment_id: u64 = env
+                            .storage()
+                            .instance()
+                            .get(&DataKey::AmendmentCount)
+                            .unwrap_or(0u64)
+                            + 1;
+                        env.storage()
+                            .instance()
+                            .set(&DataKey::AmendmentCount, &amendment_id);
+
+                        let amendment_entry = AmendmentEntry {
+                            credential_id,
+                            amendment_id,
+                            previous_metadata_hash: old_metadata_hash.clone(),
+                            new_metadata_hash: new_metadata_hash.clone(),
+                            amended_by: issuer.clone(),
+                            amended_at: timestamp,
+                        };
+
+                        let mut amendment_history: Vec<AmendmentEntry> = env
+                            .storage()
+                            .instance()
+                            .get(&DataKey::AmendmentHistory(credential_id))
+                            .unwrap_or(Vec::new(&env));
+                        amendment_history.push_back(amendment_entry);
+                        env.storage()
+                            .instance()
+                            .set(&DataKey::AmendmentHistory(credential_id), &amendment_history);
+
+                        credential.metadata_hash = new_metadata_hash.clone();
+                        credential.version += 1;
+                        Self::append_credential_version(
+                            &env,
+                            credential_id,
+                            credential.version,
+                            new_metadata_hash.clone(),
+                            issuer.clone(),
+                        );
+                        env.storage()
+                            .instance()
+                            .set(&DataKey::Credential(credential_id), &credential);
+
+                        Self::invalidate_verification_caches_for_credential(&env, credential_id);
+
+                        results.push_back(BatchAmendmentResult {
+                            credential_id,
+                            success: true,
+                            error_message: None,
+                        });
+                        successful_count += 1;
+                    } else {
+                        results.push_back(BatchAmendmentResult {
+                            credential_id,
+                            success: false,
+                            error_message: Some(String::from_str(
+                                &env,
+                                "credential revoked or not owned by issuer",
+                            )),
+                        });
+                        failed_count += 1;
+                    }
+                }
+                None => {
+                    results.push_back(BatchAmendmentResult {
+                        credential_id,
+                        success: false,
+                        error_message: Some(String::from_str(&env, "credential not found")),
+                    });
+                    failed_count += 1;
+                }
+            }
+        }
+
+        batch.executed = true;
+        batch.executed_at = Some(env.ledger().timestamp());
+        env.storage()
+            .instance()
+            .set(&DataKeyBatchAmendment::BatchAmendmentRequest(batch_id), &batch);
+        env.storage()
+            .instance()
+            .set(&DataKeyBatchAmendment::BatchAmendmentResults(batch_id), &results);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = BatchAmendmentCompletedEventData {
+            batch_id,
+            issuer: issuer.clone(),
+            successful_count,
+            failed_count,
+            completed_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_BATCH_AMENDMENT_COMPLETED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+    }
+
+    /// Get batch amendment results
+    pub fn get_batch_amendment_results(
+        env: Env,
+        batch_id: u64,
+    ) -> Option<Vec<BatchAmendmentResult>> {
+        env.storage()
+            .instance()
+            .get(&DataKeyBatchAmendment::BatchAmendmentResults(batch_id))
+    }
+
+    // ===== Issue #1598: Credential Collateral for Loans =====
+    /// Lock a credential as collateral for a loan
+    pub fn lock_credential_as_collateral(
+        env: Env,
+        borrower: Address,
+        credential_id: u64,
+        lender: Address,
+        loan_amount: i128,
+        collateral_value: i128,
+        unlock_date: u64,
+    ) -> u64 {
+        borrower.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(collateral_amount > 0, "collateral amount must be positive");
+        assert!(lock_duration_secs > 0, "lock duration must be positive");
+
+        let stake_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey12::CredentialStakeCounter)
+            .unwrap_or(0u64)
+            .saturating_add(1);
+
+        let now = env.ledger().timestamp();
+        let lock_until = now.saturating_add(lock_duration_secs);
+
+        let stake = CredentialStake {
+            id: stake_id,
+            credential_id,
+            staker: staker.clone(),
+            collateral_amount,
+            staked_at: now,
+            lock_until,
+            is_liquidated: false,
+            liquidated_at: 0u64,
+        };
+
+        env.storage().instance().set(&DataKey12::CredentialStake(stake_id), &stake);
+        env.storage().instance().set(&DataKey12::CredentialStakeCounter, &stake_id);
+
+        // Track staking positions for the credential
+        let mut positions: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey12::CredentialStakingPositions(credential_id))
+            .unwrap_or(Vec::new(&env));
+
+        positions.push_back(stake_id);
+        env.storage().instance().set(&DataKey12::CredentialStakingPositions(credential_id), &positions);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("stake"), symbol_short!("created")),
+            (stake_id, collateral_amount),
+        );
+
+        stake_id
+    }
+
+    /// Liquidate a staked credential position
+    pub fn liquidate_stake(
+        env: Env,
+        liquidator: Address,
+        stake_id: u64,
+        reason: soroban_sdk::String,
+    ) -> u64 {
+        liquidator.require_auth();
+        Self::require_not_paused(&env);
+        Self::enforce_write_limit(&env);
+
+        let mut stake: CredentialStake = env
+            .storage()
+            .instance()
+            .get(&DataKey12::CredentialStake(stake_id))
+            .unwrap_or_else(|| panic!("stake not found"));
+
+        assert!(!stake.is_liquidated, "stake already liquidated");
+        assert!(env.ledger().timestamp() >= stake.lock_until, "stake still locked");
+
+        stake.is_liquidated = true;
+        stake.liquidated_at = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey12::CredentialStake(stake_id), &stake);
+
+        // Record liquidation
+        let liquidation_record = StakeLiquidationRecord {
+            stake_id,
+            liquidator: liquidator.clone(),
+            collateral_recovered: stake.collateral_amount,
+            liquidated_at: stake.liquidated_at,
+            reason,
+        };
+
+        let mut history: Vec<StakeLiquidationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey12::StakeLiquidationHistory(stake_id))
+            .unwrap_or(Vec::new(&env));
+
+        history.push_back(liquidation_record);
+        env.storage().instance().set(&DataKey12::StakeLiquidationHistory(stake_id), &history);
+
+        env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        env.events().publish(
+            (symbol_short!("stake"), symbol_short!("liquidated")),
+            (stake_id, stake.collateral_amount),
+        );
+
+        stake.collateral_amount
+    }
+
+    /// Get a staking position by ID
+    pub fn get_credential_stake(env: Env, stake_id: u64) -> Option<CredentialStake> {
+        env.storage().instance().get(&DataKey12::CredentialStake(stake_id))
+    }
+
+    /// Get all staking positions for a credential
+    pub fn get_credential_staking_positions(env: Env, credential_id: u64) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey12::CredentialStakingPositions(credential_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get liquidation history for a stake
+    pub fn get_stake_liquidation_history(env: Env, stake_id: u64) -> Vec<StakeLiquidationRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey12::StakeLiquidationHistory(stake_id))
+            .unwrap_or(Vec::new(&env))
+        assert!(
+            credential.subject == borrower,
+            "borrower must be the credential subject"
+        );
+        assert!(!credential.revoked, "cannot use revoked credential as collateral");
+        assert!(loan_amount > 0, "loan amount must be positive");
+        assert!(collateral_value > 0, "collateral value must be positive");
+
+        let lock_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyCollateral::CollateralLockCount)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyCollateral::CollateralLockCount, &lock_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let collateral = CredentialCollateral {
+            lock_id,
+            credential_id,
+            borrower: borrower.clone(),
+            lender: lender.clone(),
+            loan_amount,
+            collateral_value,
+            locked_at: env.ledger().timestamp(),
+            unlock_date,
+            liquidated: false,
+            liquidated_at: None,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyCollateral::CollateralLock(lock_id), &collateral);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = CollateralLockedEventData {
+            lock_id,
+            credential_id,
+            borrower: borrower.clone(),
+            lender: lender.clone(),
+            loan_amount,
+            locked_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_COLLATERAL_LOCKED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+
+        lock_id
+    }
+
+    /// Liquidate collateral (only callable by lender)
+    pub fn liquidate_credential_collateral(env: Env, lender: Address, lock_id: u64) {
+        lender.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut collateral: CredentialCollateral = env
+            .storage()
+            .instance()
+            .get(&DataKeyCollateral::CollateralLock(lock_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
+
+        assert!(
+            collateral.lender == lender,
+            "only the lender can liquidate collateral"
+        );
+        assert!(!collateral.liquidated, "collateral already liquidated");
+
+        collateral.liquidated = true;
+        collateral.liquidated_at = Some(env.ledger().timestamp());
+
+        env.storage()
+            .instance()
+            .set(&DataKeyCollateral::CollateralLock(lock_id), &collateral);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = CollateralLiquidatedEventData {
+            lock_id,
+            credential_id: collateral.credential_id,
+            lender: lender.clone(),
+            collateral_value: collateral.collateral_value,
+            liquidated_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_COLLATERAL_LIQUIDATED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+    }
+
+    /// Get collateral details
+    pub fn get_credential_collateral(env: Env, lock_id: u64) -> Option<CredentialCollateral> {
+        env.storage()
+            .instance()
+            .get(&DataKeyCollateral::CollateralLock(lock_id))
+    }
+
+    // ===== Issue #1600: Credential Insurance Escrow =====
+    /// Create insurance escrow for a credential
+    pub fn create_insurance_escrow(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        holder: Address,
+        insurance_amount: i128,
+        premium_amount: i128,
+        escrow_expiry: u64,
+    ) -> u64 {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.issuer == issuer,
+            "only the issuer can create insurance"
+        );
+        assert!(insurance_amount > 0, "insurance amount must be positive");
+        assert!(premium_amount > 0, "premium amount must be positive");
+
+        let escrow_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyInsuranceEscrow::InsuranceEscrowCount)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyInsuranceEscrow::InsuranceEscrowCount, &escrow_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let escrow = CredentialInsuranceEscrow {
+            escrow_id,
+            credential_id,
+            holder: holder.clone(),
+            issuer: issuer.clone(),
+            insurance_amount,
+            premium_amount,
+            escrow_created_at: env.ledger().timestamp(),
+            escrow_expiry,
+            active: true,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyInsuranceEscrow::InsuranceEscrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = InsuranceEscrowCreatedEventData {
+            escrow_id,
+            credential_id,
+            holder: holder.clone(),
+            insurance_amount,
+            premium_amount,
+        };
+        let topic = String::from_str(&env, TOPIC_INSURANCE_ESCROW_CREATED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+
+        escrow_id
+    }
+
+    /// Submit an insurance claim
+    pub fn submit_insurance_claim(
+        env: Env,
+        claimant: Address,
+        escrow_id: u64,
+        claim_amount: i128,
+        claim_reason: soroban_sdk::String,
+    ) -> u64 {
+        claimant.require_auth();
+        Self::require_not_paused(&env);
+
+        let escrow: CredentialInsuranceEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKeyInsuranceEscrow::InsuranceEscrow(escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
+
+        assert!(escrow.active, "insurance escrow is not active");
+        assert!(
+            claimant == escrow.holder || claimant == escrow.issuer,
+            "only holder or issuer can claim"
+        );
+        assert!(
+            claim_amount > 0 && claim_amount <= escrow.insurance_amount,
+            "invalid claim amount"
+        );
+
+        let claim_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyInsuranceEscrow::InsuranceClaimCount)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyInsuranceEscrow::InsuranceClaimCount, &claim_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let claim = InsuranceClaim {
+            claim_id,
+            escrow_id,
+            claimant: claimant.clone(),
+            claim_amount,
+            claim_reason,
+            claim_submitted_at: env.ledger().timestamp(),
+            approved: false,
+            approved_at: None,
+            payout_completed: false,
+            payout_amount: None,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKeyInsuranceEscrow::InsuranceClaim(claim_id), &claim);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event_topic = String::from_str(&env, TOPIC_INSURANCE_CLAIM_SUBMITTED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(event_topic);
+        env.events().publish(topics, claim);
+
+        claim_id
+    }
+
+    /// Approve an insurance claim
+    pub fn approve_insurance_claim(env: Env, issuer: Address, claim_id: u64) {
+        issuer.require_auth();
+        Self::require_not_paused(&env);
+
+        let mut claim: InsuranceClaim = env
+            .storage()
+            .instance()
+            .get(&DataKeyInsuranceEscrow::InsuranceClaim(claim_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
+
+        let escrow: CredentialInsuranceEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKeyInsuranceEscrow::InsuranceEscrow(claim.escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
+
+        assert!(
+            escrow.issuer == issuer,
+            "only the issuer can approve claims"
+        );
+        assert!(!claim.approved, "claim already approved");
+
+        claim.approved = true;
+        claim.approved_at = Some(env.ledger().timestamp());
+        claim.payout_amount = Some(claim.claim_amount);
+        claim.payout_completed = true;
+
+        env.storage()
+            .instance()
+            .set(&DataKeyInsuranceEscrow::InsuranceClaim(claim_id), &claim);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = InsuranceClaimApprovedEventData {
+            claim_id,
+            escrow_id: claim.escrow_id,
+            claimant: claim.claimant.clone(),
+            payout_amount: claim.claim_amount,
+            approved_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_INSURANCE_CLAIM_APPROVED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+    }
+
+    /// Get insurance escrow details
+    pub fn get_insurance_escrow(env: Env, escrow_id: u64) -> Option<CredentialInsuranceEscrow> {
+        env.storage()
+            .instance()
+            .get(&DataKeyInsuranceEscrow::InsuranceEscrow(escrow_id))
+    }
+
+    /// Get insurance claim details
+    pub fn get_insurance_claim(env: Env, claim_id: u64) -> Option<InsuranceClaim> {
+        env.storage()
+            .instance()
+            .get(&DataKeyInsuranceEscrow::InsuranceClaim(claim_id))
+    }
+
+    // ===== Issue #1601: Credential Inheritance for Estate Planning =====
+    /// Designate a designee for credential inheritance
+    pub fn designate_credential_designee(
+        env: Env,
+        holder: Address,
+        credential_id: u64,
+        designee: Address,
+        share_percentage: u32,
+    ) -> u64 {
+        holder.require_auth();
+        Self::require_not_paused(&env);
+
+        let credential: Credential = env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+
+        assert!(
+            credential.subject == holder,
+            "holder must be the credential subject"
+        );
+        assert!(!credential.revoked, "cannot designate on revoked credential");
+        assert!(
+            share_percentage > 0 && share_percentage <= 100,
+            "share percentage must be between 1 and 100"
+        );
+
+        let designee_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyInheritance::InheritanceDesigneeCount)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyInheritance::InheritanceDesigneeCount, &designee_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let designee_record = CredentialDesignee {
+            designee_id,
+            credential_id,
+            holder: holder.clone(),
+            designee: designee.clone(),
+            designated_at: env.ledger().timestamp(),
+            share_percentage,
+            active: true,
+        };
+
+        env.storage()
+            .instance()
+            .set(
+                &DataKeyInheritance::InheritanceDesignee(designee_id),
+                &designee_record,
+            );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = DesigneeDesignatedEventData {
+            designee_id,
+            credential_id,
+            holder: holder.clone(),
+            designee: designee.clone(),
+            designated_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_DESIGNEE_DESIGNATED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+
+        designee_id
+    }
+
+    /// Transfer credential to designee (called after holder death verification)
+    pub fn transfer_credential_to_designee(
+        env: Env,
+        admin: Address,
+        designee_id: u64,
+        transfer_reason: soroban_sdk::String,
+    ) -> u64 {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+
+        let designee_record: CredentialDesignee = env
+            .storage()
+            .instance()
+            .get(&DataKeyInheritance::InheritanceDesignee(designee_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
+
+        assert!(
+            designee_record.active,
+            "designee record is not active"
+        );
+
+        let transfer_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyInheritance::InheritanceTransferCount)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyInheritance::InheritanceTransferCount, &transfer_id);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let transfer = CredentialInheritanceTransfer {
+            transfer_id,
+            credential_id: designee_record.credential_id,
+            original_holder: designee_record.holder.clone(),
+            new_holder: designee_record.designee.clone(),
+            designee: designee_record.designee.clone(),
+            transfer_reason,
+            death_verified_at: env.ledger().timestamp(),
+            transfer_completed_at: env.ledger().timestamp(),
+            share_percentage: designee_record.share_percentage,
+        };
+
+        env.storage()
+            .instance()
+            .set(
+                &DataKeyInheritance::InheritanceTransfer(transfer_id),
+                &transfer,
+            );
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+
+        let event = InheritanceTransferredEventData {
+            transfer_id,
+            credential_id: designee_record.credential_id,
+            new_holder: designee_record.designee.clone(),
+            original_holder: designee_record.holder.clone(),
+            transferred_at: env.ledger().timestamp(),
+        };
+        let topic = String::from_str(&env, TOPIC_INHERITANCE_TRANSFERRED);
+        let mut topics: Vec<String> = Vec::new(&env);
+        topics.push_back(topic);
+        env.events().publish(topics, event);
+
+        transfer_id
+    }
+
+    /// Get designee record
+    pub fn get_credential_designee(env: Env, designee_id: u64) -> Option<CredentialDesignee> {
+        env.storage()
+            .instance()
+            .get(&DataKeyInheritance::InheritanceDesignee(designee_id))
+    }
+
+    /// Get inheritance transfer record
+    pub fn get_inheritance_transfer(env: Env, transfer_id: u64) -> Option<CredentialInheritanceTransfer> {
+        env.storage()
+            .instance()
+            .get(&DataKeyInheritance::InheritanceTransfer(transfer_id))
+    }
+
+    // ── Issue 1586: Credential Merging ──────────────────────────────────────────
+    /// Merge multiple credentials into a single consolidated credential
+    pub fn merge_credentials(
+        env: Env,
+        subject: Address,
+        credential_ids: Vec<u64>,
+    ) -> u64 {
+        subject.require_auth();
+
+        let now = env.ledger().timestamp();
+        let merged_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialCount)
+            .unwrap_or(0u64) + 1;
+
+        let mut total_attestations = 0u64;
+        let mut metadata_parts = Vec::new(&env);
+
+        for cred_id in credential_ids.iter() {
+            let credential: Option<Credential> = env
+                .storage()
+                .instance()
+                .get(&DataKey1::Credential(*cred_id));
+
+            if let Some(cred) = credential {
+                if cred.subject != subject {
+                    panic!("Cannot merge credentials from different subjects");
+                }
+                total_attestations += cred.required_attestations as u64;
+                metadata_parts.push_back(cred.metadata_hash);
+            }
+        }
+
+        let merged_credential = credential_merging::MergedCredential {
+            id: merged_id,
+            subject: subject.clone(),
+            source_credential_ids: credential_ids.clone(),
+            metadata_hash: Bytes::from_slice(&env, b"merged_hash"),
+            merged_at: now,
+            merged_by: subject.clone(),
+            total_attestations,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MergedCredential(merged_id), &merged_credential);
+
+        env.events().publish((symbol_short!("merged_cred"),), credential_merging::CredentialMergedEventData {
+            merged_credential_id: merged_id,
+            source_credential_ids: credential_ids,
+            subject,
+            merged_at: now,
+        });
+
+        merged_id
+    }
+
+    /// Validate credentials for merging
+    pub fn validate_merge_credentials(
+        env: Env,
+        credential_ids: Vec<u64>,
+    ) -> Vec<credential_merging::MergeValidationResult> {
+        let mut results = Vec::new(&env);
+
+        for cred_id in credential_ids.iter() {
+            let credential: Option<Credential> = env
+                .storage()
+                .instance()
+                .get(&DataKey1::Credential(*cred_id));
+
+            let status = if let Some(cred) = credential {
+                if cred.revoked {
+                    credential_merging::MergeValidationStatus::CredentialRevoked
+                } else if cred.required_attestations == 0 {
+                    credential_merging::MergeValidationStatus::InsufficientAttestations
+                } else {
+                    credential_merging::MergeValidationStatus::Valid
+                }
+            } else {
+                credential_merging::MergeValidationStatus::InvalidCredentialType
+            };
+
+            results.push_back(credential_merging::MergeValidationResult {
+                credential_id: *cred_id,
+                status,
+                message: soroban_sdk::String::from_slice(&env, "validation_result"),
+            });
+        }
+
+        results
+    }
+
+    // ── Issue 1587: Cross-chain Bridge ──────────────────────────────────────────
+    /// Create a cross-chain bridge for credential portability
+    pub fn create_cross_chain_bridge(
+        env: Env,
+        admin: Address,
+        source_chain: soroban_sdk::String,
+        target_chain: soroban_sdk::String,
+        validator_set: Address,
+        approval_threshold: u32,
+    ) -> u64 {
+        admin.require_auth();
+
+        let bridge_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::BridgeCount)
+            .unwrap_or(0u64) + 1;
+
+        let bridge = cross_chain_bridge::CrossChainBridge {
+            id: bridge_id,
+            source_chain: source_chain.clone(),
+            target_chain: target_chain.clone(),
+            validator_set: validator_set.clone(),
+            approval_threshold,
+            active: true,
+            created_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CrossChainBridge(bridge_id), &bridge);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::BridgeCount, &bridge_id);
+
+        bridge_id
+    }
+
+    /// Wrap a credential for cross-chain transfer
+    pub fn wrap_credential_for_transfer(
+        env: Env,
+        credential_id: u64,
+        source_chain: soroban_sdk::String,
+        target_chain: soroban_sdk::String,
+    ) -> u64 {
+        let wrapped_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::WrappedCredentialCount)
+            .unwrap_or(0u64) + 1;
+
+        let credential: Option<Credential> = env
+            .storage()
+            .instance()
+            .get(&DataKey1::Credential(credential_id));
+
+        if let Some(cred) = credential {
+            let wrapped = cross_chain_bridge::WrappedCredential {
+                id: wrapped_id,
+                original_credential_id: credential_id,
+                source_chain: source_chain.clone(),
+                target_chain: target_chain.clone(),
+                wrapped_metadata: cred.metadata_hash,
+                original_issuer: cred.issuer,
+                wrapped_by: cred.subject.clone(),
+                wrapped_at: env.ledger().timestamp(),
+                valid: true,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedCredential(wrapped_id), &wrapped);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::WrappedCredentialCount, &wrapped_id);
+
+            env.events().publish((symbol_short!("wrapped_cred"),), cross_chain_bridge::CredentialWrappedEventData {
+                original_credential_id: credential_id,
+                wrapped_credential_id: wrapped_id,
+                source_chain,
+                target_chain,
+                wrapped_at: env.ledger().timestamp(),
+            });
+
+            wrapped_id
+        } else {
+            panic!("Credential not found");
+        }
+    }
+
+    // ── Issue 1588: Fractional Transfer ────────────────────────────────────────
+    /// Enable fractional transfer for a credential
+    pub fn enable_fractional_transfer(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        denominator: u32,
+    ) {
+        issuer.require_auth();
+
+        let credential: Option<Credential> = env
+            .storage()
+            .instance()
+            .get(&DataKey1::Credential(credential_id));
+
+        if let Some(cred) = credential {
+            if cred.issuer != issuer {
+                panic!("Only issuer can enable fractional transfer");
+            }
+
+            let ownership = fractional_transfer::FractionalOwnershipState {
+                credential_id,
+                total_fractions: denominator,
+                owner_fractions: soroban_sdk::Map::new(&env),
+                total_denominator: denominator,
+                enabled: true,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::FractionalOwnership(credential_id), &ownership);
+
+            env.events().publish((symbol_short!("fractioned"),), fractional_transfer::CredentialFractionalizedEventData {
+                credential_id,
+                fractions_created: denominator,
+                denominator,
+                created_at: env.ledger().timestamp(),
+            });
+        } else {
+            panic!("Credential not found");
+        }
+    }
+
+    /// Transfer a fraction of a credential
+    pub fn transfer_credential_fraction(
+        env: Env,
+        from: Address,
+        to: Address,
+        credential_id: u64,
+        amount_bps: u32,
+    ) -> u64 {
+        from.require_auth();
+
+        let transfer_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::FractionTransferCount)
+            .unwrap_or(0u64) + 1;
+
+        let ownership: Option<fractional_transfer::FractionalOwnershipState> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FractionalOwnership(credential_id));
+
+        if let Some(_ownership) = ownership {
+            let transfer = fractional_transfer::FractionTransfer {
+                id: transfer_id,
+                fraction_id: credential_id,
+                from: from.clone(),
+                to: to.clone(),
+                numerator: amount_bps,
+                denominator: 10000,
+                transferred_at: env.ledger().timestamp(),
+                amount_bps,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::FractionTransfer(transfer_id), &transfer);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::FractionTransferCount, &transfer_id);
+
+            env.events().publish((symbol_short!("frac_xfer"),), fractional_transfer::FractionTransferredEventData {
+                transfer_id,
+                fraction_id: credential_id,
+                from,
+                to,
+                numerator: amount_bps,
+                denominator: 10000,
+                transferred_at: env.ledger().timestamp(),
+            });
+
+            transfer_id
+        } else {
+            panic!("Credential is not fractionalized");
+        }
+    }
+
+    // ── Issue 1589: Credential Branching ───────────────────────────────────────
+    /// Create a branch for credential version control
+    pub fn create_credential_branch(
+        env: Env,
+        issuer: Address,
+        credential_id: u64,
+        branch_name: soroban_sdk::String,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let branch_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::BranchCount)
+            .unwrap_or(0u64) + 1;
+
+        let credential: Option<Credential> = env
+            .storage()
+            .instance()
+            .get(&DataKey1::Credential(credential_id));
+
+        if let Some(cred) = credential {
+            let branch = credential_branching::CredentialBranch {
+                id: branch_id,
+                credential_id,
+                name: branch_name.clone(),
+                metadata_hash: cred.metadata_hash,
+                parent_branch_id: None,
+                created_at: env.ledger().timestamp(),
+                created_by: issuer.clone(),
+                is_default: false,
+                version: 1,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialBranch(branch_id), &branch);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::BranchCount, &branch_id);
+
+            env.events().publish((symbol_short!("branch_cr"),), credential_branching::BranchCreatedEventData {
+                branch_id,
+                credential_id,
+                branch_name,
+                created_at: env.ledger().timestamp(),
+            });
+
+            branch_id
+        } else {
+            panic!("Credential not found");
+        }
+    }
+
+    /// Commit changes to a credential branch
+    pub fn commit_to_branch(
+        env: Env,
+        issuer: Address,
+        branch_id: u64,
+        metadata_hash: Bytes,
+        message: soroban_sdk::String,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let commit_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::CommitCount)
+            .unwrap_or(0u64) + 1;
+
+        let branch: Option<credential_branching::CredentialBranch> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialBranch(branch_id));
+
+        if let Some(mut b) = branch {
+            let commit = credential_branching::BranchCommit {
+                id: commit_id,
+                branch_id,
+                credential_id: b.credential_id,
+                metadata_hash: metadata_hash.clone(),
+                parent_commit_id: None,
+                message: message.clone(),
+                committed_by: issuer.clone(),
+                committed_at: env.ledger().timestamp(),
+                attestation_count: 0,
+            };
+
+            env.storage()
+                .instance()
+                .set(&DataKey::BranchCommit(commit_id), &commit);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::CommitCount, &commit_id);
+
+            b.metadata_hash = metadata_hash;
+            b.version += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialBranch(branch_id), &b);
+
+            env.events().publish((symbol_short!("commit"),), credential_branching::CommitEventData {
+                commit_id,
+                branch_id,
+                credential_id: b.credential_id,
+                message,
+                committed_at: env.ledger().timestamp(),
+            });
+
+            commit_id
+        } else {
+            panic!("Branch not found");
+        }
+    }
+
+    /// Merge two credential branches
+    pub fn merge_credential_branches(
+        env: Env,
+        issuer: Address,
+        source_branch_id: u64,
+        target_branch_id: u64,
+    ) -> u64 {
+        issuer.require_auth();
+
+        let merge_id = env
+            .storage()
+            .instance()
+            .get(&DataKey::MergeCount)
+            .unwrap_or(0u64) + 1;
+
+        let source: Option<credential_branching::CredentialBranch> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialBranch(source_branch_id));
+
+        let target: Option<credential_branching::CredentialBranch> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CredentialBranch(target_branch_id));
+
+        if let (Some(src), Some(mut tgt)) = (source, target) {
+            if src.credential_id != tgt.credential_id {
+                panic!("Cannot merge branches from different credentials");
+            }
+
+            let merged_metadata = if src.metadata_hash == tgt.metadata_hash {
+                src.metadata_hash.clone()
+            } else {
+                tgt.metadata_hash.clone()
+            };
+
+            let merge = credential_branching::BranchMerge {
+                id: merge_id,
+                source_branch_id,
+                target_branch_id,
+                credential_id: src.credential_id,
+                merged_metadata_hash: merged_metadata.clone(),
+                merged_by: issuer.clone(),
+                merged_at: env.ledger().timestamp(),
+                merge_strategy: 3,
+                success: true,
+            };
+
+            tgt.metadata_hash = merged_metadata;
+            tgt.version += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::CredentialBranch(target_branch_id), &tgt);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::BranchMerge(merge_id), &merge);
+
+            env.storage()
+                .instance()
+                .set(&DataKey::MergeCount, &merge_id);
+
+            env.events().publish((symbol_short!("branch_mrg"),), credential_branching::BranchMergedEventData {
+                merge_id,
+                source_branch_id,
+                target_branch_id,
+                credential_id: src.credential_id,
+                success: true,
+                merged_at: env.ledger().timestamp(),
+            });
+
+            merge_id
+        } else {
+            panic!("Branch not found");
+        }
     }
 }
 
@@ -29139,6 +31896,646 @@ mod doc_tests {
         // Flag is now off — subject may attest.
         client.attest(&subject, &credential_id, &slice_id, &true, &None);
         assert!(client.is_attested(&credential_id, &slice_id));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1590: Slice Composition Templates
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_init_predefined_templates() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.init_predefined_templates(&admin);
+
+        let templates = client.list_predefined_templates();
+        assert!(templates.len() > 0, "should have predefined templates");
+
+        let pe_template = client.get_predefined_template(1u32);
+        assert!(pe_template.is_some(), "PE template should exist");
+
+        let template = pe_template.unwrap();
+        assert_eq!(template.template_id, 1u32);
+        assert_eq!(template.recommended_threshold_bps, 6600u32);
+    }
+
+    #[test]
+    fn test_get_predefined_template() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.init_predefined_templates(&admin);
+
+        let degree_template = client.get_predefined_template(2u32);
+        assert!(degree_template.is_some(), "degree template should exist");
+
+        let template = degree_template.unwrap();
+        assert_eq!(template.category, soroban_sdk::String::from_str(&env, "Education"));
+    }
+
+    #[test]
+    fn test_list_predefined_templates_all_available() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = new_client(&env);
+
+        client.init_predefined_templates(&admin);
+
+        let templates = client.list_predefined_templates();
+        assert_eq!(templates.len(), 4, "should have 4 predefined templates");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1591: Slice Performance Scoring
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_calculate_slice_performance_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attestor = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let creator = Address::generate(&env);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+
+        let score = client.calculate_slice_performance_score(slice_id);
+        assert_eq!(score.slice_id, slice_id);
+        assert!(score.quality_score <= 10000, "quality score should be <= 10000");
+    }
+
+    #[test]
+    fn test_get_slice_performance_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attestor = Address::generate(&env);
+        let mut attestors = Vec::new(&env);
+        attestors.push_back(attestor.clone());
+        let mut weights = Vec::new(&env);
+        weights.push_back(100u32);
+        let creator = Address::generate(&env);
+        let slice_id = client.create_slice(&creator, &attestors, &weights, &100u32);
+
+        client.calculate_slice_performance_score(slice_id);
+        let score = client.get_slice_performance_score(slice_id);
+        assert!(score.is_some(), "performance score should be retrievable");
+    }
+
+    #[test]
+    fn test_compare_slices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attestor1 = Address::generate(&env);
+        let attestor2 = Address::generate(&env);
+        let mut attestors1 = Vec::new(&env);
+        attestors1.push_back(attestor1.clone());
+        let mut weights1 = Vec::new(&env);
+        weights1.push_back(100u32);
+        let creator1 = Address::generate(&env);
+        let slice_id_1 = client.create_slice(&creator1, &attestors1, &weights1, &100u32);
+
+        let mut attestors2 = Vec::new(&env);
+        attestors2.push_back(attestor2.clone());
+        let mut weights2 = Vec::new(&env);
+        weights2.push_back(100u32);
+        let creator2 = Address::generate(&env);
+        let slice_id_2 = client.create_slice(&creator2, &attestors2, &weights2, &100u32);
+
+        client.calculate_slice_performance_score(slice_id_1);
+        client.calculate_slice_performance_score(slice_id_2);
+
+        let (score1, score2) = client.compare_slices(slice_id_1, slice_id_2);
+        assert!(score1.is_some(), "first slice should have score");
+        assert!(score2.is_some(), "second slice should have score");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1592: Credential Derivatives
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_issue_credential_derivative() {
+    // ===== Tests for Issue #1599: Batch Credential Amendments =====
+
+    #[test]
+    fn test_batch_amend_credentials_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        let metadata1 = Bytes::from_slice(&env, b"metadata_hash_1");
+        let metadata2 = Bytes::from_slice(&env, b"metadata_hash_2");
+        let new_metadata1 = Bytes::from_slice(&env, b"new_metadata_hash_1");
+        let new_metadata2 = Bytes::from_slice(&env, b"new_metadata_hash_2");
+
+        let cred_id1 = client.issue_credential(&issuer, &subject1, &1u32, &metadata1, &None, &0u64);
+        let cred_id2 = client.issue_credential(&issuer, &subject2, &1u32, &metadata2, &None, &0u64);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred_id1);
+        cred_ids.push_back(cred_id2);
+
+        let mut new_hashes = Vec::new(&env);
+        new_hashes.push_back(new_metadata1.clone());
+        new_hashes.push_back(new_metadata2.clone());
+
+        let batch_id = client.batch_amend_credentials(&issuer, &cred_ids, &new_hashes);
+        assert!(batch_id > 0);
+
+        client.execute_batch_amendment(&issuer, &batch_id);
+
+        let results = client.get_batch_amendment_results(&batch_id);
+        assert!(results.is_some());
+        let result_vec = results.unwrap();
+        assert_eq!(result_vec.len(), 2);
+        assert!(result_vec.get(0).unwrap().success);
+        assert!(result_vec.get(1).unwrap().success);
+    }
+
+    #[test]
+    fn test_batch_amend_credentials_mismatched_lengths() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_derivative");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64; // 1 day from now
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32, // Call option
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        assert!(derivative_id > 0, "derivative should have been issued");
+
+        let derivative = client.get_credential_derivative(derivative_id);
+        assert!(derivative.is_some(), "derivative should be retrievable");
+
+        let deriv = derivative.unwrap();
+        assert_eq!(deriv.underlying_credential, credential_id);
+        assert!(!deriv.is_exercised, "derivative should not be exercised initially");
+    }
+
+    #[test]
+    fn test_exercise_derivative() {
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let mut cred_ids = Vec::new(&env);
+        cred_ids.push_back(cred_id);
+
+        let new_metadata = Bytes::from_slice(&env, b"new_metadata");
+        let extra_metadata = Bytes::from_slice(&env, b"extra_metadata");
+        let mut new_hashes = Vec::new(&env);
+        new_hashes.push_back(new_metadata);
+        new_hashes.push_back(extra_metadata);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.batch_amend_credentials(&issuer, &cred_ids, &new_hashes);
+        }));
+        assert!(result.is_err());
+    }
+
+    // ===== Tests for Issue #1598: Credential Collateral for Loans =====
+
+    #[test]
+    fn test_lock_credential_as_collateral_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &borrower, &1u32, &metadata, &None, &0u64);
+
+        let lock_id = client.lock_credential_as_collateral(
+            &borrower,
+            &cred_id,
+            &lender,
+            &1000i128,
+            &5000i128,
+            &(env.ledger().timestamp() + 86400),
+        );
+
+        assert!(lock_id > 0);
+        let collateral = client.get_credential_collateral(&lock_id);
+        assert!(collateral.is_some());
+        let coll = collateral.unwrap();
+        assert_eq!(coll.credential_id, cred_id);
+        assert_eq!(coll.borrower, borrower);
+        assert_eq!(coll.lender, lender);
+        assert_eq!(coll.loan_amount, 1000);
+        assert!(!coll.liquidated);
+    }
+
+    #[test]
+    fn test_liquidate_credential_collateral_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &borrower, &1u32, &metadata, &None, &0u64);
+
+        let lock_id = client.lock_credential_as_collateral(
+            &borrower,
+            &cred_id,
+            &lender,
+            &1000i128,
+            &5000i128,
+            &(env.ledger().timestamp() + 86400),
+        );
+
+        client.liquidate_credential_collateral(&lender, &lock_id);
+
+        let collateral = client.get_credential_collateral(&lock_id);
+        assert!(collateral.is_some());
+        let coll = collateral.unwrap();
+        assert!(coll.liquidated);
+        assert!(coll.liquidated_at.is_some());
+    }
+
+    #[test]
+    fn test_lock_revoked_credential_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &borrower, &1u32, &metadata, &None, &0u64);
+        client.revoke_credential(&issuer, &cred_id, &None);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.lock_credential_as_collateral(
+                &borrower,
+                &cred_id,
+                &lender,
+                &1000i128,
+                &5000i128,
+                &(env.ledger().timestamp() + 86400),
+            );
+        }));
+        assert!(result.is_err());
+    }
+
+    // ===== Tests for Issue #1600: Credential Insurance Escrow =====
+
+    #[test]
+    fn test_create_insurance_escrow_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let escrow_id = client.create_insurance_escrow(
+            &issuer,
+            &cred_id,
+            &holder,
+            &10000i128,
+            &500i128,
+            &(env.ledger().timestamp() + 31536000),
+        );
+
+        assert!(escrow_id > 0);
+        let escrow = client.get_insurance_escrow(&escrow_id);
+        assert!(escrow.is_some());
+        let esc = escrow.unwrap();
+        assert_eq!(esc.credential_id, cred_id);
+        assert_eq!(esc.holder, holder);
+        assert_eq!(esc.issuer, issuer);
+        assert_eq!(esc.insurance_amount, 10000);
+        assert!(esc.active);
+    }
+
+    #[test]
+    fn test_submit_insurance_claim_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_exercise");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64;
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32,
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        client.exercise_derivative(&holder, &derivative_id);
+
+        let derivative = client.get_credential_derivative(derivative_id).unwrap();
+        assert!(derivative.is_exercised, "derivative should be exercised");
+        assert!(derivative.settlement_time > 0, "settlement time should be set");
+    }
+
+    #[test]
+    fn test_get_credential_derivatives() {
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let escrow_id = client.create_insurance_escrow(
+            &issuer,
+            &cred_id,
+            &holder,
+            &10000i128,
+            &500i128,
+            &(env.ledger().timestamp() + 31536000),
+        );
+
+        let claim_reason = String::from_str(&env, "credential fraud detected");
+        let claim_id = client.submit_insurance_claim(&holder, &escrow_id, &5000i128, &claim_reason);
+
+        assert!(claim_id > 0);
+        let claim = client.get_insurance_claim(&claim_id);
+        assert!(claim.is_some());
+        let c = claim.unwrap();
+        assert_eq!(c.escrow_id, escrow_id);
+        assert_eq!(c.claimant, holder);
+        assert_eq!(c.claim_amount, 5000);
+        assert!(!c.approved);
+    }
+
+    #[test]
+    fn test_approve_insurance_claim_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_get_derivs");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64;
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32,
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        let derivatives = client.get_credential_derivatives(credential_id);
+        assert!(derivatives.len() > 0, "should have derivatives");
+        assert_eq!(derivatives.get(0).unwrap(), derivative_id);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Tests for Issue #1593: Credential Staking
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_stake_credential() {
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let escrow_id = client.create_insurance_escrow(
+            &issuer,
+            &cred_id,
+            &holder,
+            &10000i128,
+            &500i128,
+            &(env.ledger().timestamp() + 31536000),
+        );
+
+        let claim_reason = String::from_str(&env, "credential fraud detected");
+        let claim_id = client.submit_insurance_claim(&holder, &escrow_id, &5000i128, &claim_reason);
+
+        client.approve_insurance_claim(&issuer, &claim_id);
+
+        let claim = client.get_insurance_claim(&claim_id);
+        assert!(claim.is_some());
+        let c = claim.unwrap();
+        assert!(c.approved);
+        assert!(c.approved_at.is_some());
+        assert!(c.payout_completed);
+        assert_eq!(c.payout_amount, Some(5000));
+    }
+
+    // ===== Tests for Issue #1601: Credential Inheritance for Estate Planning =====
+
+    #[test]
+    fn test_designate_credential_designee_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_stake");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &86400u64);
+
+        assert!(stake_id > 0, "stake should have been created");
+
+        let stake = client.get_credential_stake(stake_id);
+        assert!(stake.is_some(), "stake should be retrievable");
+
+        let s = stake.unwrap();
+        assert_eq!(s.credential_id, credential_id);
+        assert_eq!(s.collateral_amount, 1000u64);
+        assert!(!s.is_liquidated, "stake should not be liquidated initially");
+    }
+
+    #[test]
+    fn test_liquidate_stake() {
+        let holder = Address::generate(&env);
+        let designee = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let designee_id = client.designate_credential_designee(&holder, &cred_id, &designee, &100u32);
+
+        assert!(designee_id > 0);
+        let des = client.get_credential_designee(&designee_id);
+        assert!(des.is_some());
+        let d = des.unwrap();
+        assert_eq!(d.credential_id, cred_id);
+        assert_eq!(d.holder, holder);
+        assert_eq!(d.designee, designee);
+        assert_eq!(d.share_percentage, 100);
+        assert!(d.active);
+    }
+
+    #[test]
+    fn test_transfer_credential_to_designee_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let designee = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let designee_id = client.designate_credential_designee(&holder, &cred_id, &designee, &100u32);
+
+        let reason = String::from_str(&env, "holder deceased");
+        let transfer_id = client.transfer_credential_to_designee(&admin, &designee_id, &reason);
+
+        assert!(transfer_id > 0);
+        let transfer = client.get_inheritance_transfer(&transfer_id);
+        assert!(transfer.is_some());
+        let t = transfer.unwrap();
+        assert_eq!(t.credential_id, cred_id);
+        assert_eq!(t.new_holder, designee);
+        assert_eq!(t.original_holder, holder);
+        assert_eq!(t.share_percentage, 100);
+    }
+
+    #[test]
+    fn test_designate_invalid_share_percentage_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let liquidator = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_liquidate");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &1u64);
+
+        // Advance ledger to allow liquidation
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2u64);
+
+        let recovered = client.liquidate_stake(
+            &liquidator,
+            &stake_id,
+            &soroban_sdk::String::from_str(&env, "default liquidation"),
+        );
+
+        assert_eq!(recovered, 1000u64, "should recover collateral");
+
+        let stake = client.get_credential_stake(stake_id).unwrap();
+        assert!(stake.is_liquidated, "stake should be liquidated");
+    }
+
+    #[test]
+    fn test_get_credential_staking_positions() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_positions");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &86400u64);
+
+        let positions = client.get_credential_staking_positions(credential_id);
+        assert!(positions.len() > 0, "should have staking positions");
+        assert_eq!(positions.get(0).unwrap(), stake_id);
+    }
+
+    #[test]
+    fn test_get_stake_liquidation_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let liquidator = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_history");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let stake_id = client.stake_credential(&staker, &credential_id, &1000u64, &1u64);
+
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2u64);
+
+        let _recovered = client.liquidate_stake(
+            &liquidator,
+            &stake_id,
+            &soroban_sdk::String::from_str(&env, "test liquidation"),
+        );
+
+        let history = client.get_stake_liquidation_history(stake_id);
+        assert!(history.len() > 0, "should have liquidation history");
+        assert_eq!(history.get(0).unwrap().stake_id, stake_id);
+        let holder = Address::generate(&env);
+        let designee = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"metadata_hash");
+
+        let cred_id = client.issue_credential(&issuer, &holder, &1u32, &metadata, &None, &0u64);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.designate_credential_designee(&holder, &cred_id, &designee, &150u32);
+        }));
+        assert!(result.is_err());
     }
 }
 

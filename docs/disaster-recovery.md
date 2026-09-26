@@ -373,3 +373,155 @@ This table consolidates the individual drills already defined in §4 into a sing
 | Full DR Tabletop Exercise (all roles, simulated incident end-to-end using §5 role assignments and §6 communication cadence) | Quarterly | New — run alongside the quarterly drills above | Incident Commander |
 
 The Incident Commander is responsible for scheduling the quarterly batch (Key Recovery, RPC Failover, Emergency Pause, API Secret Rotation, and the Tabletop Exercise together) at the start of each calendar quarter and confirming completion against the §4.7 checklist before quarter-end.
+
+---
+
+## 1.9 Admin Key Rotation Runbook
+
+> Added by issue #1508. This runbook covers the planned admin key rotation
+> (90-day cadence or post-compromise) for all three contracts.
+> For the v1.1 `AdminProposal` timelock flow, see the design note in
+> `docs/security-best-practices.md` — the steps below reflect both the current
+> v1.0 direct `set_admin` path and the v1.1 timelock-guarded path.
+
+### When to Rotate
+
+| Trigger | Action | Urgency |
+|---|---|---|
+| Scheduled 90-day rotation | Planned rotation per §2 backup strategy | Low — schedule at quarter start |
+| Suspected key compromise | Emergency rotation + contract pause | Immediate — follow §1.1 and §1.7 first |
+| Team member offboarding | Rotate any key the departing member could have accessed | Within 24 hours of offboarding |
+| CI/CD secrets exposure (e.g. leaked log) | Emergency rotation | Immediate |
+
+### Pre-Rotation Checklist
+
+Before rotating any admin key:
+
+- [ ] New key generated on hardware wallet (not software keystore)
+- [ ] New key backed up to encrypted cold storage (separate from the key being replaced)
+- [ ] GitHub Actions environment secret (`STELLAR_DEPLOY_SECRET_KEY`) updated for the target environment
+- [ ] Team notified that a key rotation is in progress
+- [ ] If rotating under suspected compromise: contract paused via `emergency_pause` first (§1.7)
+
+### Step-by-Step: v1.0 Direct `set_admin` Path
+
+Use this path for the current deployed contracts on mainnet/testnet until v1.1 is deployed.
+
+```bash
+# 1. Generate a new Stellar keypair (use hardware wallet in production)
+stellar keys generate new-admin-key --network <network>
+NEW_ADMIN=$(stellar keys address new-admin-key)
+echo "New admin address: $NEW_ADMIN"
+
+# 2. Fund the new key on testnet (skip on mainnet — ensure it already has XLM)
+stellar keys fund new-admin-key --network testnet
+
+# 3. Rotate admin on each contract (run for quorum_proof, sbt_registry, zk_verifier)
+for CONTRACT_ID in \
+    "$CONTRACT_QUORUM_PROOF" \
+    "$CONTRACT_SBT_REGISTRY" \
+    "$CONTRACT_ZK_VERIFIER"; do
+  echo "Rotating admin on contract: $CONTRACT_ID"
+  stellar contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$OLD_ADMIN_KEY" \
+    --network "$STELLAR_NETWORK" \
+    --rpc-url "$STELLAR_RPC_URL" \
+    -- set_admin \
+    --new_admin "$NEW_ADMIN"
+done
+
+# 4. Verify the new admin is set on all three contracts
+for CONTRACT_ID in \
+    "$CONTRACT_QUORUM_PROOF" \
+    "$CONTRACT_SBT_REGISTRY" \
+    "$CONTRACT_ZK_VERIFIER"; do
+  CURRENT_ADMIN=$(stellar contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$NEW_ADMIN_KEY" \
+    --network "$STELLAR_NETWORK" \
+    --rpc-url "$STELLAR_RPC_URL" \
+    -- get_admin 2>/dev/null || echo "ERROR")
+  if [[ "$CURRENT_ADMIN" == *"$NEW_ADMIN"* ]]; then
+    echo "  [OK] $CONTRACT_ID — admin confirmed as $NEW_ADMIN"
+  else
+    echo "  [FAIL] $CONTRACT_ID — expected $NEW_ADMIN, got $CURRENT_ADMIN"
+    echo "  Manual intervention required!"
+  fi
+done
+
+# 5. Confirm the OLD key no longer has admin privileges (attempt a no-op admin call)
+echo "Confirming old key is revoked..."
+stellar contract invoke \
+    --id "$CONTRACT_QUORUM_PROOF" \
+    --source "$OLD_ADMIN_KEY" \
+    --network "$STELLAR_NETWORK" \
+    --rpc-url "$STELLAR_RPC_URL" \
+    -- pause \
+    --admin "$(stellar keys address old-admin-key)" \
+  && echo "[FAIL] Old key still has admin privileges — investigation required!" \
+  || echo "[OK] Old key correctly rejected."
+```
+
+### Step-by-Step: v1.1 AdminProposal / Timelock Path
+
+Once v1.1 is deployed, direct `set_admin` is replaced by the timelock-guarded proposal flow. The rotation takes a minimum of 48 hours on mainnet (1 hour on testnet) to complete.
+
+```bash
+# Day 0 — Submit the admin change proposal
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$CURRENT_ADMIN_KEY" \
+  --network "$STELLAR_NETWORK" \
+  -- propose_admin_change \
+  --new_admin "$NEW_ADMIN" \
+  --eta $(($(date +%s) + 172800))   # now + 48 hours in epoch seconds
+
+# Note the proposal ID returned and share it with the team for review.
+# The monitoring alert `PendingAdminProposal` will fire within one scrape interval.
+
+# Day 2 (after eta) — Execute the proposal (any caller can execute after eta)
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$EXECUTOR_KEY" \
+  --network "$STELLAR_NETWORK" \
+  -- execute_admin_change \
+  --proposal_id "$PROPOSAL_ID"
+
+# If the proposal must be cancelled before execution (e.g. key was compromised
+# between propose and execute), the current admin can cancel it:
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$CURRENT_ADMIN_KEY" \
+  --network "$STELLAR_NETWORK" \
+  -- cancel_admin_change \
+  --proposal_id "$PROPOSAL_ID"
+```
+
+### Post-Rotation Checklist
+
+After completing the rotation on all three contracts:
+
+- [ ] New admin key confirmed on all three contracts (verified in step 4 above)
+- [ ] Old admin key confirmed revoked (verified in step 5 above)
+- [ ] `.env` and all GitHub Actions secrets updated with the new key
+- [ ] Old key material destroyed (hardware wallet reset or key deletion confirmed)
+- [ ] Key rotation logged in the incident/ops log with date and outcome
+- [ ] `backups/key-rotation-log.txt` entry appended (date, reason, who performed it)
+- [ ] DR drill checklist §4.7 "Deployer key backup verified in cold storage" re-validated
+- [ ] If rotated under compromise: full incident report filed per §3 Step 5
+
+### Rejection of Same-Transaction Admin-Then-Upgrade
+
+Under both v1.0 and v1.1, an admin-then-upgrade sequence **cannot be performed in
+a single transaction** on Soroban — each contract invocation is its own transaction.
+Under v1.1, the timelock additionally prevents an attacker from submitting `upgrade`
+immediately after `set_admin` even in separate transactions, because the new admin
+cannot take effect until after the 48-hour delay has elapsed. Under v1.0, operators
+should treat any `set_admin` call that is immediately followed (within the same
+ledger or within minutes) by an `upgrade` call as a suspicious sequence and pause
+the contract immediately.
+
+The `ContractUpgradeDetected` Prometheus alert in `monitoring/prometheus/alerts.yml`
+fires within one scrape interval of any upgrade event — operators monitoring that
+alert will have the earliest possible warning of an unauthorized upgrade.

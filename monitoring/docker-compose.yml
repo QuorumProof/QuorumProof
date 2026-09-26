@@ -78,15 +78,67 @@ services:
       - loki
     restart: unless-stopped
 
+  # Issue #1486 — render alertmanager config before starting Alertmanager.
+  # Substitutes ${SLACK_ALERT_WEBHOOK_URL} and ${PAGERDUTY_ROUTING_KEY} from
+  # the environment so Alertmanager never posts to a literal ${...} URL.
+  # Run `scripts/render_alertmanager_config.sh` (or `docker compose run
+  # render-alertmanager-config`) before `docker compose up alertmanager`.
+  render-alertmanager-config:
+    image: bhgedigital/envsubst:latest
+    volumes:
+      - ./prometheus/alertmanager.yml:/input/alertmanager.yml:ro
+      - ./prometheus:/output
+    environment:
+      SLACK_ALERT_WEBHOOK_URL: ${SLACK_ALERT_WEBHOOK_URL:?SLACK_ALERT_WEBHOOK_URL must be set — see docs/deployment-guide.md}
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:?PAGERDUTY_ROUTING_KEY must be set — see docs/deployment-guide.md}
+    command: >
+      sh -c "envsubst '$$SLACK_ALERT_WEBHOOK_URL $$PAGERDUTY_ROUTING_KEY'
+             < /input/alertmanager.yml
+             > /output/alertmanager.rendered.yml
+             && echo 'Rendered alertmanager config → /output/alertmanager.rendered.yml'"
+
   alertmanager:
     image: prom/alertmanager:v0.27.0
     ports:
       - "9093:9093"
     volumes:
-      - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Mount the rendered (secrets-substituted) config, not the template.
+      # Run the render-alertmanager-config service first, or call
+      # scripts/render_alertmanager_config.sh directly.
+      - ./prometheus/alertmanager.rendered.yml:/etc/alertmanager/alertmanager.yml:ro
+    depends_on:
+      - render-alertmanager-config
     restart: unless-stopped
 
   # #586 — Log aggregation
+  # #1653 — rotates api-server file logs, archives them to cold storage
+  # (S3 when LOG_ARCHIVE_BUCKET is set, otherwise the log-archive volume) and
+  # enforces the local retention window. See docs/log-retention-policy.md.
+  log-archiver:
+    image: amazon/aws-cli:2.17.0
+    entrypoint: ["/bin/bash", "/opt/quorumproof/log_archive.sh"]
+    command: ["--loop", "3600"]
+    environment:
+      LOG_DIR: /var/log/quorumproof
+      LOG_ROTATE_MAX_MB: ${LOG_ROTATE_MAX_MB:-100}
+      LOG_LOCAL_RETENTION_DAYS: ${LOG_LOCAL_RETENTION_DAYS:-7}
+      LOG_ARCHIVE_BUCKET: ${LOG_ARCHIVE_BUCKET:-}
+      LOG_ARCHIVE_PREFIX: ${LOG_ARCHIVE_PREFIX:-logs}
+      LOG_ARCHIVE_STORAGE_CLASS: ${LOG_ARCHIVE_STORAGE_CLASS:-GLACIER_IR}
+      LOG_ARCHIVE_DIR: /var/lib/quorumproof/log-archive
+      LOG_ARCHIVE_RETENTION_DAYS: ${LOG_ARCHIVE_RETENTION_DAYS:-2555}
+      HOST_ID: ${HOST_ID:-compose}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    volumes:
+      - ../scripts/log_archive.sh:/opt/quorumproof/log_archive.sh:ro
+      - quorumproof-logs:/var/log/quorumproof
+      - quorumproof-log-archive:/var/lib/quorumproof/log-archive
+    depends_on:
+      - api-server
+    restart: unless-stopped
+
   loki:
     image: grafana/loki:3.0.0
     ports:
@@ -113,3 +165,5 @@ volumes:
   # Using a named volume rather than a host bind-mount avoids permission
   # differences between Docker Desktop (macOS/Windows) and Linux hosts.
   quorumproof-logs:
+  # #1653 — local cold-storage fallback when LOG_ARCHIVE_BUCKET is unset.
+  quorumproof-log-archive:

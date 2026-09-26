@@ -119,3 +119,80 @@ export async function closePool(): Promise<void> {
 export async function _resetPoolForTest(): Promise<void> {
   await closePool();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pool metrics — Issue #1559
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Point-in-time snapshot of connection-pool utilisation. */
+export interface PoolMetrics {
+  /** Maximum number of connections the pool will open (`max` config). */
+  max_connections: number;
+  /** Number of connections currently checked out by active callers. */
+  active_connections: number;
+  /** Number of connections sitting idle and ready to be reused. */
+  idle_connections: number;
+  /** Number of callers waiting for a connection (queue depth). */
+  waiting_requests: number;
+  /**
+   * Percentage of the pool in active use: `(active / max) * 100`.
+   * A value ≥ 80 is a signal to increase `DATABASE_POOL_MAX`.
+   */
+  utilization_pct: number;
+  /** ISO-8601 timestamp at which this snapshot was taken. */
+  sampled_at: string;
+}
+
+/**
+ * Return a point-in-time snapshot of the shared pool's utilisation metrics.
+ *
+ * Throws if the pool has not been initialised yet (same contract as
+ * `getPool()`).
+ *
+ * The `pg` Pool exposes `.totalCount` (all connections, idle + active),
+ * `.idleCount` (idle), and `.waitingCount` (requests queued for a
+ * connection).  Active = total − idle.
+ */
+export function getPoolMetrics(): PoolMetrics {
+  const pool = getPool();
+  const max = parseInt(process.env.DATABASE_POOL_MAX ?? '10', 10);
+  const total = pool.totalCount;
+  const idle = pool.idleCount;
+  const waiting = pool.waitingCount;
+  const active = total - idle;
+  const utilization_pct = max > 0 ? Math.round((active / max) * 100) : 0;
+
+  return {
+    max_connections: max,
+    active_connections: active,
+    idle_connections: idle,
+    waiting_requests: waiting,
+    utilization_pct,
+    sampled_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * Prometheus text-format exposition of pool metrics.  Scraped by the
+ * `/metrics/db` endpoint registered in `index.ts`.
+ */
+export function getPoolMetricsPrometheus(): string {
+  const m = getPoolMetrics();
+  return [
+    '# HELP quorumproof_db_pool_max Maximum connections in the pool',
+    '# TYPE quorumproof_db_pool_max gauge',
+    `quorumproof_db_pool_max ${m.max_connections}`,
+    '# HELP quorumproof_db_pool_active Active (checked-out) connections',
+    '# TYPE quorumproof_db_pool_active gauge',
+    `quorumproof_db_pool_active ${m.active_connections}`,
+    '# HELP quorumproof_db_pool_idle Idle connections ready for reuse',
+    '# TYPE quorumproof_db_pool_idle gauge',
+    `quorumproof_db_pool_idle ${m.idle_connections}`,
+    '# HELP quorumproof_db_pool_waiting Requests queued waiting for a connection',
+    '# TYPE quorumproof_db_pool_waiting gauge',
+    `quorumproof_db_pool_waiting ${m.waiting_requests}`,
+    '# HELP quorumproof_db_pool_utilization_pct Pool utilisation as a percentage of max',
+    '# TYPE quorumproof_db_pool_utilization_pct gauge',
+    `quorumproof_db_pool_utilization_pct ${m.utilization_pct}`,
+  ].join('\n') + '\n';
+}

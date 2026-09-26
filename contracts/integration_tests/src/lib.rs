@@ -49,6 +49,11 @@ mod regressions;
 #[cfg(test)]
 mod upgrade_safety;
 
+// Issue #1630: Upgrade simulation (snapshot code swap) and state-compatibility
+// checks, plus admin/zero-hash guard rails for every contract's `upgrade`.
+#[cfg(test)]
+mod upgrade_simulation;
+
 // Integration tests for QuorumProof contract interactions (#364)
 // Covers multi-contract scenarios and end-to-end credential lifecycle flows.
 
