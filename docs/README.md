@@ -20,8 +20,22 @@ New to the codebase? Read these two first:
 | [architecture.md](./architecture.md) | System overview: FBA trust slices, SBTs, the contract set, how the pieces fit together. |
 | [deployment-guide.md](./deployment-guide.md) | End-to-end walkthrough: build the contracts, deploy them, initialize and wire them, verify. |
 
+Prefer learning by watching or doing? See the [video tutorials](./video-tutorials.md)
+and the [interactive documentation](./interactive-documentation.md) (search, API
+playground, quorum slice simulator).
+
 Then see [`../README.md`](../README.md) for the contribution workflow and
 [`../SECURITY.md`](../SECURITY.md) for the vulnerability-reporting policy.
+
+---
+
+## Tutorials & interactive docs
+
+| Doc | What it covers |
+|---|---|
+| [video-tutorials.md](./video-tutorials.md) | Index of video tutorials for common tasks, with scripts, captions, and the recording guide (issue #1634). |
+| [interactive-documentation.md](./interactive-documentation.md) | Interactive docs: full-text search, API playground, slice/hash playgrounds, and the feedback loop (issue #1635). |
+| [bbs-plus-tutorial.md](./bbs-plus-tutorial.md) | BBS+ selective-disclosure tutorial. |
 
 ---
 
@@ -87,7 +101,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [threat-model.md](./threat-model.md) | Assets, threat actors, attack vectors, and mitigations already considered. |
 | [THREAT_MODEL_CREDENTIAL_FRAUD.md](./THREAT_MODEL_CREDENTIAL_FRAUD.md) | Focused threat model for credential-fraud detection (issue #1252). |
 | [security-best-practices.md](./security-best-practices.md) | Security guidance for contributors and integrators. |
-| [container-image-scanning.md](./container-image-scanning.md) | Trivy image scanning in CI: vulnerability DB, reports, blocking policy and alerting (#1651). |
+| [security-best-practices.md](./security-best-practices.md#security-requirements-checklist-threat-modeling-and-tooling) | Security requirements (SR-* IDs), PR/release checklists, threat-modeling guide, and security tooling (issue #1637). |
 | [security-audit-checklist.md](./security-audit-checklist.md) | Internal review checklist used before releases. |
 | [issuer-security-checklist.md](./issuer-security-checklist.md) | Security checklist for institutions issuing credentials. |
 | [gdpr-compliance.md](./gdpr-compliance.md) | GDPR obligations and how the system meets them. |
@@ -136,6 +150,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 |---|---|
 | [api-client-guide.md](./api-client-guide.md) | Using the API client to talk to the API server. |
 | [api-endpoint-examples.md](./api-endpoint-examples.md) | Worked request/response examples for the REST endpoints. |
+| [api-response-examples.md](./api-response-examples.md) | Success and error response examples for every endpoint group, response schemas, and v1/v2 example versioning (issue #1636). |
 | [integration-patterns-guide.md](./integration-patterns-guide.md) | Common integration patterns for verifiers and issuers. |
 | [interoperability-guide.md](./interoperability-guide.md) | Interoperating with external credential systems. |
 | [government-licensing-integration.md](./government-licensing-integration.md) | Protocol for licensing bodies to integrate as verified issuers. |

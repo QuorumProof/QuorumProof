@@ -640,3 +640,220 @@ Until v1.1 lands, the following controls reduce the single-key risk:
 3. **Separate keys per environment** — testnet and mainnet use distinct key pairs, so a testnet secrets leak does not affect mainnet.
 4. **90-day rotation policy** — the deployer key is rotated every 90 days per `docs/disaster-recovery.md` §2 backup strategy.
 5. **Emergency pause** — if a key compromise is suspected, the contract can be paused immediately via `emergency_pause` while the key rotation is executed (see §1.7 in `docs/disaster-recovery.md`).
+
+---
+
+## Security Requirements, Checklist, Threat Modeling, and Tooling
+
+> Added by issue #1637. This section turns the guidance above into concrete,
+> enforceable requirements for QuorumProof contributors and operators. The
+> generic checklist earlier in this file still applies; the items below are
+> specific to this codebase and are the ones reviewers will ask about.
+
+### Security Requirements
+
+Requirements use RFC 2119 keywords. Each has an ID so PRs and audits can cite it.
+
+#### Smart contracts (`contracts/`)
+
+| ID | Requirement |
+|---|---|
+| SR-C1 | Every state-mutating public function **MUST** call `require_auth()` on the address whose authority it exercises (issuer, holder, attestor, or admin) before touching storage. |
+| SR-C2 | Contract code **MUST NOT** add new bare `.unwrap()` / `.expect()` calls; use `panic_with_error!(&env, ContractError::…)` so failures surface as typed errors. Enforced by `scripts/check_unwraps.sh` (ratchet). |
+| SR-C3 | `unsafe` blocks **MUST NOT** be used in contract crates. |
+| SR-C4 | Admin addresses **MUST NOT** be hardcoded; they are set at `initialize` and changed only via the admin-rotation flow. |
+| SR-C5 | Credentials and SBTs **MUST** remain non-transferable; no code path may change `subject` / `owner` after issuance except the documented recovery flow. |
+| SR-C6 | Personal data **MUST NOT** be written to ledger storage. Only hashes/commitments go on-chain; encryption and compression happen off-chain (see [privacy-guide.md](./privacy-guide.md), [crypto-shredding-architecture.md](./crypto-shredding-architecture.md)). |
+| SR-C7 | ZK verification entry points used in production **MUST** fail closed. Test-only verifiers stay behind `#[cfg(any(test, feature = "testutils"))]`. |
+| SR-C8 | Every storage entry that must outlive its default TTL **MUST** have its TTL extended in the same call that writes it. |
+| SR-C9 | Upgrades **MUST** follow [contract-upgrade-checklist.md](./contract-upgrade-checklist.md) and preserve the invariants in [migration-invariants.md](./migration-invariants.md). |
+
+#### API server (`api-server/`)
+
+| ID | Requirement |
+|---|---|
+| SR-A1 | Every route that accepts a body **MUST** validate it with a schema from `middleware/validate.ts`. JSON bodies are capped at 100 kB. |
+| SR-A2 | Privileged routes **MUST** be protected with `rbac.requirePermission(...)`; `/api/admin/*` additionally sits behind the IP allow-list. |
+| SR-A3 | Errors **MUST** be returned as RFC 9457 Problem Details and **MUST NOT** leak stack traces, SQL, secrets, or internal hostnames. |
+| SR-A4 | SQL **MUST** use parameterized queries. String-concatenated SQL is rejected in review. |
+| SR-A5 | Secrets (API keys, webhook secrets, OTPs, share-link passwords) **MUST** be stored hashed; plaintext is returned only once at creation. |
+| SR-A6 | Rate limiting, DDoS protection, and request de-duplication middleware **MUST NOT** be bypassed for new `/api` routes. |
+| SR-A7 | Outbound webhooks **MUST** be signed (see `api-server/docs/WEBHOOK_SIGNATURE_VERIFICATION.md`). |
+| SR-A8 | Logs **MUST NOT** contain secrets, OTPs, full API keys, or credential metadata plaintext. |
+| SR-A9 | CORS **MUST** use an explicit origin allow-list in production. |
+
+#### Frontend / dashboard
+
+| ID | Requirement |
+|---|---|
+| SR-F1 | Secret keys **MUST NOT** be handled by the web app; signing is delegated to the wallet (e.g. Freighter). |
+| SR-F2 | User-controlled strings **MUST** be rendered as text, never via `innerHTML` / `dangerouslySetInnerHTML`. |
+| SR-F3 | Production builds **MUST** ship a Content-Security-Policy that disallows inline scripts. |
+
+#### Operations & supply chain
+
+| ID | Requirement |
+|---|---|
+| SR-O1 | Deployer/admin keys **MUST** be stored on hardware wallets and rotated every 90 days (see [attestor-key-custody-guide.md](./attestor-key-custody-guide.md)). |
+| SR-O2 | Testnet and mainnet **MUST** use distinct keys and distinct GitHub environments with required reviewers. |
+| SR-O3 | New Rust dependencies **MUST** pass `cargo deny check`; advisory exceptions in `deny.toml` **MUST** carry a tracking issue and date. |
+| SR-O4 | Every release **MUST** publish an SBOM (`sbom/`, `.github/workflows/sbom.yml`). |
+| SR-O5 | Suspected vulnerabilities **MUST** be reported privately per [`../SECURITY.md`](../SECURITY.md), not in public issues. |
+
+### Security Checklist
+
+Copy the relevant block into your PR description and tick each item.
+
+#### Every PR
+
+- [ ] No secrets, keys, or real addresses with funds in the diff (TruffleHog passes)
+- [ ] New/changed contract functions call `require_auth()` where they mutate state (SR-C1)
+- [ ] No new bare `unwrap()` / `expect()` / `unsafe` in contracts (SR-C2, SR-C3)
+- [ ] New API routes validate input and have RBAC where needed (SR-A1, SR-A2)
+- [ ] Errors use Problem Details and reveal no internals (SR-A3)
+- [ ] No personal data written on-chain or to logs (SR-C6, SR-A8)
+- [ ] New dependencies justified and pass `cargo deny` / `npm audit` (SR-O3)
+- [ ] Threat model updated if the change adds an asset, trust boundary, or entry point (see below)
+
+#### Contract changes
+
+- [ ] Negative tests for unauthorized callers exist for every new mutating function
+- [ ] Storage TTLs extended where needed (SR-C8)
+- [ ] Fuzz target added or updated for new parsing/arithmetic logic ([fuzz-testing-guide.md](./fuzz-testing-guide.md))
+- [ ] Arithmetic uses checked operations on untrusted input
+- [ ] Events emitted for security-relevant state changes (issue, revoke, attest, admin change)
+- [ ] `scripts/scan_contracts.sh` reports no CRITICAL findings
+
+#### Release
+
+- [ ] [security-audit-checklist.md](./security-audit-checklist.md) completed
+- [ ] `cargo audit`, `cargo deny check`, `npm audit --omit=dev` clean or exceptions documented
+- [ ] Mutation-testing score not regressed ([mutation-testing workflow](../.github/workflows/mutation-testing.yml))
+- [ ] SBOM generated and attached (SR-O4)
+- [ ] Upgrade path reviewed against [contract-upgrade-checklist.md](./contract-upgrade-checklist.md)
+- [ ] Monitoring and alerts cover any new critical events ([critical-event-alerting.md](./critical-event-alerting.md))
+
+#### Deployment
+
+- [ ] Deployer key on hardware wallet, correct environment (SR-O1, SR-O2)
+- [ ] [deployment-checklist.md](./deployment-checklist.md) completed
+- [ ] Emergency pause procedure verified and on-call informed ([disaster-recovery.md](./disaster-recovery.md))
+- [ ] Admin IP allow-list and CORS origins reviewed for the target environment
+
+### Threat Modeling Guide
+
+The system-level threat model lives in [threat-model.md](./threat-model.md),
+with a focused model for credential fraud in
+[THREAT_MODEL_CREDENTIAL_FRAUD.md](./THREAT_MODEL_CREDENTIAL_FRAUD.md). Use
+this guide when a feature changes what those documents describe.
+
+#### When to threat-model
+
+Run the process below (it takes 30–60 minutes for most features) when a change:
+
+- adds a new contract, public contract function, or API route;
+- introduces a new asset (key, secret, personal data, token);
+- crosses a new trust boundary (new external service, bridge, oracle, webhook consumer);
+- changes authorization, quorum/threshold logic, or cryptographic verification;
+- changes how data is stored, retained, or deleted.
+
+#### Process
+
+1. **Scope and diagram.** Draw a data-flow diagram of the change: actors
+   (holder, issuer, attestor, verifier, admin, anonymous caller), processes
+   (contract, API server, frontend, workers), data stores (ledger storage,
+   Postgres, Redis, object storage), and **trust boundaries** between them.
+   Mermaid in the PR description is fine:
+
+   ```mermaid
+   flowchart LR
+     V[Verifier] -- HTTPS --> API[API server]
+     API -- RPC --> RPC[(Soroban RPC)]
+     RPC --> QP[quorum_proof contract]
+     H[Holder wallet] -- signed tx --> QP
+     subgraph Trust boundary: ledger
+       QP
+     end
+   ```
+
+2. **List assets.** What would an attacker want? For QuorumProof the usual
+   list is: admin/deployer keys, attestor keys, credential integrity,
+   revocation status, holder privacy (link between address and identity),
+   API keys and webhook secrets, audit-log integrity, availability of
+   verification.
+
+3. **Enumerate threats with STRIDE** per element crossing a boundary:
+
+   | STRIDE | Question | QuorumProof example |
+   |---|---|---|
+   | **S**poofing | Can someone act as another principal? | Forged attestor signature; stolen API key |
+   | **T**ampering | Can data be modified in transit or at rest? | Altered metadata hash; edited audit-log rows |
+   | **R**epudiation | Can an actor deny an action? | Attestor denies co-signing; missing events |
+   | **I**nformation disclosure | Can data leak? | Personal data on-chain; verbose error bodies; share-link enumeration |
+   | **D**enial of service | Can availability be degraded? | Unbounded loops over slice members; batch-verify amplification; RPC exhaustion |
+   | **E**levation of privilege | Can a caller gain rights? | Missing `require_auth`; RBAC bypass; upgrade hijack |
+
+   Also consider FBA-specific threats: Sybil attestors, collusion to reach a
+   weighted threshold, and slice manipulation (see
+   [economic-security-model.md](./economic-security-model.md) and
+   [quorum-slice-guide.md](./quorum-slice-guide.md)).
+
+4. **Rate each threat.** Use Likelihood (1–3) × Impact (1–3). Score ≥ 6 must
+   be mitigated before merge; 3–4 needs a tracked issue; ≤ 2 may be accepted
+   with a written rationale.
+
+5. **Decide and record mitigations.** For each threat pick: mitigate,
+   transfer, accept, or eliminate the feature. Link each mitigation to the
+   requirement ID above, a test, or a monitoring alert.
+
+6. **Record the result.** Add a row to the relevant table in
+   [threat-model.md](./threat-model.md) (or a new section for a new
+   component). Significant design decisions go in an ADR under
+   [`adr/`](./adr/README.md).
+
+#### Threat record template
+
+```markdown
+### T-<component>-<n>: <short name>
+
+- **Element / boundary:** <e.g. POST /api/verify/batch → Soroban RPC>
+- **STRIDE category:** <S|T|R|I|D|E>
+- **Description:** <how the attack works>
+- **Assets at risk:** <keys, integrity, privacy, availability…>
+- **Likelihood × Impact:** <L> × <I> = <score>
+- **Mitigation:** <control, requirement ID, test, alert>
+- **Status:** <mitigated | tracked in #NNN | accepted (rationale)>
+```
+
+#### Review
+
+The PR reviewer checks that every threat scored ≥ 6 has a mitigation that is
+actually present in the diff (code, test, or alert), not only described.
+
+### Security Tooling
+
+| Tool | What it catches | Where it runs | Run locally |
+|---|---|---|---|
+| `cargo audit` | Known-vulnerable Rust crates (RustSec) | CI `security` job | `cargo install cargo-audit && cargo audit` |
+| `cargo deny` | Advisories, unsound/yanked crates, license policy, banned deps (`deny.toml`) | CI `security` job | `cargo install cargo-deny && cargo deny check` |
+| TruffleHog | Committed secrets across history | CI `security` job | `trufflehog git file://. --results=verified,unknown` |
+| `scripts/scan_contracts.sh` | Unsafe contract patterns: bare unwrap/expect, `unsafe`, hardcoded addresses, missing auth | Local / pre-release | `./scripts/scan_contracts.sh` |
+| `scripts/check_unwraps.sh` | Ratchet on bare `.unwrap()` count in contracts | CI | `./scripts/check_unwraps.sh` |
+| `scripts/check_deps.sh` | Stale advisory exceptions in `deny.toml` | Local / scheduled | `./scripts/check_deps.sh` |
+| `cargo fuzz` (`fuzz/`) | Panics and logic errors on adversarial input | `.github/workflows/fuzz.yml` | see [FUZZING.md](./FUZZING.md) |
+| `cargo mutants` | Weak tests around security checks | `.github/workflows/mutation-testing.yml` | `./scripts/mutation_test.sh` |
+| Formal verification (`formal-verification/`) | Invariant violations in critical functions | Local | see [formal-verification.md](./formal-verification.md) |
+| SBOM (`sbom/`) | Supply-chain inventory for each release | `.github/workflows/sbom.yml` | see workflow |
+| `npm audit` | Known-vulnerable JS packages in `api-server/`, `frontend/`, `dashboard/` | Local / recommended in CI | `npm audit --omit=dev` in each package |
+| `cargo clippy -- -D warnings` | Lints including suspicious arithmetic and error handling | CI `contracts` job | `cargo clippy --all-targets -- -D warnings` |
+| Prometheus alerts (`monitoring/`) | Runtime anomalies: auth failures, admin changes, pause events | Production | see [critical-event-alerting.md](./critical-event-alerting.md) |
+
+**Adding a tool.** New security tooling should run in CI (fail the build on
+high-severity findings), document how to suppress a false positive with a
+tracking comment, and be added to the table above.
+
+**Handling findings.** Treat a tooling finding like a bug: fix it, or add a
+dated, issue-linked exception (the `deny.toml` `allow` list is the model).
+Never silence a finding without a tracking issue. Findings that indicate an
+exploitable vulnerability follow the private disclosure process in
+[`../SECURITY.md`](../SECURITY.md).
