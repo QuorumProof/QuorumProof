@@ -375,6 +375,39 @@ export function createGraphqlRouter(soroban: SorobanClient) {
   });
 
   /**
+   * POST /api/graphql/subscriptions
+   * Registers a lightweight subscription descriptor that clients can pair with
+   * the existing WebSocket event stream. This keeps subscription state explicit
+   * without introducing a second socket protocol.
+   */
+  router.post('/subscriptions', (req: Request, res: Response) => {
+    const { query, variables } = req.body as { query?: unknown; variables?: unknown };
+    if (typeof query !== 'string' || !query.trim()) {
+      res.status(400).json({ error: 'query must be a non-empty string' });
+      return;
+    }
+    const id = `gqlsub_${Date.now().toString(36)}_${subscriptions.size.toString(36)}`;
+    const record = {
+      id,
+      query,
+      variables: variables && typeof variables === 'object' && !Array.isArray(variables)
+        ? variables as GraphQLVariables
+        : {},
+      created_at: new Date().toISOString(),
+    };
+    subscriptions.set(id, record);
+    res.status(201).json({
+      subscription: record,
+      stream: '/ws',
+    });
+  });
+
+  router.delete('/subscriptions/:id', (req: Request, res: Response) => {
+    const deleted = subscriptions.delete(req.params.id);
+    res.status(deleted ? 204 : 404).send(deleted ? undefined : { error: 'subscription not found' });
+  });
+
+  /**
    * GET /api/graphql
    * Returns schema information and federation metadata for discoverability.
    */

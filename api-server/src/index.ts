@@ -30,6 +30,7 @@ import { getDefaultRegionFailoverDetector } from './services/regionFailover.js';
 import privilegeEscalationRouter from './routes/privilegeEscalation.js';
 import tracingRouter from './routes/tracing.js';
 import adminRouter from './routes/admin.js';
+import { createEventsRouter } from './routes/events.js';
 // #1309: Auto-generated OpenAPI docs (Swagger UI / ReDoc)
 import docsRouter from './routes/docs.js';
 import { createDashboardRouter } from './routes/dashboard.js';
@@ -214,6 +215,7 @@ app.use('/api/credentials', createEncryptedCredentialsRouter()); // #1572 thresh
 app.use('/api/credentials', createAuditRouter()); // #1573 audit trail
 app.use('/api/bulk', createBulkOperationsRouter(sorobanClient)); // #1610 bounded bulk API operations
 app.use('/api/verify', verifyRouter);
+app.use('/api/graphql', createGraphqlRouter(sorobanClient)); // #1614 GraphQL query/subscription surface
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
 app.use('/api/credentials', createCredentialTiersRouter()); // #1602 credential tiering
