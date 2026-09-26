@@ -8,6 +8,7 @@ import credentialExportRouter from './routes/credentialExport.js';
 import { createHolderAttestationRouter } from './routes/holderAttestation.js';
 import { createEncryptedCredentialsRouter } from './routes/encryptedCredentials.js';
 import { createAuditRouter } from './routes/credentialAudit.js';
+import { createBulkOperationsRouter } from './routes/bulkOperations.js';
 import verifyRouter from './routes/verify.js';
 import notificationsRouter from './routes/notifications.js';
 import analyticsRouter from './routes/analytics.js';
@@ -43,6 +44,7 @@ import { v1Compat } from './middleware/v1Compat.js';
 import v1Router from './routes/v1/index.js';
 import v2Router from './routes/v2/index.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
+import { apiMeteringMiddleware, getApiMeteringPrometheus, getApiMeteringReport } from './middleware/apiMetering.js';
 import { rbac } from './middleware/rbac.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
@@ -113,6 +115,7 @@ app.use(structuredLoggingMiddleware);
 app.use(distributedTracingMiddleware);
 
 app.use(express.json({ limit: '100kb' }));
+app.use('/api', apiMeteringMiddleware);
 
 // #1559: Acquire a pooled connection for the request lifetime and release it
 // back to the pool on response finish so it can be reused.
@@ -188,12 +191,21 @@ app.use('/api', concurrencyLimiter.middleware);
 
 app.use(cacheControl);
 
+// Shared Soroban adapter for routes that need contract reads.
+const sorobanClient = {
+  simulateCall: Soroban.simulateCall,
+  u64Val: Soroban.u64Val,
+  u32Val: Soroban.u32Val,
+  addressVal: Soroban.addressVal,
+};
+
 app.use('/api/slices', slicesRouter);
 app.use('/api/credentials', credentialsRouter);
 app.use('/api/credentials', credentialExportRouter); // #1000 credential export (json/pdf/qrcode)
 app.use('/api/credentials', createHolderAttestationRouter()); // #1571 holder attestation
 app.use('/api/credentials', createEncryptedCredentialsRouter()); // #1572 threshold encryption
 app.use('/api/credentials', createAuditRouter()); // #1573 audit trail
+app.use('/api/bulk', createBulkOperationsRouter(sorobanClient)); // #1610 bounded bulk API operations
 app.use('/api/verify', verifyRouter);
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
@@ -214,12 +226,6 @@ app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation
 app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 
 // #997 Credential Holder Dashboard API
-const sorobanClient = {
-  simulateCall: Soroban.simulateCall,
-  u64Val: Soroban.u64Val,
-  u32Val: Soroban.u32Val,
-  addressVal: Soroban.addressVal,
-};
 app.use('/api/me', createDashboardRouter(sorobanClient));
 
 // #1650: Multi-region failover status (mounted before /health so it is not
@@ -266,6 +272,21 @@ app.get('/metrics/ws', (_req, res) => {
 app.get('/metrics/rpc', (_req, res) => {
   res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
+});
+
+app.get('/metrics/api', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(getApiMeteringPrometheus());
+});
+
+app.get('/api/debug/requests', (_req, res) => {
+  res.json({
+    metering: getApiMeteringReport(),
+    deduplication: {
+      enabled: true,
+      headers: ['X-Request-Dedup', 'X-Request-Dedup-Key'],
+    },
+  });
 });
 
 app.get('/rpc/circuit-breaker', (_req, res) => {
