@@ -51,10 +51,13 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [ci-testnet-deployment.md](./ci-testnet-deployment.md) | How the automated testnet deployment pipeline works. |
 | [cicd-pipeline.md](./cicd-pipeline.md) | Overview of the CI/CD pipeline stages and gates. |
 | [multi-region-deployment.md](./multi-region-deployment.md) | Running the API server across multiple regions. |
+| [multi-region-failover.md](./multi-region-failover.md) | AWS active/passive multi-region failover: detection, data replication, procedures and drills (#1650). |
+| [infrastructure-as-code.md](./infrastructure-as-code.md) | Terraform layout, state, CI plan/apply, drift detection and infrastructure testing (#1652). |
 | [capacity-planning.md](./capacity-planning.md) | Sizing guidance for throughput, storage, and RPC load. |
 | [cost-optimization-guide.md](./cost-optimization-guide.md) | Reducing on-chain fees and infrastructure cost. |
 | [database-migrations.md](./database-migrations.md) | Running and authoring API-server database migrations. |
 | [backup-system.md](./backup-system.md) | Backup architecture, schedule, and restore procedure. |
+| [log-retention-policy.md](./log-retention-policy.md) | Log retention periods, cold-storage archival, retrieval and compliance mapping (#1653). |
 | [disaster-recovery.md](./disaster-recovery.md) | Emergency pause/redeploy and credential-restoration procedures. |
 | [DR_PLAN_IMPLEMENTATION.md](./DR_PLAN_IMPLEMENTATION.md) | Implementation notes for the disaster-recovery plan. |
 | [resilience.md](./resilience.md) | Resilience requirements and chaos-testing approach (issue #1003). |
@@ -84,6 +87,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [threat-model.md](./threat-model.md) | Assets, threat actors, attack vectors, and mitigations already considered. |
 | [THREAT_MODEL_CREDENTIAL_FRAUD.md](./THREAT_MODEL_CREDENTIAL_FRAUD.md) | Focused threat model for credential-fraud detection (issue #1252). |
 | [security-best-practices.md](./security-best-practices.md) | Security guidance for contributors and integrators. |
+| [container-image-scanning.md](./container-image-scanning.md) | Trivy image scanning in CI: vulnerability DB, reports, blocking policy and alerting (#1651). |
 | [security-audit-checklist.md](./security-audit-checklist.md) | Internal review checklist used before releases. |
 | [issuer-security-checklist.md](./issuer-security-checklist.md) | Security checklist for institutions issuing credentials. |
 | [gdpr-compliance.md](./gdpr-compliance.md) | GDPR obligations and how the system meets them. |

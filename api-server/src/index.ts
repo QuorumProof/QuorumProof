@@ -23,6 +23,9 @@ import gdprRouter from './routes/gdpr.js';
 import apiKeysRouter from './routes/apiKeys.js';
 import oauth2Router from './routes/oauth2.js';
 import healthRouter from './routes/health.js';
+// #1650: Multi-region failover detection
+import { createRegionRouter } from './routes/region.js';
+import { getDefaultRegionFailoverDetector } from './services/regionFailover.js';
 import privilegeEscalationRouter from './routes/privilegeEscalation.js';
 import tracingRouter from './routes/tracing.js';
 import adminRouter from './routes/admin.js';
@@ -213,6 +216,11 @@ const sorobanClient = {
 };
 app.use('/api/me', createDashboardRouter(sorobanClient));
 
+// #1650: Multi-region failover status (mounted before /health so it is not
+// shadowed by the generic health router).
+const regionFailoverDetector = getDefaultRegionFailoverDetector();
+app.use('/health/region', createRegionRouter(regionFailoverDetector));
+
 // #1308: Health check endpoints
 app.use('/health', healthRouter);
 
@@ -315,6 +323,10 @@ gracefulShutdown.addCleanupTask(() => {
 gracefulShutdown.addCleanupTask(() => {
   closeWsServer();
 });
+// #1650: stop polling the peer region once we begin draining.
+gracefulShutdown.addCleanupTask(() => {
+  regionFailoverDetector.stop();
+});
 
 // #1311: Attach SIGTERM / SIGINT handlers. This is idempotent; the
 // handlers are registered with process.once so they fire at most once.
@@ -362,6 +374,8 @@ async function runStartupMigrations(): Promise<void> {
   httpServer.listen(PORT, () =>
     console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
   );
+  // #1650: no-op unless PEER_REGION_HEALTH_URL is set.
+  regionFailoverDetector.start();
 
   // Issue #870: Graceful shutdown — drain the connection pool so in-flight
   // queries finish cleanly before the process exits.
