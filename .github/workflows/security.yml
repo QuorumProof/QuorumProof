@@ -1,0 +1,280 @@
+# Issue #1631: Continuous security testing
+#
+#   SAST                 Semgrep (Rust, TypeScript, secrets), CodeQL (JS/TS), Clippy
+#   Dependency scanning  cargo-audit, cargo-deny, npm audit (frontend, api-server)
+#   Container scanning   Trivy image scan of api-server + Trivy fs/IaC/secret scan
+#   Aggregation          scripts/security/aggregate_reports.py -> one report
+#
+# Every scanner uploads its raw output as an artifact. The `report` job merges
+# them, posts a job summary and fails the run on findings >= FAIL_ON.
+# See docs/continuous-security-testing.md.
+name: Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Nightly, so new advisories are caught even when the code has not changed.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fail_on:
+        description: "Minimum severity that fails the run"
+        default: "high"
+        type: choice
+        options: [critical, high, medium, low, none]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FAIL_ON: ${{ github.event.inputs.fail_on || 'high' }}
+
+jobs:
+  # ── SAST ──────────────────────────────────────────────────────────────────
+  semgrep:
+    name: SAST / Semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        run: |
+          mkdir -p reports
+          semgrep scan \
+            --config p/rust \
+            --config p/typescript \
+            --config p/javascript \
+            --config p/secrets \
+            --config p/github-actions \
+            --config .semgrep.yml \
+            --exclude target --exclude node_modules --exclude dist \
+            --sarif --output reports/semgrep.sarif \
+            --metrics off || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-semgrep
+          path: reports/
+
+  codeql:
+    name: SAST / CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
+          output: reports
+      - name: Rename SARIF for aggregation
+        run: for f in reports/*.sarif; do mv "$f" "reports/codeql-$(basename "$f")"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-codeql
+          path: reports/
+
+  clippy:
+    name: SAST / Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install clippy-sarif
+        run: cargo install clippy-sarif sarif-fmt --locked
+      - name: Run Clippy with security-relevant lints
+        run: |
+          mkdir -p reports
+          cargo clippy --workspace --exclude fuzz --all-targets --message-format=json -- \
+            -W clippy::unwrap_used \
+            -W clippy::expect_used \
+            -W clippy::panic \
+            -W clippy::indexing_slicing \
+            -W clippy::arithmetic_side_effects \
+            -W clippy::cast_possible_truncation \
+            -W clippy::integer_division \
+            | clippy-sarif > reports/clippy.sarif || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-clippy
+          path: reports/
+
+  # ── Dependency scanning ───────────────────────────────────────────────────
+  cargo-audit:
+    name: Deps / cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Cargo.lock
+        run: |
+          mkdir -p reports
+          cargo audit --json > reports/cargo-audit.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-cargo-audit
+          path: reports/
+
+  cargo-deny:
+    name: Deps / cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Check advisories, bans and sources
+        # Blocking cargo-deny already runs in ci.yml; here we only collect its output.
+        run: |
+          mkdir -p reports
+          cargo deny --color never check advisories bans sources 2> reports/cargo-deny.txt || true
+          cat reports/cargo-deny.txt
+      - name: Check licenses (informational)
+        continue-on-error: true
+        run: cargo deny --color never check licenses
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-cargo-deny
+          path: reports/
+
+  npm-audit:
+    name: Deps / npm audit (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [frontend, api-server]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: npm audit
+        working-directory: ${{ matrix.project }}
+        run: |
+          mkdir -p ../reports
+          npm audit --json --package-lock-only > ../reports/npm-audit-${{ matrix.project }}.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-npm-${{ matrix.project }}
+          path: reports/
+
+  # ── Container / filesystem scanning ───────────────────────────────────────
+  trivy-image:
+    name: Container / Trivy image (api-server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build api-server image
+        run: docker build -t quorumproof-api-server:${{ github.sha }} api-server
+      - name: Scan image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: quorumproof-api-server:${{ github.sha }}
+          format: sarif
+          output: reports/trivy-image-api-server.sarif
+          scanners: vuln,secret,misconfig
+          ignore-unfixed: true
+          exit-code: "0"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-trivy-image
+          path: reports/
+
+  trivy-fs:
+    name: Container / Trivy fs + IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan repository (vulns, secrets, Dockerfile / workflow misconfig)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: reports/trivy-fs.sarif
+          scanners: vuln,secret,misconfig
+          skip-dirs: target,node_modules,frontend/node_modules,api-server/node_modules
+          exit-code: "0"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-trivy-fs
+          path: reports/
+
+  # ── Aggregation ───────────────────────────────────────────────────────────
+  report:
+    name: Security report
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [semgrep, codeql, clippy, cargo-audit, cargo-deny, npm-audit, trivy-image, trivy-fs]
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: security-*
+          path: reports
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Aggregate reports
+        id: aggregate
+        run: |
+          set +e
+          python3 scripts/security/aggregate_reports.py reports \
+            --markdown security-report.md \
+            --json security-report.json \
+            --fail-on "$FAIL_ON"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          cat security-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload SARIF to code scanning
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: reports
+          category: continuous-security
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            security-report.md
+            security-report.json
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: security-report
+          path: security-report.md
+      - name: Enforce severity threshold
+        if: steps.aggregate.outputs.exit_code != '0'
+        run: |
+          echo "::error::Security findings at or above '$FAIL_ON' were found. See the job summary."
+          exit 1

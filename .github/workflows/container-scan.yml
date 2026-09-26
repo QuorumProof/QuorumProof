@@ -1,0 +1,229 @@
+# .github/workflows/container-scan.yml
+#
+# Container image vulnerability scanning — Issue #1651.
+#
+#   * Builds every Dockerfile in the repo (api-server, monitoring exporter,
+#     tts service) and scans the resulting image with Trivy (OS packages +
+#     language dependencies) and the Dockerfile itself for misconfigurations.
+#   * Vulnerability database: the Trivy DB (NVD, GHSA, distro advisories)
+#     is downloaded once per run, cached across runs, and shared by every
+#     matrix job via the `trivy-db` job — see docs/container-image-scanning.md.
+#   * Reports: SARIF → GitHub code scanning (Security tab), JSON + Markdown
+#     reports uploaded as artifacts, and a per-image summary in the job summary.
+#   * Alerting: PRs fail on fixable CRITICAL/HIGH findings (policy in
+#     .trivyignore / scripts/scan_images.sh); scheduled scans open or update a
+#     GitHub issue per image and post to Slack when SLACK_SECURITY_WEBHOOK_URL
+#     is configured.
+#
+# Scheduled daily so newly-published CVEs against already-merged images are
+# caught even when no code changes.
+
+name: Container Image Scan
+
+on:
+  pull_request:
+    paths:
+      - "**/Dockerfile"
+      - "api-server/package*.json"
+      - "services/tts/package*.json"
+      - "monitoring/exporter/requirements.txt"
+      - ".trivyignore"
+      - "trivy.yaml"
+      - ".github/workflows/container-scan.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/Dockerfile"
+      - "api-server/**"
+      - "services/tts/**"
+      - "monitoring/exporter/**"
+      - ".trivyignore"
+      - "trivy.yaml"
+      - ".github/workflows/container-scan.yml"
+  schedule:
+    - cron: "0 4 * * *" # daily 04:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_VERSION: "0.56.2"
+  TRIVY_CACHE_DIR: ${{ github.workspace }}/.cache/trivy
+
+jobs:
+  # ── Vulnerability database ─────────────────────────────────────────────────
+  trivy-db:
+    name: Update vulnerability database
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.key.outputs.key }}
+    steps:
+      - name: Compute cache key (one DB per day)
+        id: key
+        run: echo "key=trivy-db-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore DB cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Install Trivy
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: aquasecurity/setup-trivy@v0.2.2
+        with:
+          version: v${{ env.TRIVY_VERSION }}
+
+      - name: Download vulnerability + Java DB
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          # ghcr.io is rate-limited; fall back to the public ECR mirror.
+          trivy image --download-db-only --cache-dir "$TRIVY_CACHE_DIR" \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2
+          trivy image --download-java-db-only --cache-dir "$TRIVY_CACHE_DIR" \
+            --java-db-repository ghcr.io/aquasecurity/trivy-java-db:1,public.ecr.aws/aquasecurity/trivy-java-db:1
+          trivy --cache-dir "$TRIVY_CACHE_DIR" version
+
+  # ── Build + scan each image ────────────────────────────────────────────────
+  scan:
+    name: Scan ${{ matrix.image.name }}
+    needs: trivy-db
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: api-server
+            context: api-server
+            dockerfile: api-server/Dockerfile
+          - name: exporter
+            context: monitoring/exporter
+            dockerfile: monitoring/exporter/Dockerfile
+          - name: tts
+            context: services/tts
+            dockerfile: services/tts/Dockerfile
+    env:
+      IMAGE_REF: quorumproof/${{ matrix.image.name }}:scan-${{ github.sha }}
+      REPORT_DIR: scan-reports/${{ matrix.image.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore vulnerability DB
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: ${{ needs.trivy-db.outputs.cache-key }}
+          fail-on-cache-miss: true
+
+      - uses: aquasecurity/setup-trivy@v0.2.2
+        with:
+          version: v${{ env.TRIVY_VERSION }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          tags: ${{ env.IMAGE_REF }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+
+      - name: Scan image + Dockerfile
+        id: scan
+        run: |
+          set +e
+          scripts/scan_images.sh \
+            --image "$IMAGE_REF" \
+            --dockerfile "${{ matrix.image.dockerfile }}" \
+            --name "${{ matrix.image.name }}" \
+            --output "$REPORT_DIR" \
+            --skip-db-update
+          code=$?
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          cat "$REPORT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          # Exit codes: 0 clean, 1 policy violation, anything else = scanner error.
+          if [ "$code" -gt 1 ]; then exit "$code"; fi
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles(format('{0}/trivy-image.sarif', env.REPORT_DIR)) != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.REPORT_DIR }}/trivy-image.sarif
+          category: container-${{ matrix.image.name }}
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-scan-${{ matrix.image.name }}
+          path: ${{ env.REPORT_DIR }}
+          retention-days: 90
+
+      # ── Alerting ──────────────────────────────────────────────────────────
+      - name: Open / update vulnerability issue
+        if: steps.scan.outputs.exitcode == '1' && github.event_name != 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          IMAGE_NAME: ${{ matrix.image.name }}
+        with:
+          script: |
+            const fs = require('fs');
+            const name = process.env.IMAGE_NAME;
+            const summary = fs.readFileSync(`${process.env.REPORT_DIR}/summary.md`, 'utf8').slice(0, 60000);
+            const title = `Container vulnerabilities: ${name}`;
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Scan of \`${name}\` at ${context.sha.slice(0, 7)} found fixable vulnerabilities above the policy threshold.\n\nFull reports: ${run}\n\n${summary}`;
+            const { data: open } = await github.rest.issues.listForRepo({ ...context.repo, state: 'open', labels: 'container-vulnerability' });
+            const existing = open.find(i => i.title === title);
+            if (existing) {
+              await github.rest.issues.update({ ...context.repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ ...context.repo, title, body, labels: ['security', 'container-vulnerability'] });
+            }
+
+      - name: Close resolved vulnerability issue
+        if: steps.scan.outputs.exitcode == '0' && github.event_name != 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          IMAGE_NAME: ${{ matrix.image.name }}
+        with:
+          script: |
+            const title = `Container vulnerabilities: ${process.env.IMAGE_NAME}`;
+            const { data: open } = await github.rest.issues.listForRepo({ ...context.repo, state: 'open', labels: 'container-vulnerability' });
+            for (const issue of open.filter(i => i.title === title)) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body: `Resolved — latest scan (${context.sha.slice(0, 7)}) is clean.` });
+              await github.rest.issues.update({ ...context.repo, issue_number: issue.number, state: 'closed', state_reason: 'completed' });
+            }
+
+      - name: Slack alert
+        if: steps.scan.outputs.exitcode == '1' && github.event_name != 'pull_request'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_SECURITY_WEBHOOK_URL }}
+          IMAGE_NAME: ${{ matrix.image.name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_SECURITY_WEBHOOK_URL not configured — skipping Slack alert."
+            exit 0
+          fi
+          counts=$(jq -r '"critical=\(.critical) high=\(.high) medium=\(.medium) low=\(.low)"' "$REPORT_DIR/counts.json")
+          payload=$(jq -n --arg img "$IMAGE_NAME" --arg counts "$counts" --arg url "$RUN_URL" \
+            '{text: ":rotating_light: Container scan: *\($img)* has fixable vulnerabilities above policy (\($counts)). <\($url)|View reports>"}')
+          curl -fsS -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK_URL"
+
+      - name: Enforce policy
+        if: steps.scan.outputs.exitcode == '1'
+        run: |
+          echo "::error::${{ matrix.image.name }} has fixable vulnerabilities at or above the policy threshold. See the job summary and uploaded reports."
+          exit 1

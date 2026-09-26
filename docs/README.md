@@ -20,8 +20,22 @@ New to the codebase? Read these two first:
 | [architecture.md](./architecture.md) | System overview: FBA trust slices, SBTs, the contract set, how the pieces fit together. |
 | [deployment-guide.md](./deployment-guide.md) | End-to-end walkthrough: build the contracts, deploy them, initialize and wire them, verify. |
 
+Prefer learning by watching or doing? See the [video tutorials](./video-tutorials.md)
+and the [interactive documentation](./interactive-documentation.md) (search, API
+playground, quorum slice simulator).
+
 Then see [`../README.md`](../README.md) for the contribution workflow and
 [`../SECURITY.md`](../SECURITY.md) for the vulnerability-reporting policy.
+
+---
+
+## Tutorials & interactive docs
+
+| Doc | What it covers |
+|---|---|
+| [video-tutorials.md](./video-tutorials.md) | Index of video tutorials for common tasks, with scripts, captions, and the recording guide (issue #1634). |
+| [interactive-documentation.md](./interactive-documentation.md) | Interactive docs: full-text search, API playground, slice/hash playgrounds, and the feedback loop (issue #1635). |
+| [bbs-plus-tutorial.md](./bbs-plus-tutorial.md) | BBS+ selective-disclosure tutorial. |
 
 ---
 
@@ -51,10 +65,15 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [ci-testnet-deployment.md](./ci-testnet-deployment.md) | How the automated testnet deployment pipeline works. |
 | [cicd-pipeline.md](./cicd-pipeline.md) | Overview of the CI/CD pipeline stages and gates. |
 | [multi-region-deployment.md](./multi-region-deployment.md) | Running the API server across multiple regions. |
+| [multi-region-failover.md](./multi-region-failover.md) | AWS active/passive multi-region failover: detection, data replication, procedures and drills (#1650). |
+| [infrastructure-as-code.md](./infrastructure-as-code.md) | Terraform layout, state, CI plan/apply, drift detection and infrastructure testing (#1652). |
+| [blue-green-deployment.md](./blue-green-deployment.md) | Zero-downtime api-server releases: blue/green slots, health-check validation, traffic switching, rollback. |
 | [capacity-planning.md](./capacity-planning.md) | Sizing guidance for throughput, storage, and RPC load. |
 | [cost-optimization-guide.md](./cost-optimization-guide.md) | Reducing on-chain fees and infrastructure cost. |
 | [database-migrations.md](./database-migrations.md) | Running and authoring API-server database migrations. |
 | [backup-system.md](./backup-system.md) | Backup architecture, schedule, and restore procedure. |
+| [log-retention-policy.md](./log-retention-policy.md) | Log retention periods, cold-storage archival, retrieval and compliance mapping (#1653). |
+| [backup-verification.md](./backup-verification.md) | Automated backup verification, integrity checks, and restoring from a verified backup. |
 | [disaster-recovery.md](./disaster-recovery.md) | Emergency pause/redeploy and credential-restoration procedures. |
 | [DR_PLAN_IMPLEMENTATION.md](./DR_PLAN_IMPLEMENTATION.md) | Implementation notes for the disaster-recovery plan. |
 | [resilience.md](./resilience.md) | Resilience requirements and chaos-testing approach (issue #1003). |
@@ -74,6 +93,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [critical-event-alerting.md](./critical-event-alerting.md) | Critical-event metrics and the Prometheus alert rules that fire on them. |
 | [operator-health-metrics.md](./operator-health-metrics.md) | Health metrics exposed for operators and their meaning. |
 | [perf-regression.md](./perf-regression.md) | Performance-regression benchmarking and thresholds. |
+| [performance-tuning-guide.md](./performance-tuning-guide.md) | Bottlenecks, tuning parameters, benchmark methodology, and performance monitoring. |
 
 ---
 
@@ -84,11 +104,13 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [threat-model.md](./threat-model.md) | Assets, threat actors, attack vectors, and mitigations already considered. |
 | [THREAT_MODEL_CREDENTIAL_FRAUD.md](./THREAT_MODEL_CREDENTIAL_FRAUD.md) | Focused threat model for credential-fraud detection (issue #1252). |
 | [security-best-practices.md](./security-best-practices.md) | Security guidance for contributors and integrators. |
+| [security-best-practices.md](./security-best-practices.md#security-requirements-checklist-threat-modeling-and-tooling) | Security requirements (SR-* IDs), PR/release checklists, threat-modeling guide, and security tooling (issue #1637). |
 | [security-audit-checklist.md](./security-audit-checklist.md) | Internal review checklist used before releases. |
 | [issuer-security-checklist.md](./issuer-security-checklist.md) | Security checklist for institutions issuing credentials. |
 | [gdpr-compliance.md](./gdpr-compliance.md) | GDPR obligations and how the system meets them. |
 | [audit-log-format.md](./audit-log-format.md) | Structure and semantics of the audit log. |
 | [formal-verification.md](./formal-verification.md) | Formal verification of critical functions (issue #1317). |
+| [continuous-security-testing.md](./continuous-security-testing.md) | CI security pipeline: SAST, dependency and container scanning, aggregated report (issue #1631). |
 
 ---
 
@@ -119,6 +141,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [contract-upgrade-checklist.md](./contract-upgrade-checklist.md) | Checklist to run through before and during an upgrade. |
 | [contract-upgrade-strategy.md](./contract-upgrade-strategy.md) | The upgrade strategy and its rationale. |
 | [scheduled-upgrades.md](./scheduled-upgrades.md) | Scheduling an upgrade to execute at a future time. |
+| [upgrade-testing.md](./upgrade-testing.md) | Upgrade simulation tests and the static state-compatibility check (issue #1630). |
 | [migration-invariants.md](./migration-invariants.md) | Formal invariant set the migration verifier checks (enforced in CI). |
 | [SLICE_MIGRATION_GUIDE.md](./SLICE_MIGRATION_GUIDE.md) | Migrating existing quorum slices (issue #1253). |
 
@@ -130,10 +153,12 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 |---|---|
 | [api-client-guide.md](./api-client-guide.md) | Using the API client to talk to the API server. |
 | [api-endpoint-examples.md](./api-endpoint-examples.md) | Worked request/response examples for the REST endpoints. |
+| [api-response-examples.md](./api-response-examples.md) | Success and error response examples for every endpoint group, response schemas, and v1/v2 example versioning (issue #1636). |
 | [integration-patterns-guide.md](./integration-patterns-guide.md) | Common integration patterns for verifiers and issuers. |
 | [interoperability-guide.md](./interoperability-guide.md) | Interoperating with external credential systems. |
 | [government-licensing-integration.md](./government-licensing-integration.md) | Protocol for licensing bodies to integrate as verified issuers. |
 | [websocket-scaling.md](./websocket-scaling.md) | Scaling WebSocket delivery across multiple API-server replicas. |
+| [plugin-development-guide.md](./plugin-development-guide.md) | Writing, testing, and distributing API-server plugins. |
 
 See also [`../api-server/docs/API_DOCUMENTATION.md`](../api-server/docs/API_DOCUMENTATION.md)
 for the auto-generated OpenAPI / Swagger reference.
@@ -152,6 +177,7 @@ for the auto-generated OpenAPI / Swagger reference.
 | [fuzz-testing-guide.md](./fuzz-testing-guide.md) | Guide to writing and running fuzz tests. |
 | [code-coverage.md](./code-coverage.md) | How coverage is measured and reported. |
 | [coverage-configuration.md](./coverage-configuration.md) | Coverage tooling configuration reference. |
+| [longevity-testing.md](./longevity-testing.md) | Long-running API server soak tests: memory monitoring, leak and exhaustion detection (issue #1632). |
 
 ---
 

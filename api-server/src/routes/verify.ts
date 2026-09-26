@@ -8,6 +8,12 @@ import {
 } from '../soroban.js';
 import { validate, schemas } from '../middleware/validate.js';
 import { metricsStore } from '../services/metrics.js';
+// #1568: Proof verification memoization — avoid redundant on-chain lookups
+// for the same (credential_id, claim_type, proof) tuple.
+import {
+  getDefaultProofMemoizationService,
+  buildProofCacheKey,
+} from '../services/proofMemoization.js';
 
 /**
  * Best-effort caller identity for analytics attribution — same header
@@ -208,6 +214,8 @@ export class ProofVerificationCache<T> {
 
 export function createVerifyRouter(soroban: SorobanClient) {
   const router = Router();
+  // #1568: Proof memoization — shared across all requests in this process.
+  const proofMemo = getDefaultProofMemoizationService();
 
   /**
    * POST /api/verify/batch

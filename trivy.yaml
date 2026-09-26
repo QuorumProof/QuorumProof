@@ -1,0 +1,20 @@
+# Trivy configuration shared by CI (.github/workflows/container-scan.yml) and
+# local runs (scripts/scan_images.sh) — Issue #1651.
+scan:
+  scanners:
+    - vuln
+    - secret
+    - misconfig
+vulnerability:
+  # Report both OS and language-package findings.
+  type:
+    - os
+    - library
+severity:
+  - UNKNOWN
+  - LOW
+  - MEDIUM
+  - HIGH
+  - CRITICAL
+ignorefile: .trivyignore
+timeout: 10m
