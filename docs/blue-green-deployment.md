@@ -118,7 +118,7 @@ uses:
 | `BG_POST_SWITCH_SOAK` | `60` | Seconds of monitoring after the switch. |
 | `BG_ERROR_THRESHOLD` | `0.05` | Max 5xx ratio during soak. |
 | `BG_KEEP_PREVIOUS` | `true` | `false` scales the old slot to 0 after success. |
-| `PROMETHEUS_URL` | — | Enables the error-rate gate. Requires a `slot` label on `http_requests_total` (add via relabelling from the pod label). |
+| `PROMETHEUS_URL` | — | Enables the error-rate gate. Uses `quorumproof_api_errors_total` / `quorumproof_api_request_duration_seconds_count`; requires a `slot` label on them (add via relabelling from the pod's `slot` label). |
 | `NOTIFY_WEBHOOK` | — | Slack/Teams notifications. |
 
 ---
