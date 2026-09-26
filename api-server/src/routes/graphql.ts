@@ -1,10 +1,162 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
-import { GraphQLResolvers, type SorobanClient } from '../services/graphqlResolvers.js';
-import { graphqlSchema } from '../services/graphqlSchema.js';
+import { getPool } from '../db.js';
+
+export type SorobanClient = {
+  simulateCall: typeof SimulateCallType;
+  u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
+  addressVal: (a: string) => ReturnType<typeof SimulateCallType>;
+};
+
+function serializeBigInt(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(serializeBigInt);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, serializeBigInt(v)])
+    );
+  }
+  return value;
+}
+
+// Minimal introspection schema returned for __schema queries
+const SCHEMA_DESCRIPTION = {
+  types: [
+    {
+      name: 'Query',
+      kind: 'OBJECT',
+      fields: [
+        { name: 'credential', description: 'Fetch a single credential by ID' },
+        { name: 'credentials', description: 'Fetch multiple credentials by IDs' },
+        { name: 'slice', description: 'Fetch a quorum slice by ID' },
+        { name: 'credentialCount', description: 'Total number of credentials' },
+        { name: 'attestorReputation', description: 'Reputation score for an attestor address' },
+        { name: 'credentialTier', description: 'Fetch tier information for a credential' },
+        { name: 'credentialRewards', description: 'Fetch reward balance for a credential' },
+        { name: 'tierRequirements', description: 'Fetch tier advancement requirements' },
+        { name: 'redemptionRequests', description: 'Fetch redemption requests for a credential' },
+      ],
+    },
+    { name: 'Credential', kind: 'OBJECT' },
+    { name: 'Slice', kind: 'OBJECT' },
+    { name: 'AttestorReputation', kind: 'OBJECT' },
+    { name: 'CredentialTier', kind: 'OBJECT' },
+    { name: 'CredentialRewards', kind: 'OBJECT' },
+    { name: 'TierRequirement', kind: 'OBJECT' },
+    { name: 'RedemptionRequest', kind: 'OBJECT' },
+  ],
+};
 
 type GraphQLVariables = Record<string, unknown>;
 
+
+async function resolveCredentialTier(
+  args: GraphQLVariables,
+  _ctx: ResolverContext,
+): Promise<unknown> {
+  const id = args['id'];
+  if (!id) throw new Error('credentialTier requires id argument');
+
+  try {
+    const pool = getPool();
+    const result = await pool.query(
+      `SELECT credential_id, tier, tier_points, tier_acquired_at
+       FROM credential_tiers WHERE credential_id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) return null;
+
+    const tierRow = result.rows[0];
+    const benefitsResult = await pool.query(
+      `SELECT benefit_name, benefit_value FROM tier_benefits WHERE tier = $1`,
+      [tierRow.tier]
+    );
+
+    const benefits: Record<string, string> = {};
+    for (const benefit of benefitsResult.rows) {
+      benefits[benefit.benefit_name] = benefit.benefit_value;
+    }
+
+    return {
+      credential_id: tierRow.credential_id,
+      tier: tierRow.tier,
+      tier_points: tierRow.tier_points,
+      tier_acquired_at: tierRow.tier_acquired_at,
+      benefits,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveCredentialRewards(
+  args: GraphQLVariables,
+  _ctx: ResolverContext,
+): Promise<unknown> {
+  const id = args['id'];
+  if (!id) throw new Error('credentialRewards requires id argument');
+
+  try {
+    const pool = getPool();
+    const result = await pool.query(
+      `SELECT credential_id, reward_points, accumulated_value
+       FROM credential_rewards WHERE credential_id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      credential_id: row.credential_id,
+      reward_points: row.reward_points,
+      accumulated_value: row.accumulated_value,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveTierRequirements(
+  _args: GraphQLVariables,
+  _ctx: ResolverContext,
+): Promise<unknown[]> {
+  try {
+    const pool = getPool();
+    const result = await pool.query(
+      `SELECT tier, min_points, min_attestations, min_age_days
+       FROM tier_requirements ORDER BY min_points ASC`
+    );
+    return result.rows;
+  } catch {
+    return [];
+  }
+}
+
+async function resolveRedemptionRequests(
+  args: GraphQLVariables,
+  _ctx: ResolverContext,
+): Promise<unknown[]> {
+  const id = args['id'];
+  if (!id) throw new Error('redemptionRequests requires id argument');
+
+  try {
+    const pool = getPool();
+    const limit = Math.min(parseInt(String(args['limit'] ?? '50'), 10), 100);
+
+    const result = await pool.query(
+      `SELECT id, credential_id, amount, destination_address, status, submitted_at, processed_at
+       FROM redemption_requests WHERE credential_id = $1
+       ORDER BY submitted_at DESC LIMIT $2`,
+      [id, limit]
+    );
+
+    return result.rows;
+  } catch {
+    return [];
+  }
+}
 
 // Simple operation parser: extracts top-level field selections and their arguments
 // Handles patterns like:  fieldName(arg: value) { ... }  and  fieldName
@@ -171,6 +323,18 @@ export function createGraphqlRouter(soroban: SorobanClient) {
             case 'tierStats':
               data[key] = await resolvers.resolveTierStats();
               break;
+            case 'credentialTier':
+              data[key] = await resolveCredentialTier(resolvedArgs, ctx);
+              break;
+            case 'credentialRewards':
+              data[key] = await resolveCredentialRewards(resolvedArgs, ctx);
+              break;
+            case 'tierRequirements':
+              data[key] = await resolveTierRequirements(resolvedArgs, ctx);
+              break;
+            case 'redemptionRequests':
+              data[key] = await resolveRedemptionRequests(resolvedArgs, ctx);
+              break;
             default:
               errors.push({ message: `Unknown field: ${field}`, path: key });
           }
@@ -197,44 +361,20 @@ export function createGraphqlRouter(soroban: SorobanClient) {
   router.get('/', (_req: Request, res: Response) => {
     res.json({
       endpoint: 'POST /api/graphql',
-      description: 'GraphQL endpoint with federation support (#1604)',
-      version: '2.0',
-      schema: graphqlSchema,
-      federation: {
-        enabled: true,
-        version: '2.0',
-        entities: ['Credential', 'CredentialTier', 'AttestorReputation'],
-      },
-      supported_fields: {
-        queries: [
-          'credential(id: ID!)',
-          'credentials(ids: [ID!]!)',
-          'credentialsByIssuer(issuer: String!, limit: Int, offset: Int)',
-          'slice(id: ID!)',
-          'credentialCount',
-          'attestorReputation(address: String!)',
-          'credentialTier(credentialId: ID!)',
-          'credentialRewards(credentialId: ID!, status: String)',
-          'rewardsSummary(credentialId: ID!)',
-          'searchCredentials(query: String!, limit: Int, offset: Int)',
-          'tierStats',
-        ],
-        mutations: [
-          'updateCredentialReputation(credentialId: ID!, scoreIncrement: Int!)',
-          'claimReward(credentialId: ID!, rewardId: ID!)',
-          'settleEscrow(escrowId: ID!, settlementHash: String!)',
-        ],
-      },
-      benchmarking: {
-        supported: true,
-        metricsHeader: 'X-GraphQL-Duration-Ms',
-      },
+      description: 'GraphQL-compatible batch query endpoint',
+      supported_fields: [
+        'credential(id: ID)',
+        'credentials(ids: [ID])',
+        'slice(id: ID)',
+        'credentialCount',
+        'attestorReputation(address: String)',
+        'credentialTier(id: ID)',
+        'credentialRewards(id: ID)',
+        'tierRequirements',
+        'redemptionRequests(id: ID, limit: Int)',
+      ],
       example: {
-        query: `{
-  credential(id: "1") { id subject issuer tier { tier reputationScore } }
-  tierStats { tier count avgReputation }
-  credentialCount
-}`,
+        query: '{ credential(id: "1") { id subject issuer } credentialTier(id: "1") { tier tier_points } tierRequirements { tier min_points } }',
       },
     });
   });

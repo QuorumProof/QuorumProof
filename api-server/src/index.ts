@@ -66,6 +66,9 @@ import { createGracefulShutdown } from './services/gracefulShutdown.js';
 // #1559: Connection pooling for the API server.
 import { createConnectionPool, createConnectionPoolMiddleware } from './services/connectionPool.js';
 import * as Soroban from './soroban.js';
+import { createCredentialTiersRouter } from './routes/credentialTiers.js';
+import { createCredentialRedemptionRouter } from './routes/credentialRedemption.js';
+import { initTierRedemptionEvents } from './services/tierRedemptionEvents.js';
 
 const app = express();
 
@@ -194,6 +197,9 @@ app.use('/api/credentials', createAuditRouter()); // #1573 audit trail
 app.use('/api/verify', verifyRouter);
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
+app.use('/api/credentials', createCredentialTiersRouter()); // #1602 credential tiering
+app.use('/api/credentials', createCredentialRedemptionRouter()); // #1603 credential redemption
+app.use('/api/verify', verifyRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
@@ -413,4 +419,8 @@ function broadcastEvent(...args: Parameters<typeof _wsServerBroadcastEvent>) {
   return result;
 }
 
-/* … truncated 5498 chars — edit only what you need near the top … */
+// #1605: Initialize tier/redemption events broadcaster for real-time push notifications
+initTierRedemptionEvents(broadcastEvent);
+
+export { broadcastEvent };
+export default app;

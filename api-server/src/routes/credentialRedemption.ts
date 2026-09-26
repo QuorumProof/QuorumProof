@@ -1,168 +1,363 @@
 import { Router, Request, Response } from 'express';
-import { credentialRedemptionService } from '../services/credentialRedemption.js';
+import { getPool } from '../db.js';
+import {
+  publishRedemptionRequestedEvent,
+  publishRedemptionClaimedEvent,
+} from '../services/tierRedemptionEvents.js';
+
+type RedemptionStatus = 'pending' | 'approved' | 'claimed' | 'expired' | 'cancelled';
+
+interface RewardInfo {
+  credential_id: number;
+  reward_points: number;
+  accumulated_value: string;
+}
+
+interface RedemptionRequest {
+  id: number;
+  credential_id: number;
+  amount: string;
+  destination_address: string;
+  status: RedemptionStatus;
+  submitted_at: string;
+  processed_at?: string;
+}
 
 export function createCredentialRedemptionRouter() {
   const router = Router();
 
-  // Get all rewards for a credential
-  router.get('/:credentialId/rewards', async (req: Request, res: Response) => {
+  /**
+   * GET /api/credentials/:id/rewards
+   * Get reward balance for a credential
+   */
+  router.get('/:id/rewards', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId as string, 10);
-      if (!Number.isInteger(credentialId) || credentialId <= 0) {
-        res.status(400).json({ error: 'Invalid credential ID' });
+      const { id } = req.params;
+      const pool = getPool();
+
+      const result = await pool.query(
+        `SELECT credential_id, reward_points, accumulated_value
+         FROM credential_rewards WHERE credential_id = $1`,
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        res.status(404).json({ error: 'Reward account not found' });
         return;
       }
 
-      let status: string | undefined;
-      const statusVal = req.query.status;
-      if (typeof statusVal === 'string') {
-        status = statusVal;
-      } else if (Array.isArray(statusVal)) {
-        status = String(statusVal[0]);
-      }
-      const rewards = await credentialRedemptionService.getCredentialRewards(credentialId, status);
-      res.json(rewards);
+      const row = result.rows[0];
+      const rewardInfo: RewardInfo = {
+        credential_id: row.credential_id,
+        reward_points: row.reward_points,
+        accumulated_value: row.accumulated_value,
+      };
+
+      res.json(rewardInfo);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
     }
   });
 
-  // Get reward details
-  router.get('/rewards/:rewardId', async (req: Request, res: Response) => {
+  /**
+   * POST /api/credentials/:id/rewards/accrue
+   * Accrue rewards to a credential
+   */
+  router.post('/:id/rewards/accrue', async (req: Request, res: Response) => {
     try {
-      const rewardId = Array.isArray(req.params.rewardId) ? req.params.rewardId[0] : (req.params.rewardId as string);
-      const reward = await credentialRedemptionService.getReward(rewardId);
-      if (!reward) {
-        res.status(404).json({ error: 'Reward not found' });
+      const { id } = req.params;
+      const { points, value } = req.body as { points?: number; value?: string };
+
+      if (!points || points <= 0) {
+        res.status(400).json({ error: 'Points must be a positive number' });
         return;
       }
-      res.json(reward);
+
+      const valueAmount = value ? parseFloat(value) : 0;
+      const pool = getPool();
+
+      const result = await pool.query(
+        `UPDATE credential_rewards
+         SET reward_points = reward_points + $1,
+             accumulated_value = accumulated_value + $2
+         WHERE credential_id = $3
+         RETURNING credential_id, reward_points, accumulated_value`,
+        [points, valueAmount, id]
+      );
+
+      if (result.rows.length === 0) {
+        res.status(404).json({ error: 'Credential not found' });
+        return;
+      }
+
+      const row = result.rows[0];
+      res.json({
+        credential_id: row.credential_id,
+        reward_points: row.reward_points,
+        accumulated_value: row.accumulated_value,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
     }
   });
 
-  // Claim a reward (moves to escrow)
-  router.post('/:credentialId/rewards/:rewardId/claim', async (req: Request, res: Response) => {
+  /**
+   * POST /api/credentials/:id/redemptions
+   * Submit a redemption request
+   */
+  router.post('/:id/redemptions', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId as string, 10);
-      if (!Number.isInteger(credentialId) || credentialId <= 0) {
-        res.status(400).json({ error: 'Invalid credential ID' });
+      const { id } = req.params;
+      const { amount, destination_address, reason } = req.body as {
+        amount?: string;
+        destination_address?: string;
+        reason?: string;
+      };
+
+      if (!amount || !destination_address) {
+        res.status(400).json({
+          error: 'amount and destination_address are required',
+        });
         return;
       }
 
-      const rewardId = Array.isArray(req.params.rewardId) ? req.params.rewardId[0] : (req.params.rewardId as string);
-      const escrow = await credentialRedemptionService.claimReward(rewardId);
-      res.json(escrow);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: msg });
-    }
-  });
-
-  // Get escrow entries for a credential
-  router.get('/:credentialId/escrow', async (req: Request, res: Response) => {
-    try {
-      const credentialId = parseInt(req.params.credentialId as string, 10);
-      if (!Number.isInteger(credentialId) || credentialId <= 0) {
-        res.status(400).json({ error: 'Invalid credential ID' });
+      const amountValue = parseFloat(amount);
+      if (isNaN(amountValue) || amountValue <= 0) {
+        res.status(400).json({ error: 'amount must be a positive number' });
         return;
       }
 
-      let status: string | undefined;
-      const statusVal = req.query.status;
-      if (typeof statusVal === 'string') {
-        status = statusVal;
-      } else if (Array.isArray(statusVal)) {
-        status = String(statusVal[0]);
+      const pool = getPool();
+
+      // Check available rewards
+      const rewardResult = await pool.query(
+        `SELECT accumulated_value FROM credential_rewards WHERE credential_id = $1`,
+        [id]
+      );
+
+      if (rewardResult.rows.length === 0) {
+        res.status(404).json({ error: 'Credential not found' });
+        return;
       }
-      const escrow = await credentialRedemptionService.getCredentialEscrow(credentialId, status);
-      res.json(escrow);
+
+      const availableValue = parseFloat(rewardResult.rows[0].accumulated_value);
+      if (amountValue > availableValue) {
+        res.status(400).json({
+          error: `Insufficient reward balance. Available: ${availableValue}, Requested: ${amountValue}`,
+        });
+        return;
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        // Create escrow
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30); // 30-day expiration
+
+        const escrowResult = await client.query(
+          `INSERT INTO reward_escrow (credential_id, amount, escrow_status, expires_at)
+           VALUES ($1, $2, 'pending', $3)
+           RETURNING id`,
+          [id, amountValue, expiresAt.toISOString()]
+        );
+
+        const escrowId = escrowResult.rows[0].id;
+
+        // Create redemption request
+        const redemptionResult = await client.query(
+          `INSERT INTO redemption_requests
+           (credential_id, reward_escrow_id, amount, destination_address, status, reason)
+           VALUES ($1, $2, $3, $4, 'pending', $5)
+           RETURNING id, credential_id, amount, destination_address, status, submitted_at`,
+          [id, escrowId, amountValue, destination_address, reason || 'Manual redemption request']
+        );
+
+        // Update reward balance
+        await client.query(
+          `UPDATE credential_rewards
+           SET accumulated_value = accumulated_value - $1
+           WHERE credential_id = $2`,
+          [amountValue, id]
+        );
+
+        // Create ledger entry
+        await client.query(
+          `INSERT INTO redemption_ledger
+           (credential_id, redemption_request_id, debit, balance, transaction_type, description)
+           SELECT $1, $2, $3, accumulated_value, 'redemption_request', $4
+           FROM credential_rewards WHERE credential_id = $1`,
+          [id, redemptionResult.rows[0].id, amountValue, `Redemption to ${destination_address}`]
+        );
+
+        await client.query('COMMIT');
+
+        const redempReq = redemptionResult.rows[0];
+        const redemptionReq: RedemptionRequest = {
+          id: redempReq.id,
+          credential_id: redempReq.credential_id,
+          amount: redempReq.amount,
+          destination_address: redempReq.destination_address,
+          status: redempReq.status,
+          submitted_at: redempReq.submitted_at,
+        };
+
+        // Publish redemption requested event for real-time notifications
+        publishRedemptionRequestedEvent(
+          parseInt(id, 10),
+          redempReq.id,
+          redempReq.amount,
+          destination_address
+        );
+
+        res.status(201).json(redemptionReq);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
     }
   });
 
-  // Settle escrow (release reward)
-  router.post('/escrow/:escrowId/settle', async (req: Request, res: Response) => {
+  /**
+   * GET /api/credentials/:id/redemptions
+   * Get redemption history for a credential
+   */
+  router.get('/:id/redemptions', async (req: Request, res: Response) => {
     try {
-      const { settlementHash } = req.body as { settlementHash?: unknown };
-      if (typeof settlementHash !== 'string' || !settlementHash) {
-        res.status(400).json({ error: 'settlementHash is required' });
-        return;
+      const { id } = req.params;
+      const { status: statusFilter, limit = '50' } = req.query;
+
+      const pool = getPool();
+      const limitNum = Math.min(parseInt(String(limit), 10), 100);
+
+      let query =
+        `SELECT id, credential_id, amount, destination_address, status, submitted_at, processed_at
+         FROM redemption_requests WHERE credential_id = $1`;
+      const params: any[] = [id];
+
+      if (statusFilter) {
+        query += ` AND status = $2`;
+        params.push(statusFilter);
       }
 
-      const escrowId = Array.isArray(req.params.escrowId) ? req.params.escrowId[0] : (req.params.escrowId as string);
-      const escrow = await credentialRedemptionService.settleEscrow(escrowId, settlementHash);
-      res.json(escrow);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: msg });
-    }
-  });
+      query += ` ORDER BY submitted_at DESC LIMIT $${params.length + 1}`;
+      params.push(limitNum);
 
-  // Refund escrow (return reward to pending)
-  router.post('/escrow/:escrowId/refund', async (req: Request, res: Response) => {
-    try {
-      const escrowId = Array.isArray(req.params.escrowId) ? req.params.escrowId[0] : (req.params.escrowId as string);
-      const escrow = await credentialRedemptionService.refundEscrow(escrowId);
-      res.json(escrow);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: msg });
-    }
-  });
+      const result = await pool.query(query, params);
 
-  // Get total rewards summary
-  router.get('/:credentialId/rewards/summary', async (req: Request, res: Response) => {
-    try {
-      const credentialId = parseInt(req.params.credentialId as string, 10);
-      if (!Number.isInteger(credentialId) || credentialId <= 0) {
-        res.status(400).json({ error: 'Invalid credential ID' });
-        return;
-      }
-
-      const summary = await credentialRedemptionService.getTotalRewardsByCredential(credentialId);
-      res.json(summary);
+      res.json(result.rows);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
     }
   });
 
-  // Get redemption history
-  router.get('/:credentialId/redemption-history', async (req: Request, res: Response) => {
+  /**
+   * POST /api/credentials/:id/redemptions/:requestId/claim
+   * Claim an approved redemption
+   */
+  router.post('/:id/redemptions/:requestId/claim', async (req: Request, res: Response) => {
     try {
-      const credentialId = parseInt(req.params.credentialId as string, 10);
-      if (!Number.isInteger(credentialId) || credentialId <= 0) {
-        res.status(400).json({ error: 'Invalid credential ID' });
-        return;
+      const { id, requestId } = req.params;
+      const pool = getPool();
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        // Get redemption request
+        const reqResult = await client.query(
+          `SELECT id, status, amount FROM redemption_requests
+           WHERE id = $1 AND credential_id = $2`,
+          [requestId, id]
+        );
+
+        if (reqResult.rows.length === 0) {
+          await client.query('ROLLBACK');
+          res.status(404).json({ error: 'Redemption request not found' });
+          return;
+        }
+
+        const req_row = reqResult.rows[0];
+        if (req_row.status !== 'approved') {
+          await client.query('ROLLBACK');
+          res.status(400).json({
+            error: `Cannot claim redemption with status: ${req_row.status}`,
+          });
+          return;
+        }
+
+        // Update redemption request
+        const updateResult = await client.query(
+          `UPDATE redemption_requests
+           SET status = 'claimed', processed_at = now()
+           WHERE id = $1
+           RETURNING id, status, processed_at`,
+          [requestId]
+        );
+
+        // Update escrow
+        await client.query(
+          `UPDATE reward_escrow SET escrow_status = 'claimed' WHERE id =
+           (SELECT reward_escrow_id FROM redemption_requests WHERE id = $1)`,
+          [requestId]
+        );
+
+        // Create ledger entry
+        await client.query(
+          `INSERT INTO redemption_ledger
+           (credential_id, redemption_request_id, credit, balance, transaction_type, description)
+           SELECT $1, $2, $3, accumulated_value, 'redemption_claimed', 'Redemption claimed'
+           FROM credential_rewards WHERE credential_id = $1`,
+          [id, requestId, req_row.amount]
+        );
+
+        await client.query('COMMIT');
+
+        // Publish redemption claimed event for real-time notifications
+        publishRedemptionClaimedEvent(parseInt(id, 10), parseInt(requestId, 10), req_row.amount);
+
+        res.json(updateResult.rows[0]);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
       }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
 
-      let limitStr = '50';
-      const limitVal = req.query.limit;
-      if (typeof limitVal === 'string') {
-        limitStr = limitVal;
-      } else if (Array.isArray(limitVal)) {
-        limitStr = String(limitVal[0]);
-      }
+  /**
+   * GET /api/credentials/:id/ledger
+   * Get redemption accounting ledger for a credential
+   */
+  router.get('/:id/ledger', async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { limit = '100' } = req.query;
 
-      let offsetStr = '0';
-      const offsetVal = req.query.offset;
-      if (typeof offsetVal === 'string') {
-        offsetStr = offsetVal;
-      } else if (Array.isArray(offsetVal)) {
-        offsetStr = String(offsetVal[0]);
-      }
+      const pool = getPool();
+      const limitNum = Math.min(parseInt(String(limit), 10), 500);
 
-      const limit = Math.min(parseInt(limitStr || '50') || 50, 500);
-      const offset = parseInt(offsetStr || '0') || 0;
+      const result = await pool.query(
+        `SELECT id, credential_id, debit, credit, balance, transaction_type, description, created_at
+         FROM redemption_ledger WHERE credential_id = $1
+         ORDER BY created_at DESC LIMIT $2`,
+        [id, limitNum]
+      );
 
-      const history = await credentialRedemptionService.getRedemptionHistory(credentialId, limit, offset);
-      res.json(history);
+      res.json(result.rows);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ error: msg });
