@@ -34,3 +34,11 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:3001"]
     scrape_interval: 15s
+
+  # #1650 — multi-region failover detector (api-server/src/services/regionFailover.ts).
+  # In AWS, point one target per region at https://api-<region>.<domain>.
+  - job_name: "api-server-region-failover"
+    metrics_path: /health/region/metrics
+    static_configs:
+      - targets: ["host.docker.internal:3001"]
+    scrape_interval: 15s

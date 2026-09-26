@@ -202,3 +202,22 @@ groups:
         annotations:
           summary: "Sustained WebSocket message drops detected"
           description: "WebSocket messages are being dropped at {{ $value | humanize }} drops/s over the last 5 minutes. A client (or multiple) is falling far behind the send queue. Check for slow consumers or systemic network issues. See docs/operational-runbook.md#ws-message-drops."
+
+      # #1650 — Multi-region failover
+      - alert: RegionFailoverActive
+        expr: quorumproof_region_failover_active == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Secondary region {{ $labels.region }} is serving — primary is down"
+          description: "The failover detector in {{ $labels.region }} reports the primary region unreachable. Route 53 should have moved traffic here. Decide whether to promote the Aurora secondary with scripts/region_failover.sh unplanned — see docs/multi-region-failover.md."
+
+      - alert: RegionPeerUnreachable
+        expr: quorumproof_region_peer_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Region {{ $labels.region }} cannot reach its peer region"
+          description: "{{ $labels.region }} ({{ $labels.role }}) has seen its peer region as unhealthy for 5 minutes. If this is the primary, failover capacity is lost."
