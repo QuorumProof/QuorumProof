@@ -92,6 +92,7 @@ const TOPIC_COMMIT_MADE: &str = "CommitMade";
 const TOPIC_BRANCH_MERGED: &str = "BranchMerged";
 /// `migration::MigrationJob.kind` tag for credential-metadata-schema migrations.
 const MIGRATION_KIND_METADATA_SCHEMA: u32 = 1;
+// Design rationale: docs/adr/adr-013-instance-storage-and-ttl.md
 const STANDARD_TTL: u32 = 16_384;
 const EXTENDED_TTL: u32 = 524_288;
 const MAX_ATTESTORS_PER_SLICE: u32 = 20;
@@ -886,6 +887,7 @@ pub enum ContractError {
 
 #[contracttype]
 #[derive(Clone)]
+/// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md, docs/adr/adr-013-instance-storage-and-ttl.md
 pub enum DataKey {
     Credential(u64),
     CredentialCount,
@@ -2498,6 +2500,7 @@ pub enum BatchResult {
 /// stake/weight assigned to each attestor, as described in the Stellar whitepaper.
 #[contracttype]
 #[derive(Clone)]
+/// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
 pub struct QuorumSlice {
     pub id: u64,
     pub creator: Address,
@@ -3397,6 +3400,7 @@ pub struct InheritanceTransferredEventData {
 }
 
 #[contract]
+/// Design rationale: docs/adr/adr-001-fba-trust-model.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct QuorumProofContract;
 
 #[contractimpl]
@@ -3546,6 +3550,8 @@ impl QuorumProofContract {
     /// Issue #487: Migrate contract state from `from_version` to `to_version`.
     /// Only the admin may call this. Versions must be sequential (to = from + 1).
     /// Each version bump applies the corresponding migration logic.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn migrate_state(env: Env, admin: Address, from_version: u32, to_version: u32) {
         admin.require_auth();
         let stored_admin: Address = env
@@ -4063,6 +4069,8 @@ impl QuorumProofContract {
     }
 
     /// Pause the contract. Only admin may call this.
+    ///
+    /// Design rationale: docs/adr/adr-014-admin-circuit-breaker-and-rate-limiting.md
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
         let stored: Address = env
@@ -5271,6 +5279,8 @@ impl QuorumProofContract {
     }
 
     /// Require that the address is within rate limits
+    ///
+    /// Design rationale: docs/adr/adr-014-admin-circuit-breaker-and-rate-limiting.md
     fn require_rate_limit(env: &Env, address: &Address) {
         if !Self::check_rate_limit(env, address) {
             panic_with_error!(env, ContractError::RateLimitExceeded);
@@ -6492,6 +6502,7 @@ impl QuorumProofContract {
         }
     }
 
+    /// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
     fn create_weighted_slice(
         env: &Env,
         creator: Address,
@@ -11998,6 +12009,8 @@ impl QuorumProofContract {
     /// Returns false if the credential is revoked, suspended, or expired.
     /// Check if a credential is attested by a quorum slice.
     /// Panics with ContractError::CredentialNotFound if missing.
+    ///
+    /// Design rationale: docs/adr/adr-012-weighted-threshold-quorum-slices.md
     pub fn is_attested(env: Env, credential_id: u64, slice_id: u64) -> bool {
         // Issue #377: Check verification cache first
         if let Some(cache) = Self::get_verification_cache(&env, credential_id, slice_id) {
@@ -13612,6 +13625,8 @@ impl QuorumProofContract {
     /// # Panics
     /// Panics if `admin` does not authorize the call.
     /// Panics with `ContractError::InvalidInput` if upgrade validation fails.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         let stored: Address = env
@@ -13643,6 +13658,8 @@ impl QuorumProofContract {
     ///
     /// # Panics
     /// Panics with `ContractError::InvalidInput` if any check fails.
+    ///
+    /// Design rationale: docs/adr/adr-011-state-versioning-and-upgrades.md
     pub fn validate_upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
         // Check 1: hash must not be all-zeros (blank WASM guard)
         let zero = soroban_sdk::BytesN::<32>::from_array(&env, &[0u8; 32]);

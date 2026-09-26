@@ -154,3 +154,6 @@ VERIFICATION_CHECKLIST.md
 # OS-generated junk
 **/.DS_Store
 **/Thumbs.db
+
+# Longevity test output (#1632)
+longevity-reports/
