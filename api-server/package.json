@@ -10,6 +10,8 @@
     "dev": "tsx src/index.ts",
     "test": "vitest --run",
     "loadtest:ws": "tsx loadtest/wsLoadTest.ts",
+    "longevity": "node --expose-gc --import tsx longevity/harness.ts",
+    "longevity:smoke": "LONGEVITY_DURATION=3m LONGEVITY_WARMUP=30s node --expose-gc --import tsx longevity/harness.ts",
     "migrate": "tsx src/migrations/cli.ts up",
     "migrate:rollback": "tsx src/migrations/cli.ts down",
     "openapi:generate": "tsx scripts/generate-openapi-spec.ts",

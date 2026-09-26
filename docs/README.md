@@ -89,6 +89,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [gdpr-compliance.md](./gdpr-compliance.md) | GDPR obligations and how the system meets them. |
 | [audit-log-format.md](./audit-log-format.md) | Structure and semantics of the audit log. |
 | [formal-verification.md](./formal-verification.md) | Formal verification of critical functions (issue #1317). |
+| [continuous-security-testing.md](./continuous-security-testing.md) | CI security pipeline: SAST, dependency and container scanning, aggregated report (issue #1631). |
 
 ---
 
@@ -119,6 +120,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [contract-upgrade-checklist.md](./contract-upgrade-checklist.md) | Checklist to run through before and during an upgrade. |
 | [contract-upgrade-strategy.md](./contract-upgrade-strategy.md) | The upgrade strategy and its rationale. |
 | [scheduled-upgrades.md](./scheduled-upgrades.md) | Scheduling an upgrade to execute at a future time. |
+| [upgrade-testing.md](./upgrade-testing.md) | Upgrade simulation tests and the static state-compatibility check (issue #1630). |
 | [migration-invariants.md](./migration-invariants.md) | Formal invariant set the migration verifier checks (enforced in CI). |
 | [SLICE_MIGRATION_GUIDE.md](./SLICE_MIGRATION_GUIDE.md) | Migrating existing quorum slices (issue #1253). |
 
@@ -152,6 +154,7 @@ for the auto-generated OpenAPI / Swagger reference.
 | [fuzz-testing-guide.md](./fuzz-testing-guide.md) | Guide to writing and running fuzz tests. |
 | [code-coverage.md](./code-coverage.md) | How coverage is measured and reported. |
 | [coverage-configuration.md](./coverage-configuration.md) | Coverage tooling configuration reference. |
+| [longevity-testing.md](./longevity-testing.md) | Long-running API server soak tests: memory monitoring, leak and exhaustion detection (issue #1632). |
 
 ---
 
