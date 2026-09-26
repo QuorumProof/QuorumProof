@@ -1,0 +1,40 @@
+name: Documentation feedback
+description: Report something unclear, wrong, or missing in the docs.
+title: "[Docs feedback] "
+labels: ["documentation", "docs-feedback"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: Path of the doc (e.g. docs/quorum-slice-guide.md) and section, if known.
+      placeholder: docs/api-response-examples.md#verification
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem?
+      options:
+        - Incorrect or outdated
+        - Unclear / hard to follow
+        - Missing information
+        - Broken example or link
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: helpful
+    attributes:
+      label: Was the page helpful overall?
+      options:
+        - "Yes"
+        - Partly
+        - "No"
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What were you trying to do, and what would have helped?
+    validations:
+      required: true

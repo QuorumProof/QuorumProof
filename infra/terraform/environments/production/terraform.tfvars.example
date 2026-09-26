@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars (or pass -var-file) — values here are placeholders.
+api_image                 = "123456789012.dkr.ecr.us-east-1.amazonaws.com/quorumproof/api-server@sha256:<digest>"
+hosted_zone_id            = "Z0123456789ABCDEFGHIJ"
+api_domain                = "api.quorumproof.io"
+primary_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/<id>"
+secondary_certificate_arn = "arn:aws:acm:eu-west-1:123456789012:certificate/<id>"
+alert_emails              = ["oncall@quorumproof.io"]
+
+api_environment = {
+  STELLAR_RPC_URL       = "https://soroban-mainnet.stellar.org"
+  CONTRACT_QUORUM_PROOF = "<contract-id>"
+  CONTRACT_SBT_REGISTRY = "<contract-id>"
+  CONTRACT_ZK_VERIFIER  = "<contract-id>"
+}
+
+api_secret_names = {
+  DATABASE_URL = "quorumproof/production/database-url"
+  REDIS_URL    = "quorumproof/production/redis-url"
+}

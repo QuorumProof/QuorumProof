@@ -1,0 +1,5 @@
+# Copy to backend.hcl (git-ignored) and fill in. The state bucket and lock
+# table are bootstrapped once per account — see docs/infrastructure-as-code.md.
+bucket         = "quorumproof-terraform-state-<account-id>"
+region         = "us-east-1"
+dynamodb_table = "quorumproof-terraform-locks"

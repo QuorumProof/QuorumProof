@@ -1,0 +1,66 @@
+# Issue #1631: project-specific Semgrep rules, run alongside the registry
+# rulesets in .github/workflows/security.yml.
+rules:
+  - id: soroban-upgrade-without-admin-check
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      `update_current_contract_wasm` is called without comparing the caller
+      against the stored admin. Anyone who can satisfy `require_auth` for an
+      arbitrary address could replace the contract code.
+      See docs/upgrade-testing.md.
+    patterns:
+      - pattern-inside: |
+          fn $F(...) { ... }
+      - pattern: $ENV.deployer().update_current_contract_wasm($HASH)
+      - pattern-not-inside: |
+          fn $F(...) {
+            ...
+            assert!($STORED == $ADMIN, ...);
+            ...
+          }
+    paths:
+      include: [contracts/]
+
+  - id: soroban-privileged-fn-missing-require-auth
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      A function that takes an `admin` address writes contract storage but never
+      calls `admin.require_auth()`.
+    patterns:
+      - pattern-inside: |
+          pub fn $F($ENV: Env, admin: Address, ...) { ... }
+      - pattern: $ENV.storage().$KIND().set(...)
+      - pattern-not-inside: |
+          pub fn $F($ENV: Env, admin: Address, ...) {
+            ...
+            admin.require_auth();
+            ...
+          }
+    paths:
+      include: [contracts/]
+      exclude: ["**/tests*.rs", "**/integration_tests/**", "**/proptest_*.rs"]
+
+  - id: api-server-logs-secret
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: A value that looks like a secret or private key is written to the log.
+    pattern-either:
+      - pattern: console.$LOG(..., $X.SECRET_KEY, ...)
+      - pattern: console.$LOG(..., $X.secretKey, ...)
+      - pattern: console.$LOG(..., process.env.$K, ...)
+    paths:
+      include: [api-server/, frontend/src/, dashboard/]
+
+  - id: express-error-leaks-stack
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      An error's stack or raw object is returned to the HTTP client. Return a
+      generic message and log the details on the server instead.
+    pattern-either:
+      - pattern: $RES.json({..., error: $E.stack, ...})
+      - pattern: $RES.send($E.stack)
+    paths:
+      include: [api-server/]
