@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/QuorumProof/QuorumProof",
+  "default": "latest",
+  "versions": [
+    {
+      "version": "latest",
+      "label": "Latest (main)",
+      "ref": "main",
+      "status": "current",
+      "released": null,
+      "deprecated": null,
+      "eol": null
+    }
+  ]
+}

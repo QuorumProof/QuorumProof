@@ -65,13 +65,26 @@
   .meter > i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); }
   .table-wrap { overflow-x: auto; }
   [hidden] { display: none !important; }
+  .version-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+  .version-bar label { margin: 0; }
+  .version-bar select { width: auto; min-width: 160px; }
+  .version-banner { max-width: 1040px; margin: 12px auto 0; padding: 0 16px; }
+  .version-banner > div { border: 1px solid var(--warn); color: var(--ink); border-radius: 6px; padding: 8px 12px; }
+  .version-banner.eol > div { border-color: var(--bad); }
 </style>
 </head>
 <body>
 <header>
   <h1>QuorumProof Interactive Docs</h1>
   <p>Search the documentation, try API calls, and experiment with quorum slices — all in your browser.</p>
+  <!-- #1642: documentation version switcher, driven by docs/versions.json -->
+  <div class="version-bar">
+    <label for="doc-version">Docs version</label>
+    <select id="doc-version" aria-describedby="version-status"><option value="latest">Latest (main)</option></select>
+    <span class="muted" id="version-status"></span>
+  </div>
 </header>
+<div class="version-banner" id="version-banner" hidden><div id="version-banner-text"></div></div>
 
 <nav role="tablist" aria-label="Sections">
   <button role="tab" data-tab="search" aria-selected="true">Search</button>
@@ -213,6 +226,45 @@
   const initial = location.hash.slice(1);
   if ([...tabs].some((t) => t.dataset.tab === initial)) show(initial);
 
+  // ── Docs version (#1642) ─────────────────────────────────────────────────
+  // Versions are git refs listed in docs/versions.json; see
+  // docs/documentation-versioning.md. The chosen version is kept in ?v=.
+  let docRef = 'main';
+  function applyVersion(v) {
+    docRef = v ? v.ref : 'main';
+    const banner = $('version-banner');
+    if (v && (v.status === 'deprecated' || v.status === 'eol')) {
+      banner.classList.toggle('eol', v.status === 'eol');
+      $('version-banner-text').textContent = v.status === 'eol'
+        ? `You are viewing docs for ${v.label}, which reached end of life on ${v.eol} and is no longer maintained. Switch to a supported version.`
+        : `Docs for ${v.label} are deprecated and receive security and correctness fixes only. End of life: ${v.eol}.`;
+      banner.hidden = false;
+    } else {
+      banner.hidden = true;
+    }
+    $('version-status').textContent = v && v.version !== 'latest' ? `branch ${v.ref} · ${v.status}` : '';
+    if ($('q').value) runSearch();
+  }
+  fetch('../versions.json')
+    .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then((data) => {
+      const sel = $('doc-version');
+      const byName = new Map(data.versions.map((v) => [v.version, v]));
+      sel.innerHTML = data.versions.map((v) =>
+        `<option value="${esc(v.version)}">${esc(v.label)}${v.status === 'deprecated' ? ' (deprecated)' : v.status === 'eol' ? ' (end of life)' : ''}</option>`).join('');
+      const params = new URLSearchParams(location.search);
+      const wanted = byName.has(params.get('v')) ? params.get('v') : data.default;
+      sel.value = wanted;
+      applyVersion(byName.get(wanted));
+      sel.addEventListener('change', () => {
+        const url = new URL(location.href);
+        if (sel.value === data.default) url.searchParams.delete('v'); else url.searchParams.set('v', sel.value);
+        history.replaceState(null, '', url);
+        applyVersion(byName.get(sel.value));
+      });
+    })
+    .catch(() => { $('version-status').textContent = 'versions.json not found — showing latest.'; });
+
   // ── Search ───────────────────────────────────────────────────────────────
   let entries = [];
   fetch('search-index.json')
@@ -255,7 +307,7 @@
     }
     scored.sort((a, b) => b[0] - a[0]);
     $('results').innerHTML = scored.slice(0, 30).map(([, e]) => {
-      const url = `${REPO}/blob/main/docs/${e.doc}${e.anchor ? '#' + e.anchor : ''}`;
+      const url = `${REPO}/blob/${docRef}/docs/${e.doc}${e.anchor ? '#' + e.anchor : ''}`;
       return `<div class="result"><a href="${esc(url)}" target="_blank" rel="noopener">${highlight(e.heading || e.title, terms)}</a>
         <div class="muted">${esc(e.title)} · docs/${esc(e.doc)}</div>
         <div>${highlight(snippet(e.text, terms[0]), terms)}</div></div>`;

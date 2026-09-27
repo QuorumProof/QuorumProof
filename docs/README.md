@@ -44,6 +44,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | Doc | What it covers |
 |---|---|
 | [architecture.md](./architecture.md) | High-level system architecture and component responsibilities. |
+| [architecture-diagrams.md](./architecture-diagrams.md) | Mermaid diagrams: system architecture, contract interactions, data flow, and deployment topology (issue #1644). |
 | [economic-security-model.md](./economic-security-model.md) | Economic assumptions, incentives, and attack cost analysis (see also [ADR-006](./adr/adr-006-economic-security-model.md)). |
 | [weighted-voting.md](./weighted-voting.md) | Weighted quorum voting: per-attestor trust weights (1–100) and threshold semantics. |
 | [claim-types.md](./claim-types.md) | Claim type registry — the claims a credential holder can prove. |
@@ -79,7 +80,20 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [resilience.md](./resilience.md) | Resilience requirements and chaos-testing approach (issue #1003). |
 | [operational-runbook.md](./operational-runbook.md) | Day-to-day operational procedures. |
 | [OPERATOR_RUNBOOK.md](./OPERATOR_RUNBOOK.md) | Operator-facing runbook for common incidents and tasks. |
-| [troubleshooting-guide.md](./troubleshooting-guide.md) | Diagnosing common failures across contracts, API, and infra. |
+| [troubleshooting-guide.md](./troubleshooting-guide.md) | Common issues, diagnostic procedures (D1–D6), and triage decision trees across contracts, API, and infra (issue #1643). |
+
+---
+
+## Runbooks
+
+Step-by-step, copy-pasteable procedures for standard operations (issue #1645).
+
+| Doc | What it covers |
+|---|---|
+| [runbook-deployment.md](./runbook-deployment.md) | Production release: migrations, contract upgrades, blue/green API rollout, post-deploy verification. |
+| [runbook-incident-response.md](./runbook-incident-response.md) | Severity levels, roles, detect → stabilize → diagnose → resolve → postmortem, emergency pause, comms templates. |
+| [runbook-rollback.md](./runbook-rollback.md) | Rolling back the API server, contract upgrades, database migrations, and testnet deploys. |
+| [runbook-maintenance.md](./runbook-maintenance.md) | Maintenance windows, change freeze, and the recurring maintenance task schedule. |
 
 ---
 
@@ -178,6 +192,18 @@ for the auto-generated OpenAPI / Swagger reference.
 | [code-coverage.md](./code-coverage.md) | How coverage is measured and reported. |
 | [coverage-configuration.md](./coverage-configuration.md) | Coverage tooling configuration reference. |
 | [longevity-testing.md](./longevity-testing.md) | Long-running API server soak tests: memory monitoring, leak and exhaustion detection (issue #1632). |
+
+---
+
+## Documentation versions
+
+| Doc | What it covers |
+|---|---|
+| [documentation-versioning.md](./documentation-versioning.md) | How docs are versioned (git refs listed in [`versions.json`](./versions.json)), switching versions, backport rules, and the deprecation policy (issue #1642). |
+
+You are reading the **latest** docs (`main`). To read the docs for an older
+release, pick it in the interactive docs version switcher or open the
+`docs/vMAJOR.MINOR` branch.
 
 ---
 
