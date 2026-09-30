@@ -197,6 +197,16 @@ jobs:
       - name: Check docs index is complete
         run: ./scripts/check_docs_index.sh
 
+  # Issue #1659: validate that all DR scripts exist, are executable, and that
+  # docs reference the correct procedures. Lightweight check — does not run
+  # live DR scenarios (use scripts/dr_test_harness.sh for that).
+  validate-dr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate DR scripts and documentation
+        run: ./scripts/validate_dr.sh
+
   security:
     runs-on: ubuntu-latest
     steps:
