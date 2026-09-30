@@ -1,0 +1,239 @@
+{
+  "QuorumProof: Soroban Contract Boilerplate": {
+    "scope": "rust",
+    "prefix": "qp-contract",
+    "description": "Scaffold a new Soroban smart contract with contractimpl and standard imports",
+    "body": [
+      "#![no_std]",
+      "use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec};",
+      "",
+      "#[contract]",
+      "pub struct ${1:ContractName};",
+      "",
+      "#[contractimpl]",
+      "impl ${1:ContractName} {",
+      "    /// Initializes the contract with an admin address.",
+      "    pub fn initialize(env: Env, admin: Address) {",
+      "        admin.require_auth();",
+      "        if env.storage().instance().has(&DataKey::Admin) {",
+      "            panic!(\"Already initialized\");",
+      "        }",
+      "        env.storage().instance().set(&DataKey::Admin, &admin);",
+      "    }",
+      "",
+      "    /// ${2:Contract function description}",
+      "    pub fn ${3:execute}(env: Env, caller: Address) -> Result<bool, ${4:ContractError}> {",
+      "        caller.require_auth();",
+      "        ${0:// Implementation}",
+      "        Ok(true)",
+      "    }",
+      "}",
+      "",
+      "#[contracttype]",
+      "#[derive(Clone)]",
+      "pub enum DataKey {",
+      "    Admin,",
+      "    ${5:State}(Address),",
+      "}"
+    ]
+  },
+
+  "QuorumProof: Contract Error Enum": {
+    "scope": "rust",
+    "prefix": "qp-error-enum",
+    "description": "Create a Soroban #[contracterror] enum with descriptive error codes",
+    "body": [
+      "use soroban_sdk::contracterror;",
+      "",
+      "#[contracterror]",
+      "#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]",
+      "#[repr(u32)]",
+      "pub enum ${1:ContractError} {",
+      "    NotInitialized = 1,",
+      "    AlreadyInitialized = 2,",
+      "    Unauthorized = 3,",
+      "    InvalidThreshold = 4,",
+      "    ProofVerificationFailed = 5,",
+      "    CredentialExpired = 6,",
+      "    ${0:CustomError = 100,}",
+      "}"
+    ]
+  },
+
+  "QuorumProof: Instance Storage Get": {
+    "scope": "rust",
+    "prefix": "qp-storage-get",
+    "description": "Safe storage get with fallback or error checking",
+    "body": [
+      "let ${1:value}: ${2:Type} = env",
+      "    .storage()",
+      "    .instance()",
+      "    .get(&${3:DataKey::Key})",
+      "    .ok_or(${4:ContractError::NotInitialized})?;"
+    ]
+  },
+
+  "QuorumProof: Persistent Storage Set with TTL": {
+    "scope": "rust",
+    "prefix": "qp-storage-set",
+    "description": "Set persistent storage entry with TTL extension",
+    "body": [
+      "env.storage().persistent().set(&${1:key}, &${2:value});",
+      "env.storage().persistent().extend_ttl(&${1:key}, ${3:100_000}, ${4:200_000});"
+    ]
+  },
+
+  "QuorumProof: Require Authentication": {
+    "scope": "rust",
+    "prefix": "qp-require-auth",
+    "description": "Require caller authentication pattern",
+    "body": [
+      "${1:caller}.require_auth();"
+    ]
+  },
+
+  "QuorumProof: Event Publish": {
+    "scope": "rust",
+    "prefix": "qp-event-publish",
+    "description": "Publish a typed Soroban event with topics and payload",
+    "body": [
+      "env.events().publish(",
+      "    (symbol_short!(\"${1:topic}\"), ${2:entity_address}),",
+      "    ${3:event_payload}",
+      ");"
+    ]
+  },
+
+  "QuorumProof: Contract Unit Test": {
+    "scope": "rust",
+    "prefix": "qp-contract-test",
+    "description": "Create a Soroban contract unit test module with mock environment",
+    "body": [
+      "#[cfg(test)]",
+      "mod test {",
+      "    use super::*;",
+      "    use soroban_sdk::{testutils::Address as _, Address, Env};",
+      "",
+      "    #[test]",
+      "    fn test_${1:feature_name}() {",
+      "        let env = Env::default();",
+      "        env.mock_all_auths();",
+      "",
+      "        let contract_id = env.register_contract(None, ${2:ContractName});",
+      "        let client = ${2:ContractName}Client::new(&env, &contract_id);",
+      "",
+      "        let admin = Address::generate(&env);",
+      "        client.initialize(&admin);",
+      "",
+      "        ${0:// Assertions}",
+      "    }",
+      "}"
+    ]
+  },
+
+  "QuorumProof: Quorum Slice Threshold Validation": {
+    "scope": "rust",
+    "prefix": "qp-quorum-slice",
+    "description": "Validate attestations against quorum slice threshold and weights",
+    "body": [
+      "let total_weight: u32 = ${1:attestations}",
+      "    .iter()",
+      "    .map(|a| a.weight)",
+      "    .sum();",
+      "",
+      "if total_weight < ${2:threshold_weight} {",
+      "    return Err(${3:ContractError::InvalidThreshold});",
+      "}"
+    ]
+  },
+
+  "QuorumProof: ZK Proof Verification Call": {
+    "scope": "rust",
+    "prefix": "qp-zk-verify",
+    "description": "Invoke ZK verifier contract to validate zero-knowledge proof",
+    "body": [
+      "let verifier_client = zk_verifier::Client::new(&env, &${1:verifier_address});",
+      "let is_valid = verifier_client.verify_proof(&${2:proof_bytes}, &${3:public_inputs});",
+      "if !is_valid {",
+      "    return Err(${4:ContractError::ProofVerificationFailed});",
+      "}"
+    ]
+  },
+
+  "QuorumProof: TS Contract Invocation": {
+    "scope": "typescript,javascript",
+    "prefix": "qp-invoke-contract",
+    "description": "Stellar SDK TypeScript contract call with transaction builder",
+    "body": [
+      "import { Contract, Operation, TransactionBuilder, BASE_FEE } from \"@stellar/stellar-sdk\";",
+      "",
+      "async function invokeContract(client: any, sourceKeypair: any, contractId: string, method: string, args: any[]) {",
+      "    const contract = new Contract(contractId);",
+      "    const account = await client.horizon.loadAccount(sourceKeypair.publicKey());",
+      "",
+      "    const tx = new TransactionBuilder(account, {",
+      "        fee: BASE_FEE,",
+      "        networkPassphrase: client.networkPassphrase,",
+      "    })",
+      "        .addOperation(contract.call(method, ...args))",
+      "        .setTimeout(180)",
+      "        .build();",
+      "",
+      "    tx.sign(sourceKeypair);",
+      "    return await client.horizon.submitTransaction(tx);",
+      "}"
+    ]
+  },
+
+  "QuorumProof: TS Credential Verification": {
+    "scope": "typescript,javascript",
+    "prefix": "qp-verify-credential",
+    "description": "Verify verifiable credential signature, expiration, and revocation status",
+    "body": [
+      "export async function verifyCredential(credential: {",
+      "    id: string;",
+      "    issuer: string;",
+      "    holder: string;",
+      "    expirationTimestamp: number;",
+      "    signature: string;",
+      "}): Promise<{ isValid: boolean; reason?: string }> {",
+      "    const now = Math.floor(Date.now() / 1000);",
+      "    if (credential.expirationTimestamp && now > credential.expirationTimestamp) {",
+      "        return { isValid: false, reason: \"Credential has expired\" };",
+      "    }",
+      "",
+      "    ${0:// Validate cryptographic signature and revocation}",
+      "    return { isValid: true };",
+      "}"
+    ]
+  },
+
+  "QuorumProof: TS WebSocket Event Subscription": {
+    "scope": "typescript,javascript",
+    "prefix": "qp-ws-subscribe",
+    "description": "Subscribe to real-time QuorumProof events via WebSocket with reconnect",
+    "body": [
+      "export function subscribeToEvents(url: string, onEvent: (data: any) => void) {",
+      "    const ws = new WebSocket(url);",
+      "",
+      "    ws.onopen = () => {",
+      "        console.log(\"Connected to QuorumProof event feed\");",
+      "        ws.send(JSON.stringify({ action: \"subscribe\", topic: \"credentials\" }));",
+      "    };",
+      "",
+      "    ws.onmessage = (event) => {",
+      "        const payload = JSON.parse(event.data);",
+      "        onEvent(payload);",
+      "    };",
+      "",
+      "    ws.onerror = (error) => console.error(\"WebSocket error:\", error);",
+      "    ws.onclose = () => {",
+      "        console.log(\"Reconnecting in 3s...\");",
+      "        setTimeout(() => subscribeToEvents(url, onEvent), 3000);",
+      "    };",
+      "",
+      "    return () => ws.close();",
+      "}"
+    ]
+  }
+}

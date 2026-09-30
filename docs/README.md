@@ -68,6 +68,7 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 |---|---|
 | [local-dev-setup.md](./local-dev-setup.md) | Setting up a local development environment: prerequisites, setup script, Docker Compose, standalone network, and troubleshooting (issue #1663). |
 | [ide-setup.md](./ide-setup.md) | VS Code extension recommendations, workspace settings, debug configurations, and tasks for contract and API development (issue #1664). |
+| [code-snippets.md](./code-snippets.md) | Code snippets library for common Soroban smart contract and client SDK patterns (issue #1670). |
 | [environment-parity.md](./environment-parity.md) | Detecting and remediating env/config drift between environments using check_env_parity.sh and compare_environments.sh (issue #1662). |
 
 ---
@@ -86,6 +87,8 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [infrastructure-as-code.md](./infrastructure-as-code.md) | Terraform layout, state, CI plan/apply, drift detection and infrastructure testing (#1652). |
 | [blue-green-deployment.md](./blue-green-deployment.md) | Zero-downtime api-server releases: blue/green slots, health-check validation, traffic switching, rollback. |
 | [capacity-planning.md](./capacity-planning.md) | Sizing guidance for throughput, storage, and RPC load. |
+| [canary-deployments.md](./canary-deployments.md) | Canary deployment strategy, traffic routing, health checks, and rollback triggers (issue #1654). |
+| [cost-optimization-analysis.md](./cost-optimization-analysis.md) | Cloud and blockchain operational cost breakdown and optimization analysis (issue #1657). |
 | [cost-optimization-guide.md](./cost-optimization-guide.md) | Reducing on-chain fees and infrastructure cost. |
 | [database-migrations.md](./database-migrations.md) | Running and authoring API-server database migrations. |
 | [backup-system.md](./backup-system.md) | Backup architecture, schedule, and restore procedure. |
@@ -141,6 +144,8 @@ Step-by-step, copy-pasteable procedures for standard operations (issue #1645).
 | [security-best-practices.md](./security-best-practices.md#security-requirements-checklist-threat-modeling-and-tooling) | Security requirements (SR-* IDs), PR/release checklists, threat-modeling guide, and security tooling (issue #1637). |
 | [security-audit-checklist.md](./security-audit-checklist.md) | Internal review checklist used before releases. |
 | [issuer-security-checklist.md](./issuer-security-checklist.md) | Security checklist for institutions issuing credentials. |
+| [network-policy.md](./network-policy.md) | Kubernetes network policies for service isolation and zero-trust ingress/egress (issue #1655). |
+| [secrets-management.md](./secrets-management.md) | Secrets management architecture, Vault/AWS Secrets Manager integration, and rotation policies (issue #1656). |
 | [attestor-key-custody-guide.md](./attestor-key-custody-guide.md) | Key custody practices and HSM recommendations for attestor institutions. |
 | [container-image-scanning.md](./container-image-scanning.md) | Container image vulnerability scanning with Trivy: CI pipeline and suppression policy. |
 | [gdpr-compliance.md](./gdpr-compliance.md) | GDPR obligations and how the system meets them. |
