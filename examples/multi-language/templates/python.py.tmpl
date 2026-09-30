@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""QuorumProof REST <scenario> — Python (standard library only).
+
+Implements the scenario in ../SPEC.md. Run:
+    QP_API_URL=http://localhost:3000 python3 <file>.py
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+BASE_URL = os.environ.get("QP_API_URL", "http://localhost:3000").rstrip("/")
+API_KEY = os.environ.get("QP_API_KEY")
+
+
+def request(method, path, body=None):
+    """Send a JSON request; return (status, parsed_body)."""
+    ...  # copy from python/quickstart.py
+
+
+def main():
+    # 1. <step one>
+    # 2. <step two>
+    ...
+
+
+if __name__ == "__main__":
+    main()

@@ -135,6 +135,9 @@ Follow the step-by-step walkthrough in [demo/demo-script.md](demo/demo-script.md
 
 - [Documentation Index](docs/README.md) — all `docs/` guides grouped by topic (start here)
 - [Architecture Overview](docs/architecture.md)
+- [FAQ](docs/faq.md) and [Glossary](docs/glossary.md)
+- [Code Examples in Python, JavaScript, Rust and Go](docs/code-examples.md)
+- [Migration Guides Between Versions](docs/migration-guides.md)
 - [Contract Module Index](contracts/quorum_proof/README.md) — maps each contract source file to its purpose and originating issue
 - [Trust Slice Model](docs/trust-slices.md)
 - [ZK Verification Design](docs/zk-verification-implementation.md)

@@ -1,0 +1,147 @@
+# docker-compose.dev.yml — #1663 Local development environment.
+#
+# Brings up a complete local QuorumProof stack:
+#
+#   stellar-standalone  — Stellar quickstart node (port 8000, Soroban RPC enabled)
+#   postgres            — PostgreSQL 16 for the API server (port 5432)
+#   api-server          — TypeScript API server with src/ mounted for live reload (port 3000)
+#   frontend            — Vite/React frontend with src/ mounted for HMR (port 5173)
+#
+# Quick start:
+#   docker compose -f docker-compose.dev.yml up
+#
+# Start just the dependencies (Stellar + Postgres) and run services locally:
+#   docker compose -f docker-compose.dev.yml up stellar-standalone postgres -d
+#
+# Notes:
+#   - The frontend service builds from frontend/Dockerfile.dev.  If that file
+#     is missing, build it first:
+#       docker build -t quorumproof-frontend-dev -f frontend/Dockerfile.dev frontend/
+#   - The api-server service builds from api-server/Dockerfile (production
+#     Dockerfile) and mounts ./api-server/src for live reload via nodemon.
+#     Ensure your api-server package.json has a "dev" script that uses nodemon
+#     or tsx watch, e.g.: "dev": "nodemon --exec tsx src/index.ts"
+#   - Never commit real secrets into this file.  Credentials here (POSTGRES_PASSWORD,
+#     etc.) are intentionally weak dev-only values.
+
+version: "3.8"
+
+services:
+
+  # ── Stellar standalone node ────────────────────────────────────────────────
+  # Runs a full Stellar + Soroban RPC node locally.
+  # Soroban RPC is reachable at http://localhost:8000/soroban/rpc (matches
+  # the [standalone] rpc_url in environments.toml).
+  stellar-standalone:
+    image: stellar/quickstart:testing
+    ports:
+      - "8000:8000"
+    environment:
+      NETWORK: standalone
+      ENABLE_SOROBAN_RPC: "true"
+      USE_DEFAULT_PEER_PORT: "true"
+    networks:
+      - dev
+    healthcheck:
+      test:
+        - "CMD"
+        - "wget"
+        - "-qO-"
+        - "http://localhost:8000/soroban/rpc"
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── PostgreSQL 16 ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: quorumproof
+      POSTGRES_USER: qp
+      POSTGRES_PASSWORD: devpassword
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qp -d quorumproof"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── API server ─────────────────────────────────────────────────────────────
+  # Built from api-server/Dockerfile (production Dockerfile).
+  # ./api-server/src is mounted into the container so source edits are visible
+  # without rebuilding the image — requires the api-server to run via a file
+  # watcher (e.g. nodemon/tsx watch) in dev mode.
+  api-server:
+    build:
+      context: ./api-server
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      # Point the API server at the local standalone Stellar node
+      STELLAR_NETWORK: standalone
+      STELLAR_RPC_URL: http://stellar-standalone:8000/soroban/rpc
+      # Point at the local Postgres instance
+      DATABASE_URL: postgres://qp:devpassword@postgres:5432/quorumproof
+    volumes:
+      # Mount source for live reload (works with nodemon / tsx watch)
+      - ./api-server/src:/app/src
+    depends_on:
+      stellar-standalone:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - dev
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  # Built from frontend/Dockerfile.dev for hot-module-replacement (HMR).
+  # ./frontend/src is mounted so edits appear instantly in the browser.
+  #
+  # If you prefer to build the image manually:
+  #   docker build -t quorumproof-frontend-dev -f frontend/Dockerfile.dev frontend/
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_STELLAR_NETWORK: standalone
+      VITE_STELLAR_RPC_URL: http://localhost:8000/soroban/rpc
+    volumes:
+      # Mount source for Vite HMR
+      - ./frontend/src:/app/src
+    depends_on:
+      - api-server
+    networks:
+      - dev
+    restart: unless-stopped
+
+networks:
+  dev:
+    driver: bridge
+
+volumes:
+  # Postgres data persisted across container restarts
+  postgres-data:

@@ -270,3 +270,85 @@ groups:
         annotations:
           summary: "WebSocket messages are being dropped"
           description: "Slow consumers are overflowing send queues. See docs/performance-tuning-guide.md section 4.2."
+
+  # Issue #1661: Cost Alert Thresholds
+  # Thresholds, routing, and tuning instructions are in
+  # docs/cost-alert-thresholds.md.
+  #
+  # Metrics are emitted by the api-server's /api/costs/report endpoint and
+  # scraped by the exporter via monitoring/exporter/exporter.py.
+  #
+  # quorumproof_cost_total_stroops_24h   — rolling 24-hour total gas cost (stroops)
+  # quorumproof_cost_operation_stroops   — per-operation cumulative cost (stroops)
+  # quorumproof_cost_daily_budget_stroops — operator-configured daily budget
+  #
+  # 1 XLM = 10,000,000 stroops. Default daily budget: 10 XLM = 100,000,000 stroops.
+  # Adjust quorumproof_cost_daily_budget_stroops in the exporter or via env var
+  # COST_DAILY_BUDGET_STROOPS. See docs/cost-alert-thresholds.md §Tuning.
+  - name: quorumproof-cost
+    rules:
+      # ── Recording rule: rolling 24-hour total gas cost ──────────────────────
+      # Precomputes the daily spend so the alert expressions stay readable.
+      - record: quorumproof_cost_total_stroops_24h
+        expr: >
+          increase(quorumproof_cost_operation_stroops_total[24h])
+
+      # ── Warning: 80 % of daily budget consumed ───────────────────────────────
+      # Fires when the rolling 24 h cost exceeds 80 % of the configured budget.
+      # Gives operators time to review top spenders before the critical threshold.
+      - alert: CostBudgetWarning
+        expr: >
+          quorumproof_cost_total_stroops_24h
+            > (quorumproof_cost_daily_budget_stroops * 0.80)
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Gas cost approaching daily budget ({{ $value | humanize }} stroops)"
+          description: >
+            Rolling 24-hour gas cost is {{ $value | humanize }} stroops, above 80% of
+            the configured daily budget. Review top-spending operations at
+            GET /api/costs/optimizations and consider applying the tuning steps in
+            docs/cost-alert-thresholds.md §Reducing Cost.
+
+      # ── Critical: 100 % of daily budget consumed ─────────────────────────────
+      # Pages on-call via PagerDuty. Cost overruns at this level may indicate
+      # a runaway integration, an unexpected traffic spike, or a pricing change.
+      - alert: CostBudgetCritical
+        expr: >
+          quorumproof_cost_total_stroops_24h
+            > quorumproof_cost_daily_budget_stroops
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Daily gas budget exceeded ({{ $value | humanize }} stroops)"
+          description: >
+            Rolling 24-hour gas cost is {{ $value | humanize }} stroops, above the
+            configured daily budget. Immediate action: check GET /api/costs/report
+            for the top spenders and GET /api/costs/optimizations for quick wins.
+            Consider throttling high-volume callers or enabling DISABLE_BACKGROUND_JOBS.
+            See docs/cost-alert-thresholds.md §Emergency Response.
+
+      # ── Single-operation spike alert ─────────────────────────────────────────
+      # Fires when one operation consumes more than 50 % of the hourly budget
+      # allocation (daily_budget / 24 / 2 = 25 % daily). This catches a single
+      # expensive operation that would exhaust the budget without the 24 h
+      # rolling window triggering first.
+      - alert: CostOperationSpike
+        expr: >
+          increase(quorumproof_cost_operation_stroops_total[1h])
+            > (quorumproof_cost_daily_budget_stroops / 48)
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Operation {{ $labels.operation }} cost spike ({{ $value | humanize }} stroops/h)"
+          description: >
+            Operation {{ $labels.operation }} consumed {{ $value | humanize }} stroops in
+            the last hour, more than half of the expected hourly budget allocation.
+            Investigate at GET /api/costs/projection?operation={{ $labels.operation }}&callsPerDay=...
+            and apply the tuning guidance in docs/cost-alert-thresholds.md §Per-Operation Tuning.

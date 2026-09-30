@@ -1,0 +1,29 @@
+# k8s/network-policy/default-deny.yaml — Issue #1655: Network Policy for Pod Security.
+#
+# Default deny-all NetworkPolicy for the quorumproof namespace.
+# This ensures that no pod can receive ingress or send egress traffic unless
+# explicitly allowed by a more specific NetworkPolicy. This baseline prevents
+# lateral movement: a compromised pod cannot reach other pods or arbitrary
+# internet endpoints.
+#
+# Apply order: apply this first, then the allow-* policies below.
+# Without the allow-* policies applied, all pods in the namespace will lose
+# connectivity. Apply the full set together:
+#
+#   kubectl apply -f k8s/network-policy/
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/managed-by: network-policy
+spec:
+  # Empty podSelector selects ALL pods in the namespace
+  podSelector: {}
+  # Deny all ingress and egress by default
+  policyTypes:
+    - Ingress
+    - Egress

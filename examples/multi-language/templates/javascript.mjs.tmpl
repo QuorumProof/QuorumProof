@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+// QuorumProof REST <scenario> — JavaScript (Node 18+, built-in fetch).
+//
+// Implements the scenario in ../SPEC.md. Run:
+//   QP_API_URL=http://localhost:3000 node <file>.mjs
+
+const BASE_URL = (process.env.QP_API_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+const API_KEY = process.env.QP_API_KEY;
+
+/** Send a JSON request; return { status, body }. */
+async function request(method, path, body) {
+  // copy from javascript/quickstart.mjs
+}
+
+async function main() {
+  // 1. <step one>
+  // 2. <step two>
+}
+
+main().catch((err) => {
+  console.error(err.stack ?? String(err));
+  process.exit(1);
+});

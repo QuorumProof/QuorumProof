@@ -27,7 +27,11 @@ Columns:
 | `check_unwraps.sh` | Ratchet check — fails if new bare `.unwrap()` calls appear in contract source (issue #1391) | `ci.yml` (`contracts` job) | — |
 | `check_docs_index.sh` | Verifies every `docs/*.md` file is linked from `docs/README.md` (issue #1498) | `ci.yml` (`docs-index` job) | — |
 | `docs_versions.py` | Manages documentation versions in `docs/versions.json` (`list`, `cut`, `deprecate`, `eol`, `check`) — see `docs/documentation-versioning.md` (issue #1642) | `ci.yml` (`docs-index` job, `check`) / `manual` | — |
+| `check_code_examples.sh` | Runs the multi-language code examples against a mock API and diffs their output (issue #1638) | `code-examples.yml` | — |
 | `validate_env.sh` | Cross-checks `environments.toml` against `.env` to ensure the selected network matches the contract addresses | `manual` | — |
+| `setup_dev.sh` | One-shot local dev environment setup: checks prerequisites, installs Rust targets, builds contracts, installs npm deps, creates `.env` (issue #1663) | `manual` | — |
+| `check_env_parity.sh` | Compares two env files for missing keys, placeholder values, network consistency, and contract address format; emits color-coded drift report (issue #1662) | `manual` / CI | — |
+| `compare_environments.sh` | Multi-environment comparison: reads named snapshots from `environments/`, checks RPC/passphrase consistency, delegates per-file diff to `check_env_parity.sh` (issue #1662) | `manual` | — |
 
 ---
 
@@ -89,6 +93,21 @@ Columns:
 | `scan_contracts.sh` | Security pattern scan — checks for bare `unwrap()`/`expect()`, unsafe integer arithmetic, and other Soroban-specific anti-patterns (issue #594) | `ci.yml` (`security` job) | — |
 | `check_deps.sh` | Verifies contract `soroban-sdk` versions match `contracts/dependencies.toml`; warns if a pinned RUSTSEC advisory has been present >90 days (issues #589, #1490) | `ci.yml` (`security` job) | — |
 | `generate_docs.sh` | Auto-generates contract API docs from Rust source comments and writes them to `docs/contracts/` with a version stamp (issue #590) | `manual` | — |
+
+---
+
+## Scaling & Service Mesh
+
+| Script | What it does | Invoked by | Test coverage |
+|---|---|---|---|
+| `scaling_load_test.sh` | Drives the api-server under sustained load while watching the HPA; validates replica scale-up and scale-down (issue #1658) | `ci.yml` / `manual` | — |
+
+## Disaster Recovery Testing
+
+| Script | What it does | Invoked by | Test coverage |
+|---|---|---|---|
+| `dr_test_harness.sh` | Runs a suite of DR scenarios (RPC failover, snapshot/restore, key rotation, pod kill, backup restore) and validates RTO/RPO targets (issue #1659) | `manual` / scheduled | — |
+| `validate_dr.sh` | Lightweight CI check — verifies DR scripts exist, are executable, and that docs reference the correct procedures (issue #1659) | `ci.yml` | — |
 
 ---
 

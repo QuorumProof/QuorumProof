@@ -1,0 +1,113 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    // ── Rust contract tests via CodeLLDB ────────────────────────────────────
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Rust Tests (quorum_proof)",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "quorum_proof",
+          "--target",
+          "x86_64-unknown-linux-gnu"
+        ],
+        "filter": {
+          "name": "quorum_proof",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "RUST_LOG": "debug"
+      },
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Rust Tests (sbt_registry)",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "sbt_registry",
+          "--target",
+          "x86_64-unknown-linux-gnu"
+        ],
+        "filter": {
+          "name": "sbt_registry",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "RUST_LOG": "debug"
+      },
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Rust Tests (zk_verifier)",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "zk_verifier",
+          "--target",
+          "x86_64-unknown-linux-gnu"
+        ],
+        "filter": {
+          "name": "zk_verifier",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "RUST_LOG": "debug"
+      },
+      "sourceLanguages": ["rust"]
+    },
+
+    // ── Node.js API Server ──────────────────────────────────────────────────
+    {
+      "type": "node",
+      "request": "attach",
+      "name": "Debug API Server",
+      "port": 9229,
+      "restart": true,
+      "localRoot": "${workspaceFolder}/api-server",
+      "remoteRoot": "${workspaceFolder}/api-server",
+      "sourceMaps": true,
+      "outFiles": ["${workspaceFolder}/api-server/dist/**/*.js"],
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+    },
+
+    // ── Frontend / Vitest ───────────────────────────────────────────────────
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug Frontend Tests",
+      "autoAttachChildProcesses": true,
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "program": "${workspaceFolder}/frontend/node_modules/vitest/vitest.mjs",
+      "args": ["--reporter=verbose"],
+      "smartStep": true,
+      "cwd": "${workspaceFolder}/frontend",
+      "console": "integratedTerminal",
+      "sourceMaps": true
+    }
+  ]
+}

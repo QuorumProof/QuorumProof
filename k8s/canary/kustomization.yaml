@@ -1,0 +1,15 @@
+# k8s/canary/kustomization.yaml — Issue #1654: Canary Deployments.
+#
+# Apply the canary deployment:
+#   kubectl apply -k k8s/canary/
+#
+# The canary-direct Service is for validation only; the weighted traffic split
+# works via the main Service (k8s/api-server-deployment.yaml) selecting all
+# `app: quorumproof-api-server` pods regardless of `track` label.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment-canary.yaml
+  - service-canary.yaml

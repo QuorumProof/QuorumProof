@@ -20,6 +20,9 @@ New to the codebase? Read these two first:
 | [architecture.md](./architecture.md) | System overview: FBA trust slices, SBTs, the contract set, how the pieces fit together. |
 | [deployment-guide.md](./deployment-guide.md) | End-to-end walkthrough: build the contracts, deploy them, initialize and wire them, verify. |
 
+Stuck on a term or a common question? See the [glossary](./glossary.md) and
+the [FAQ](./faq.md). Upgrading? Start with the [migration guides](./migration-guides.md).
+
 Prefer learning by watching or doing? See the [video tutorials](./video-tutorials.md)
 and the [interactive documentation](./interactive-documentation.md) (search, API
 playground, quorum slice simulator).
@@ -36,6 +39,9 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [video-tutorials.md](./video-tutorials.md) | Index of video tutorials for common tasks, with scripts, captions, and the recording guide (issue #1634). |
 | [interactive-documentation.md](./interactive-documentation.md) | Interactive docs: full-text search, API playground, slice/hash playgrounds, and the feedback loop (issue #1635). |
 | [bbs-plus-tutorial.md](./bbs-plus-tutorial.md) | BBS+ selective-disclosure tutorial. |
+| [code-examples.md](./code-examples.md) | REST examples in Python, JavaScript, Rust and Go, with example templates, testing and maintenance rules (issue #1638). |
+| [faq.md](./faq.md) | Frequently asked questions with short answers linking to the full docs (issue #1639). |
+| [glossary.md](./glossary.md) | Alphabetical glossary of project-specific and domain terms (issue #1640). |
 
 ---
 
@@ -53,6 +59,16 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [METADATA_SCHEMA_VERSIONING_PLAN.md](./METADATA_SCHEMA_VERSIONING_PLAN.md) | Plan for versioning the credential metadata schema and migrating between versions. |
 | [IMPLEMENTATION_NOTES_910_913_915.md](./IMPLEMENTATION_NOTES_910_913_915.md) | Implementation notes for attestation veto and related features (issues #910/#913/#915). |
 | [infrastructure-improvements.md](./infrastructure-improvements.md) | Security, versioning, and state-validation infrastructure work (issues #574–577). |
+
+---
+
+## Developer Tooling & Environment
+
+| Doc | What it covers |
+|---|---|
+| [local-dev-setup.md](./local-dev-setup.md) | Setting up a local development environment: prerequisites, setup script, Docker Compose, standalone network, and troubleshooting (issue #1663). |
+| [ide-setup.md](./ide-setup.md) | VS Code extension recommendations, workspace settings, debug configurations, and tasks for contract and API development (issue #1664). |
+| [environment-parity.md](./environment-parity.md) | Detecting and remediating env/config drift between environments using check_env_parity.sh and compare_environments.sh (issue #1662). |
 
 ---
 
@@ -77,10 +93,12 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [backup-verification.md](./backup-verification.md) | Automated backup verification, integrity checks, and restoring from a verified backup. |
 | [disaster-recovery.md](./disaster-recovery.md) | Emergency pause/redeploy and credential-restoration procedures. |
 | [DR_PLAN_IMPLEMENTATION.md](./DR_PLAN_IMPLEMENTATION.md) | Implementation notes for the disaster-recovery plan. |
+| [dr-runbook.md](./dr-runbook.md) | DR runbook: quick-reference decision tree and step-by-step recovery procedures for all scenarios (issue #1659). |
 | [resilience.md](./resilience.md) | Resilience requirements and chaos-testing approach (issue #1003). |
 | [operational-runbook.md](./operational-runbook.md) | Day-to-day operational procedures. |
 | [OPERATOR_RUNBOOK.md](./OPERATOR_RUNBOOK.md) | Operator-facing runbook for common incidents and tasks. |
 | [troubleshooting-guide.md](./troubleshooting-guide.md) | Common issues, diagnostic procedures (D1–D6), and triage decision trees across contracts, API, and infra (issue #1643). |
+| [autoscaling-guide.md](./autoscaling-guide.md) | HPA policy, metrics pipeline, threshold tuning, and load testing for automated scaling (issue #1658). |
 
 ---
 
@@ -108,6 +126,8 @@ Step-by-step, copy-pasteable procedures for standard operations (issue #1645).
 | [operator-health-metrics.md](./operator-health-metrics.md) | Health metrics exposed for operators and their meaning. |
 | [perf-regression.md](./perf-regression.md) | Performance-regression benchmarking and thresholds. |
 | [performance-tuning-guide.md](./performance-tuning-guide.md) | Bottlenecks, tuning parameters, benchmark methodology, and performance monitoring. |
+| [service-mesh-operations.md](./service-mesh-operations.md) | Istio service mesh: installation, mTLS enforcement, traffic visualisation, distributed tracing (issue #1660). |
+| [cost-alert-thresholds.md](./cost-alert-thresholds.md) | Cost monitoring, alert thresholds (warning/critical), alert routing, and threshold tuning (issue #1661). |
 
 ---
 
@@ -121,6 +141,8 @@ Step-by-step, copy-pasteable procedures for standard operations (issue #1645).
 | [security-best-practices.md](./security-best-practices.md#security-requirements-checklist-threat-modeling-and-tooling) | Security requirements (SR-* IDs), PR/release checklists, threat-modeling guide, and security tooling (issue #1637). |
 | [security-audit-checklist.md](./security-audit-checklist.md) | Internal review checklist used before releases. |
 | [issuer-security-checklist.md](./issuer-security-checklist.md) | Security checklist for institutions issuing credentials. |
+| [attestor-key-custody-guide.md](./attestor-key-custody-guide.md) | Key custody practices and HSM recommendations for attestor institutions. |
+| [container-image-scanning.md](./container-image-scanning.md) | Container image vulnerability scanning with Trivy: CI pipeline and suppression policy. |
 | [gdpr-compliance.md](./gdpr-compliance.md) | GDPR obligations and how the system meets them. |
 | [audit-log-format.md](./audit-log-format.md) | Structure and semantics of the audit log. |
 | [formal-verification.md](./formal-verification.md) | Formal verification of critical functions (issue #1317). |
@@ -158,6 +180,15 @@ Step-by-step, copy-pasteable procedures for standard operations (issue #1645).
 | [upgrade-testing.md](./upgrade-testing.md) | Upgrade simulation tests and the static state-compatibility check (issue #1630). |
 | [migration-invariants.md](./migration-invariants.md) | Formal invariant set the migration verifier checks (enforced in CI). |
 | [SLICE_MIGRATION_GUIDE.md](./SLICE_MIGRATION_GUIDE.md) | Migrating existing quorum slices (issue #1253). |
+| [migration-guides.md](./migration-guides.md) | Breaking changes per version and step-by-step migration and rollback guides for the API, contract state/schema, WASM and database (issue #1641). |
+| [migration-testing-guide.md](./migration-testing-guide.md) | Testing a migration and its rollback before production: static checks, tests, testnet rehearsal, go/no-go (issue #1641). |
+| [user-credentials-migration.md](./user-credentials-migration.md) | Migrating user credential records between schema versions. |
+| [sbt-lifecycle.md](./sbt-lifecycle.md) | Full lifecycle of a Soulbound Token: issuance, attestation, revocation, and expiry. |
+| [saga-rollback-specification.md](./saga-rollback-specification.md) | Saga pattern specification for multi-step contract operations and compensating rollbacks. |
+| [batch-issuance-limits.md](./batch-issuance-limits.md) | Limits and recommendations for batch credential issuance operations. |
+| [circuit-breaker-write-coverage.md](./circuit-breaker-write-coverage.md) | Admin circuit-breaker write coverage tracking and enforcement. |
+| [quorum-slice-guide.md](./quorum-slice-guide.md) | End-to-end guide: creating, managing, and querying quorum slices. |
+| [unwrap-audit.md](./unwrap-audit.md) | Audit log of unwrap/expect usage in contract source and remediation status (issue #1391). |
 
 ---
 
@@ -173,6 +204,8 @@ Step-by-step, copy-pasteable procedures for standard operations (issue #1645).
 | [government-licensing-integration.md](./government-licensing-integration.md) | Protocol for licensing bodies to integrate as verified issuers. |
 | [websocket-scaling.md](./websocket-scaling.md) | Scaling WebSocket delivery across multiple API-server replicas. |
 | [plugin-development-guide.md](./plugin-development-guide.md) | Writing, testing, and distributing API-server plugins. |
+| [throttling.md](./throttling.md) | Request throttling and backpressure configuration for the API server. |
+| [api-quality-guards.md](./api-quality-guards.md) | API quality gates: contract tests, lint rules, and CI enforcement. |
 
 See also [`../api-server/docs/API_DOCUMENTATION.md`](../api-server/docs/API_DOCUMENTATION.md)
 for the auto-generated OpenAPI / Swagger reference.

@@ -1,0 +1,12 @@
+[package]
+name = "quorumproof-quickstart"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone example: not a member of the repository's contract workspace.
+[workspace]
+
+[dependencies]
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
