@@ -1483,7 +1483,14 @@
 "title": "QuorumProof Documentation",
 "heading": "Architecture & core concepts",
 "anchor": "architecture--core-concepts",
-"text": "Doc What it covers --- --- architecture.md High-level system architecture and component responsibilities. economic-security-model.md Economic assumptions, incentives, and attack cost analysis (see also ADR-006). weighted-voting.md Weighted quorum voting: per-attestor trust weights (1–100) and threshold semantics. claim-types.md Claim type registry — the claims a credential holder can prove. credential-types.md Credential type registry — the credential kinds the system issues. crypto-shredding-architecture.md Crypto-shredding design for GDPR-style erasure of off-chain personal data. METADATA SC"
+"text": "Doc What it covers --- --- architecture.md High-level system architecture and component responsibilities. architecture-diagrams.md Mermaid diagrams: system architecture, contract interactions, data flow, and deployment topology (issue 1644). economic-security-model.md Economic assumptions, incentives, and attack cost analysis (see also ADR-006). weighted-voting.md Weighted quorum voting: per-attestor trust weights (1–100) and threshold semantics. claim-types.md Claim type registry — the claims a credential holder can prove. credential-types.md Credential type registry — the credential kinds th"
+},
+{
+"doc": "README.md",
+"title": "QuorumProof Documentation",
+"heading": "Developer Tooling & Environment",
+"anchor": "developer-tooling--environment",
+"text": "Doc What it covers --- --- local-dev-setup.md Setting up a local development environment: prerequisites, setup script, Docker Compose, standalone network, and troubleshooting (issue 1663). ide-setup.md VS Code extension recommendations, workspace settings, debug configurations, and tasks for contract and API development (issue 1664). environment-parity.md Detecting and remediating env/config drift between environments using check env parity.sh and compare environments.sh (issue 1662). ---"
 },
 {
 "doc": "README.md",
@@ -1491,6 +1498,13 @@
 "heading": "Deployment & Operations",
 "anchor": "deployment--operations",
 "text": "Doc What it covers --- --- deployment-guide.md Primary build-and-deploy walkthrough. deployment-checklist.md Pre-flight checklist to run before any deployment. mainnet-deployment-runbook.md Step-by-step mainnet deployment procedure with per-contract confirmation gates. ci-testnet-deployment.md How the automated testnet deployment pipeline works. cicd-pipeline.md Overview of the CI/CD pipeline stages and gates. multi-region-deployment.md Running the API server across multiple regions. multi-region-failover.md AWS active/passive multi-region failover: detection, data replication, procedures and "
+},
+{
+"doc": "README.md",
+"title": "QuorumProof Documentation",
+"heading": "Runbooks",
+"anchor": "runbooks",
+"text": "Step-by-step, copy-pasteable procedures for standard operations (issue 1645). Doc What it covers --- --- runbook-deployment.md Production release: migrations, contract upgrades, blue/green API rollout, post-deploy verification. runbook-incident-response.md Severity levels, roles, detect → stabilize → diagnose → resolve → postmortem, emergency pause, comms templates. runbook-rollback.md Rolling back the API server, contract upgrades, database migrations, and testnet deploys. runbook-maintenance.md Maintenance windows, change freeze, and the recurring maintenance task schedule. ---"
 },
 {
 "doc": "README.md",
@@ -1504,7 +1518,7 @@
 "title": "QuorumProof Documentation",
 "heading": "Security & Compliance",
 "anchor": "security--compliance",
-"text": "Doc What it covers --- --- threat-model.md Assets, threat actors, attack vectors, and mitigations already considered. THREAT MODEL CREDENTIAL FRAUD.md Focused threat model for credential-fraud detection (issue 1252). security-best-practices.md Security guidance for contributors and integrators. security-best-practices.md Security requirements (SR- IDs), PR/release checklists, threat-modeling guide, and security tooling (issue 1637). security-audit-checklist.md Internal review checklist used before releases. issuer-security-checklist.md Security checklist for institutions issuing credentials. g"
+"text": "Doc What it covers --- --- threat-model.md Assets, threat actors, attack vectors, and mitigations already considered. THREAT MODEL CREDENTIAL FRAUD.md Focused threat model for credential-fraud detection (issue 1252). security-best-practices.md Security guidance for contributors and integrators. security-best-practices.md Security requirements (SR- IDs), PR/release checklists, threat-modeling guide, and security tooling (issue 1637). security-audit-checklist.md Internal review checklist used before releases. issuer-security-checklist.md Security checklist for institutions issuing credentials. a"
 },
 {
 "doc": "README.md",
@@ -1533,6 +1547,13 @@
 "heading": "Testing & QA",
 "anchor": "testing--qa",
 "text": "Doc What it covers --- --- TESTING COMPREHENSIVE GUIDE.md The overall testing strategy and how the layers fit together. API CONTRACT TESTING.md Contract tests between the API server and its consumers. E2E TESTING.md End-to-end test suite against testnet. SNAPSHOT TESTING.md Snapshot testing approach and how to update snapshots. FUZZING.md Fuzz targets (including BBS+ operations) and how to run them. fuzz-testing-guide.md Guide to writing and running fuzz tests. code-coverage.md How coverage is measured and reported. coverage-configuration.md Coverage tooling configuration reference. longevity-"
+},
+{
+"doc": "README.md",
+"title": "QuorumProof Documentation",
+"heading": "Documentation versions",
+"anchor": "documentation-versions",
+"text": "Doc What it covers --- --- documentation-versioning.md How docs are versioned (git refs listed in versions.json ), switching versions, backport rules, and the deprecation policy (issue 1642). You are reading the latest docs ( main ). To read the docs for an older release, pick it in the interactive docs version switcher or open the docs/vMAJOR.MINOR branch. ---"
 },
 {
 "doc": "README.md",
@@ -5651,11 +5672,116 @@
 "text": "- The source of truth for shapes is the route code under api-server/src/routes/ and the OpenAPI spec in api-server/openapi/openapi.json . When they disagree with this file, the code wins — fix the example. - Values are illustrative; addresses and hashes are truncated with … where the exact value is irrelevant. - When adding a new endpoint, add: one success example, every error status it can emit, and any new schema to Shared response schemas. - Record the change in the changelog."
 },
 {
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "System Architecture Diagrams",
+"anchor": "system-architecture-diagrams",
+"text": "Issue 1644. These diagrams show how QuorumProof fits together: the overall system, how the contracts call each other, how data moves through a credential's lifecycle, and how the system is deployed. The prose reference is architecture.md. The design decisions behind the diagrams are recorded in the ADRs, especially ADR-010 (three-contract architecture) and ADR-015 (read-only API server). The diagrams are written in Mermaid. GitHub renders them inline, and you can edit them as plain text in a PR. If you change a contract interface, a deployment manifest or a Terraform module, update the matchin"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "Table of Contents",
+"anchor": "table-of-contents",
+"text": "1. System architecture 2. Contract interactions 3. Data flow 4. Deployment 5. Keeping diagrams current ---"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "1. System architecture",
+"anchor": "1-system-architecture",
+"text": "The Stellar ledger is the source of truth. Clients sign and submit writes with their own wallets. The API server never holds user keys. It reads contract state by simulating calls against Soroban RPC (ADR-015), and it adds indexing, caching, notifications and analytics on top. mermaid flowchart LR subgraph Clients FE[Frontend<br/ frontend/] DB UI[Operator dashboard<br/ dashboard/] SDK[Integrators<br/ SDK / REST / GraphQL] W[Wallet<br/ signs transactions] end subgraph API[\"API server (api-server/)\"] MW[Middleware<br/ auth · RBAC · rate limit · tracing] R[Routes<br/ REST v1/v2 · GraphQL · WebSoc"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "2. Contract interactions",
+"anchor": "2-contract-interactions",
+"text": ""
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "2.1 Dependency graph",
+"anchor": "21-dependency-graph",
+"text": "mermaid flowchart TD QP[quorum proof] SBT[sbt registry] ZK[zk verifier] SBT -- get credential<br/ on every mint QP QP -- get tokens by owner, get token<br/ in verify engineer SBT QP -- verify claim / verify groth16 proof<br/ in verify engineer ZK sbt registry stores the quorum proof contract ID at initialization. That's why it has to be deployed last (see Deployment order)."
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "2.2 Issuance and attestation",
+"anchor": "22-issuance-and-attestation",
+"text": "mermaid sequenceDiagram autonumber actor Issuer actor Engineer as Engineer (subject) actor Att as Attestors<br/ (university, society, employer) participant QP as quorum proof participant SBT as sbt registry Engineer- QP: create slice(creator, attestors, weights, threshold) QP-- Engineer: slice id Issuer- QP: issue credential(issuer, subject, type, metadata hash, expires at, nonce) QP-- Issuer: credential id (event: CredentialIssued) loop each attestor in the slice Att- QP: attest(attestor, credential id, slice id, value, expires at) QP-- Att: event: AttestationRecorded end Note over QP: weight"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "2.3 Verification",
+"anchor": "23-verification",
+"text": "mermaid sequenceDiagram autonumber actor V as Verifier (employer) participant API as API server participant RPC as Soroban RPC participant QP as quorum proof participant SBT as sbt registry participant ZK as zk verifier V- API: GET /verify/... (or direct contract call) API- API: verification cache hit? alt cache miss API- RPC: simulate verify engineer(sbt id, zk id, subject, credential id, claim, proof, vk hash) RPC- QP: verify engineer(...) QP- QP: credential exists, not revoked/expired, attested QP- SBT: get tokens by owner(subject) SBT-- QP: token ids QP- ZK: verify proof for claim type ZK-"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "2.4 Revocation and dispute",
+"anchor": "24-revocation-and-dispute",
+"text": "mermaid stateDiagram-v2 [ ] -- Issued: issue credential Issued -- Attested: attest → weighted threshold met Issued -- Revoked: revoke credential Attested -- Suspended: suspend credential Attested -- Challenged: challenge attestation Challenged -- Attested: challenge rejected Challenged -- Revoked: challenge upheld Attested -- Expired: expires at passed Expired -- Attested: renew credential Attested -- Revoked: revoke credential Suspended -- Revoked: revoke credential Revoked -- [ ] The states are simplified. The authoritative flags and error codes are in sdk-methods-reference.md and error-code"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "3. Data flow",
+"anchor": "3-data-flow",
+"text": ""
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "3.1 What lives where",
+"anchor": "31-what-lives-where",
+"text": "mermaid flowchart LR subgraph OnChain[\"On-chain (public, permanent)\"] C[Credential record<br/ issuer · subject · type ·<br/ metadata hash · flags] S[Quorum slices<br/ attestors · weights · threshold] A[Attestations] T[SBTs] E[Contract events] end subgraph OffChain[\"Off-chain\"] M[Credential metadata<br/ IPFS — encrypted/compressed by client] IDX[Indexed events,<br/ search index, analytics<br/ PostgreSQL] CACHE[Verification cache,<br/ sessions, rate limits<br/ Redis] LOG[Logs → Loki →<br/ cold-storage archive] BK[Backups / snapshots<br/ S3, versioned + encrypted] end M -. hash anchored in .- C E"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "3.2 Event pipeline",
+"anchor": "32-event-pipeline",
+"text": "mermaid sequenceDiagram participant QP as Contracts participant RPC as Soroban RPC participant L as API server<br/ event listener participant PG as PostgreSQL participant RD as Redis participant WS as WebSocket clients participant AM as Alertmanager QP-- RPC: emit event (ledger N) loop poll L- RPC: getEvents(startLedger, contractIds) RPC-- L: events end L- PG: persist + index L- RD: invalidate affected verification cache keys L- WS: push notification L- AM: critical events (pause, upgrade, revocation spike) ---"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "4. Deployment",
+"anchor": "4-deployment",
+"text": ""
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "4.1 Runtime topology (production)",
+"anchor": "41-runtime-topology-production",
+"text": "mermaid flowchart TB U[Users / integrators] -- R53[Route 53<br/ failover DNS + health checks] subgraph P[\"Primary region\"] ALB1[ALB] -- SVC1[api-server service<br/ blue / green slots] SVC1 -- AUR1[(Aurora PostgreSQL<br/ primary)] SVC1 -- RED1[(Redis)] S31[(S3: backups + log archive)] end subgraph S[\"Secondary region (passive)\"] ALB2[ALB] -- SVC2[api-server service] SVC2 -- AUR2[(Aurora PostgreSQL<br/ global replica)] S32[(S3 replica)] end R53 -- healthy ALB1 R53 -.- on failover ALB2 AUR1 -. global replication .- AUR2 S31 -. cross-region replication .- S32 SVC1 & SVC2 -- RPC[Soroban RPC<br/ pri"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "4.2 Release pipeline",
+"anchor": "42-release-pipeline",
+"text": "mermaid flowchart LR PR[Pull request] -- CI[ci.yml<br/ build · test · lint ·<br/ docs-index · security] CI -- M[merge to main] M -- TD[testnet-deploy.yml<br/ deploy testnet.sh] TD -- SM{testnet smoke test.sh} SM -- fail TR[testnet rollback.sh<br/ restore manifest] SM -- pass IMG[api-server image<br/ container-scan.yml] IMG -- BG[blue-green-deploy.yml<br/ deploy to idle slot] BG -- HC{preview health<br/ checks pass?} HC -- no KEEP[keep traffic on<br/ current slot] HC -- yes SW[switch live Service<br/ selector] M -.- contract release UP[pre upgrade checks.sh →<br/ upgrade rollback.sh] The operat"
+},
+{
+"doc": "architecture-diagrams.md",
+"title": "System Architecture Diagrams",
+"heading": "5. Keeping diagrams current",
+"anchor": "5-keeping-diagrams-current",
+"text": "- Update the diagram in the same PR as the change it describes. Reviewers should ask for it. - Keep node labels matched to real names (contract methods, script names, Terraform modules) so readers can grep for them. - Preview locally with the Mermaid Live Editor or any editor with Mermaid preview. GitHub renders the committed version. - Stick to flowchart , sequenceDiagram and stateDiagram-v2 , which render reliably on GitHub."
+},
+{
 "doc": "architecture.md",
 "title": "Architecture Overview",
 "heading": "Architecture Overview",
 "anchor": "architecture-overview",
-"text": ""
+"text": "Visual diagrams of the full system, contract interactions, data flow and deployment are in architecture-diagrams.md."
 },
 {
 "doc": "architecture.md",
@@ -6125,6 +6251,209 @@
 "heading": "Related Documentation",
 "anchor": "related-documentation",
 "text": "- Monitoring Guide — Prometheus & Grafana setup - Disaster Recovery — Backup and restore procedures - Threat Model — Security considerations for audit logs"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Automated Scaling Guide",
+"anchor": "automated-scaling-guide",
+"text": "Issue 1658 — Automated Scaling This document covers the autoscaling policy for quorumproof-api-server , the metrics that drive it, how to tune thresholds, and how to validate the system under load. ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Table of Contents",
+"anchor": "table-of-contents",
+"text": "1. Overview 2. Architecture 3. Autoscaling Policy 4. Metrics Pipeline 5. Threshold Tuning 6. Load Testing 7. Operational Runbook 8. Troubleshooting ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Overview",
+"anchor": "overview",
+"text": "QuorumProof's API server handles two primary workload shapes: - Verification bursts — a relying party integration issues thousands of POST /api/credentials/verify-batch calls in a short window. CPU and request-rate rise sharply. - Issuance backlog — a university or licensing body batch-issues credentials. CPU is moderate but the search-index write path saturates memory. Manual scaling cannot react fast enough to either pattern. The Kubernetes Horizontal Pod Autoscaler (HPA) reacts to CPU utilisation and HTTP request rate in near-real-time and keeps p95 API latency below the 500 ms SLO. ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Architecture",
+"anchor": "architecture",
+"text": "Prometheus ──scrapes──► quorumproof-exporter (metrics.py) │ ▼ Prometheus Adapter ──custom-metrics API──► HPA │ scales ▼ quorumproof-api-server (Deployment) minReplicas: 2 maxReplicas: 10 Files: File Purpose --- --- k8s/hpa.yaml HPA definition — thresholds, scale behaviours k8s/prometheus-adapter-config.yaml Bridges Prometheus series into k8s custom-metrics API scripts/scaling load test.sh Load driver + HPA validation script ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Autoscaling Policy",
+"anchor": "autoscaling-policy",
+"text": ""
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Scaling triggers (any one is sufficient to trigger scale-up)",
+"anchor": "scaling-triggers-any-one-is-sufficient-to-trigger-scale-up",
+"text": "Metric Type Target Rationale --- --- --- --- CPU utilisation Resource 50 % average Leaves headroom before the 500 m limit; avoids throttling during ZK-proof verification. Memory utilisation Resource 70 % average Prevents OOM kills during batch-verification bursts (search-index writes). quorumproof http requests per second Pods (custom) 200 req/s per replica Above this threshold the p95 latency breaches 500 ms (see §Threshold Tuning)."
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Scale-up behaviour",
+"anchor": "scale-up-behaviour",
+"text": "yaml scaleUp: stabilizationWindowSeconds: 60 react within 60 s of sustained load policies: - type: Percent value: 100 periodSeconds: 60 double pod count per minute - type: Pods value: 2 periodSeconds: 60 always add ≥ 2 pods selectPolicy: Max"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Scale-down behaviour",
+"anchor": "scale-down-behaviour",
+"text": "yaml scaleDown: stabilizationWindowSeconds: 300 don't scale down for 5 min after metric drops policies: - type: Percent value: 20 periodSeconds: 60 remove ≤ 20 % per minute selectPolicy: Min The conservative scale-down prevents flapping during bursty credential verification traffic where a relying party fires waves of requests with short gaps. ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Metrics Pipeline",
+"anchor": "metrics-pipeline",
+"text": ""
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Prometheus exporter metrics used",
+"anchor": "prometheus-exporter-metrics-used",
+"text": "The following Prometheus counters/gauges are consumed by the HPA. They are emitted by monitoring/exporter/exporter.py and monitoring/exporter/metrics.py . Prometheus metric Kind Description --- --- --- quorumproof api requests total Counter Total HTTP requests received. Used to derive per-pod request rate via Prometheus Adapter recording rule rate(...[2m]) . quorumproof api errors total Counter Total error responses. Not used by HPA directly but exposed as quorumproof error rate per second for dashboards. quorumproof pending attestations Gauge Queued attestation requests. Available as a custom"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Prometheus Adapter recording rule",
+"anchor": "prometheus-adapter-recording-rule",
+"text": "The adapter config in k8s/prometheus-adapter-config.yaml registers: quorumproof http requests per second = rate(quorumproof api requests total{namespace, pod}[2m]) Verify the metric is visible in the custom-metrics API: bash kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/namespaces/quorumproof/pods/ /quorumproof http requests per second jq . ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Threshold Tuning",
+"anchor": "threshold-tuning",
+"text": "Thresholds were derived from load tests run against a single replica with scripts/scaling load test.sh and api-server/loadtest/credentialLoadTest.ts ."
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Methodology",
+"anchor": "methodology",
+"text": "1. Run LOAD RPS=50 LOAD DURATION=120 ./scripts/scaling load test.sh --dry-run to verify config, then increase LOAD RPS in steps of 50. 2. Record p95 latency from Grafana → API Latency dashboard for each step. 3. The threshold is the RPS where p95 first exceeds 500 ms."
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Results (single replica, requests.cpu: 100m , memory: 256Mi )",
+"anchor": "results-single-replica-requestscpu-100m--memory-256mi",
+"text": "RPS per replica CPU util p95 latency Status --- --- --- --- 100 ~20 % 120 ms ✅ within SLO 150 ~35 % 220 ms ✅ within SLO 200 ~48 % 430 ms ⚠️ near threshold 250 ~60 % 680 ms ❌ breaches SLO → CPU target 50 % and request-rate target 200 req/s were chosen as the scale-up triggers. Both thresholds allow some headroom before SLO breach, and the HPA's 60 s scale-up window means a new replica is usually ready before p95 hits 500 ms."
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Re-tuning after a resource change",
+"anchor": "re-tuning-after-a-resource-change",
+"text": "If you change the pod's CPU/memory requests or the application's profile (e.g. enabling in-process ZK verification), re-run the load test at each RPS step and update the targets in k8s/hpa.yaml . ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Load Testing",
+"anchor": "load-testing",
+"text": ""
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Quick run (against local api-server)",
+"anchor": "quick-run-against-local-api-server",
+"text": "bash Start the api-server locally cd api-server && npm run dev & Run the load test (dry-run to validate prerequisites) ./scripts/scaling load test.sh --dry-run Real run: 500 req/s for 120 s LOAD RPS=500 LOAD DURATION=120 API URL=http://localhost:3001 \\ ./scripts/scaling load test.sh"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Against a Kubernetes cluster",
+"anchor": "against-a-kubernetes-cluster",
+"text": "bash Port-forward the service kubectl -n quorumproof port-forward svc/quorumproof-api-server 8080:80 & Run the HPA validation NAMESPACE=quorumproof API URL=http://localhost:8080 \\ LOAD RPS=600 LOAD DURATION=180 \\ ./scripts/scaling load test.sh"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Credential-specific load test",
+"anchor": "credential-specific-load-test",
+"text": "For a more realistic load pattern (issuance + verification): bash cd api-server LOAD ISSUE COUNT=2000 LOAD VERIFY COUNT=20000 LOAD RPC LATENCY MS=80 \\ npm run loadtest:credentials ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Operational Runbook",
+"anchor": "operational-runbook",
+"text": ""
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Manually override replica count",
+"anchor": "manually-override-replica-count",
+"text": "bash Scale to 5 replicas immediately (bypasses HPA temporarily) kubectl -n quorumproof scale deployment quorumproof-api-server --replicas=5 After the incident, re-enable HPA control by restoring min/max: kubectl -n quorumproof patch hpa quorumproof-api-server \\ -p '{\"spec\":{\"minReplicas\":2,\"maxReplicas\":10}}'"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Disable autoscaling temporarily",
+"anchor": "disable-autoscaling-temporarily",
+"text": "bash kubectl -n quorumproof delete hpa quorumproof-api-server Re-enable: kubectl apply -f k8s/hpa.yaml"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Raise the max replicas for a planned event",
+"anchor": "raise-the-max-replicas-for-a-planned-event",
+"text": "bash kubectl -n quorumproof patch hpa quorumproof-api-server \\ -p '{\"spec\":{\"maxReplicas\":20}}' Revert after the event: kubectl -n quorumproof patch hpa quorumproof-api-server \\ -p '{\"spec\":{\"maxReplicas\":10}}'"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Check HPA status",
+"anchor": "check-hpa-status",
+"text": "bash kubectl -n quorumproof describe hpa quorumproof-api-server Key fields to check: - Conditions — AbleToScale: True , ScalingActive: True - Events — any recent scale events with reasons - Current/Desired Replicas — should converge within 2 min of a load change ---"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Troubleshooting",
+"anchor": "troubleshooting",
+"text": ""
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "HPA shows <unknown for custom metrics",
+"anchor": "hpa-shows-unknown-for-custom-metrics",
+"text": "The Prometheus Adapter is not running or not configured correctly. bash Check adapter pods kubectl -n monitoring get pods -l app=prometheus-adapter Check adapter logs kubectl -n monitoring logs -l app=prometheus-adapter --tail=50 Verify the metric is registered kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 jq '.resources[].name'"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "HPA is not scaling up under load",
+"anchor": "hpa-is-not-scaling-up-under-load",
+"text": "1. Check that the Prometheus exporter is scraping correctly: curl http://localhost:3001/metrics/events grep quorumproof api requests total 2. Confirm the Prometheus Adapter config matches the metric labels in your cluster (namespace and pod label names must align). 3. Ensure metrics-server is installed and healthy: kubectl -n kube-system get pods -l k8s-app=metrics-server"
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Pods crash-loop during scale-up",
+"anchor": "pods-crash-loop-during-scale-up",
+"text": "The initialDelaySeconds on the liveness probe (15 s) should cover Node.js startup + DB migrations. If pods crash before they pass the probe, increase initialDelaySeconds in k8s/api-server-deployment.yaml and re-apply."
+},
+{
+"doc": "autoscaling-guide.md",
+"title": "Automated Scaling Guide",
+"heading": "Scale-down never happens",
+"anchor": "scale-down-never-happens",
+"text": "The stabilizationWindowSeconds: 300 intentionally delays scale-down. If metrics remain elevated (e.g. a memory leak) the HPA will not scale down. Check Grafana → API Latency and CPU dashboards for sustained utilisation."
 },
 {
 "doc": "backup-system.md",
@@ -6741,6 +7070,111 @@
 "heading": "After any rollback",
 "anchor": "after-any-rollback",
 "text": "1. ./scripts/blue green deploy.sh status — confirm the live slot and image. 2. Capture logs from the failed slot before scaling it down: kubectl -n quorumproof logs -l app=quorumproof-api-server,slot=<failed --tail=500 . 3. ./scripts/blue green deploy.sh scale-down-idle once investigation is done. 4. Record the incident per OPERATOR RUNBOOK.md."
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Canary Deployments",
+"anchor": "canary-deployments",
+"text": "Issue 1654 — Deployments are all-or-nothing. This document describes the QuorumProof canary deployment architecture for the Kubernetes API server, how traffic is shifted incrementally, how promotion/rollback decisions are made, and what triggers an automatic rollback."
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Overview",
+"anchor": "overview",
+"text": "QuorumProof supports two independent canary deployment strategies : Layer Mechanism Script Docs ------- ----------- -------- ------ Soroban smart contracts Upload new WASM to 10% of RPC endpoints; soak; upgrade contract scripts/canary deploy.sh docs/blue-green-deployment.md Kubernetes API server Add a canary Deployment alongside stable; weight by replica count scripts/canary k8s.sh This document Both strategies follow the same principle: send a small fraction of real traffic to the new version, measure error rate + latency, then either promote or roll back. ---"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Kubernetes Canary Architecture",
+"anchor": "kubernetes-canary-architecture",
+"text": "Traffic splitting uses weighted replica counts — no Ingress annotation or service mesh required. The main quorumproof-api-server Service selects all pods with app: quorumproof-api-server regardless of the track label, so kube-proxy distributes requests across stable and canary pods proportionally. ┌─────────────────────────────────────┐ │ Service: quorumproof-api-server │ │ selector: app=quorumproof-api-server │ └──────────────┬──────────────────────┘ │ round-robin ┌────────────────────────┴─────────────────────┐ │ (9 pods) │ (1 pod) ┌─────────▼──────────┐ ┌──────────▼──────────┐ │ Deployment:"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Traffic percentages by replica count",
+"anchor": "traffic-percentages-by-replica-count",
+"text": "Stable replicas Canary replicas Canary % ---------------- ----------------- ---------- 9 1 ~10% 3 1 ~25% 1 1 ~50% ---"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Quick Start",
+"anchor": "quick-start",
+"text": "bash 1. Deploy canary at 10% traffic ./scripts/canary k8s.sh deploy \\ --image quorumproof/api-server:v1.2.0 \\ --pct 10 2. Monitor for 5 minutes (auto-rollback on breach) ./scripts/canary k8s.sh monitor \\ --soak 300 \\ --error-threshold 0.05 \\ --p95-ms 2000 3a. Promote if healthy ./scripts/canary k8s.sh promote 3b. Or rollback manually at any point ./scripts/canary k8s.sh rollback Check current state at any time ./scripts/canary k8s.sh status ---"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Deployment Workflow",
+"anchor": "deployment-workflow",
+"text": ""
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Step 1: Deploy canary",
+"anchor": "step-1-deploy-canary",
+"text": "bash ./scripts/canary k8s.sh deploy --image quorumproof/api-server:v1.2.0 --pct 10 This: 1. Applies k8s/canary/ manifests (creates quorumproof-api-server-canary Deployment) 2. Sets the canary image via kubectl set image 3. Scales the canary to achieve the requested traffic percentage 4. Waits for pods to pass readiness probes"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Step 2: Validate canary-only traffic",
+"anchor": "step-2-validate-canary-only-traffic",
+"text": "Before exposing to general traffic, validate via the canary-direct Service: bash kubectl port-forward -n quorumproof \\ $(kubectl get pod -n quorumproof -l track=canary -o name head -1) \\ 8080:3001 curl http://localhost:8080/health/ready curl http://localhost:8080/api/credentials"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Step 3: Monitor metrics",
+"anchor": "step-3-monitor-metrics",
+"text": "bash ./scripts/canary k8s.sh monitor --soak 300 During the soak period the script polls Prometheus every 15 seconds for: Metric Threshold Default -------- ----------- --------- Error rate < error threshold 5% p95 latency < p95 ms 2000ms Pod restarts < 3 — If any threshold is breached, the canary is rolled back automatically."
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Step 4: Promote or rollback",
+"anchor": "step-4-promote-or-rollback",
+"text": "bash Promote: rolls stable to the canary image, then deletes the canary ./scripts/canary k8s.sh promote Rollback: deletes the canary Deployment, restoring 100% stable traffic ./scripts/canary k8s.sh rollback ---"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Rollback Triggers",
+"anchor": "rollback-triggers",
+"text": "Automatic rollback (during monitor ) fires when: Condition Threshold ----------- ----------- Error rate exceeds threshold 0.05 (configurable) p95 latency exceeds threshold 2000ms (configurable) Pod restart count too high 3 restarts Manual rollback at any time: bash ./scripts/canary k8s.sh rollback Emergency rollback without the script: bash kubectl delete deployment quorumproof-api-server-canary -n quorumproof Stable continues serving 100% of traffic immediately ---"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Prometheus Metrics for Canary Monitoring",
+"anchor": "prometheus-metrics-for-canary-monitoring",
+"text": "The canary pods expose a track=canary label via the DEPLOYMENT TRACK environment variable and the deployment.kubernetes.io/track: canary pod annotation (scraped by Prometheus). Useful PromQL queries: promql Error rate: canary vs stable rate(quorumproof api errors total{track=\"canary\"}[1m]) rate(quorumproof api errors total{track=\"stable\"}[1m]) p95 latency comparison histogram quantile(0.95, rate(quorumproof contract invocation duration seconds bucket{track=\"canary\"}[1m])) Pod restarts for canary sum(kube pod container status restarts total{ namespace=\"quorumproof\", pod=~\"quorumproof-api-server"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "GitHub Actions Integration",
+"anchor": "github-actions-integration",
+"text": "A canary deployment GitHub Actions workflow is available at .github/workflows/canary-deploy.yml (originally for Soroban contracts). For Kubernetes canary deployments, extend the existing workflow or create a separate one: yaml .github/workflows/k8s-canary.yml - name: Deploy Kubernetes canary run: chmod +x scripts/canary k8s.sh NAMESPACE=quorumproof \\ PROMETHEUS URL=${{ vars.PROMETHEUS URL }} \\ NOTIFY WEBHOOK=${{ secrets.NOTIFY WEBHOOK }} \\ ./scripts/canary k8s.sh deploy \\ --image \"quorumproof/api-server:${{ github.sha }}\" \\ --pct 10 - name: Monitor canary run: ./scripts/canary k8s.sh monitor \\"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "Relationship to Blue-Green Deployments",
+"anchor": "relationship-to-blue-green-deployments",
+"text": "Blue-green and canary are complementary strategies: Blue-Green Canary - ----------- -------- Traffic split 0% / 100% switch Gradual (10% → 100%) Risk Binary (instant switch) Lower (incremental exposure) Rollback time Instant (patch selector) Instant (delete canary) Best for Schema migrations, major versions Feature releases, risky changes Manifests k8s/blue-green/ k8s/canary/ Use canary for normal releases, blue-green for zero-downtime schema changes. ---"
+},
+{
+"doc": "canary-deployments.md",
+"title": "Canary Deployments",
+"heading": "See Also",
+"anchor": "see-also",
+"text": "- k8s/canary/ — Kubernetes manifests - scripts/canary k8s.sh — Kubernetes canary script - scripts/canary deploy.sh — Soroban contract canary script - docs/blue-green-deployment.md — blue-green strategy guide - k8s/blue-green/ — blue-green manifests"
 },
 {
 "doc": "capacity-planning.md",
@@ -8099,6 +8533,265 @@
 "heading": "References",
 "anchor": "references",
 "text": "- Soroban Contract Upgrade Documentation - Stellar Deployer Interface - QuorumProof Architecture - Error Codes Reference - Migration Invariants — Formal invariant set (I1–I8) - Migration Verification Harness — Snapshot-diff test harness - CI Workflow — CI gate with migration verification"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Cost Alert Thresholds",
+"anchor": "cost-alert-thresholds",
+"text": "Issue 1661 — Add Cost Alert Thresholds This document covers the cost monitoring setup, alert thresholds, alert routing, and threshold tuning guidance for QuorumProof's Stellar Soroban gas costs. For background on the gas cost tracking implementation, see docs/cost-optimization-guide.md. ---"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Table of Contents",
+"anchor": "table-of-contents",
+"text": "1. Overview 2. Cost Metrics 3. Alert Thresholds 4. Alert Routing 5. Threshold Tuning 6. Per-Operation Tuning 7. Reducing Cost 8. Emergency Response ---"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Overview",
+"anchor": "overview",
+"text": "Soroban charges a minResourceFee (in stroops) per contract invocation, based on CPU, memory, and ledger-entry usage. Without monitoring, cost overruns go unnoticed until the infrastructure bill arrives. QuorumProof records every fee via api-server/src/services/gasCostTracker.ts and exposes three Prometheus metrics used by the alert rules in monitoring/prometheus/alerts.yml (group: quorumproof-cost ): Metric Type Description --- --- --- quorumproof cost operation stroops total Counter Cumulative gas cost per operation name (stroops) quorumproof cost daily budget stroops Gauge Operator-configure"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Cost Metrics",
+"anchor": "cost-metrics",
+"text": ""
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Viewing the cost report",
+"anchor": "viewing-the-cost-report",
+"text": "bash Full report: totals + per-operation breakdown curl -sf http://<API URL /api/costs/report jq . Top N operations by spend curl -sf \"http://<API URL /api/costs/optimizations?top=5\" jq . Project cost for a given volume curl -sf \"http://<API URL /api/costs/projection?operation=is attested&callsPerDay=10000&days=30\" jq ."
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Grafana dashboard",
+"anchor": "grafana-dashboard",
+"text": "A cost panel can be added to the existing Grafana contract-health dashboard. Import the following PromQL queries into a new panel: promql Rolling 24-hour gas cost in XLM quorumproof cost total stroops 24h / 10000000 Per-operation cost breakdown (top 5, last 24 h) topk(5, sum by (operation) ( increase(quorumproof cost operation stroops total[24h]) ) ) / 10000000 ---"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Alert Thresholds",
+"anchor": "alert-thresholds",
+"text": "Three alert rules are defined in monitoring/prometheus/alerts.yml under the quorumproof-cost group:"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "CostBudgetWarning (warning)",
+"anchor": "costbudgetwarning-warning",
+"text": "yaml expr: quorumproof cost total stroops 24h (quorumproof cost daily budget stroops 0.80) for: 15m Fires when the rolling 24-hour cost exceeds 80 % of the daily budget . This gives 15–30 minutes of warning before the critical threshold is hit, enough time to review top spenders and reduce call volume."
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "CostBudgetCritical (critical → PagerDuty)",
+"anchor": "costbudgetcritical-critical--pagerduty",
+"text": "yaml expr: quorumproof cost total stroops 24h quorumproof cost daily budget stroops for: 5m Fires when the rolling 24-hour cost exceeds 100 % of the daily budget . Routes to both quorumproof-cost (Slack) and quorumproof-critical (Slack + PagerDuty) via the alertmanager routing tree."
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "CostOperationSpike (warning)",
+"anchor": "costoperationspike-warning",
+"text": "yaml expr: increase(quorumproof cost operation stroops total[1h]) (quorumproof cost daily budget stroops / 48) for: 10m Fires when a single operation consumes more than budget / 48 stroops in one hour (equivalent to 50 % of the hourly budget allocation). This catches explosive call patterns from a single integration before the 24-hour rolling window triggers. ---"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Alert Routing",
+"anchor": "alert-routing",
+"text": "Alertmanager ( monitoring/prometheus/alertmanager.yml ) routes cost alerts as follows: CostBudgetWarning (severity: warning, team: platform) → quorumproof-cost (Slack) → repeat every 4 h CostBudgetCritical (severity: critical, team: platform) → quorumproof-cost (Slack) ← via platform route (continue: true) → quorumproof-critical (Slack) ← via critical route → PagerDuty on-call ← via critical route CostOperationSpike (severity: warning, team: platform) → quorumproof-cost (Slack) → repeat every 4 h The team: platform label on all cost alerts ensures they are routed to the quorumproof-platform re"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Configuring the Slack channel",
+"anchor": "configuring-the-slack-channel",
+"text": "bash Update the Kubernetes secret to set the webhook URL kubectl -n quorumproof create secret generic quorumproof-api-server-env \\ --from-literal=SLACK ALERT WEBHOOK URL=https://hooks.slack.com/... \\ --dry-run=client -o yaml kubectl apply -f - The quorumproof-cost channel must exist in your Slack workspace and the webhook must be configured to post to it. The channel name is hardcoded in monitoring/prometheus/alertmanager.yml ; change it to match your workspace if needed. ---"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Threshold Tuning",
+"anchor": "threshold-tuning",
+"text": ""
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Setting the daily budget",
+"anchor": "setting-the-daily-budget",
+"text": "The daily budget is controlled by the quorumproof cost daily budget stroops Prometheus gauge. The exporter reads this from the environment: bash .env or Kubernetes secret COST DAILY BUDGET STROOPS=100000000 10 XLM/day (default) Set the budget based on: 1. Run GET /api/costs/report for 7 days to establish a baseline. 2. Set the budget to 2× the p95 daily cost observed during that baseline. 3. Adjust upward for planned high-traffic events; adjust downward after optimisation work."
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Changing thresholds",
+"anchor": "changing-thresholds",
+"text": "The warning threshold (80 %) and critical threshold (100 %) are expressed as multipliers in alerts.yml . To change: bash Example: lower warning to 70 %, raise critical to 120 % Edit monitoring/prometheus/alerts.yml: CostBudgetWarning expr: quorumproof cost total stroops 24h (quorumproof cost daily budget stroops 0.70) CostBudgetCritical expr: quorumproof cost total stroops 24h (quorumproof cost daily budget stroops 1.20) Reload Prometheus after editing alerts.yml: bash curl -X POST http://localhost:9090/-/reload"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Per-environment tuning",
+"anchor": "per-environment-tuning",
+"text": "Use different budgets for staging vs production by setting different values for COST DAILY BUDGET STROOPS in each environment's Kubernetes secret: bash Staging: lower budget catches runaway tests early COST DAILY BUDGET STROOPS=10000000 1 XLM/day Production: budget based on measured p95 daily cost × 2 COST DAILY BUDGET STROOPS=200000000 20 XLM/day ---"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Per-Operation Tuning",
+"anchor": "per-operation-tuning",
+"text": "When CostOperationSpike fires for a specific operation, use the cost API to investigate and tune: bash Which operation is spiking? curl -sf \"http://<API URL /api/costs/optimizations?top=10\" jq '.[].operation' How much is it costing? curl -sf \"http://<API URL /api/costs/report\" jq '.perOperation[\"is attested\"]' Project the cost at current call rate curl -sf \"http://<API URL /api/costs/projection?operation=is attested&callsPerDay=50000&days=30\" jq ."
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Common high-cost operations and mitigations",
+"anchor": "common-high-cost-operations-and-mitigations",
+"text": "Operation Typical cost Mitigation --- --- --- verify groth16 proof High (ZK pairing) Cache proof results for identical (credential id, proof) pairs; use the verification cache (see docs/verification-cache-invalidation.md). is attested Low-medium Batch via verify-batch ; avoid per-request calls from high-frequency relying parties. get credential Low Already cached by the api-server search index; ensure cache TTL is set. create slice / attest Medium These are write operations; cost is proportional to ledger entries written. No easy mitigation — review batch issuance limits. ---"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Reducing Cost",
+"anchor": "reducing-cost",
+"text": "When CostBudgetWarning or CostBudgetCritical fires: 1. Check top spenders: bash curl -sf \"http://<API URL /api/costs/optimizations?top=10\" jq . 2. Apply quick wins: - Enable verification caching for verify groth16 proof (biggest cost reduction). - Increase cache TTL for is attested results. - Switch high-frequency relying parties to verify-batch instead of individual calls. 3. Throttle abusive callers: - Check rate-limit hits in Grafana. - Apply stricter rate limits to the offending API key (see docs/OPERATOR RUNBOOK.md). 4. Defer non-critical background work: bash kubectl -n quorumproof set e"
+},
+{
+"doc": "cost-alert-thresholds.md",
+"title": "Cost Alert Thresholds",
+"heading": "Emergency Response",
+"anchor": "emergency-response",
+"text": "When CostBudgetCritical fires and on-call is paged: 1. Assess scope — is this a cost spike from a legitimate traffic surge, or an unexpected runaway process? bash curl -sf \"http://<API URL /api/costs/report\" jq '.total {calls, totalXlm}' 2. Identify the source — check the top-spending operation and the request logs in Loki for the calling integration. 3. Immediate containment — disable background jobs, apply throttling, or temporarily pause non-critical API keys. 4. After the incident — update the budget, apply permanent mitigations, and document in an incident ticket. Update this guide if a n"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "Cost Optimization Analysis",
+"anchor": "cost-optimization-analysis",
+"text": "Issue 1657 — Infrastructure costs aren't analyzed. This document covers cost tracking, attribution, reporting, and concrete optimization opportunities for QuorumProof's Soroban smart-contract operations and supporting infrastructure."
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "Overview",
+"anchor": "overview",
+"text": "QuorumProof tracks on-chain gas costs (Soroban minResourceFee in stroops) for every contract operation via api-server/src/services/gasCostTracker.ts (see the existing docs/cost-optimization-guide.md for the API-level description). This document extends that foundation with: - Team-level cost attribution for charge-back and budget tracking - Automated cost reports runnable from CI or on demand - Identified optimization opportunities with estimated savings - A Terraform module for tracking infrastructure-level cost tags"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "Tooling",
+"anchor": "tooling",
+"text": ""
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "scripts/cost report.sh",
+"anchor": "scriptscost-reportsh",
+"text": "Pulls the /api/costs/report , /api/costs/optimizations , and /api/costs/projection endpoints and renders a human-readable summary. bash Basic report ./scripts/cost report.sh Save full JSON report ./scripts/cost report.sh --output /tmp/cost-report.json Show top 20 operations ./scripts/cost report.sh --top 20 Project cost for 50 000 calls/day over 90 days ./scripts/cost report.sh --calls 50000 --days 90"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "scripts/cost attribution.sh",
+"anchor": "scriptscost-attributionsh",
+"text": "Maps operations to owning teams using infra/cost-attribution.json and prints a per-team breakdown. bash Default config ./scripts/cost attribution.sh Custom attribution config ./scripts/cost attribution.sh --config myteam-attribution.json Emit JSON for downstream tooling ./scripts/cost attribution.sh --json --output attr.json"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "infra/cost-attribution.json",
+"anchor": "infracost-attributionjson",
+"text": "Declares which operations belong to which team. Edit this file to reflect your org structure. Unattributed operations are flagged at report runtime."
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "infra/terraform/modules/cost-tracking/",
+"anchor": "infraterraformmodulescost-tracking",
+"text": "Terraform module that adds AWS Cost Allocation Tags to all QuorumProof resources (ECS tasks, RDS, S3, CloudWatch) so costs are visible in AWS Cost Explorer broken down by Project , Environment , Team , and Component . ---"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "Cost Attribution Model",
+"anchor": "cost-attribution-model",
+"text": "Team Owned Operations Notes ------ ----------------- ------- credentials issue credential , get credential , revoke credential , batch issue credentials Highest volume; primary optimization target attestation attest , is attested , get attestors , remove attestor Second-highest read volume zk verify groth16 proof , verify plonk proof , verify claim Highest per-call fee; low volume slices create slice , get slice , add attestor Low volume; moderate fee registry register sbt , get sbt SBT issuance; low volume infrastructure get version , admin , upgrade Ops overhead; minimal cost ---"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "Identified Optimization Opportunities",
+"anchor": "identified-optimization-opportunities",
+"text": ""
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "1. Batch credential issuance (credentials team)",
+"anchor": "1-batch-credential-issuance-credentials-team",
+"text": "Issue : issue credential is called one-at-a-time in integrations that issue multiple credentials in one session (e.g., during onboarding when degree + license are issued together). Optimization : Use batch issue credentials which amortizes transaction overhead across multiple issuances in a single Soroban invocation. Estimated savings : 30–40% reduction in per-credential fee at volumes 100/day. bash Measure current average via the projection endpoint curl \"http://localhost:3001/api/costs/projection?operation=issue credential&callsPerDay=1000&days=30\" curl \"http://localhost:3001/api/costs/proje"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "2. Cache is attested read calls (attestation team)",
+"anchor": "2-cache-is-attested-read-calls-attestation-team",
+"text": "Issue : is attested is the highest-volume read operation. It is often called redundantly (e.g., on every page load) despite the attestation state changing rarely. Optimization : The existing credential cache ( docs/ → issue 1555) already caches get credential . Extend it to cache is attested results with a TTL of 5 minutes for attested credentials (revocations still invalidate immediately via the webhook event stream). Estimated savings : 60–80% reduction in is attested on-chain calls for production traffic patterns."
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "3. Reduce ZK proof verification compute (zk team)",
+"anchor": "3-reduce-zk-proof-verification-compute-zk-team",
+"text": "Issue : verify groth16 proof and verify plonk proof have the highest per-call fees because BLS12-381 pairing arithmetic is compute-intensive on-chain. Optimization : - Pre-verify proofs off-chain in the API server before submitting to the contract. Reject malformed proofs before paying the on-chain fee. - Implement a verification result cache keyed on (proof hash, verifying key hash) with a short TTL to deduplicate repeated verification of the same proof. Estimated savings : 15–25% reduction in paid ZK verification fees (avoids paying for proofs that would fail anyway)."
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "4. RPC simulation before submission",
+"anchor": "4-rpc-simulation-before-submission",
+"text": "Issue : Failed contract invocations still consume the base transaction fee. Optimization : The API server already calls simulateTransaction before submitting. Enforce a hard gate: any simulation that returns an error MUST NOT be submitted. This is already mostly true but some error paths bypass the guard. Estimated savings : 5–10% reduction in wasted fees on malformed inputs."
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "5. Infrastructure right-sizing (all teams)",
+"anchor": "5-infrastructure-right-sizing-all-teams",
+"text": "Issue : ECS task definitions use fixed CPU/memory allocations that were set conservatively at launch and haven't been revisited. Optimization : Use the Terraform cost-tracking module outputs combined with AWS CloudWatch Container Insights to identify tasks running at < 40% CPU/memory utilization. Right-size to the next-lower Fargate tier. Estimated savings : 20–35% reduction in compute costs. Use infra/terraform/modules/cost-tracking to tag resources and surface them in AWS Cost Explorer. ---"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "CI Integration",
+"anchor": "ci-integration",
+"text": "Add the cost report to your CI pipeline to catch regressions: yaml .github/workflows/cost-check.yml - name: Cost report run: ./scripts/cost report.sh --output /tmp/cost-report.json Fail if total daily cost exceeds budget (example: 100 XLM/day) DAILY XLM=$(jq -r '.report.dailyAvgXlm // 0' /tmp/cost-report.json) awk \"BEGIN{if ($DAILY XLM 100) {print \\\"COST BUDGET EXCEEDED\\\"; exit 1}}\""
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "Cost Monitoring Dashboard",
+"anchor": "cost-monitoring-dashboard",
+"text": "The Grafana dashboard at monitoring/grafana/dashboards/ can be extended with cost panels. Add the following PromQL queries: promql Average fee per operation (stroops) avg by (operation) (quorumproof contract fee stroops) Total daily cost (XLM) sum(increase(quorumproof contract fee stroops[24h])) / 10000000 Top 5 cost contributors topk(5, sum by (operation) (increase(quorumproof contract fee stroops[24h])))"
+},
+{
+"doc": "cost-optimization-analysis.md",
+"title": "Cost Optimization Analysis",
+"heading": "See Also",
+"anchor": "see-also",
+"text": "- docs/cost-optimization-guide.md — gas cost tracking API reference - infra/cost-attribution.json — team attribution config - scripts/cost report.sh — on-demand cost report - scripts/cost attribution.sh — team attribution report - infra/terraform/modules/cost-tracking/ — AWS cost tags"
 },
 {
 "doc": "cost-optimization-guide.md",
@@ -9690,6 +10383,216 @@
 "text": "Under both v1.0 and v1.1, an admin-then-upgrade sequence cannot be performed in a single transaction on Soroban — each contract invocation is its own transaction. Under v1.1, the timelock additionally prevents an attacker from submitting upgrade immediately after set admin even in separate transactions, because the new admin cannot take effect until after the 48-hour delay has elapsed. Under v1.0, operators should treat any set admin call that is immediately followed (within the same ledger or within minutes) by an upgrade call as a suspicious sequence and pause the contract immediately. The C"
 },
 {
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "Documentation Versioning",
+"anchor": "documentation-versioning",
+"text": "Issue 1642. Operators and integrators on an older release need docs that match the contracts and API they actually run. This page covers how documentation versions are defined, how to switch between them, how each version is maintained, and when a version is deprecated. ---"
+},
+{
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "Table of Contents",
+"anchor": "table-of-contents",
+"text": "1. How versions work 2. Switching versions 3. Cutting a new version 4. Maintaining older versions 5. Deprecation policy 6. Manifest reference ---"
+},
+{
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "1. How versions work",
+"anchor": "1-how-versions-work",
+"text": "Documentation versions are git refs , not copies of docs/ inside the tree. Copies would double the size of docs/ , confuse the docs index and link checks, and drift the moment someone forgets to update both. Version Git ref What it documents --- --- --- latest main Unreleased work on main . Always the default. MAJOR.MINOR (e.g. 1.0 ) branch docs/vMAJOR.MINOR The release line with that contract version (see contracts/quorum proof/src/version.rs ). Patch releases ( 1.0.1 , 1.0.2 ) share their minor version's docs. A patch never changes a public interface, so it doesn't need a separate docs versi"
+},
+{
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "2. Switching versions",
+"anchor": "2-switching-versions",
+"text": "Interactive docs. Open docs/interactive/ (see interactive-documentation.md) and pick a version from the Docs version menu in the header. Search result links then open that version's copy of each page on GitHub. If the version is deprecated or at end of life, a banner shows the dates. Your choice is saved in the URL ( ?v=1.0 ), so you can share the link. The search index is always built from latest . A page that was added after an older version was cut won't exist on that version's branch, and its link will 404. GitHub. Use the branch selector, or change the ref in the URL: https://github.com/Q"
+},
+{
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "3. Cutting a new version",
+"anchor": "3-cutting-a-new-version",
+"text": "A maintainer cuts a docs version as part of every minor or major release, right after the release commit lands on main : bash python3 scripts/docs versions.py cut 1.1 branch docs/v1.1 from HEAD, add to manifest git push upstream docs/v1.1 git add docs/versions.json git commit -m \"docs: cut documentation version 1.1\" Use --ref <sha to branch from the release commit if main has moved on. Cutting a new version doesn't deprecate the older ones on its own. Apply §5 as a separate step. ---"
+},
+{
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "4. Maintaining older versions",
+"anchor": "4-maintaining-older-versions",
+"text": "- Fix on main first , then backport. Cherry-pick the docs commit onto every supported docs/vX.Y branch it applies to: bash git checkout -b backport/1.0-fix-typo upstream/docs/v1.0 git cherry-pick -x <sha open a PR against docs/v1.0 - Backport only what's true for that version. If a fix describes behaviour that changed after the version was cut, rewrite it for the old behaviour. Don't cherry-pick it as-is. - What gets backported , by version status: Change supported deprecated eol --- --- --- --- Security advisories / security-relevant corrections Yes Yes Yes (banner only) Factual errors, broke"
+},
+{
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "5. Deprecation policy",
+"anchor": "5-deprecation-policy",
+"text": "Each docs version moves through these states: supported ──(deprecate)──▶ deprecated ──(180 days)──▶ eol Status Meaning --- --- current latest ( main ) only. supported Fully maintained per §4. deprecated Security and correctness fixes only. The switcher shows a warning with the EOL date. eol No longer maintained. The branch is kept read-only for history and the switcher shows an end-of-life banner. Rules 1. We maintain at least the two most recent minor versions as supported . 2. When a new minor or major version is cut, a version that falls outside that window is deprecated : bash python3 scri"
+},
+{
+"doc": "documentation-versioning.md",
+"title": "Documentation Versioning",
+"heading": "6. Manifest reference",
+"anchor": "6-manifest-reference",
+"text": "docs/versions.json : json { \"schema\": 1, \"repository\": \"https://github.com/QuorumProof/QuorumProof\", \"default\": \"latest\", \"versions\": [ { \"version\": \"latest\", \"label\": \"Latest (main)\", \"ref\": \"main\", \"status\": \"current\", \"released\": null, \"deprecated\": null, \"eol\": null }, { \"version\": \"1.0\", \"label\": \"v1.0\", \"ref\": \"docs/v1.0\", \"status\": \"deprecated\", \"released\": \"2026-10-01\", \"deprecated\": \"2027-04-01\", \"eol\": \"2027-09-28\" } ] } Field Description --- --- version latest or MAJOR.MINOR . label Name shown in the version switcher. ref Git ref the docs are read from. status current , supported , "
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "DR Runbook — QuorumProof",
+"anchor": "dr-runbook--quorumproof",
+"text": "Issue 1659 — Add Disaster Recovery Testing This runbook is the single-page reference an operator reaches for during a live incident. For background on the DR architecture, roles, and testing schedule, see docs/disaster-recovery.md. ---"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "Quick-Reference: Recovery Decision Tree",
+"anchor": "quick-reference-recovery-decision-tree",
+"text": "Symptom │ ├─ API returns 503 / no response │ └─► Go to §1: API Server Recovery │ ├─ \"RPC endpoint unreachable\" in logs │ └─► Go to §2: RPC Failover │ ├─ Contract returns unexpected errors │ └─► Go to §3: Contract Recovery │ ├─ Backup integrity check failed │ └─► Go to §4: Backup & Restore │ ├─ API key / secret compromised │ └─► Go to §5: Key Rotation │ └─ Cost spike / budget alert └─► Go to §6: Cost Containment ---"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "§1 API Server Recovery",
+"anchor": "1-api-server-recovery",
+"text": "RTO target: 2 minutes"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "1a. Pod crash / OOMKilled",
+"anchor": "1a-pod-crash--oomkilled",
+"text": "bash Check pod status kubectl -n quorumproof get pods -l app=quorumproof-api-server View crash logs kubectl -n quorumproof logs -l app=quorumproof-api-server --previous --tail=100 Force restart all pods kubectl -n quorumproof rollout restart deployment/quorumproof-api-server Watch rollout progress kubectl -n quorumproof rollout status deployment/quorumproof-api-server"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "1b. All pods crash-looping",
+"anchor": "1b-all-pods-crash-looping",
+"text": "bash Check if a bad config was recently applied kubectl -n quorumproof describe deployment quorumproof-api-server Roll back to the last known-good deployment kubectl -n quorumproof rollout undo deployment/quorumproof-api-server Verify rollback kubectl -n quorumproof rollout status deployment/quorumproof-api-server"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "1c. Manual scale-up (emergency)",
+"anchor": "1c-manual-scale-up-emergency",
+"text": "bash Bypass HPA and scale to a fixed count kubectl -n quorumproof scale deployment quorumproof-api-server --replicas=5 Validation: bash curl -sf http://<API URL /health && echo \"API is up\" ---"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "§2 RPC Failover",
+"anchor": "2-rpc-failover",
+"text": "RTO target: 5 minutes Run the automated failover script: bash Check which endpoints are healthy ./scripts/failover.sh --check Switch to backup endpoint ./scripts/failover.sh --switch testnet-backup testnet ./scripts/failover.sh --switch mainnet-backup mainnet Verify state consistency ./scripts/failover.sh --verify Manual override (edit .env and restart): bash .env STELLAR RPC URL=https://horizon-testnet.stellar.org testnet backup STELLAR RPC URL=https://horizon.stellar.org mainnet backup Restart api-server to pick up new RPC URL kubectl -n quorumproof rollout restart deployment/quorumproof-api"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "§3 Contract Recovery",
+"anchor": "3-contract-recovery",
+"text": ""
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "3a. Contract is paused",
+"anchor": "3a-contract-is-paused",
+"text": "bash Check pause state soroban contract invoke --network testnet -- is paused Unpause (requires admin key) soroban contract invoke --network testnet -- set paused --paused false"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "3b. Admin key loss",
+"anchor": "3b-admin-key-loss",
+"text": "Follow docs/disaster-recovery.md §1.1 . If a backup admin key was pre-registered, invoke set admin(new admin) from it. Otherwise, redeploy."
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "3c. Contract redeployment",
+"anchor": "3c-contract-redeployment",
+"text": "bash ./scripts/build.sh ./scripts/deploy testnet.sh or deploy mainnet.sh Update CONTRACT env vars in .env and k8s Secret ---"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "§4 Backup & Restore",
+"anchor": "4-backup--restore",
+"text": "RTO target: 60 minutes RPO: backup cadence (default 6 h)"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "4a. Create a snapshot",
+"anchor": "4a-create-a-snapshot",
+"text": "bash ./scripts/snapshot.sh ./scripts/verify snapshot.sh"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "4b. Create an encrypted backup",
+"anchor": "4b-create-an-encrypted-backup",
+"text": "bash ./scripts/backup.sh ./scripts/verify backup.sh"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "4c. Restore from backup",
+"anchor": "4c-restore-from-backup",
+"text": "bash List available backups ls -lth backups/ Dry-run (no writes) ./scripts/restore from backup.sh --dry-run Live restore ./scripts/restore from backup.sh backups/<timestamp .enc.tar.gz"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "4d. Integrity check",
+"anchor": "4d-integrity-check",
+"text": "bash ./scripts/check backup integrity.sh ---"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "§5 Key Rotation",
+"anchor": "5-key-rotation",
+"text": "RTO target: 5 minutes"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "API secret / JWT key",
+"anchor": "api-secret--jwt-key",
+"text": "bash Generate a new secret NEW SECRET=$(openssl rand -base64 48) Update the Kubernetes secret kubectl -n quorumproof create secret generic quorumproof-api-server-env \\ --from-literal=JWT SECRET=\"${NEW SECRET}\" \\ --dry-run=client -o yaml kubectl apply -f - Restart pods to pick up new secret kubectl -n quorumproof rollout restart deployment/quorumproof-api-server After rotation, all existing JWT tokens signed with the old key will be rejected. Users must re-authenticate."
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "Stellar deployer / admin key",
+"anchor": "stellar-deployer--admin-key",
+"text": "See docs/disaster-recovery.md §1.1 . ---"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "§6 Cost Containment",
+"anchor": "6-cost-containment",
+"text": "See Prometheus alert CostBudgetWarning / CostBudgetCritical (defined in monitoring/prometheus/alerts.yml ). bash Check current cost report curl -sf http://<API URL /api/costs/report jq . Identify top spenders curl -sf \"http://<API URL /api/costs/optimizations?top=10\" jq . Emergency: disable non-critical background jobs (set env DISABLE BACKGROUND JOBS=true and restart) kubectl -n quorumproof set env deployment/quorumproof-api-server \\ DISABLE BACKGROUND JOBS=true See docs/cost-alert-thresholds.md for full alert tuning guidance. ---"
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "Recovery Metrics & RTO/RPO Targets",
+"anchor": "recovery-metrics--rtorpo-targets",
+"text": "These targets are tested by scripts/dr test harness.sh . Scenario RTO RPO Test script --- --- --- --- API pod crash 2 min 0 (stateless) dr test harness.sh --scenario pod kill RPC endpoint failure 5 min 0 dr test harness.sh --scenario rpc failover Key rotation 5 min 0 dr test harness.sh --scenario key rotation Snapshot + restore 60 min Backup cadence dr test harness.sh --scenario snapshot restore Full backup restore 60 min Backup cadence dr test harness.sh --scenario backup restore Run all DR tests: bash ./scripts/dr test harness.sh --all --dry-run validate config without live ops ./scripts/dr "
+},
+{
+"doc": "dr-runbook.md",
+"title": "DR Runbook — QuorumProof",
+"heading": "Post-Incident Checklist",
+"anchor": "post-incident-checklist",
+"text": "- [ ] Document root cause in an incident ticket - [ ] Update docs/disaster-recovery.md if a procedure gap was found - [ ] Run ./scripts/validate dr.sh to confirm all DR scripts are consistent - [ ] Schedule a follow-up DR drill within 30 days if the incident revealed a gap - [ ] Notify affected users via the communication plan in docs/disaster-recovery.md §6"
+},
+{
 "doc": "economic-security-model.md",
 "title": "Economic Security Model for Weighted Voting",
 "heading": "Economic Security Model for Weighted Voting",
@@ -9856,6 +10759,174 @@
 "heading": "References",
 "anchor": "references",
 "text": "- ADR-001: Federated Byzantine Agreement (FBA) Trust Model - weighted-voting.md: Consensus algorithm and API specification - Stellar Consensus Protocol (SCP) Whitepaper: Federated consensus foundations"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Environment Parity Guide",
+"anchor": "environment-parity-guide",
+"text": "This guide explains QuorumProof's environment parity tooling, how to use it, and how to remediate common configuration drift. ---"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Why environment parity matters",
+"anchor": "why-environment-parity-matters",
+"text": "QuorumProof deploys three Soroban contracts to Stellar networks. Each deployment environment (testnet, mainnet, futurenet, standalone) has its own: - RPC endpoint - Network passphrase - Set of deployed contract IDs Configuration drift — the state where a .env file, a CI secret, or a teammate's local setup disagrees with the canonical values — is one of the most common sources of mysterious failures: - A developer's .env still points to old contract IDs after a redeployment. - A CI job uses a testnet passphrase against a mainnet RPC endpoint. - A new variable added to .env.example is never set "
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "check env parity.sh",
+"anchor": "check-env-paritysh",
+"text": "Compares two environment files and reports drift across six categories."
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Usage",
+"anchor": "usage",
+"text": "bash ./scripts/check env parity.sh [OPTIONS] Flag Default Description --- --- --- --env1 <file .env Primary file to check (your live env) --env2 <file .env.example Reference file to compare against --report <file — Write machine-readable drift report to file --format <text\\ json text Format for --report output --fail-on-drift off Exit 1 if any drift is found --help — Print usage"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Checks performed",
+"anchor": "checks-performed",
+"text": "1. Missing keys — Variables present in env2 (reference) but absent from env1 . Typically means .env.example was updated but .env was not. 2. Extra keys — Variables in env1 but not in env2 . Usually harmless local additions, but reported as warnings so you can confirm they are intentional. 3. Placeholder values — Variables whose value still contains <... or change-me . Indicates a configuration step was skipped. 4. Network consistency — Checks that STELLAR NETWORK matches a section in environments.toml , that STELLAR RPC URL matches the canonical URL in that section, and that VITE STELLAR NETWO"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Examples",
+"anchor": "examples",
+"text": "Default — compare .env against .env.example : bash ./scripts/check env parity.sh Check a specific env file against the example: bash ./scripts/check env parity.sh --env1 environments/mainnet.env Write a JSON report (useful in CI): bash ./scripts/check env parity.sh \\ --report reports/env-drift.json \\ --format json \\ --fail-on-drift Compare two non-default files: bash ./scripts/check env parity.sh \\ --env1 environments/testnet.env \\ --env2 environments/mainnet.env ---"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "compare environments.sh",
+"anchor": "compare-environmentssh",
+"text": "Compares multiple named environment snapshots against environments.toml and against each other. Useful when you maintain per-network .env files."
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Setup: environment snapshots",
+"anchor": "setup-environment-snapshots",
+"text": "The tool reads from environments/<name .env files: bash One-time setup mkdir -p environments/ Create a snapshot of your current env cp .env environments/testnet.env Repeat for other networks cp .env environments/mainnet.env The environments/ directory is intentionally left out of version control to avoid committing secrets. Only commit .env.example template files."
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Usage",
+"anchor": "usage",
+"text": "bash ./scripts/compare environments.sh [OPTIONS] Flag Default Description --- --- --- --envs <list all found Comma-separated environment names to compare --report-dir <dir — Write per-comparison reports to this directory --format <text\\ json text Format for reports --fail-on-drift off Exit 1 if any drift found --help — Print usage"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Examples",
+"anchor": "examples",
+"text": "Compare all snapshots: bash ./scripts/compare environments.sh Compare testnet and mainnet only: bash ./scripts/compare environments.sh --envs testnet,mainnet Write JSON reports to a directory: bash ./scripts/compare environments.sh \\ --envs testnet,mainnet \\ --report-dir reports/env-comparison \\ --format json \\ --fail-on-drift"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "What it checks",
+"anchor": "what-it-checks",
+"text": "Per snapshot: - RPC URL consistency — STELLAR RPC URL matches environments.toml for the declared STELLAR NETWORK . - Passphrase consistency — STELLAR NETWORK PASSPHRASE (if set) matches the passphrase in environments.toml . - Frontend/backend parity — VITE frontend variables mirror their non- VITE backend equivalents. - Key parity against .env.example — delegates to check env parity.sh for a full missing/extra/placeholder check. Cross-snapshot: - Shared config consistency — Variables that should be identical across all environments (e.g. RATE LIMIT MAX , HMAC SIGNING SECRET ) are checked for u"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Understanding drift reports",
+"anchor": "understanding-drift-reports",
+"text": ""
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Text format (default stdout)",
+"anchor": "text-format-default-stdout",
+"text": "QuorumProof Environment Parity Checker env1 (primary): .env env2 (reference): .env.example [1/6] Missing keys ✗ MISSING: WS INSTANCE ID (present in .env.example, absent from .env) [2/6] Extra keys ⚠ EXTRA: MY LOCAL DEBUG FLAG (present in .env, absent from .env.example) [3/6] Placeholder values ⚠ PLACEHOLDER: CONTRACT QUORUM PROOF=\"<your-contract-id \" [4/6] Network consistency ✓ Network configuration is consistent STELLAR NETWORK=testnet STELLAR RPC URL=https://soroban-testnet.stellar.org [5/6] Contract address format ✓ All contract address formats look valid [6/6] Required variables ✗ REQUIRED"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "JSON format ( --format json )",
+"anchor": "json-format----format-json",
+"text": "json { \"generated at\": \"2026-09-28T07:28:00Z\", \"env1\": \"/workspaces/QuorumProof/.env\", \"env2\": \"/workspaces/QuorumProof/.env.example\", \"drift count\": 2, \"warning count\": 1, \"missing keys\": [\"WS INSTANCE ID\"], \"extra keys\": [\"MY LOCAL DEBUG FLAG\"], \"placeholder vars\": [\"CONTRACT QUORUM PROOF=<your-contract-id \"], \"network issues\": [], \"contract issues\": [], \"required missing\": [\"CONTRACT QUORUM PROOF (contains placeholder: \\\"<your-contract-id \\\")\"] } ---"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Common drift causes and remediation",
+"anchor": "common-drift-causes-and-remediation",
+"text": ""
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Missing env vars after .env.example update",
+"anchor": "missing-env-vars-after-envexample-update",
+"text": "Symptom: [1/6] Missing keys lists one or more variables. Cause: A developer added a new variable to .env.example (e.g. for a new feature), but existing .env files were not updated. Remediation: 1. Check what the new variable does: grep -n \"NEW VAR\" .env.example 2. Add it to .env with an appropriate value. 3. If the variable is optional (empty by default), add it with an empty value: bash echo \"NEW VAR=\" .env ---"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Stale contract addresses after redeployment",
+"anchor": "stale-contract-addresses-after-redeployment",
+"text": "Symptom: [5/6] Contract address format flags an invalid ID, or ./scripts/validate env.sh reports a contract not found on chain. Cause: The contracts were redeployed (e.g. deploy testnet.sh ran again), generating new contract IDs, but .env still has old values. Remediation: 1. Redeploy and capture the new IDs: bash ./scripts/deploy testnet.sh The deploy script writes updated IDs to .env automatically. 2. Update any snapshot files: bash cp .env environments/testnet.env 3. Confirm parity: bash ./scripts/check env parity.sh --fail-on-drift ---"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Network mismatch (testnet vars in mainnet .env )",
+"anchor": "network-mismatch-testnet-vars-in-mainnet-env",
+"text": "Symptom: [4/6] Network consistency reports an RPC URL mismatch or STELLAR NETWORK=testnet with STELLAR RPC URL=https://mainnet... . Cause: Copy-paste from a different environment's file without updating STELLAR NETWORK and STELLAR RPC URL together. Remediation: 1. Open .env and verify STELLAR NETWORK is the intended value. 2. Look up the canonical RPC URL in environments.toml : bash grep -A 2 \"\\[mainnet\\]\" environments.toml 3. Update STELLAR RPC URL and VITE STELLAR RPC URL to match. 4. Update VITE STELLAR NETWORK if needed. ---"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Placeholder values left unconfigured",
+"anchor": "placeholder-values-left-unconfigured",
+"text": "Symptom: [3/6] Placeholder values lists variables ending in change-me or <your-contract-id . Cause: The file was copied from .env.example but not fully configured. Remediation — contract IDs: bash After deploying, the script sets these automatically: ./scripts/deploy testnet.sh Or set manually: CONTRACT ID=$(stellar contract deploy ...) sed -i \"s/CONTRACT QUORUM PROOF=. /CONTRACT QUORUM PROOF=$CONTRACT ID/\" .env Remediation — HMAC secrets: bash Generate a cryptographically random secret: python3 -c \"import secrets; print(secrets.token hex(32))\" Then update .env manually. ---"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "CI integration",
+"anchor": "ci-integration",
+"text": "Add a parity check step to your GitHub Actions workflow to catch drift on every push."
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Example: check .env against .env.example in CI",
+"anchor": "example-check-env-against-envexample-in-ci",
+"text": "yaml .github/workflows/ci.yml jobs: env-parity: name: Environment parity runs-on: ubuntu-latest steps: - uses: actions/checkout@v4 - name: Create .env from CI secrets run: cat .env <<EOF STELLAR NETWORK=${{ vars.STELLAR NETWORK }} STELLAR RPC URL=${{ vars.STELLAR RPC URL }} CONTRACT QUORUM PROOF=${{ secrets.CONTRACT QUORUM PROOF }} CONTRACT SBT REGISTRY=${{ secrets.CONTRACT SBT REGISTRY }} CONTRACT ZK VERIFIER=${{ secrets.CONTRACT ZK VERIFIER }} VITE STELLAR NETWORK=${{ vars.STELLAR NETWORK }} VITE STELLAR RPC URL=${{ vars.STELLAR RPC URL }} VITE CONTRACT QUORUM PROOF=${{ secrets.CONTRACT QUOR"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Example: compare multiple environment snapshots",
+"anchor": "example-compare-multiple-environment-snapshots",
+"text": "yaml multi-env-parity: name: Multi-environment parity runs-on: ubuntu-latest steps: - uses: actions/checkout@v4 - name: Restore environment snapshots run: mkdir -p environments/ echo \"${{ secrets.TESTNET ENV }}\" environments/testnet.env echo \"${{ secrets.MAINNET ENV }}\" environments/mainnet.env - name: Compare environments run: ./scripts/compare environments.sh \\ --envs testnet,mainnet \\ --report-dir reports/env-comparison \\ --format json \\ --fail-on-drift - name: Upload comparison reports if: always() uses: actions/upload-artifact@v4 with: name: env-comparison-reports path: reports/env-compar"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Remediation checklist template",
+"anchor": "remediation-checklist-template",
+"text": "Copy this into a GitHub issue or incident note when resolving drift: markdown Environment Parity Remediation Detected by: check env parity.sh / compare environments.sh / manual Date: Affected environment(s): Drift found - [ ] Missing keys: - [ ] Placeholder values: - [ ] Network mismatch: - [ ] Contract format issues: - [ ] Required vars missing: Root cause (Describe what caused the drift: redeployment, new .env.example variable, copy-paste from wrong environment, etc.) Actions taken - [ ] Updated .env with correct values - [ ] Updated environment snapshots in environments/ - [ ] Ran ./scripts"
+},
+{
+"doc": "environment-parity.md",
+"title": "Environment Parity Guide",
+"heading": "Related",
+"anchor": "related",
+"text": "- scripts/validate env.sh — Single-environment validation: checks network, RPC, and verifies contracts exist on chain. - environments.toml — Canonical network configurations (passphrase, RPC URL) for testnet, mainnet, futurenet, standalone. - .env.example — Reference template for all environment variables. - docs/deployment-checklist.md — Deployment checklist that includes environment validation as a gate. - docs/troubleshooting-guide.md — Broader troubleshooting reference."
 },
 {
 "doc": "error-codes.md",
@@ -11958,6 +13029,174 @@
 "text": "This migration reflects improvements in: - Groth16 & PLONK specifications from protocol research - Soroban SDK capabilities for cryptographic operations - Production best practices for key management - Security audits of proof systems Migration completed by QuorumProof team with support from Stellar Foundation."
 },
 {
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "IDE Setup Guide — VS Code for QuorumProof",
+"anchor": "ide-setup-guide--vs-code-for-quorumproof",
+"text": "This guide covers everything you need to get a productive VS Code environment for QuorumProof — Rust/Soroban contract development, TypeScript API server, and the React frontend — all in one workspace. ---"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Table of Contents",
+"anchor": "table-of-contents",
+"text": "1. Prerequisites 2. Recommended Extensions 3. Opening the Workspace 4. Debug Configurations 5. Tasks 6. Rust-Analyzer Tips 7. Common Issues and Fixes ---"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Prerequisites",
+"anchor": "prerequisites",
+"text": "Install the following before opening the project: Tool Minimum Version Install ------ ---------------- --------- Rust 1.70 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \\ sh wasm32 target — rustup target add wasm32-unknown-unknown native debug target — rustup target add x86 64-unknown-linux-gnu (Linux) or aarch64-apple-darwin (macOS Apple Silicon) Soroban CLI latest cargo install --locked stellar-cli --features opt Node.js 20 LTS via nvm or package manager CodeLLDB — installed via VS Code extension marketplace (see below) ---"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Recommended Extensions",
+"anchor": "recommended-extensions",
+"text": "The file .vscode/extensions.json lists all recommended extensions. VS Code will prompt you to install them when you open the workspace. You can also install them manually from the Extensions panel ( Ctrl+Shift+X / ⌘⇧X ). Extension ID Purpose --- --- rust-lang.rust-analyzer Rust language server: completions, inlay hints, go-to-definition, inline errors serayuzgur.crates Shows latest crate versions in Cargo.toml tamasfe.even-better-toml TOML syntax, formatting, and schema validation vadimcn.vscode-lldb Native debugger backend for Rust (CodeLLDB) ms-vscode.hexeditor Inspect WASM binaries in hex r"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Opening the Workspace",
+"anchor": "opening-the-workspace",
+"text": "Open the repository root directly: File → Open Folder → /path/to/QuorumProof VS Code will automatically pick up .vscode/settings.json , .vscode/tasks.json , and .vscode/launch.json . ---"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Debug Configurations",
+"anchor": "debug-configurations",
+"text": "Debug configurations live in .vscode/launch.json . Open the Run & Debug panel ( Ctrl+Shift+D / ⌘⇧D ), pick a configuration from the dropdown, and press F5."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Debug Rust Tests (quorum proof / sbt registry / zk verifier)",
+"anchor": "debug-rust-tests-quorum-proof--sbt-registry--zk-verifier",
+"text": "These three configurations use CodeLLDB ( vadimcn.vscode-lldb ) to compile and launch the test binary for a specific Soroban contract package. Important: The cargo.args in each configuration pass --target x86 64-unknown-linux-gnu (or the equivalent native target for your machine). Soroban contracts normally compile to wasm32-unknown-unknown , but debuggers cannot attach to WASM — the native target produces a standard ELF/Mach-O binary that CodeLLDB can instrument. This is the correct approach for unit tests because Soroban's soroban-sdk test utilities work on native targets. Steps: 1. Set a br"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Debug API Server",
+"anchor": "debug-api-server",
+"text": "Attach to a running API server process that was started with the --inspect flag. 1. Start the server in debug mode: bash cd api-server node --inspect ./node modules/.bin/tsx src/index.ts or via the \"Start API Server\" task — edit it to add --inspect if needed 2. Select \"Debug API Server\" in the Run & Debug panel. 3. Press F5. VS Code attaches to port 9229. The configuration has \"restart\": true , so it reconnects automatically when the process restarts (e.g. if you use nodemon or tsx --watch )."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Debug Frontend Tests",
+"anchor": "debug-frontend-tests",
+"text": "Launches Vitest in debug mode so you can step through test code. 1. Select \"Debug Frontend Tests\". 2. Press F5. Vitest runs with the Node.js debugger enabled. 3. Set breakpoints in frontend/src/ or frontend/src/ tests / . ---"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Tasks",
+"anchor": "tasks",
+"text": "Tasks are defined in .vscode/tasks.json and can be run from: - Terminal → Run Task… menu - Ctrl+Shift+P / ⌘⇧P → \"Tasks: Run Task\" - Keyboard shortcut: Ctrl+Shift+B runs the default build task (\"Build Contracts\") Task What it does --- --- Build Contracts (default build) Runs scripts/build.sh — compiles all three contracts to wasm32-unknown-unknown Test Contracts (default test) Runs cargo test across the entire workspace Deploy to Testnet Runs scripts/deploy testnet.sh — deploys contracts to Stellar testnet Validate Environment Runs scripts/validate env.sh — checks that required env vars and too"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Rust-Analyzer Tips",
+"anchor": "rust-analyzer-tips",
+"text": ""
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "WASM target awareness",
+"anchor": "wasm-target-awareness",
+"text": "The project's .cargo/config.toml sets the default build target to wasm32-unknown-unknown . .vscode/settings.json propagates this to rust-analyzer: json \"rust-analyzer.cargo.target\": \"wasm32-unknown-unknown\", \"rust-analyzer.cargo.features\": \"all\" This means completions and type-checking reflect the actual WASM build, not a native build. If you see \"target not found\" errors on first load, run: bash rustup target add wasm32-unknown-unknown then reload the window ( Ctrl+Shift+P → \"Developer: Reload Window\")."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "proc-macro support",
+"anchor": "proc-macro-support",
+"text": "rust-analyzer.procMacro.enable is true . The soroban-sdk derives ( [contractimpl] , [contracttype] , etc.) are expanded in the editor, giving accurate completions and hover docs inside contract functions."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Checking on save",
+"anchor": "checking-on-save",
+"text": "\"rust-analyzer.check.command\": \"check\" runs cargo check on every save, which is much faster than cargo build . Errors appear as squiggles immediately."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Multiple workspace members",
+"anchor": "multiple-workspace-members",
+"text": "The Cargo workspace has five members ( quorum proof , sbt registry , zk verifier , integration tests , e2e tests ). rust-analyzer loads all of them. If you only want to work on one contract, you can narrow the scope with: json \"rust-analyzer.linkedProjects\": [ \"contracts/quorum proof/Cargo.toml\" ] Add that to your user settings.json (not the workspace one) so it doesn't affect other contributors."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Inlay hints",
+"anchor": "inlay-hints",
+"text": "Type hints and parameter hints are enabled. Toggle them with Ctrl+Alt+; (Linux/Windows) or ⌃⌥; (macOS), or via \"Rust Analyzer: Toggle Inlay Hints\". ---"
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Common Issues and Fixes",
+"anchor": "common-issues-and-fixes",
+"text": ""
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "\"error[E0463]: can't find crate for std \"",
+"anchor": "errore0463-cant-find-crate-for-std-",
+"text": "rust-analyzer is trying to check against wasm32-unknown-unknown but the target is not installed. bash rustup target add wasm32-unknown-unknown Reload the window afterwards."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "\"proc macro server crashed\" / proc-macro expansion fails",
+"anchor": "proc-macro-server-crashed--proc-macro-expansion-fails",
+"text": "bash cargo clean cargo build Then reload the window. This rebuilds the proc-macro crates that rust-analyzer shells out to."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "CodeLLDB: \"Unable to find a suitable build target\"",
+"anchor": "codelldb-unable-to-find-a-suitable-build-target",
+"text": "The debug configurations explicitly pass --target x86 64-unknown-linux-gnu (or the equivalent native target). Make sure that target is installed: bash Linux rustup target add x86 64-unknown-linux-gnu macOS Apple Silicon rustup target add aarch64-apple-darwin macOS Intel rustup target add x86 64-apple-darwin If you are on a non-Linux host, update the \"args\" in .vscode/launch.json to match your native triple."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "API server debugger won't attach",
+"anchor": "api-server-debugger-wont-attach",
+"text": "Make sure the server was started with --inspect (or --inspect-brk to pause before the first line). The default npm run dev script does not pass --inspect ; start it manually or add a separate dev:debug npm script: json \"dev:debug\": \"node --inspect ./node modules/.bin/tsx src/index.ts\" Then run \"Start API Server\" normally and attach."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "rust-analyzer is slow / high CPU",
+"anchor": "rust-analyzer-is-slow--high-cpu",
+"text": "Disable the contracts/bbs plus v1 crate from the workspace if you are not actively working on it — it's excluded from the Cargo workspace by default ( exclude in root Cargo.toml ) but may still be indexed if you open files from it. Close those tabs to stop rust-analyzer from analysing it."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": ".env file not picked up by tasks",
+"anchor": "env-file-not-picked-up-by-tasks",
+"text": "Copy the example file and fill in your values: bash cp .env.example .env The \"Validate Environment\" task will report which variables are missing."
+},
+{
+"doc": "ide-setup.md",
+"title": "IDE Setup Guide — VS Code for QuorumProof",
+"heading": "Spell-checker false positives",
+"anchor": "spell-checker-false-positives",
+"text": "Domain-specific words ( soroban , groth , plonk , wasm , etc.) are already in the workspace cSpell.words list. To add more, open .vscode/settings.json and append to that array."
+},
+{
 "doc": "infrastructure-as-code.md",
 "title": "Infrastructure as Code (Issue 1652)",
 "heading": "Infrastructure as Code (Issue 1652)",
@@ -12536,7 +13775,7 @@
 "title": "Interactive Documentation",
 "heading": "1. Documentation search",
 "anchor": "1-documentation-search",
-"text": "- Client-side full-text search across every docs/ / .md file, split into sections at headings (H1–H4). - Results rank heading matches above body matches, highlight the terms, and link to the exact section on GitHub. - The index is docs/interactive/search-index.json , generated by scripts/build docs search index.py . Run it with --check to verify the committed index is current."
+"text": "- Client-side full-text search across every docs/ / .md file, split into sections at headings (H1–H4). - Results rank heading matches above body matches, highlight the terms, and link to the exact section on GitHub. - The index is docs/interactive/search-index.json , generated by scripts/build docs search index.py . Run it with --check to verify the committed index is current. - Version switcher ( 1642). The Docs version menu in the header lists the versions in versions.json . Picking one rewrites result links to that version's git ref and shows a deprecation / end-of-life banner where relevan"
 },
 {
 "doc": "interactive-documentation.md",
@@ -12564,7 +13803,7 @@
 "title": "Interactive Documentation",
 "heading": "Maintaining it",
 "anchor": "maintaining-it",
-"text": "When you… Do this --- --- Add, rename, or edit a doc Re-run python3 scripts/build docs search index.py and commit the updated search-index.json . Change a response shape Update api-response-examples.md and the matching mock in interactive/index.html . Add a commonly used endpoint Add a preset to PRESETS in interactive/index.html . Change slice rules (weight range, threshold semantics) Update computeSlice() in interactive/index.html . The page is plain HTML, CSS, and JavaScript with no dependencies. Keep it that way so it works offline and in any static host."
+"text": "When you… Do this --- --- Add, rename, or edit a doc Re-run python3 scripts/build docs search index.py and commit the updated search-index.json . Change a response shape Update api-response-examples.md and the matching mock in interactive/index.html . Add a commonly used endpoint Add a preset to PRESETS in interactive/index.html . Cut or deprecate a docs version Run python3 scripts/docs versions.py cut deprecate … — the switcher reads versions.json directly, no page change needed. Change slice rules (weight range, threshold semantics) Update computeSlice() in interactive/index.html . The page "
 },
 {
 "doc": "interoperability-guide.md",
@@ -12901,6 +14140,321 @@
 "heading": "Related Documentation",
 "anchor": "related-documentation",
 "text": "- Threat Model & Security Analysis - Security Best Practices - Security Audit Checklist - Audit Log Format - Backup System - Monitoring Guide"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Local Development Setup",
+"anchor": "local-development-setup",
+"text": "This guide walks you through setting up a fully functional QuorumProof development environment on your local machine. You can run everything with Docker Compose for the closest approximation to production, or run individual services natively for faster feedback loops."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Table of Contents",
+"anchor": "table-of-contents",
+"text": "- Prerequisites - Quick Start (automated) - Manual Step-by-Step Setup - Docker Compose Dev Environment - Standalone Network Configuration - Running Individual Services - Deploying Contracts to Standalone - Environment Variable Reference - Common Issues and Fixes ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Prerequisites",
+"anchor": "prerequisites",
+"text": "Install the following tools before running setup. Tool Minimum version Install ------ ---------------- --------- Rust 1.70 rustup.rs Node.js 18.x nodejs.org or nvm Docker Engine 24.x docs.docker.com Docker Compose v2 (plugin) Bundled with Docker Desktop; standalone: pip install docker-compose Stellar CLI Latest cargo install --locked stellar-cli soroban-cli Latest cargo install --locked soroban-cli (or included with Stellar CLI) macOS / Linux : Docker Desktop ships with Compose v2 as a plugin ( docker compose ). On bare Linux you may have the older standalone docker-compose binary — both work."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Quick Start (automated)",
+"anchor": "quick-start-automated",
+"text": "The setup dev.sh script automates all of the manual steps below. bash From the repo root ./scripts/setup dev.sh The script: 1. Verifies all prerequisites are installed 2. Adds the wasm32-unknown-unknown Rust target 3. Installs soroban-cli if missing 4. Copies .env.example → .env (only if .env doesn't already exist) 5. Generates a dev identity for the standalone network 6. Builds contracts ( scripts/build.sh ) 7. Runs npm ci in api-server/ and frontend/ 8. Prints a next-steps summary Flags: bash ./scripts/setup dev.sh --skip-docker Skip Docker/Compose prerequisite checks ./scripts/setup dev.sh "
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Manual Step-by-Step Setup",
+"anchor": "manual-step-by-step-setup",
+"text": "Follow these steps if you prefer a hands-on setup or if setup dev.sh fails."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "1. Install Rust and the WASM target",
+"anchor": "1-install-rust-and-the-wasm-target",
+"text": "bash Install Rust (if not already installed) curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs sh source \"$HOME/.cargo/env\" Add the WebAssembly target required by Soroban rustup target add wasm32-unknown-unknown"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "2. Install Soroban and Stellar CLI tools",
+"anchor": "2-install-soroban-and-stellar-cli-tools",
+"text": "bash cargo install --locked soroban-cli cargo install --locked stellar-cli Confirm the installations: bash soroban --version stellar --version"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "3. Install Node.js dependencies",
+"anchor": "3-install-nodejs-dependencies",
+"text": "bash API server npm ci --prefix api-server Frontend npm ci --prefix frontend"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "4. Configure environment variables",
+"anchor": "4-configure-environment-variables",
+"text": "bash cp .env.example .env Edit .env for local development — the defaults work out of the box with Docker Compose, but you may want to review the values: env STELLAR NETWORK=standalone STELLAR RPC URL=http://localhost:8000/soroban/rpc See the Environment Variable Reference section for a full description of every variable."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "5. Build the contracts",
+"anchor": "5-build-the-contracts",
+"text": "bash ./scripts/build.sh equivalent to: cargo build --release --target wasm32-unknown-unknown Compiled WASM files are placed in target/wasm32-unknown-unknown/release/ ."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "6. Generate a standalone network identity",
+"anchor": "6-generate-a-standalone-network-identity",
+"text": "bash stellar keys generate dev --network standalone stellar keys address dev This creates a local keypair named dev that will be funded automatically by the Quickstart node when the standalone network boots. ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Docker Compose Dev Environment",
+"anchor": "docker-compose-dev-environment",
+"text": "docker-compose.dev.yml in the repo root defines a four-service dev stack. Service Port Description --------- ------ ------------- stellar-standalone 8000 Stellar quickstart (standalone + Soroban RPC) postgres 5432 PostgreSQL 16 database for the API server api-server 3000 TypeScript API server with live reload frontend 5173 Vite/React frontend with HMR"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Starting the full stack",
+"anchor": "starting-the-full-stack",
+"text": "bash docker compose -f docker-compose.dev.yml up Add -d to run in the background: bash docker compose -f docker-compose.dev.yml up -d"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Starting only infrastructure services",
+"anchor": "starting-only-infrastructure-services",
+"text": "Run Stellar and Postgres locally while developing api-server and frontend natively: bash docker compose -f docker-compose.dev.yml up stellar-standalone postgres -d"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Stopping and cleaning up",
+"anchor": "stopping-and-cleaning-up",
+"text": "bash Stop containers, keep volumes docker compose -f docker-compose.dev.yml down Stop containers and remove volumes (resets Postgres data) docker compose -f docker-compose.dev.yml down -v"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Rebuilding a service after a Dockerfile change",
+"anchor": "rebuilding-a-service-after-a-dockerfile-change",
+"text": "bash docker compose -f docker-compose.dev.yml build api-server docker compose -f docker-compose.dev.yml up api-server"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Viewing logs",
+"anchor": "viewing-logs",
+"text": "bash All services docker compose -f docker-compose.dev.yml logs -f One service docker compose -f docker-compose.dev.yml logs -f stellar-standalone ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Standalone Network Configuration",
+"anchor": "standalone-network-configuration",
+"text": "The standalone network is a single-node Stellar network running entirely on your machine. It uses an insecure passphrase and mines blocks instantly, making it ideal for development iteration."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Network parameters",
+"anchor": "network-parameters",
+"text": "Parameter Value ----------- ------- Network passphrase Standalone Network ; February 2017 RPC URL http://localhost:8000/soroban/rpc Friendbot (faucet) http://localhost:8000/friendbot?addr=<address Horizon http://localhost:8000 These values are stored in environments.toml : toml [standalone] network passphrase = \"Standalone Network ; February 2017\" rpc url = \"http://localhost:8000/soroban/rpc\""
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Fund an account on standalone",
+"anchor": "fund-an-account-on-standalone",
+"text": "The Quickstart node ships with a Friendbot that funds accounts on demand: bash Via curl ADDR=$(stellar keys address dev) curl \"http://localhost:8000/friendbot?addr=${ADDR}\" Via Stellar CLI (uses Friendbot automatically for standalone/testnet) stellar keys generate dev --network standalone --fund"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Verify the standalone node is responding",
+"anchor": "verify-the-standalone-node-is-responding",
+"text": "bash curl -s http://localhost:8000/soroban/rpc \\ -H 'Content-Type: application/json' \\ -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLatestLedger\",\"params\":{}}' \\ jq . ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Running Individual Services",
+"anchor": "running-individual-services",
+"text": ""
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Contracts (Rust/Soroban)",
+"anchor": "contracts-rustsoroban",
+"text": "bash Build cargo build --release --target wasm32-unknown-unknown Run all tests (unit + integration) cargo test Run tests for a single contract cargo test -p quorum proof cargo test -p sbt registry cargo test -p zk verifier Watch-and-test cargo watch -x test"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "API server",
+"anchor": "api-server",
+"text": "bash cd api-server Install dependencies npm ci Start in development mode (with file watching) npm run dev Run tests npm test Type-check npm run typecheck if defined in package.json The API server listens on port 3000 (configurable via PORT env var)."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Frontend",
+"anchor": "frontend",
+"text": "bash cd frontend Install dependencies npm ci Start Vite dev server with HMR npm run dev Build for production npm run build Preview production build npm run preview The Vite dev server listens on port 5173 by default. ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Deploying Contracts to Standalone",
+"anchor": "deploying-contracts-to-standalone",
+"text": "After the standalone Stellar node is running and your contracts are built:"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Deploy all three contracts",
+"anchor": "deploy-all-three-contracts",
+"text": "bash WASM DIR=\"target/wasm32-unknown-unknown/release\" Deploy quorum proof CONTRACT QUORUM PROOF=$(stellar contract deploy \\ --wasm \"$WASM DIR/quorum proof.wasm\" \\ --source dev \\ --network standalone) echo \"CONTRACT QUORUM PROOF=$CONTRACT QUORUM PROOF\" Deploy sbt registry CONTRACT SBT REGISTRY=$(stellar contract deploy \\ --wasm \"$WASM DIR/sbt registry.wasm\" \\ --source dev \\ --network standalone) echo \"CONTRACT SBT REGISTRY=$CONTRACT SBT REGISTRY\" Deploy zk verifier CONTRACT ZK VERIFIER=$(stellar contract deploy \\ --wasm \"$WASM DIR/zk verifier.wasm\" \\ --source dev \\ --network standalone) echo \"C"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Write addresses to .env",
+"anchor": "write-addresses-to-env",
+"text": "bash sed -i \"s CONTRACT QUORUM PROOF=. CONTRACT QUORUM PROOF=$CONTRACT QUORUM PROOF \" .env sed -i \"s CONTRACT SBT REGISTRY=. CONTRACT SBT REGISTRY=$CONTRACT SBT REGISTRY \" .env sed -i \"s CONTRACT ZK VERIFIER=. CONTRACT ZK VERIFIER=$CONTRACT ZK VERIFIER \" .env"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Invoke a contract function",
+"anchor": "invoke-a-contract-function",
+"text": "bash stellar contract invoke \\ --id \"$CONTRACT QUORUM PROOF\" \\ --source dev \\ --network standalone \\ -- issue credential \\ --subject \"GABC...\" \\ --credential type \"degree\" \\ --metadata hash \"abc123\" ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Environment Variable Reference",
+"anchor": "environment-variable-reference",
+"text": "Copy .env.example to .env and customise as needed. The table below describes every variable used in local development."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Network",
+"anchor": "network",
+"text": "Variable Default Description ---------- --------- ------------- STELLAR NETWORK testnet Active network: standalone , testnet , mainnet , futurenet STELLAR RPC URL https://soroban-testnet.stellar.org Soroban RPC endpoint. Use http://localhost:8000/soroban/rpc for standalone"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Contract addresses",
+"anchor": "contract-addresses",
+"text": "Variable Description ---------- ------------- CONTRACT QUORUM PROOF On-chain address of the quorum proof contract CONTRACT SBT REGISTRY On-chain address of the sbt registry contract CONTRACT ZK VERIFIER On-chain address of the zk verifier contract"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "API server",
+"anchor": "api-server",
+"text": "Variable Default Description ---------- --------- ------------- PORT 3000 API server listen port DATABASE URL — PostgreSQL connection string, e.g. postgres://qp:devpassword@localhost:5432/quorumproof RATE LIMIT WINDOW MS 60000 Rate limit window in ms RATE LIMIT MAX 100 Max requests per window HMAC SIGNING SECRET — Secret for HMAC request signing PUBLIC APP BASE URL http://localhost:3000 Publicly reachable origin for QR codes / export links REDIS URL — Redis URL for WebSocket cross-instance delivery (optional for local dev)"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Frontend",
+"anchor": "frontend",
+"text": "Variable Default Description ---------- --------- ------------- VITE STELLAR NETWORK testnet Network used by the frontend VITE STELLAR RPC URL https://soroban-testnet.stellar.org Soroban RPC for frontend queries VITE CONTRACT QUORUM PROOF — Contract address for frontend VITE CONTRACT SBT REGISTRY — Contract address for frontend VITE CONTRACT ZK VERIFIER — Contract address for frontend ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Common Issues and Fixes",
+"anchor": "common-issues-and-fixes",
+"text": ""
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Port already in use",
+"anchor": "port-already-in-use",
+"text": "Symptom: Error: listen EADDRINUSE: address already in use :::3000 Fix: Kill the process holding the port, or change the port in .env : bash Find the process lsof -i :3000 Kill it kill -9 <PID Or change the port echo \"PORT=3001\" .env For Docker Compose services, change the host-side port in docker-compose.dev.yml : yaml ports: - \"3001:3000\" host:container"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "wasm32-unknown-unknown target missing",
+"anchor": "wasm32-unknown-unknown-target-missing",
+"text": "Symptom: error[E0463]: can't find crate for 'std' or error: ... target 'wasm32-unknown-unknown' not found Fix: bash rustup target add wasm32-unknown-unknown Confirm the target is installed: bash rustup target list --installed grep wasm32"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Stellar CLI authentication error",
+"anchor": "stellar-cli-authentication-error",
+"text": "Symptom: Error: Missing required option: --source or error: account not found Fix: Ensure you have a local key generated and the account is funded: bash Generate a key (standalone) — safe to run again if key already exists stellar keys generate dev --network standalone 2 /dev/null true Fund via Friendbot curl \"http://localhost:8000/friendbot?addr=$(stellar keys address dev)\" Verify the key exists stellar keys list stellar keys address dev"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Docker Compose standalone node unhealthy / not starting",
+"anchor": "docker-compose-standalone-node-unhealthy--not-starting",
+"text": "Symptom: stellar-standalone stays in starting or unhealthy Fix: Pull the latest quickstart image and give it more startup time: bash docker pull stellar/quickstart:testing docker compose -f docker-compose.dev.yml up stellar-standalone Check the container logs for specific errors: bash docker compose -f docker-compose.dev.yml logs stellar-standalone The node typically takes 15–30 seconds on first boot. The healthcheck retries 15 times at 10-second intervals (2.5 minutes total)."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "PostgreSQL connection refused",
+"anchor": "postgresql-connection-refused",
+"text": "Symptom: ECONNREFUSED 127.0.0.1:5432 from the API server Fix: Start Postgres and wait for the health check: bash docker compose -f docker-compose.dev.yml up postgres -d docker compose -f docker-compose.dev.yml ps confirm \"healthy\" Then set DATABASE URL in your .env : env DATABASE URL=postgres://qp:devpassword@localhost:5432/quorumproof"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "npm ci fails with ENOENT or integrity error",
+"anchor": "npm-ci-fails-with-enoent-or-integrity-error",
+"text": "Symptom: npm ci fails because package-lock.json is missing or stale Fix: Regenerate the lockfile: bash In api-server/ cd api-server && npm install && cd .. In frontend/ cd frontend && npm install && cd .. Then commit the updated lockfiles."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Cargo build fails: \"could not compile soroban-sdk\"",
+"anchor": "cargo-build-fails-could-not-compile-soroban-sdk",
+"text": "Symptom: Build fails with linker or dependency errors after a rustup update Fix: Pin your Rust toolchain to the version in rust-toolchain.toml (if present), or check .cargo/config.toml : bash cat .cargo/config.toml rustup show active-toolchain If no toolchain file exists, use stable : bash rustup default stable cargo build --release --target wasm32-unknown-unknown"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "Frontend cannot reach the API server",
+"anchor": "frontend-cannot-reach-the-api-server",
+"text": "Symptom: CORS errors or ERR CONNECTION REFUSED in the browser console Fix: Check that VITE environment variables are set in frontend/.env (not the root .env ). Vite only injects variables prefixed with VITE : bash cp frontend/.env.example frontend/.env if it exists or add manually: echo \"VITE STELLAR RPC URL=http://localhost:8000/soroban/rpc\" frontend/.env Also ensure the API server CORS configuration allows http://localhost:5173 ."
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "\"Missing STELLAR RPC URL\" in Docker Compose",
+"anchor": "missing-stellar-rpc-url-in-docker-compose",
+"text": "Symptom: API server container exits with a missing env var error Fix: Ensure the root .env file exists before starting Compose — it is referenced via env file: .env in docker-compose.dev.yml : bash cp .env.example .env docker compose -f docker-compose.dev.yml up ---"
+},
+{
+"doc": "local-dev-setup.md",
+"title": "Local Development Setup",
+"heading": "See Also",
+"anchor": "see-also",
+"text": "- Architecture Overview - Contract Module Index - Testnet Deployment - Troubleshooting Guide - Error Code Reference - scripts/README.md — all available scripts"
 },
 {
 "doc": "log-retention-policy.md",
@@ -14112,6 +15666,139 @@
 "heading": "Failover test scenarios",
 "anchor": "failover-test-scenarios",
 "text": "Scenarios are run with scripts/region failover.sh drill <scenario against staging first, then in a scheduled production game day. Always start with --dry-run to review the commands. Scenario What it does Pass criteria --- --- --- primary-api-down Scales the primary ECS service to 0, waits, restores it Route 53 serves the secondary within ~90 s; RegionFailoverActive fires on the secondary; SNS + webhook alerts delivered; primary returns to PRIMARY after recovery threshold health-check-flap Inverts the primary Route 53 health check for 60 s Single alarm/recovery pair, no oscillation; peer detect"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Network Policy for Pod Security",
+"anchor": "network-policy-for-pod-security",
+"text": "Issue 1655 — Network policies aren't enforced. This document describes the Kubernetes NetworkPolicy architecture for QuorumProof: what is allowed, what is blocked, how to test, and how to maintain policies as the cluster evolves."
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Overview",
+"anchor": "overview",
+"text": "Without NetworkPolicies, any compromised pod in the quorumproof namespace can reach any other pod — database, monitoring, or application — on any port. This enables trivial lateral movement by an attacker who has exploited a single service. The policies in k8s/network-policy/ implement a default-deny posture: all ingress and egress traffic is blocked unless explicitly permitted by an allow rule. ---"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Policy Files",
+"anchor": "policy-files",
+"text": "File Purpose ------ --------- k8s/network-policy/default-deny.yaml Deny all ingress + egress for every pod in the namespace k8s/network-policy/api-server-policy.yaml Allow rules for API server ingress and egress k8s/network-policy/monitoring-policy.yaml Allow rules for Prometheus and Grafana k8s/network-policy/kustomization.yaml Kustomize root for applying all policies at once ---"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Traffic Matrix",
+"anchor": "traffic-matrix",
+"text": ""
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "API Server ( app: quorumproof-api-server )",
+"anchor": "api-server--app-quorumproof-api-server",
+"text": "Direction Source/Dest Port Allowed Reason ----------- ------------ ------ --------- -------- Ingress ingress-nginx namespace 3001 ✅ Production HTTP traffic Ingress Prometheus (monitoring ns) 3001 ✅ Metrics scraping Ingress Node CIDR (10.0.0.0/8) 3001 ✅ Kubelet health probes Ingress Any other source any ❌ Default deny Egress kube-dns 53/UDP+TCP ✅ DNS resolution Egress quorumproof-postgres pod 5432 ✅ Database Egress quorumproof-redis pod 6379 ✅ Cache Egress External (0.0.0.0/0 excl. RFC-1918) 443 ✅ Soroban RPC, webhooks Egress Prometheus (monitoring ns) 9090 ✅ Rule push / federation Egress Any R"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Prometheus ( app: prometheus in monitoring namespace)",
+"anchor": "prometheus--app-prometheus-in-monitoring-namespace",
+"text": "Direction Source/Dest Port Allowed ----------- ------------ ------ --------- Ingress Grafana 9090 ✅ Ingress quorumproof namespace 9090 ✅ Egress API server (quorumproof ns) 3001 ✅ Egress Alertmanager 9093 ✅ Egress kube-dns 53 ✅ ---"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Applying the Policies",
+"anchor": "applying-the-policies",
+"text": "bash Apply all policies at once (recommended) kubectl apply -k k8s/network-policy/ Or apply individually (apply allow rules BEFORE default-deny to avoid downtime) kubectl apply -f k8s/network-policy/api-server-policy.yaml kubectl apply -f k8s/network-policy/monitoring-policy.yaml kubectl apply -f k8s/network-policy/default-deny.yaml"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Verify policies are applied",
+"anchor": "verify-policies-are-applied",
+"text": "bash kubectl get networkpolicy -n quorumproof kubectl get networkpolicy -n monitoring kubectl describe networkpolicy default-deny-all -n quorumproof ---"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Testing",
+"anchor": "testing",
+"text": "Run the automated connectivity tests: bash Full test (requires cluster access and a running deployment) ./scripts/test network policies.sh --namespace quorumproof Dry-run (print test plan without executing) ./scripts/test network policies.sh --dry-run"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Manual spot-check",
+"anchor": "manual-spot-check",
+"text": "bash 1. Verify an untrusted pod CANNOT reach the api-server kubectl run netpol-test \\ --image=ghcr.io/nicolaka/netshoot:latest \\ --namespace=quorumproof \\ --restart=Never \\ --rm \\ -it \\ -- curl -sf --max-time 5 http://quorumproof-api-server:3001/health Expected: connection timeout or refused (policy blocks it) 2. Verify api-server CAN reach Stellar RPC kubectl exec -n quorumproof \\ $(kubectl get pod -n quorumproof -l app=quorumproof-api-server -o name head -1) \\ -- curl -sf --max-time 5 https://soroban-testnet.stellar.org -o /dev/null && \\ echo \"ALLOWED (expected)\" echo \"BLOCKED (unexpected)\" "
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "CNI Requirements",
+"anchor": "cni-requirements",
+"text": "NetworkPolicies require a CNI plugin that enforces them. The following are tested: CNI Status ----- -------- Calico ✅ Recommended — supports GlobalNetworkPolicy extensions Cilium ✅ Supported — additional Layer 7 policies available AWS VPC CNI + Calico ✅ AWS EKS supported configuration Flannel ❌ Does NOT enforce NetworkPolicies Weave Net ⚠️ Partial support (no egress enforcement in older versions) Check your cluster's CNI: bash kubectl get pods -n kube-system grep -E \"calico cilium flannel weave\" ---"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Policy Maintenance",
+"anchor": "policy-maintenance",
+"text": ""
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Adding a new service",
+"anchor": "adding-a-new-service",
+"text": "1. Create a new allow policy file: k8s/network-policy/<service -policy.yaml 2. Follow the pattern in api-server-policy.yaml : - One resource per direction (separate ingress + egress) - Use podSelector + namespaceSelector for internal, ipBlock for external 3. Add to kustomization.yaml 4. Apply and run scripts/test network policies.sh 5. Document the traffic matrix in this file"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Updating CIDR blocks",
+"anchor": "updating-cidr-blocks",
+"text": "The external egress rule uses 0.0.0.0/0 with RFC-1918 exclusions. For production hardening, replace this with specific CIDR blocks for: - Stellar RPC endpoints (obtain from your cloud provider's route table) - Slack API: 54.183.0.0/16 , 52.44.0.0/15 (subject to change — prefer FQDN via egress gateway) - PagerDuty: 18.185.0.0/16 (EU) / 35.166.0.0/16 (US) Alternatively, use a CNI egress gateway (Calico Enterprise, Cilium Enterprise) to enforce FQDN-based egress rules without maintaining IP lists."
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Blue-green deployments",
+"anchor": "blue-green-deployments",
+"text": "The api-server-policy.yaml uses app: quorumproof-api-server as the pod selector, which matches both slot: blue and slot: green pods. No policy update is required during blue-green slot switches. If you need slot-specific policies, add a slot label to the podSelector . ---"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Troubleshooting",
+"anchor": "troubleshooting",
+"text": ""
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Pod cannot reach a service it should reach",
+"anchor": "pod-cannot-reach-a-service-it-should-reach",
+"text": "bash Check which policies apply to the pod kubectl describe pod <pod-name -n quorumproof grep -A5 \"Labels:\" kubectl get networkpolicy -n quorumproof -o yaml \\ grep -A10 \"podSelector:\" Use netshoot for live debugging kubectl run debug --image=ghcr.io/nicolaka/netshoot --rm -it \\ --namespace quorumproof -- tcpdump -i eth0 port 5432"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "Policy change not taking effect",
+"anchor": "policy-change-not-taking-effect",
+"text": "NetworkPolicy changes take effect immediately (no pod restart required). If changes don't appear to take effect, check: 1. kubectl get networkpolicy -n quorumproof — verify the policy exists 2. Check CNI plugin logs: kubectl logs -n kube-system -l app=calico-node 3. Ensure the pod labels match the podSelector exactly ---"
+},
+{
+"doc": "network-policy.md",
+"title": "Network Policy for Pod Security",
+"heading": "See Also",
+"anchor": "see-also",
+"text": "- k8s/network-policy/ — policy manifests - scripts/test network policies.sh — automated tests - docs/threat-model.md — lateral movement threat analysis - docs/security-best-practices.md — broader security guide"
 },
 {
 "doc": "observability-setup-guide.md",
@@ -15899,6 +17586,321 @@
 "text": "- No client-side retry/timeout policy is specified here — that's a contract of whatever consumes the API server (frontend, SDK), not the server itself. - No SLO/SLA numbers (e.g. \"p99 latency under X ms during a chaos event\") are defined yet — the requirements above are behavioral (correctness under failure), not performance targets. Adding quantitative SLOs is future work."
 },
 {
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "Runbook: Deployment",
+"anchor": "runbook-deployment",
+"text": "Issue 1645. This is the standard procedure for releasing QuorumProof: the API server image, and the contracts when they change. Use it for every production release. For a first-ever mainnet contract deployment, use mainnet-deployment-runbook.md, which has per-contract confirmation gates. For background, see deployment-guide.md and architecture-diagrams.md §4. --- --- Owner Release engineer on duty Approvals One maintainer for API-only releases; two maintainers for contract releases Duration ~30 min (API only) · ~90 min (with contract upgrade) Rollback runbook-rollback.md ---"
+},
+{
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "0. Before you start",
+"anchor": "0-before-you-start",
+"text": "- [ ] The release PR is merged to main and CI is green ( ci.yml , security.yml , container-scan.yml ). - [ ] The deployment checklist is complete. - [ ] The release is not in a change freeze. Check the maintenance calendar in runbook-maintenance.md. - [ ] There's no open SEV-1 or SEV-2 incident. - [ ] You've posted the release plan in the ops channel: version, image tag, whether contracts change, and the rollback owner. - [ ] The environment is correct: bash ./scripts/validate env.sh Record the current state before changing anything. You'll need it to roll back: bash ./scripts/blue green deplo"
+},
+{
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "1. Testnet (automatic)",
+"anchor": "1-testnet-automatic",
+"text": "Every merge to main runs testnet-deploy.yml . It deploys with deploy testnet.sh , then runs testnet smoke test.sh . If the smoke test fails, testnet rollback.sh restores the previous manifest. - [ ] Confirm the latest testnet-deploy.yml run for the release commit passed: gh run list --workflow testnet-deploy.yml --limit 3 . - [ ] If it rolled back, stop . Fix the problem on main first. ---"
+},
+{
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "2. Database migrations (if the release has any)",
+"anchor": "2-database-migrations-if-the-release-has-any",
+"text": "- [ ] Check that the backup is fresh: gh run list --workflow backup.yml --limit 1 . - [ ] Apply the migrations. They must be backward compatible with the image currently live, because it keeps serving until the switch: bash cd api-server && DATABASE URL=... npm run migrate - [ ] Confirm db-migrations.yml / the migration log shows every migration applied. - [ ] If this fails, npm run migrate:rollback and abort the release. See database-migrations.md. ---"
+},
+{
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "3. Contract upgrade (only if contracts changed)",
+"anchor": "3-contract-upgrade-only-if-contracts-changed",
+"text": "Upgrade in dependency order: quorum proof , then zk verifier , then sbt registry . For each contract: 1. [ ] Build the release WASM and record its hash: bash ./scripts/build.sh sha256sum target/wasm32-unknown-unknown/release/<contract .wasm 2. [ ] Run the safety checks against the live contract: bash ./scripts/pre upgrade checks.sh <contract id <new wasm path \"$ADMIN KEY\" All three check classes must pass: data migration, backward compatibility and state consistency. 3. [ ] Upgrade, with automatic rollback if the post-upgrade smoke tests fail: bash STELLAR NETWORK=mainnet ./scripts/upgrade rol"
+},
+{
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "4. API server release (blue/green)",
+"anchor": "4-api-server-release-bluegreen",
+"text": "1. [ ] Deploy the new image to the idle slot. The script health-checks it through the preview Service before it switches traffic: bash ./scripts/blue green deploy.sh deploy <registry /quorumproof-api-server:<tag Or run the blue-green-deploy.yml workflow with the image tag. 2. [ ] If the preview health checks fail, the script leaves traffic where it is. Investigate using troubleshooting D3. 3. [ ] After the switch: bash ./scripts/blue green deploy.sh status curl -fsS https://<api-host /health jq .status \"healthy\" curl -fsS https://<api-host /health/ready jq .ready true For risky changes, prefer"
+},
+{
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "5. Post-deployment verification (30 minutes)",
+"anchor": "5-post-deployment-verification-30-minutes",
+"text": "- [ ] Smoke-test the core path: look up a known credential, verify it, and check that the WebSocket event stream connects. - [ ] Error rate and p95 latency on Grafana are at or below the pre-release baseline. Watch HighErrorRate , ApiLatencyP95High and ContractErrorBurst . - [ ] No new RpcCircuitBreakerOpen or DbPoolSaturated alerts. - [ ] The multi-region secondary (if deployed) runs the same image. Run ./scripts/deploy multi region.sh per multi-region-deployment.md. Roll back immediately (don't debug in production) if any of these happen within the 30 minutes: - the error rate is more than 2"
+},
+{
+"doc": "runbook-deployment.md",
+"title": "Runbook: Deployment",
+"heading": "6. Close out",
+"anchor": "6-close-out",
+"text": "- [ ] Post \"release complete\" with the version, image tag, WASM hashes and migration IDs. - [ ] Keep the previous blue/green slot warm for at least 24 hours . It's your instant rollback. - [ ] For a minor or major release, cut the docs version: python3 scripts/docs versions.py cut <MAJOR.MINOR (see documentation-versioning.md). - [ ] Update the release notes and changelog."
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "Runbook: Incident Response",
+"anchor": "runbook-incident-response",
+"text": "Issue 1645. This is what to do from the moment an alert fires or a problem is reported until the postmortem is done. It standardizes the roles, severity levels and first actions. Detailed per-scenario procedures are linked from §5. Contact lists and on-call rotation are in operational-runbook.md §7. ---"
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "1. Severity levels",
+"anchor": "1-severity-levels",
+"text": "Severity Definition Examples Response Updates --- --- --- --- --- SEV-1 Credential integrity or security at risk, or full outage Suspected admin-key compromise; fraudulent issuance/attestation; unexplained contract pause; API down in all regions Page immediately, 24/7; IC within 15 min Every 30 min SEV-2 Major feature degraded for many users Verification failing or badly stale; RPC circuit breaker open 10 min; region failover active; failed contract upgrade Page on-call; IC within 30 min Every 60 min SEV-3 Partial degradation, workaround exists Elevated latency; WebSocket drops; a backup verif"
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "2. Roles",
+"anchor": "2-roles",
+"text": "Role Responsibility --- --- Incident Commander (IC) Owns the incident. Makes decisions, assigns work and sets the severity. Doesn't debug. Operations lead Runs diagnostics and makes the changes the IC approves. Communications lead Status page, stakeholder and issuer updates. SEV-1 and SEV-2 only. Scribe Keeps the timeline in the incident log (UTC timestamps, every action and decision). For SEV-3 and SEV-4, one person can hold every role. For SEV-1, the IC and the operations lead must be different people. ---"
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "3. Response procedure",
+"anchor": "3-response-procedure",
+"text": ""
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "3.1 Detect and declare (first 5 minutes)",
+"anchor": "31-detect-and-declare-first-5-minutes",
+"text": "1. [ ] Acknowledge the page so the escalation stops. 2. [ ] Check it's real: look at the alert's dashboard and run curl -s https://<api-host /health jq . 3. [ ] Declare the incident in the ops channel: INCIDENT: <one-line symptom — SEV-<n — IC: <name . 4. [ ] Open the incident log from the template."
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "3.2 Stabilize (mitigate first, root-cause later)",
+"anchor": "32-stabilize-mitigate-first-root-cause-later",
+"text": "Choose the smallest action that stops the harm: Symptom First mitigation --- --- The problem started with a release or upgrade Roll back: runbook-rollback.md Fraudulent writes are in progress, or the admin key is suspected compromised Pause the contract (below) RPC provider unhealthy Fail over STELLAR RPC URL to the fallback provider (troubleshooting D2) Primary region down Regional failover: ./scripts/region failover.sh per multi-region-failover.md Abusive traffic Tighten rate limits / IP allowlist; see throttling.md Database saturated Shed load (lower CONCURRENT LIMIT DEFAULT ), kill runaway"
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "3.3 Diagnose",
+"anchor": "33-diagnose",
+"text": "- Follow the troubleshooting decision tree and the diagnostic procedures (D1–D6). - Preserve evidence before you change anything else. That means logs (Loki), contract events for the affected ledger range, and a state snapshot: ./scripts/snapshot.sh --network \"$STELLAR NETWORK\" --output snapshots/incident-<id .json . - For a suspected security incident, follow SECURITY.md too. Keep discussion in the private channel only, and don't post details in public issues."
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "3.4 Resolve",
+"anchor": "34-resolve",
+"text": "1. [ ] Apply the fix: roll forward, rollback, key rotation or data restoration. 2. [ ] If you paused the contract, unpause only after the IC signs off and state has been verified ( ./scripts/reconcile state.sh , the migration verifier, or credential spot checks): bash stellar contract invoke --network \"$STELLAR NETWORK\" --id \"$CONTRACT QUORUM PROOF\" \\ --source-account \"$ADMIN KEY\" -- unpause --admin \"$ADMIN ADDRESS\" 3. [ ] Watch the dashboards for 30 minutes. The alerts must clear and stay clear. 4. [ ] Declare the incident resolved in the channel and on the status page."
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "3.5 Follow up",
+"anchor": "35-follow-up",
+"text": "- [ ] Postmortem within 5 business days for SEV-1 and SEV-2 (blameless): timeline, impact, root cause, what went well or badly, and action items with owners. - [ ] File the action items as issues and link them from the postmortem. - [ ] Update this runbook, the troubleshooting guide or the alert rules if they were wrong or missing. ---"
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "4. Communication templates",
+"anchor": "4-communication-templates",
+"text": "Initial (status page / issuers): We are investigating an issue affecting <feature since <time UTC . Credential data on-chain is <not affected / being assessed . Next update by <time UTC . Contract paused: As a precaution, QuorumProof contract writes (issuance, attestation, revocation) are temporarily paused while we investigate <issue . Verification of existing credentials <continues / is affected . Next update by <time UTC . Resolved: The issue affecting <feature was resolved at <time UTC . Root cause: <one line . A full post-incident report will follow. ---"
+},
+{
+"doc": "runbook-incident-response.md",
+"title": "Runbook: Incident Response",
+"heading": "5. Scenario playbooks",
+"anchor": "5-scenario-playbooks",
+"text": "Scenario Playbook --- --- Admin or issuer key compromise attestor-key-custody-guide.md, disaster-recovery.md Fraudulent credentials / attestations THREAT MODEL CREDENTIAL FRAUD.md, operational-runbook.md §3.2 Failed contract upgrade runbook-rollback.md §3 Data loss or corruption backup-system.md, disaster-recovery.md Region outage multi-region-failover.md WebSocket message drops operational-runbook.md — WS Message Drops Alert fired but you don't know what it means critical-event-alerting.md, monitoring-guide.md"
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "Runbook: Maintenance",
+"anchor": "runbook-maintenance",
+"text": "Issue 1645. Routine and planned maintenance: the recurring tasks that keep QuorumProof healthy, and the procedure for running a maintenance window. Daily health checks and the on-call shift checklist are in operational-runbook.md §1. ---"
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "1. Maintenance windows",
+"anchor": "1-maintenance-windows",
+"text": "Window When (UTC) Used for --- --- --- Standard Tuesdays & Thursdays 02:00–04:00 API releases, DB migrations, infrastructure changes Contract First Wednesday of the month 02:00–05:00 Contract upgrades, key rotations Emergency Any time, IC approval Security patches, incident fixes - Change freeze: 14 Dec – 3 Jan, and the 48 hours before any announced partner launch. Only emergency changes are allowed. - Announce standard windows 48 hours ahead and contract windows 7 days ahead, on the status page and to registered issuers. ---"
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "2. Running a maintenance window",
+"anchor": "2-running-a-maintenance-window",
+"text": ""
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "2.1 Before (T-48h to T-0)",
+"anchor": "21-before-t-48h-to-t-0",
+"text": "- [ ] Create a change ticket with the scope, steps, expected impact, rollback plan and owner. - [ ] Post the announcement. Include \"writes will be paused\" if you'll pause the contract. - [ ] Check that the last backup is fresh and verified: gh run list --workflow backup.yml --limit 1 , then ./scripts/verify backup.sh <latest . - [ ] Silence the alerts you expect to fire, in Alertmanager, for the window only , with the ticket ID as the comment."
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "2.2 During",
+"anchor": "22-during",
+"text": "- [ ] Post \"maintenance started\" in the ops channel. - [ ] Do the work, following the relevant runbook (deployment, key rotation, etc.). - [ ] If anything goes off-plan, roll back (runbook-rollback.md). Don't improvise past the end of the window."
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "2.3 After",
+"anchor": "23-after",
+"text": "- [ ] Run the post-deployment checks from runbook-deployment.md §5. - [ ] Remove the silences explicitly . Don't wait for them to expire. - [ ] Post \"maintenance complete\" on the status page and in the ops channel, then close the ticket. ---"
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "3. Recurring maintenance tasks",
+"anchor": "3-recurring-maintenance-tasks",
+"text": "Task Frequency Procedure Owner --- --- --- --- Review dashboards & alert noise Daily operational-runbook.md §1 On-call Verify last backup Daily (automated) + weekly manual spot check §3.1 On-call Dependency & image vulnerability triage Weekly §3.2 Security rotation Contract state reconciliation Weekly §3.3 On-call Storage / TTL extension review Weekly §3.4 Contracts team Restore drill Monthly §3.1 SRE Capacity review Monthly capacity-planning.md SRE Terraform drift check Weekly (CI) infrastructure-as-code.md SRE Key rotation Per operational-runbook.md §1.5 attestor-key-custody-guide.md Securit"
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "3.1 Backups",
+"anchor": "31-backups",
+"text": "bash gh run list --workflow backup.yml --limit 7 daily runs succeeded? ./scripts/verify backup.sh <backup integrity + decryptability ./scripts/check backup integrity.sh hash chain Once a month, restore the latest backup to a scratch testnet contract with ./scripts/restore from backup.sh --network testnet --contract <scratch id and spot-check credentials. Never restore to production outside an incident. See backup-verification.md."
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "3.2 Dependencies and images",
+"anchor": "32-dependencies-and-images",
+"text": "bash ./scripts/check deps.sh cargo-deny / npm audit summary ./scripts/scan images.sh container CVEs (trivy) ./scripts/scan contracts.sh contract static analysis Critical and high findings go in issues labelled security , with fix deadlines taken from continuous-security-testing.md."
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "3.3 State reconciliation",
+"anchor": "33-state-reconciliation",
+"text": "bash ./scripts/reconcile state.sh <contract id primary <contract id replica Any \"inconsistent\" or \"unverifiable\" result needs a ticket. Recovery is manual. See the header of scripts/reconcile state.sh ."
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "3.4 Storage TTL",
+"anchor": "34-storage-ttl",
+"text": "Soroban persistent entries expire unless their TTL is extended. Check the TTL of hot entries ( Admin , counters, active slices) and extend any that fall under the threshold in ADR-013. A lapsed entry is an outage."
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "3.5 Log retention",
+"anchor": "35-log-retention",
+"text": "Archival runs automatically ( scripts/log archive.sh ). Once a month, confirm that the archive bucket's lifecycle rules match log-retention-policy.md, and do a test retrieval with scripts/log retrieve.sh . ---"
+},
+{
+"doc": "runbook-maintenance.md",
+"title": "Runbook: Maintenance",
+"heading": "4. Keeping runbooks current",
+"anchor": "4-keeping-runbooks-current",
+"text": "- Every runbook step has to be something you can run as written. When a script or flag changes, update the runbook in the same PR. - After every SEV-1 or SEV-2, the postmortem reviews the runbooks that were used and records the changes as action items. - The quarterly review walks through each runbook on testnet and fixes anything stale. The runbooks are: - runbook-deployment.md - runbook-incident-response.md - runbook-rollback.md - runbook-maintenance.md (this page)"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "Runbook: Rollback Procedures",
+"anchor": "runbook-rollback-procedures",
+"text": "Issue 1645. How to undo a bad release, for each part of the system. Roll back first and debug afterwards. If a release is linked to a user-facing regression, rolling back is the default mitigation. Declare an incident per runbook-incident-response.md when the impact is SEV-2 or higher. ---"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "1. Choose the right rollback",
+"anchor": "1-choose-the-right-rollback",
+"text": "mermaid flowchart TD A[What changed in the bad release?] -- B{API server image only?} B -- Yes C[§2 API server rollback<br/ seconds] B -- No D{Database migration?} D -- Yes E[§4 Database rollback] D -- No F{Contract WASM?} F -- Yes G[§3 Contract upgrade rollback] F -- Testnet deploy H[§5 Testnet rollback] E -- C G -- C When a release changed several components, roll them back in reverse order of deployment : API server first, then database, then contracts. Each earlier component is still compatible with the one deployed before it. Every rollback needs these things. Record them in the incident "
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "2. API server rollback",
+"anchor": "2-api-server-rollback",
+"text": ""
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "2.1 Blue/green (default)",
+"anchor": "21-bluegreen-default",
+"text": "The previous slot stays warm, so rolling back is a single selector patch: bash ./scripts/blue green deploy.sh status confirm active + previous slots ./scripts/blue green deploy.sh rollback point live Service back at previous slot ./scripts/blue green deploy.sh status The script reads the quorumproof.io/previous-slot annotation from the live Service. If that annotation is empty (the previous slot was already recycled), redeploy the last known-good image instead: bash ./scripts/blue green deploy.sh deploy <registry /quorumproof-api-server:<previous-tag"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "2.2 Canary",
+"anchor": "22-canary",
+"text": "If the release is still a canary, stop the rollout and send all traffic back to stable. See scripts/canary deploy.sh and the canary-deploy.yml workflow."
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "2.3 Multi-region",
+"anchor": "23-multi-region",
+"text": "Roll back both regions. A secondary region still on the bad image would take traffic on failover. See multi-region-deployment.md. Details: blue-green-deployment.md. ---"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "3. Contract upgrade rollback",
+"anchor": "3-contract-upgrade-rollback",
+"text": "Soroban contracts are upgraded in place ( upgrade(admin, new wasm hash) ). Rolling back means upgrading back to the previous WASM hash. That's only safe if the new code hasn't written state in a format the old code can't read."
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "3.1 Automatic",
+"anchor": "31-automatic",
+"text": "scripts/upgrade rollback.sh records the pre-upgrade WASM hash and rolls back on its own when the post-upgrade smoke tests fail. Check its output: if it reports that it rolled back, go straight to §6."
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "3.2 Manual",
+"anchor": "32-manual",
+"text": "1. [ ] Pause writes so no more state is written in the new format: bash stellar contract invoke --network \"$STELLAR NETWORK\" --id <contract id \\ --source-account \"$ADMIN KEY\" -- pause --admin \"$ADMIN ADDRESS\" 2. [ ] Find the previous WASM hash. It's in the release notes, the ContractUpgradeDetected alert or the pre-release record in runbook-deployment.md §0. 3. [ ] Check that the old code can read the current state. Run the compatibility checks with the old WASM: bash ./scripts/pre upgrade checks.sh <contract id <previous wasm path \"$ADMIN KEY\" If this fails, don't downgrade . Fix forward with"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "3.3 State restoration (last resort)",
+"anchor": "33-state-restoration-last-resort",
+"text": "If state is corrupted and can't be fixed forward, restore from an on-chain snapshot ( restore from snapshot ) or from the off-chain backup: bash ./scripts/verify backup.sh <backup ./scripts/restore from backup.sh --backup <backup.json --contract <contract id --network \"$STELLAR NETWORK\" Follow disaster-recovery.md. A restore is always SEV-1. ---"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "4. Database rollback",
+"anchor": "4-database-rollback",
+"text": "1. [ ] Roll the API server back first (§2). The old image has to be running before the schema goes back. 2. [ ] Roll back the migrations that the release applied: bash cd api-server npm run migrate:rollback last migration npm run migrate:rollback -- 3 last 3 migrations 3. [ ] If a down migration is destructive or missing, restore from the pre-release backup instead. Remember that PostgreSQL is a projection of chain events and can be rebuilt by re-indexing (see architecture-diagrams.md §3). Details: database-migrations.md. ---"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "5. Testnet rollback",
+"anchor": "5-testnet-rollback",
+"text": "A failed testnet CI deploy can't be rolled back on-chain. Rolling back restores the manifest pointer to the last known-good deployment: bash ./scripts/testnet rollback.sh [manifest path] CI does this automatically when testnet smoke test.sh fails. ---"
+},
+{
+"doc": "runbook-rollback.md",
+"title": "Runbook: Rollback Procedures",
+"heading": "6. Verify after any rollback",
+"anchor": "6-verify-after-any-rollback",
+"text": "- [ ] curl -fsS https://<api-host /health jq .status returns \"healthy\" . - [ ] ./scripts/blue green deploy.sh status shows the expected image. - [ ] Contract WASM hash matches the expected previous hash: stellar contract info wasm-hash --network \"$STELLAR NETWORK\" --id <contract id . - [ ] is paused returns false , unless you intend to stay paused. - [ ] Core smoke test passes: look up and verify a known credential. - [ ] Error rate and latency are back to baseline for 30 minutes. - [ ] Post a rollback summary in the ops channel and file a follow-up issue for the root cause."
+},
+{
 "doc": "saga-rollback-specification.md",
 "title": "Atomic Saga Rollback Specification",
 "heading": "Atomic Saga Rollback Specification",
@@ -16515,6 +18517,153 @@
 "text": "- API Client Guide - Error Code Reference - Architecture Overview - Trust Slice Model"
 },
 {
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Secrets Management",
+"anchor": "secrets-management",
+"text": "Issue 1656 — Secrets are hardcoded. This document describes the secrets management architecture for QuorumProof: how secrets are stored, rotated, audited, and consumed by application services."
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Problem",
+"anchor": "problem",
+"text": "Prior to this change, secrets (Stellar deploy keys, database URLs, JWT signing keys) were stored in plaintext environment files, CI variables, or Kubernetes Secret objects with no rotation, no access audit trail, and no central inventory. This is a high-severity security finding."
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Solution",
+"anchor": "solution",
+"text": "QuorumProof secrets are managed via AWS Secrets Manager using a HashiCorp Vault-compatible path convention . The architecture supports a future migration to a self-hosted Vault cluster with minimal application changes. ---"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Secret Path Convention",
+"anchor": "secret-path-convention",
+"text": "All secrets follow the Vault KV-v2 path structure: quorumproof/<environment /<service /<key Path Contents ------ ---------- quorumproof/<env /stellar/deploy-key Stellar account secret key for contract deployments quorumproof/<env /database/url PostgreSQL connection URL quorumproof/<env /api-server/jwt-secret HS256 JWT signing secret quorumproof/<env /api-server/webhook-signing-key HMAC-SHA256 webhook signing key quorumproof/<env /monitoring/pagerduty-routing-key PagerDuty Events API v2 routing key quorumproof/<env /monitoring/slack-webhook-url Slack incoming webhook URL ---"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Tooling",
+"anchor": "tooling",
+"text": ""
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "scripts/secrets manager.sh",
+"anchor": "scriptssecrets-managersh",
+"text": "A single script for all secrets operations. Supports both AWS Secrets Manager (default) and HashiCorp Vault (set VAULT ADDR + VAULT TOKEN ). bash Check all required secrets exist ENVIRONMENT=production ./scripts/secrets manager.sh check Get a secret value ./scripts/secrets manager.sh get quorumproof/production/stellar/deploy-key Set (create or update) a secret ./scripts/secrets manager.sh set \\ quorumproof/production/api-server/jwt-secret \\ \"$(openssl rand -hex 32)\" Trigger immediate rotation ./scripts/secrets manager.sh rotate quorumproof/production/database/url List all secrets in an environ"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "infra/terraform/modules/secrets/",
+"anchor": "infraterraformmodulessecrets",
+"text": "Terraform module that creates all secret objects in AWS Secrets Manager, configures KMS encryption, sets up automatic rotation, and applies resource-based access policies. hcl module \"secrets\" { source = \"../../modules/secrets\" environment = var.environment kms key arn = module.kms.key arn rotation lambda arn = module.rotation lambda.arn rotation days = 30 allowed principal arns = [module.ecs task role.arn] } ---"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Secret Rotation",
+"anchor": "secret-rotation",
+"text": ""
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Automatic rotation",
+"anchor": "automatic-rotation",
+"text": "The secrets Terraform module configures automatic rotation for credential secrets ( stellar/deploy-key , database/url , api-server/jwt-secret ) when rotation lambda arn is provided. Rotation intervals: - Stellar deploy key: 30 days (configurable via rotation days ) - Database URL (password rotation): 30 days - JWT signing secret: 30 days"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Manual rotation",
+"anchor": "manual-rotation",
+"text": "bash Immediately rotate a specific secret ./scripts/secrets manager.sh rotate quorumproof/production/stellar/deploy-key"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Zero-downtime JWT rotation",
+"anchor": "zero-downtime-jwt-rotation",
+"text": "JWT secret rotation requires dual-key support during the transition window. The API server reads the current and previous versions from Secrets Manager and accepts tokens signed with either key during a 15-minute overlap window: bash 1. Generate new secret and store as next version NEW SECRET=$(openssl rand -hex 32) ./scripts/secrets manager.sh set quorumproof/production/api-server/jwt-secret-next \"$NEW SECRET\" 2. Deploy the new API server version that reads both keys 3. Wait for old tokens to expire (≥ JWT max TTL) 4. Promote: rename next → current ./scripts/secrets manager.sh set quorumproof"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Audit Logging",
+"anchor": "audit-logging",
+"text": "Every secrets operation ( get , set , rotate , list ) is appended as a JSON Line to $AUDIT LOG FILE (default: /tmp/quorumproof-secrets-audit.log )."
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Log format",
+"anchor": "log-format",
+"text": "json { \"timestamp\": \"2026-09-28T08:00:00Z\", \"action\": \"get\", \"secret path\": \"quorumproof/production/stellar/deploy-key\", \"status\": \"ok\", \"actor\": \"arn:aws:iam::123456789012:role/quorumproof-ci\", \"environment\": \"production\", \"hostname\": \"ci-runner-abc123\" }"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Viewing the audit log",
+"anchor": "viewing-the-audit-log",
+"text": "bash All entries ./scripts/secrets manager.sh audit Last 24 hours ./scripts/secrets manager.sh audit --since 24h Last 7 days ./scripts/secrets manager.sh audit --since 7d"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "CloudTrail integration",
+"anchor": "cloudtrail-integration",
+"text": "AWS CloudTrail automatically records all GetSecretValue , PutSecretValue , and RotateSecret API calls for Secrets Manager. Combined with the script-level audit log, this provides two independent audit trails. To query CloudTrail for secrets access: bash aws cloudtrail lookup-events \\ --lookup-attributes AttributeKey=EventSource,AttributeValue=secretsmanager.amazonaws.com \\ --start-time \"$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)\" \\ --query 'Events[].{Time:EventTime,Who:Username,What:EventName,Resource:Resources[0].ResourceName}' \\ --output table ---"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Kubernetes Integration",
+"anchor": "kubernetes-integration",
+"text": "Secrets are injected into pods via the AWS Secrets Manager CSI driver or by the CI pipeline creating Kubernetes Secret objects at deploy time (never stored in Git)."
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "External Secrets Operator (recommended)",
+"anchor": "external-secrets-operator-recommended",
+"text": "yaml k8s/external-secret.yaml apiVersion: external-secrets.io/v1beta1 kind: ExternalSecret metadata: name: quorumproof-api-server-env namespace: quorumproof spec: refreshInterval: 1h secretStoreRef: name: aws-secrets-manager kind: SecretStore target: name: quorumproof-api-server-env data: - secretKey: STELLAR SECRET KEY remoteRef: key: quorumproof/production/stellar/deploy-key - secretKey: DATABASE URL remoteRef: key: quorumproof/production/database/url - secretKey: JWT SECRET remoteRef: key: quorumproof/production/api-server/jwt-secret"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "CI/CD pipeline injection",
+"anchor": "cicd-pipeline-injection",
+"text": "In GitHub Actions, retrieve secrets immediately before use and never store them in environment files: yaml - name: Inject secrets run: STELLAR KEY=$(aws secretsmanager get-secret-value \\ --secret-id quorumproof/production/stellar/deploy-key \\ --query SecretString --output text) echo \"::add-mask::$STELLAR KEY\" echo \"STELLAR SECRET KEY=$STELLAR KEY\" \"$GITHUB ENV\" ---"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Security Controls",
+"anchor": "security-controls",
+"text": "Control Implementation --------- ---------------- Encryption at rest AWS KMS (customer-managed key via kms key arn ) Encryption in transit TLS enforced by AWS Secrets Manager API Access control IAM resource-based policies on each secret Audit trail CloudTrail + script-level JSON audit log Rotation Automatic via Lambda + immediate via rotate command Secret recovery 7-day recovery window before permanent deletion No plaintext in Git All secret values stored in Secrets Manager only Masking in CI ::add-mask:: annotation on retrieved values ---"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "Migration from Hardcoded Secrets",
+"anchor": "migration-from-hardcoded-secrets",
+"text": "1. Identify all hardcoded secrets: grep -r \"STELLAR SECRET\\ DATABASE URL\\ JWT SECRET\" .env scripts/ k8s/ 2. For each secret, run: ./scripts/secrets manager.sh set quorumproof/<env /<service /<key \"<value \" 3. Remove from .env files and replace with Secrets Manager lookups. 4. Update Kubernetes Secret manifests to use External Secrets Operator. 5. Rotate all migrated secrets immediately to invalidate the old values. 6. Verify with: ENVIRONMENT=production ./scripts/secrets manager.sh check ---"
+},
+{
+"doc": "secrets-management.md",
+"title": "Secrets Management",
+"heading": "See Also",
+"anchor": "see-also",
+"text": "- infra/terraform/modules/secrets/ — Terraform module - scripts/secrets manager.sh — CLI operations tool - docs/security-best-practices.md — broader security guide - docs/issuer-security-checklist.md — secrets checklist for issuers"
+},
+{
 "doc": "security-audit-checklist.md",
 "title": "Security Audit Checklist — QuorumProof Contracts",
 "heading": "Security Audit Checklist — QuorumProof Contracts",
@@ -16989,6 +19138,230 @@
 "heading": "Security Tooling",
 "anchor": "security-tooling",
 "text": "Tool What it catches Where it runs Run locally --- --- --- --- cargo audit Known-vulnerable Rust crates (RustSec) CI security job cargo install cargo-audit && cargo audit cargo deny Advisories, unsound/yanked crates, license policy, banned deps ( deny.toml ) CI security job cargo install cargo-deny && cargo deny check TruffleHog Committed secrets across history CI security job trufflehog git file://. --results=verified,unknown scripts/scan contracts.sh Unsafe contract patterns: bare unwrap/expect, unsafe , hardcoded addresses, missing auth Local / pre-release ./scripts/scan contracts.sh script"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Service Mesh Operations Guide",
+"anchor": "service-mesh-operations-guide",
+"text": "Issue 1660 — Implement Service Mesh for Observability This guide covers the Istio service mesh deployment for QuorumProof: installation, mTLS enforcement, traffic visualisation, and day-2 operations. ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Table of Contents",
+"anchor": "table-of-contents",
+"text": "1. Overview 2. Installation 3. mTLS Enforcement 4. Traffic Visualisation 5. Distributed Tracing 6. Mesh Metrics 7. Operations Runbook 8. Troubleshooting ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Overview",
+"anchor": "overview",
+"text": "QuorumProof uses Istio as its service mesh to provide: Capability How it's configured --- --- mTLS between all services PeerAuthentication — STRICT mode ( k8s/istio-mesh.yaml ) Traffic management (retries, timeouts) VirtualService Circuit breaking DestinationRule outlierDetection Prometheus metrics per service Telemetry resource + Prometheus Adapter Distributed tracing (Jaeger / Zipkin) Telemetry tracing block Structured access logs → Loki Envoy access log provider Traffic visualisation Kiali dashboard All mesh configuration lives in k8s/istio-mesh.yaml . ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Installation",
+"anchor": "installation",
+"text": ""
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "1. Install Istio",
+"anchor": "1-install-istio",
+"text": "bash Download istioctl (1.21+ recommended) curl -L https://istio.io/downloadIstio sh - export PATH=\"$PWD/istio- /bin:$PATH\" Install with the default profile (includes Prometheus, Grafana, Kiali, Jaeger) istioctl install --set profile=default -y Verify installation istioctl verify-install"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "2. Enable sidecar injection for the quorumproof namespace",
+"anchor": "2-enable-sidecar-injection-for-the-quorumproof-namespace",
+"text": "bash kubectl label namespace quorumproof istio-injection=enabled Restart the api-server so Istio injects the Envoy sidecar kubectl -n quorumproof rollout restart deployment/quorumproof-api-server"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "3. Apply mesh configuration",
+"anchor": "3-apply-mesh-configuration",
+"text": "bash kubectl apply -f k8s/istio-mesh.yaml"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "4. Verify sidecar injection",
+"anchor": "4-verify-sidecar-injection",
+"text": "bash kubectl -n quorumproof get pods -o jsonpath='{range .items[ ]}{.metadata.name}: {.spec.containers[ ].name}{\"\\n\"}{end}' Expected: api-server pod shows two containers (api-server + istio-proxy) ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "mTLS Enforcement",
+"anchor": "mtls-enforcement",
+"text": "The PeerAuthentication resource in k8s/istio-mesh.yaml sets mTLS to STRICT for the entire quorumproof namespace. All pod-to-pod communication must use workload certificates issued by Istio's internal CA (Citadel / istiod)."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Verify mTLS is active",
+"anchor": "verify-mtls-is-active",
+"text": "bash Check TLS mode for api-server istioctl authn tls-check quorumproof-api-server.quorumproof.svc.cluster.local Expected output: HOST:PORT STATUS SERVER CLIENT AUTHN POLICY DESTINATION RULE quorumproof-api-server.quorumproof:80 OK STRICT ISTIO MUTUAL ..."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "What mTLS protects",
+"anchor": "what-mtls-protects",
+"text": "- Service-to-service communication within the cluster is encrypted and mutually authenticated — a compromised pod cannot impersonate another service. - Workload certificates are rotated automatically by istiod (default: 24 h). - Traffic from outside the mesh (ingress) terminates at the Ingress Gateway and is then re-encrypted inside the mesh."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Certificate inspection",
+"anchor": "certificate-inspection",
+"text": "bash View the workload certificate for an api-server pod kubectl -n quorumproof exec -c istio-proxy \\ $(kubectl -n quorumproof get pod -l app=quorumproof-api-server -o jsonpath='{.items[0].metadata.name}') \\ -- openssl s client -connect quorumproof-api-server:80 2 &1 head -30 ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Traffic Visualisation",
+"anchor": "traffic-visualisation",
+"text": ""
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Kiali — Service mesh topology",
+"anchor": "kiali--service-mesh-topology",
+"text": "Kiali provides a real-time graph of service-to-service traffic, request success rates, and latency. bash Open Kiali dashboard istioctl dashboard kiali Navigate to Graph → Namespace: quorumproof . You should see: - quorumproof-api-server as the central node - Edges to stellar-rpc-egress (external Stellar RPC calls) - Health icons (green = healthy, red = error rate elevated)"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Grafana — Istio dashboards",
+"anchor": "grafana--istio-dashboards",
+"text": "Istio ships pre-built Grafana dashboards: bash istioctl dashboard grafana Key dashboards: - Istio Mesh Dashboard — global request volume, success rates, latencies - Istio Service Dashboard — per-service breakdown - Istio Workload Dashboard — per-pod metrics - Istio Performance Dashboard — Envoy sidecar overhead"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Request routing",
+"anchor": "request-routing",
+"text": "The VirtualService in k8s/istio-mesh.yaml applies different policies per path: Path / Method Timeout Retries Notes --- --- --- --- GET /api/credentials/ 10 s 3 retries, 4 s per try Safe to retry — read-only All other routes 30 s None POST/PUT are not retried (non-idempotent) ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Distributed Tracing",
+"anchor": "distributed-tracing",
+"text": "The mesh automatically propagates x-b3-traceid , x-b3-spanid , and x-request-id headers. The api-server reads and forwards these headers via the distributed tracing middleware ( api-server/src/middleware/ )."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Access Jaeger",
+"anchor": "access-jaeger",
+"text": "bash istioctl dashboard jaeger Search by: - service: quorumproof-api-server - operation: /api/credentials/verify-batch - Time range: last 15 minutes Each trace shows the Envoy → api-server → Stellar RPC span tree, including latency at each hop."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Sampling rate",
+"anchor": "sampling-rate",
+"text": "The Telemetry resource sets randomSamplingPercentage: 100 for staging. For production, reduce to 1–5 % to control trace volume: bash kubectl -n quorumproof patch telemetry quorumproof-telemetry \\ --type merge \\ -p '{\"spec\":{\"tracing\":[{\"providers\":[{\"name\":\"zipkin\"}],\"randomSamplingPercentage\":5}]}}' ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Mesh Metrics",
+"anchor": "mesh-metrics",
+"text": "Istio's Envoy sidecar exports the following Prometheus metrics. These complement the application-level metrics from monitoring/exporter/ . Metric Description --- --- istio requests total Total requests by source, destination, status code istio request duration milliseconds Request latency histogram istio request bytes Request body size histogram istio response bytes Response body size histogram pilot xds pushes Control-plane config push count (health of istiod)"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Example PromQL queries",
+"anchor": "example-promql-queries",
+"text": "promql Request success rate for quorumproof-api-server (last 5 min) sum(rate(istio requests total{destination service=\"quorumproof-api-server.quorumproof.svc.cluster.local\",response code!~\"5..\"}[5m])) / sum(rate(istio requests total{destination service=\"quorumproof-api-server.quorumproof.svc.cluster.local\"}[5m])) p95 request latency histogram quantile(0.95, sum by (le) ( rate(istio request duration milliseconds bucket{destination service=~\"quorumproof. \"}[5m]) ) ) ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Operations Runbook",
+"anchor": "operations-runbook",
+"text": ""
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Update mesh config",
+"anchor": "update-mesh-config",
+"text": "bash Edit k8s/istio-mesh.yaml, then apply kubectl apply -f k8s/istio-mesh.yaml Verify no validation errors istioctl analyze -n quorumproof"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Disable mTLS temporarily (debug only)",
+"anchor": "disable-mtls-temporarily-debug-only",
+"text": "bash kubectl -n quorumproof patch peerauthentication quorumproof-mtls \\ --type merge \\ -p '{\"spec\":{\"mtls\":{\"mode\":\"PERMISSIVE\"}}}' Re-enable: kubectl -n quorumproof patch peerauthentication quorumproof-mtls \\ --type merge \\ -p '{\"spec\":{\"mtls\":{\"mode\":\"STRICT\"}}}'"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Upgrade Istio",
+"anchor": "upgrade-istio",
+"text": "bash istioctl upgrade --set profile=default kubectl -n quorumproof rollout restart deployment/quorumproof-api-server"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Remove the mesh",
+"anchor": "remove-the-mesh",
+"text": "bash kubectl delete -f k8s/istio-mesh.yaml kubectl label namespace quorumproof istio-injection- kubectl -n quorumproof rollout restart deployment/quorumproof-api-server istioctl uninstall --purge ---"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Troubleshooting",
+"anchor": "troubleshooting",
+"text": ""
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Pods stuck in Init:0/1 after mesh install",
+"anchor": "pods-stuck-in-init01-after-mesh-install",
+"text": "The Istio sidecar init container failed. Check: bash kubectl -n quorumproof describe pod <pod-name Look for iptables errors in the istio-init container log kubectl -n quorumproof logs <pod-name -c istio-init Common cause: the cluster node doesn't allow NET ADMIN capability. Solution: use Istio CNI plugin instead of the init container: istioctl install --set components.cni.enabled=true"
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "mTLS check shows PERMISSIVE instead of STRICT",
+"anchor": "mtls-check-shows-permissive-instead-of-strict",
+"text": "The PeerAuthentication was applied before sidecar injection was enabled. Restart all pods in the namespace after applying the config."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Kiali graph shows no traffic",
+"anchor": "kiali-graph-shows-no-traffic",
+"text": "Kiali queries Prometheus for Istio metrics. Ensure: 1. monitoring/prometheus/prometheus.yml scrapes the istio-system namespace. 2. Kiali is pointed at the correct Prometheus URL (set during Istio install)."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Circuit breaker ejecting too many pods",
+"anchor": "circuit-breaker-ejecting-too-many-pods",
+"text": "If outlierDetection is ejecting pods unexpectedly, check for downstream Stellar RPC latency spikes. Adjust baseEjectionTime or consecutiveGatewayErrors in the DestinationRule in k8s/istio-mesh.yaml ."
+},
+{
+"doc": "service-mesh-operations.md",
+"title": "Service Mesh Operations Guide",
+"heading": "Access logs not appearing in Loki",
+"anchor": "access-logs-not-appearing-in-loki",
+"text": "Verify promtail is configured to scrape the Envoy access log path. The access logs are written to stdout by default; confirm the promtail config in monitoring/loki/promtail.yml targets the quorumproof namespace pods."
 },
 {
 "doc": "threat-model.md",
@@ -17548,34 +19921,125 @@
 "title": "Troubleshooting Guide",
 "heading": "Troubleshooting Guide",
 "anchor": "troubleshooting-guide",
-"text": "A guide for diagnosing problems encountered while using QuorumProof — whether you're an issuer, a verifier, or an end user whose credential isn't behaving as expected. It's organized as: common errors and fixes, a decision tree to route you to the right fix quickly, and a guide to reading the logs you'll be looking at along the way. For integration-specific failures (SDK/RPC-level issues hit while building against QuorumProof), see Integration Patterns Guide §5 instead — this document is about diagnosing a problem with a specific credential, transaction, or deployment. ---"
+"text": "A guide for diagnosing problems encountered while using QuorumProof — whether you're an issuer, a verifier, or an end user whose credential isn't behaving as expected — as well as for operators running the API server and infrastructure. It's organized as: common errors and fixes, step-by-step diagnostic procedures, decision trees to route you to the right fix quickly, and a guide to reading the logs you'll be looking at along the way. For integration-specific failures (SDK/RPC-level issues hit while building against QuorumProof), see Integration Patterns Guide §5 instead — this document is abo"
 },
 {
 "doc": "troubleshooting-guide.md",
 "title": "Troubleshooting Guide",
 "heading": "Table of Contents",
 "anchor": "table-of-contents",
-"text": "1. Common Errors and Solutions 2. Decision Tree 3. Logs Interpretation Guide 4. Doc Cross-Reference Drift 5. Where to Go Next ---"
+"text": "1. Common Errors and Solutions - 1.1 Contract errors - 1.2 API server issues - 1.3 Deployment and configuration issues - 1.4 Infrastructure and monitoring issues 2. Diagnostic Procedures 3. Decision Tree 4. Logs Interpretation Guide 5. Doc Cross-Reference Drift 6. Where to Go Next ---"
 },
 {
 "doc": "troubleshooting-guide.md",
 "title": "Troubleshooting Guide",
 "heading": "1. Common Errors and Solutions",
 "anchor": "1-common-errors-and-solutions",
+"text": ""
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "1.1 Contract errors",
+"anchor": "11-contract-errors",
 "text": "Error / Symptom What it means Solution --- --- --- Error(Contract, 1) — CredentialNotFound The credential ID doesn't exist on this contract/network Confirm you're pointed at the right CONTRACT QUORUM PROOF address and network (testnet vs mainnet); confirm the ID was actually returned by a prior issue credential call Error(Contract, 3) — ContractPaused An admin has paused the contract (usually during an incident or upgrade) Wait for unpause ; check the project status page or ask the issuer when service will resume Error(Contract, 4) — DuplicateCredential A credential already exists for this sub"
 },
 {
 "doc": "troubleshooting-guide.md",
 "title": "Troubleshooting Guide",
-"heading": "2. Decision Tree",
-"anchor": "2-decision-tree",
+"heading": "1.2 API server issues",
+"anchor": "12-api-server-issues",
+"text": "Error / Symptom What it means Solution --- --- --- GET /health returns 503 with \"status\": \"unhealthy\" At least one registered health check failed (e.g. heap usage critical) Read the checks object in the response body to see which check failed; for memory , follow D3 GET /health returns 200 with \"status\": \"degraded\" The server is serving, but a check is in warning territory (e.g. heap usage high) Not an outage — watch the trend; if it persists, see Performance Tuning Guide GET /health/ready returns 503 The instance hasn't finished starting (or a readiness check failed) Kubernetes won't route tr"
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "1.3 Deployment and configuration issues",
+"anchor": "13-deployment-and-configuration-issues",
+"text": "Error / Symptom What it means Solution --- --- --- API server reads succeed but return \"not found\" for everything CONTRACT QUORUM PROOF points at a contract on a different network than STELLAR RPC URL Run ./scripts/validate env.sh — it checks that STELLAR NETWORK , the RPC URL and contract addresses agree with environments.toml sbt registry.mint fails for a credential that exists sbt registry was initialized with the wrong quorum proof contract ID Contracts must be deployed/initialized in the order in Architecture — Deployment Order; redeploy sbt registry pointing at the correct ID CI testnet "
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "1.4 Infrastructure and monitoring issues",
+"anchor": "14-infrastructure-and-monitoring-issues",
+"text": "Error / Symptom What it means Solution --- --- --- BackupMissing / BackupVerificationFailed The scheduled backup didn't run, or its integrity check failed gh run list --workflow backup.yml ; re-run the workflow; verify with ./scripts/verify backup.sh . See Backup Verification RegionFailoverActive / RegionPeerUnreachable The API server has failed over (or cannot see its peer region) curl <api /health/region ; follow Multi-Region Failover Grafana dashboards are empty Prometheus isn't scraping the exporter or the API server Open Prometheus → Status → Targets ; fix any DOWN target. See Observabili"
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "2. Diagnostic Procedures",
+"anchor": "2-diagnostic-procedures",
+"text": "Each procedure is a short, ordered checklist. Run the steps in order and stop at the first one that explains the symptom. Commands assume the environment variables from .env ( STELLAR NETWORK , STELLAR RPC URL , CONTRACT QUORUM PROOF , …) are exported."
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "D1. Credential verification returns the wrong result",
+"anchor": "d1-credential-verification-returns-the-wrong-result",
+"text": "1. Confirm the network and contract. bash ./scripts/validate env.sh 2. Read the credential directly from the contract (bypasses API caches): bash stellar contract invoke --network \"$STELLAR NETWORK\" --contract \"$CONTRACT QUORUM PROOF\" \\ -- get credential --credential id <ID Check revoked , suspended and expiry fields. 3. Check attestation status against the slice used at attestation time: get attestation count vs. the slice's threshold ( get slice ). 4. Check the SBT — quorum proof.verify engineer requires the subject to hold an SBT for the credential (see Architecture). 5. Compare with the AP"
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "D2. RPC connectivity",
+"anchor": "d2-rpc-connectivity",
+"text": "1. Is the RPC endpoint up? bash curl -s -X POST \"$STELLAR RPC URL\" -H 'Content-Type: application/json' \\ -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' Expect \"status\":\"healthy\" . 2. Is it on the right network and current? Call getLatestLedger twice a few seconds apart — the sequence should advance every ~5–6s. A stuck sequence means the node is lagging. 3. Is the API server's circuit breaker open? Check the quorumproof rpc circuit breaker state metric ( 2 = open). 4. Fail over to a secondary RPC provider by changing STELLAR RPC URL and rolling the deployment if the primary stays unhealthy"
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "D3. API server unhealthy or slow",
+"anchor": "d3-api-server-unhealthy-or-slow",
+"text": "1. curl -s <api /health jq — which check is failing? 2. curl -s <api /health/ready and /health/live — is it not ready (startup / config), or not live (process wedged)? 3. kubectl -n <ns get pods -l app=quorumproof-api-server — restarts, CrashLoopBackOff , OOMKilled ? 4. kubectl -n <ns logs <pod --previous — the last crash's logs. 5. Check the latency / error dashboards: a spike in HighP95Latency with DbPoolSaturated points to the database; with RpcCircuitBreakerOpen , to the RPC (D2). 6. If the problem started with a release, roll back first and investigate later — see Rollback Runbook."
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "D4. Transaction submitted but never lands",
+"anchor": "d4-transaction-submitted-but-never-lands",
+"text": "1. Did you poll getTransaction after sendTransaction ? sendTransaction only acknowledges receipt. 2. stellar transaction info <TX HASH (or getTransaction ) — NOT FOUND after ~30s usually means the transaction was dropped (bad sequence number or expired time bounds): rebuild and resubmit. 3. FAILED — decode the result XDR; a contract error code maps to §1.1. 4. Resource/fee errors — re-simulate instead of reusing an old footprint."
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "D5. Contract is paused unexpectedly",
+"anchor": "d5-contract-is-paused-unexpectedly",
+"text": "1. stellar contract invoke … -- is paused . 2. Look for the Paused event and the admin address that emitted it in the contract event stream (§4). 3. Check the incident channel — a pause is normally part of the Incident Response Runbook. Do not unpause without the incident commander's sign-off. 4. If nobody claims the pause, treat it as a potential admin-key compromise and escalate as SEV-1."
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "D6. Collecting a support bundle",
+"anchor": "d6-collecting-a-support-bundle",
+"text": "When escalating, attach: - Network, contract IDs and API server version/image tag. - Exact error strings, including Error(Contract, N) . - Transaction hashes and timestamps (UTC). - curl -s <api /health jq output. - Relevant log lines (with secrets and personal data redacted — see Log Retention Policy). --- ---"
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "3. Decision Tree",
+"anchor": "3-decision-tree",
+"text": ""
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "3.1 Triage: where is the problem?",
+"anchor": "31-triage-where-is-the-problem",
+"text": "Start here to pick the right diagnostic procedure. mermaid flowchart TD A[Something is wrong] -- B{Who is affected?} B -- One credential / one user C{Did a call return<br/ Error& 40;Contract, N& 41;?} B -- Everyone D{Does GET /health<br/ return 200?} C -- Yes E[Look up N in §1.1<br/ and Error Code Reference] C -- No, result is just wrong F[D1: verification<br/ returns wrong result] C -- No result at all G[D4: transaction<br/ never lands] D -- No / times out H[D3: API server<br/ unhealthy or slow] D -- Yes I{Are contract calls<br/ failing?} I -- ContractPaused J[D5: contract paused] I -- Timeou"
+},
+{
+"doc": "troubleshooting-guide.md",
+"title": "Troubleshooting Guide",
+"heading": "3.2 Detailed tree for contract-level symptoms",
+"anchor": "32-detailed-tree-for-contract-level-symptoms",
 "text": "Start at the top and follow the first branch that matches your symptom. Something isn't working. What are you seeing? │ ├─ A transaction/call raised \"Error(Contract, N)\" │ │ │ ├─ Is N in the 1-10 range (not-found / duplicate / basic validation)? │ │ → Look up N in Error Code Reference — usually a caller-side │ │ mistake (wrong ID, wrong network, already-done action). │ │ │ ├─ Is it 3 (ContractPaused)? │ │ → Not a bug on your end. Check SECURITY.md / status channel │ │ for an active incident, then retry after unpause. │ │ │ ├─ Is it 85 or 86 (snapshot-related)? │ │ → See Backup System — On-Chai"
 },
 {
 "doc": "troubleshooting-guide.md",
 "title": "Troubleshooting Guide",
-"heading": "3. Logs Interpretation Guide",
-"anchor": "3-logs-interpretation-guide",
+"heading": "4. Logs Interpretation Guide",
+"anchor": "4-logs-interpretation-guide",
 "text": "QuorumProof produces two kinds of logs you'll typically be reading: on-chain contract events (the authoritative record) and your own application/service logs (network calls, retries, RPC responses)."
 },
 {
@@ -17595,8 +20059,8 @@
 {
 "doc": "troubleshooting-guide.md",
 "title": "Troubleshooting Guide",
-"heading": "4. Doc Cross-Reference Drift",
-"anchor": "4-doc-cross-reference-drift",
+"heading": "5. Doc Cross-Reference Drift",
+"anchor": "5-doc-cross-reference-drift",
 "text": "With 70+ interlinked docs and ADRs, broken internal links and numbering collisions are an ongoing maintenance hazard. This section covers the known patterns and how to fix them."
 },
 {
@@ -17616,9 +20080,9 @@
 {
 "doc": "troubleshooting-guide.md",
 "title": "Troubleshooting Guide",
-"heading": "5. Where to Go Next",
-"anchor": "5-where-to-go-next",
-"text": "- Error Code Reference — authoritative per-code recovery - Integration Patterns Guide — patterns and retry logic for developers - Audit Log Format — full event schema - Threat Model — why a given risk is rated the way it is - Backup System — recovering from data loss or corruption - Monitoring Guide — dashboards and alerts for ongoing operations - Docs README — contributor checklist and link checker instructions If your issue isn't covered above and you believe it's a security vulnerability rather than an operational problem, follow the reporting process in SECURITY.md instead of filing a publ"
+"heading": "6. Where to Go Next",
+"anchor": "6-where-to-go-next",
+"text": "- Incident Response Runbook — if this is an outage, not a single-user problem - Rollback Runbook — undoing a bad release - System Architecture Diagrams — how requests flow between components - Error Code Reference — authoritative per-code recovery - Integration Patterns Guide — patterns and retry logic for developers - Audit Log Format — full event schema - Threat Model — why a given risk is rated the way it is - Backup System — recovering from data loss or corruption - Monitoring Guide — dashboards and alerts for ongoing operations - Docs README — contributor checklist and link checker instru"
 },
 {
 "doc": "tutorials/scripts/01-getting-started.md",

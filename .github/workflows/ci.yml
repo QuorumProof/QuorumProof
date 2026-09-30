@@ -196,6 +196,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check docs index is complete
         run: ./scripts/check_docs_index.sh
+      - name: Validate documentation versions manifest
+        run: python3 scripts/docs_versions.py check
 
   # Issue #1659: validate that all DR scripts exist, are executable, and that
   # docs reference the correct procedures. Lightweight check — does not run

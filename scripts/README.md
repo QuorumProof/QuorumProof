@@ -26,6 +26,7 @@ Columns:
 | `coverage.sh` | Generates an LLVM/gcov coverage report for the frontend (`npm run test:coverage`) | `ci.yml` (`frontend` job) | — |
 | `check_unwraps.sh` | Ratchet check — fails if new bare `.unwrap()` calls appear in contract source (issue #1391) | `ci.yml` (`contracts` job) | — |
 | `check_docs_index.sh` | Verifies every `docs/*.md` file is linked from `docs/README.md` (issue #1498) | `ci.yml` (`docs-index` job) | — |
+| `docs_versions.py` | Manages documentation versions in `docs/versions.json` (`list`, `cut`, `deprecate`, `eol`, `check`) — see `docs/documentation-versioning.md` (issue #1642) | `ci.yml` (`docs-index` job, `check`) / `manual` | — |
 | `check_code_examples.sh` | Runs the multi-language code examples against a mock API and diffs their output (issue #1638) | `code-examples.yml` | — |
 | `validate_env.sh` | Cross-checks `environments.toml` against `.env` to ensure the selected network matches the contract addresses | `manual` | — |
 | `setup_dev.sh` | One-shot local dev environment setup: checks prerequisites, installs Rust targets, builds contracts, installs npm deps, creates `.env` (issue #1663) | `manual` | — |
