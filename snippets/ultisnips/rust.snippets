@@ -1,0 +1,96 @@
+# QuorumProof Rust & Soroban Snippets
+
+snippet qp-contract "Soroban Contract Boilerplate" b
+#![no_std]
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec};
+
+#[contract]
+pub struct ${1:ContractName};
+
+#[contractimpl]
+impl $1 {
+    pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("Already initialized");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    pub fn execute(env: Env, caller: Address) -> Result<bool, ${2:ContractError}> {
+        caller.require_auth();
+        ${0}
+        Ok(true)
+    }
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey {
+    Admin,
+    State(Address),
+}
+endsnippet
+
+snippet qp-error-enum "Soroban Contract Error Enum" b
+use soroban_sdk::contracterror;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ${1:ContractError} {
+    NotInitialized = 1,
+    AlreadyInitialized = 2,
+    Unauthorized = 3,
+    InvalidThreshold = 4,
+    ProofVerificationFailed = 5,
+    CredentialExpired = 6,
+    ${0:CustomError = 100,}
+}
+endsnippet
+
+snippet qp-require-auth "Require Authentication" b
+${1:caller}.require_auth();
+endsnippet
+
+snippet qp-storage-get "Instance Storage Get" b
+let ${1:value}: ${2:Type} = env
+    .storage()
+    .instance()
+    .get(&${3:DataKey::Key})
+    .ok_or(${4:ContractError::NotInitialized})?;
+endsnippet
+
+snippet qp-storage-set "Persistent Storage Set with TTL" b
+env.storage().persistent().set(&${1:key}, &${2:value});
+env.storage().persistent().extend_ttl(&$1, ${3:100_000}, ${4:200_000});
+endsnippet
+
+snippet qp-event-publish "Publish Soroban Event" b
+env.events().publish(
+    (symbol_short!("${1:topic}"), ${2:entity_address}),
+    ${3:event_payload}
+);
+endsnippet
+
+snippet qp-contract-test "Soroban Contract Unit Test" b
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env};
+
+    #[test]
+    fn test_${1:feature_name}() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, ${2:ContractName});
+        let client = ${2}Client::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        ${0}
+    }
+}
+endsnippet
