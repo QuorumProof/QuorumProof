@@ -120,19 +120,21 @@ Record all three contract IDs immediately. Update `.env` with the values.
 
 Initialize each contract with the admin address. Use a dedicated admin account — not the deployer.
 
+The `quorum_proof` and `sbt_registry` `initialize` calls require the admin's signature (`admin.require_auth()`), so they must be signed with the admin key, not the deployer key. The `admin` identity below must resolve to `$ADMIN_ADDRESS` (`stellar keys address admin` must print it). `zk_verifier` `initialize` does not currently require the admin's signature; it is still signed with the admin identity so the admin is recorded from a key the team controls.
+
 ```bash
 ADMIN_ADDRESS=<your-admin-stellar-address>
 
 stellar contract invoke \
   --id $CONTRACT_QUORUM_PROOF \
-  --source deployer \
+  --source admin \
   --network mainnet \
   -- initialize \
   --admin $ADMIN_ADDRESS
 
 stellar contract invoke \
   --id $CONTRACT_SBT_REGISTRY \
-  --source deployer \
+  --source admin \
   --network mainnet \
   -- initialize \
   --admin $ADMIN_ADDRESS \
@@ -140,7 +142,7 @@ stellar contract invoke \
 
 stellar contract invoke \
   --id $CONTRACT_ZK_VERIFIER \
-  --source deployer \
+  --source admin \
   --network mainnet \
   -- initialize \
   --admin $ADMIN_ADDRESS
