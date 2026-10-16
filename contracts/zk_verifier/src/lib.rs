@@ -672,6 +672,8 @@ pub struct SelectiveClaimData {
 
 /// Event topic emitted by [`ZkVerifierContract::set_verifying_key`] when the
 /// legacy Groth16 verifying-key hash is first registered.
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
+
 pub const EVENT_SET_VERIFYING_KEY: &str = "zk:set_verifying_key";
 
 /// Event topic emitted by [`ZkVerifierContract::set_plonk_srs`] when the
@@ -1034,7 +1036,7 @@ impl ZkVerifierContract {
         claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1628,7 +1630,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -1965,7 +1967,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -2949,6 +2951,7 @@ mod proptest_zk_verifier;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
     use crate::plonk_test_prover;
@@ -5387,6 +5390,7 @@ mod tests {
 /// in the zk_verifier contract.
 #[cfg(test)]
 mod tests_governance_1511 {
+    extern crate std;
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::{Address, Env};
