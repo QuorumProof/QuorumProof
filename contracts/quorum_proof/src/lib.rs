@@ -1128,6 +1128,10 @@ pub enum DataKey10 {
     AttestationRequest(u64),
     /// Issue #666: Count of attestation requests
     AttestationRequestCount,
+    /// Issue #1730: Set once a multi-sig attestation request for a credential has been
+    /// executed with an approving value. Required by `is_attested` when the credential's
+    /// type has an `AttestationPolicy`.
+    MultisigAttestationApproved(u64),
     /// Issue #895: Slice modification audit trail (slice_id -> Vec<SliceModification>)
     SliceModificationTrail(u64),
     /// Issue #896: Slice delegation tracking (slice_id, delegator -> delegate)
@@ -11510,10 +11514,32 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
-    /// Stub for multisig approval check.
-    /// Returns true to preserve backward compatibility until full multisig is implemented.
-    fn is_multisig_approved(_env: &Env, _credential_id: u64) -> bool {
-        true
+    /// Issue #1730: Multi-sig gate used by `is_attested`.
+    ///
+    /// Credentials whose type has no `AttestationPolicy` are not gated (returns true).
+    /// Credentials whose type has a policy are attested only after a multi-sig attestation
+    /// request for them has executed with an approving value. Fails closed if the
+    /// credential does not exist.
+    fn is_multisig_approved(env: &Env, credential_id: u64) -> bool {
+        let credential: Credential = match env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+        {
+            Some(credential) => credential,
+            None => return false,
+        };
+        let policy_required = env
+            .storage()
+            .instance()
+            .has(&DataKey10::AttestationPolicy(credential.credential_type));
+        if !policy_required {
+            return true;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey10::MultisigAttestationApproved(credential_id))
+            .unwrap_or(false)
     }
 
     // ── Issuance Multi-Sig ────────────────────────────────────────────────────
@@ -11938,6 +11964,11 @@ impl QuorumProofContract {
             };
             records.push_back(record);
             env.storage().instance().set(&DataKey::Attestors(request.credential_id), &records);
+            if request.attestation_value {
+                env.storage()
+                    .instance()
+                    .set(&DataKey10::MultisigAttestationApproved(request.credential_id), &true);
+            }
             env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
             let attest_event = AttestationEventData {
@@ -32654,6 +32685,10 @@ mod tests_issue_1596;
 #[cfg(test)]
 #[path = "tests_issue_1597.rs"]
 mod tests_issue_1597;
+
+#[cfg(test)]
+#[path = "tests_issue_1730.rs"]
+mod tests_issue_1730;
 
 mod circuit_breaker;
 mod migration;
