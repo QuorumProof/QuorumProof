@@ -2437,6 +2437,8 @@ pub enum DataKey {
     MpcContribution(BytesN<32>, BytesN<32>),
     /// Number of contributions received for a session.
     MpcContributionCount(BytesN<32>),
+    /// Verifier addresses admitted to take part in MPC sessions.
+    MpcVerifierRegistry,
 }
 
 // ===== Issue #994: ProtocolConfig =====
@@ -2815,19 +2817,61 @@ impl ZkVerifierContract {
 
     // ─── Issue #1282: Multi-Party Computation Support ─────────────────────
 
-    /// Create a new MPC threshold verification session.
+    /// Admit a verifier address to MPC sessions. Admin only.
+    ///
+    /// Registering an address that is already present is a no-op.
+    pub fn register_mpc_verifier(env: Env, admin: Address, verifier: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let mut registry: Vec<Address> = env.storage().instance()
+            .get(&DataKey::MpcVerifierRegistry)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !registry.iter().any(|v| v == verifier) {
+            registry.push_back(verifier);
+            env.storage().instance().set(&DataKey::MpcVerifierRegistry, &registry);
+        }
+    }
+
+    /// Return how many verifiers are registered for MPC sessions.
+    pub fn get_mpc_verifier_count(env: Env) -> u32 {
+        env.storage().instance()
+            .get::<_, Vec<Address>>(&DataKey::MpcVerifierRegistry)
+            .map(|registry| registry.len())
+            .unwrap_or(0)
+    }
+
+    /// Create a new MPC threshold verification session. Admin only.
     ///
     /// The `session_id` is caller-supplied and should be a unique value
     /// derived off-chain (e.g. SHA-256(credential_id ‖ claim_type ‖ nonce)).
-    /// `threshold` must be ≥ 1 and ≤ `total_verifiers`.
+    /// `threshold` must be ≥ 1 and ≤ `total_verifiers`, and `total_verifiers`
+    /// must not exceed the number of registered verifiers.
     pub fn create_mpc_session(
         env: Env,
+        admin: Address,
         session_id: BytesN<32>,
         threshold: u32,
         total_verifiers: u32,
     ) -> MpcSession {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
         assert!(threshold >= 1, "threshold must be at least 1");
         assert!(total_verifiers >= threshold, "total_verifiers must be >= threshold");
+
+        // The verifier set a session draws on must already be registered
+        let registered = Self::get_mpc_verifier_count(env.clone());
+        assert!(
+            total_verifiers <= registered,
+            "total_verifiers exceeds registered verifiers"
+        );
 
         // Prevent duplicate sessions
         let existing: Option<MpcSession> = env.storage().instance()
@@ -5037,14 +5081,22 @@ mod tests {
         BytesN::from_array(env, &[seed; 32])
     }
 
+    /// Register `n` fresh verifier addresses so MPC sessions can draw on them.
+    fn register_mpc_verifiers(env: &Env, client: &ZkVerifierContractClient, admin: &Address, n: u32) {
+        for _ in 0..n {
+            client.register_mpc_verifier(admin, &Address::generate(env));
+        }
+    }
+
     #[test]
     fn test_create_mpc_session_returns_pending() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x01);
-        let session = client.create_mpc_session(&session_id, &2u32, &3u32);
+        let session = client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         assert_eq!(session.session_id, session_id);
         assert_eq!(session.threshold, 2u32);
@@ -5056,10 +5108,11 @@ mod tests {
     fn test_get_mpc_session_returns_stored() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x02);
-        client.create_mpc_session(&session_id, &1u32, &2u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &2u32);
 
         let retrieved = client.get_mpc_session(&session_id);
         assert_eq!(retrieved.threshold, 1u32);
@@ -5069,10 +5122,11 @@ mod tests {
     fn test_mpc_single_verifier_threshold_1_approves() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x03);
-        client.create_mpc_session(&session_id, &1u32, &1u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &1u32);
 
         let verifier = Address::generate(&env);
         let session = client.submit_mpc_contribution(&verifier, &session_id, &true);
@@ -5085,10 +5139,11 @@ mod tests {
     fn test_mpc_threshold_2_of_3_not_approved_after_one_vote() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x04);
-        client.create_mpc_session(&session_id, &2u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         let v1 = Address::generate(&env);
         let session = client.submit_mpc_contribution(&v1, &session_id, &true);
@@ -5101,10 +5156,11 @@ mod tests {
     fn test_mpc_threshold_2_of_3_approved_after_two_votes() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x05);
-        client.create_mpc_session(&session_id, &2u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
@@ -5119,11 +5175,12 @@ mod tests {
     fn test_mpc_disapproval_does_not_count_toward_threshold() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x06);
         // threshold=2, but two "no" votes should not approve
-        client.create_mpc_session(&session_id, &2u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
@@ -5138,10 +5195,11 @@ mod tests {
     fn test_mpc_contribution_count_tracks_all_votes() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x07);
-        client.create_mpc_session(&session_id, &3u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &3u32, &3u32);
 
         for _ in 0..3 {
             let v = Address::generate(&env);
@@ -5157,10 +5215,11 @@ mod tests {
     fn test_mpc_double_vote_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x08);
-        client.create_mpc_session(&session_id, &2u32, &2u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &2u32);
 
         let v = Address::generate(&env);
         client.submit_mpc_contribution(&v, &session_id, &true);
@@ -5173,9 +5232,10 @@ mod tests {
     fn test_mpc_zero_threshold_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
-        client.create_mpc_session(&make_session_id(&env, 0x09), &0u32, &3u32);
+        client.create_mpc_session(&admin, &make_session_id(&env, 0x09), &0u32, &3u32);
     }
 
     #[test]
@@ -5183,9 +5243,10 @@ mod tests {
     fn test_mpc_threshold_exceeds_total_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
-        client.create_mpc_session(&make_session_id(&env, 0x0A), &5u32, &3u32);
+        client.create_mpc_session(&admin, &make_session_id(&env, 0x0A), &5u32, &3u32);
     }
 
     #[test]
@@ -5193,15 +5254,66 @@ mod tests {
     fn test_mpc_duplicate_session_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x0B);
-        client.create_mpc_session(&session_id, &1u32, &1u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &1u32);
         // Creating the same session again must panic
-        client.create_mpc_session(&session_id, &1u32, &1u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &1u32);
     }
 
     #[test]
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_mpc_create_session_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 3);
+
+        let attacker = Address::generate(&env);
+        client.create_mpc_session(&attacker, &make_session_id(&env, 0x0C), &1u32, &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "total_verifiers exceeds registered verifiers")]
+    fn test_mpc_session_unregistered_verifier_set_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 2);
+
+        // Only 2 verifiers are registered, so a 3-verifier session is rejected
+        client.create_mpc_session(&admin, &make_session_id(&env, 0x0D), &2u32, &3u32);
+    }
+
+    #[test]
+    fn test_mpc_register_verifier_is_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let verifier = Address::generate(&env);
+        client.register_mpc_verifier(&admin, &verifier);
+        client.register_mpc_verifier(&admin, &verifier);
+
+        assert_eq!(client.get_mpc_verifier_count(), 1u32);
+    }
+
+    #[test]
+    fn test_mpc_register_verifier_non_admin_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attacker = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let result = client.try_register_mpc_verifier(&attacker, &verifier);
+        assert!(result.is_err());
+        assert_eq!(client.get_mpc_verifier_count(), 0u32);
+    }
+
     fn test_mpc_nonexistent_session_not_approved() {
         let env = Env::default();
         let contract_id = env.register_contract(None, ZkVerifierContract);
