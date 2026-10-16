@@ -2746,18 +2746,29 @@ impl ZkVerifierContract {
 
     // ─── Issue #1281: Proof Expiry and Time-Bound Verification ────────────
 
-    /// Submit a proof with a timestamp for time-bound verification.
+    /// Submit a proof for time-bound verification.
     ///
-    /// Records the `submitted_at` Unix timestamp alongside the proof hash so
-    /// that `verify_proof_with_time_bounds` can check freshness later.
-    pub fn submit_time_bound_proof(env: Env, proof: Bytes, submitted_at: u64) -> TimeBoundProof {
+    /// The submission time is the ledger timestamp at the moment of the first
+    /// submission, stored alongside the proof hash so that
+    /// `verify_proof_with_time_bounds` can check freshness later. The caller
+    /// cannot supply or backdate it.
+    ///
+    /// Re-submitting the same proof keeps the original submission time, so a
+    /// caller cannot refresh a stale proof's freshness window by resubmitting.
+    pub fn submit_time_bound_proof(env: Env, proof: Bytes) -> TimeBoundProof {
         assert!(!proof.is_empty(), "proof cannot be empty");
 
         let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
+        let key = DataKey::ProofSubmissionTimestamp(proof_hash.clone());
 
-        // Store the submission timestamp keyed by proof hash
-        env.storage().instance()
-            .set(&DataKey::ProofSubmissionTimestamp(proof_hash.clone()), &submitted_at);
+        let submitted_at: u64 = match env.storage().instance().get::<_, u64>(&key) {
+            Some(first_submitted_at) => first_submitted_at,
+            None => {
+                let now = env.ledger().timestamp();
+                env.storage().instance().set(&key, &now);
+                now
+            }
+        };
 
         TimeBoundProof {
             proof,
@@ -5001,7 +5012,8 @@ mod tests {
 
         let proof = Bytes::from_slice(&env, &[0xABu8; 64]);
         let submitted_at = 5_000u64;
-        let tb = client.submit_time_bound_proof(&proof, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        let tb = client.submit_time_bound_proof(&proof);
 
         assert_eq!(tb.submitted_at, submitted_at);
         assert_eq!(tb.proof, proof);
@@ -5015,10 +5027,45 @@ mod tests {
 
         let proof = Bytes::from_slice(&env, &[0xCDu8; 64]);
         let submitted_at = 9_999u64;
-        let tb = client.submit_time_bound_proof(&proof, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        let tb = client.submit_time_bound_proof(&proof);
 
         let stored = client.get_proof_timestamp_by_hash(&tb.proof_hash);
         assert_eq!(stored, Some(submitted_at));
+    }
+
+    #[test]
+    fn test_submit_time_bound_proof_records_ledger_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        // The submission time is the ledger time, not anything the caller passes
+        let proof = Bytes::from_slice(&env, &[0xEEu8; 64]);
+        env.ledger().set_timestamp(42_000);
+        let tb = client.submit_time_bound_proof(&proof);
+
+        assert_eq!(tb.submitted_at, 42_000u64);
+        assert_eq!(client.get_proof_timestamp_by_hash(&tb.proof_hash), Some(42_000u64));
+    }
+
+    #[test]
+    fn test_resubmit_time_bound_proof_does_not_refresh_submission_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let proof = Bytes::from_slice(&env, &[0xEFu8; 64]);
+        env.ledger().set_timestamp(1_000);
+        client.submit_time_bound_proof(&proof);
+
+        // Resubmitting much later must not reset the freshness window
+        env.ledger().set_timestamp(100_000);
+        let tb = client.submit_time_bound_proof(&proof);
+        assert_eq!(tb.submitted_at, 1_000u64);
+
+        // The original submission is now old, so a 3600s freshness window rejects it
+        assert!(!client.verify_proof_with_time_bounds(&proof, &0u64, &3_600u64));
     }
 
     #[test]
@@ -5029,7 +5076,7 @@ mod tests {
 
         // Submit proof at ledger timestamp 0 (Env::default starts at 0)
         let proof = Bytes::from_slice(&env, &[0x11u8; 64]);
-        client.submit_time_bound_proof(&proof, &0u64);
+        client.submit_time_bound_proof(&proof);
 
         // Ledger timestamp is 0; age = 0; min_age=0, max_age=3600 → should pass
         let result = client.verify_proof_with_time_bounds(&proof, &0u64, &3600u64);
@@ -5066,7 +5113,7 @@ mod tests {
         let (client, _admin) = setup(&env);
 
         let proof = Bytes::from_slice(&env, &[0x22u8; 64]);
-        client.submit_time_bound_proof(&proof, &0u64);
+        client.submit_time_bound_proof(&proof);
 
         // min_age > max_age — invalid window
         let result = client.verify_proof_with_time_bounds(&proof, &3600u64, &1u64);
