@@ -926,13 +926,6 @@ pub enum DataKey {
     SuspensionReason(u64),
     /// Number of migrations still pending, surfaced by the health check.
     PendingMigrationCount,
-    /// Issue #1389: Total number of verification calls made (across all
-    /// verification entry points), regardless of outcome.
-    TotalVerificationCount,
-    /// Issue #1389: Number of verification calls that succeeded.
-    SuccessfulVerificationCount,
-    /// Issue #1389: Number of verification calls that failed.
-    FailedVerificationCount,
     /// Issue #1511: Stored SBT registry contract address for governance repointing.
     SbtRegistryId,
     /// Issue #1511: Stored ZK verifier contract address for governance repointing.
@@ -1346,6 +1339,20 @@ pub enum DataKey11 {
     BbsDisclosureProof(u64),
     /// Flag indicating a credential was issued with BBS+ selective disclosure
     BbsCredentialFlag(u64),
+}
+
+/// Issue #1389 counters, split out of `DataKey` to stay under Soroban's
+/// 50-variant limit for `#[contracttype]` enums.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey12 {
+    /// Issue #1389: Total number of verification calls made (across all
+    /// verification entry points), regardless of outcome.
+    TotalVerificationCount,
+    /// Issue #1389: Number of verification calls that succeeded.
+    SuccessfulVerificationCount,
+    /// Issue #1389: Number of verification calls that failed.
+    FailedVerificationCount,
 }
 
 /// A BBS+ selective-disclosure credential record.
@@ -16474,17 +16481,17 @@ impl QuorumProofContract {
     fn record_verification(env: &Env, success: bool) {
         let storage = env.storage().instance();
 
-        let total: u64 = storage.get(&DataKey::TotalVerificationCount).unwrap_or(0);
-        storage.set(&DataKey::TotalVerificationCount, &(total + 1));
+        let total: u64 = storage.get(&DataKey12::TotalVerificationCount).unwrap_or(0);
+        storage.set(&DataKey12::TotalVerificationCount, &(total + 1));
 
         if success {
             let successful: u64 = storage
-                .get(&DataKey::SuccessfulVerificationCount)
+                .get(&DataKey12::SuccessfulVerificationCount)
                 .unwrap_or(0);
-            storage.set(&DataKey::SuccessfulVerificationCount, &(successful + 1));
+            storage.set(&DataKey12::SuccessfulVerificationCount, &(successful + 1));
         } else {
-            let failed: u64 = storage.get(&DataKey::FailedVerificationCount).unwrap_or(0);
-            storage.set(&DataKey::FailedVerificationCount, &(failed + 1));
+            let failed: u64 = storage.get(&DataKey12::FailedVerificationCount).unwrap_or(0);
+            storage.set(&DataKey12::FailedVerificationCount, &(failed + 1));
         }
     }
 
@@ -16494,11 +16501,11 @@ impl QuorumProofContract {
     pub fn get_verification_stats(env: Env) -> VerificationStats {
         let storage = env.storage().instance();
         VerificationStats {
-            total_verifications: storage.get(&DataKey::TotalVerificationCount).unwrap_or(0),
+            total_verifications: storage.get(&DataKey12::TotalVerificationCount).unwrap_or(0),
             successful_verifications: storage
-                .get(&DataKey::SuccessfulVerificationCount)
+                .get(&DataKey12::SuccessfulVerificationCount)
                 .unwrap_or(0),
-            failed_verifications: storage.get(&DataKey::FailedVerificationCount).unwrap_or(0),
+            failed_verifications: storage.get(&DataKey12::FailedVerificationCount).unwrap_or(0),
         }
     }
 

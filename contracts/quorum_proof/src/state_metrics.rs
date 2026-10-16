@@ -15,7 +15,7 @@
 
 use soroban_sdk::{contracttype, Env, Map, String};
 
-use crate::{DataKey, EXTENDED_TTL, STANDARD_TTL};
+use crate::{DataKey, DataKey12, EXTENDED_TTL, STANDARD_TTL};
 
 /// Snapshot of contract-level health indicators, returned by
 /// `get_state_metrics`. Every field is O(1) to compute from existing
@@ -67,7 +67,7 @@ pub fn collect(env: &Env) -> ContractStateMetrics {
     let paused: bool = storage.get(&DataKey::Paused).unwrap_or(false);
     let state_version: u32 = storage.get(&DataKey::StateVersion).unwrap_or(0u32);
     let verifications_total: u64 = storage
-        .get(&DataKey::TotalVerificationCount)
+        .get(&DataKey12::TotalVerificationCount)
         .unwrap_or(0u64);
 
     let credentials_active = credentials_issued_total.saturating_sub(credentials_revoked_total);

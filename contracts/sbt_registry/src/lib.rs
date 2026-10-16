@@ -106,6 +106,9 @@ pub enum ContractError {
     UnauthorizedClawback = 27,
     /// Issue #1402: `entries` is empty or exceeds `MAX_BATCH_SIZE`.
     BatchTooLarge = 28,
+    /// No pending co-owner proposal exists for this SBT (or it names a
+    /// different candidate). Renumbered from 28, which `BatchTooLarge` now uses.
+    CoOwnerProposalNotFound = 29,
 }
 
 #[contracttype]
@@ -188,6 +191,11 @@ pub enum DataKey {
     /// A co-owner candidate proposed by an SBT's owner, awaiting the
     /// candidate's acceptance.
     CoOwnerProposal(u64),
+    /// Issue #1413: Global list of all currently-pending clawback IDs.
+    /// Maintained on initiate/cancel so callers can enumerate active clawbacks
+    /// without iterating ClawbackRequestCount (which includes
+    /// cancelled/executed entries too).
+    PendingClawbacks,
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -609,7 +617,7 @@ impl SbtRegistryContract {
     pub fn mint(env: Env, owner: Address, credential_id: u64, metadata_uri: Bytes) -> u64 {
         owner.require_auth();
 
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1180,7 +1188,7 @@ impl SbtRegistryContract {
     pub fn burn_sbt(env: Env, holder: Address, sbt_id: u64, proof_of_residency: Bytes) {
         holder.require_auth();
 
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1563,7 +1571,7 @@ impl SbtRegistryContract {
     /// # Panics
     /// - "token not found" if `token_id` does not exist.
     pub fn transfer_ownership_dual(env: Env, token_id: u64, new_owner: Address) {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -3503,7 +3511,7 @@ impl SbtRegistryContract {
         sbt_id: u64,
         proof: Bytes,
     ) {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -5686,7 +5694,6 @@ mod tests {
         client.unpause(&admin);
         assert!(!client.is_paused());
     }
-}
 
     #[test]
     #[should_panic(expected = "credential is revoked")]

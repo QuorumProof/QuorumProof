@@ -1,4 +1,7 @@
 #![no_std]
+// Test builds run on the host and need `std::` paths (panic catching, formatting).
+#[cfg(test)]
+extern crate std;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Vec};
 use soroban_sdk::xdr::ToXdr;
 
@@ -674,6 +677,9 @@ pub struct SelectiveClaimData {
 /// legacy Groth16 verifying-key hash is first registered.
 pub const EVENT_SET_VERIFYING_KEY: &str = "zk:set_verifying_key";
 
+/// Event topic emitted by [`ZkVerifierContract::update_admin`] on every admin transfer.
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
+
 /// Event topic emitted by [`ZkVerifierContract::set_plonk_srs`] when the
 /// PLONK universal SRS is first registered.
 pub const EVENT_SET_PLONK_SRS: &str = "zk:set_plonk_srs";
@@ -1033,7 +1039,7 @@ impl ZkVerifierContract {
         claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1114,92 +1120,6 @@ impl ZkVerifierContract {
         let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
         topics.push_back(topic);
         env.events().publish(topics, event_data);
-    }
-
-    /// Verify a ZK proof with caching and TTL support.
-    ///
-    /// This function first checks if the proof has been verified before by 
-    /// looking up the cache. If found and not expired, it returns the cached result.
-    /// Otherwise, it verifies the proof and caches the result with the specified TTL.
-    /// 
-    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
-    /// Cache entries expire after `ttl` ledgers.
-    ///
-    /// **Test-only**: like [`groth16_verify`], this verifies via the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_proof_cached(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
-        proof: Bytes,
-        ttl: u32,
-    ) -> bool {
-        // Admin gate
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        // Generate cache key from proof bytes, credential_id, and claim_type
-        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
-
-        // Check cache first
-        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
-            // Check if cache entry has expired
-            let current_ledger = env.ledger().sequence();
-            if current_ledger <= entry.cached_at_ledger + entry.ttl {
-                // Cache hit: increment hit counter
-                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
-                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
-                return entry.result;
-            }
-        }
-
-        // Not in cache or expired, perform Groth16 verification
-        // Cache miss: increment miss counter
-        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
-        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
-        let vk_hash: BytesN<32> = env.storage().instance()
-            .get(&DataKey::VerifyingKeyHash)
-            .expect("verifying key not set");
-        let result = groth16_verify(&env, &vk_hash, &proof);
-
-        // Cache the result with TTL
-        let entry = CacheEntry {
-            result,
-            cached_at_ledger: env.ledger().sequence(),
-            ttl,
-        };
-        env.storage().temporary().set(&cache_key, &entry);
-
-        result
-    }
-
-    /// Verify a ZK proof for a claim with caching.
-    ///
-    /// This function first checks if the proof has been verified before by 
-    /// looking up the cache. If found, it returns the cached result immediately.
-    /// Otherwise, it verifies the proof and caches the result for future calls.
-    /// 
-    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
-    /// Cache entries are stored indefinitely until explicitly cleared.
-    ///
-    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_claim_with_cache(
-        env: Env,
-        admin: Address,
-        quorum_proof_id: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
-        proof: Bytes,
-    ) -> bool {
-        // Use default TTL of 1000 ledgers (approximately 1 day)
-        Self::verify_proof_cached(env, admin, credential_id, claim_type, proof, 1000)
     }
 
     /// Internal helper to generate cache key from proof components.
@@ -1545,32 +1465,6 @@ impl ZkVerifierContract {
 
     // ===== Anonymous Verification =====
 
-    /// Verify a Groth16 ZK proof anonymously using a holder commitment.
-    /// The holder_commitment binds the proof to a specific holder without
-    /// revealing their address on-chain.
-    ///
-    /// **Test-only**: like [`groth16_verify`], this verifies via the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_claim_anonymous(
-        env: Env,
-        _credential_id: u64,
-        _claim_type: ClaimType,
-        holder_commitment: Bytes,
-        proof: Bytes,
-    ) -> bool {
-        if holder_commitment.is_empty() {
-            return false;
-        }
-        let vk_hash: BytesN<32> = match env.storage().instance()
-            .get(&DataKey::VerifyingKeyHash)
-        {
-            Some(h) => h,
-            None => return false,
-        };
-        groth16_verify(&env, &vk_hash, &proof)
-    }
-
     /// Verify a Groth16 proof with explicit verifying-key hash and public inputs.
     ///
     /// This is the primary production entry point for Groth16 verification.
@@ -1615,7 +1509,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -1910,7 +1804,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -2888,12 +2782,133 @@ impl ZkVerifierContract {
     }
 }
 
+// Test-only entry points. They live in their own gated `#[contractimpl]` block
+// because the macro emits dispatch glue for every fn in a block regardless of
+// `#[cfg]`, so gated fns must sit inside a block that is itself gated. Keeping
+// them out of production builds also keeps the heuristic verifier out of wasm.
+#[cfg(any(test, feature = "testutils"))]
+#[contractimpl]
+impl ZkVerifierContract {
+    /// Verify a ZK proof with caching and TTL support.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found and not expired, it returns the cached result.
+    /// Otherwise, it verifies the proof and caches the result with the specified TTL.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries expire after `ttl` ledgers.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_proof_cached(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+        ttl: u32,
+    ) -> bool {
+        // Admin gate
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Generate cache key from proof bytes, credential_id, and claim_type
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+
+        // Check cache first
+        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
+            // Check if cache entry has expired
+            let current_ledger = env.ledger().sequence();
+            if current_ledger <= entry.cached_at_ledger + entry.ttl {
+                // Cache hit: increment hit counter
+                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
+                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
+                return entry.result;
+            }
+        }
+
+        // Not in cache or expired, perform Groth16 verification
+        // Cache miss: increment miss counter
+        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
+        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
+        let vk_hash: BytesN<32> = env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+            .expect("verifying key not set");
+        let result = groth16_verify(&env, &vk_hash, &proof);
+
+        // Cache the result with TTL
+        let entry = CacheEntry {
+            result,
+            cached_at_ledger: env.ledger().sequence(),
+            ttl,
+        };
+        env.storage().temporary().set(&cache_key, &entry);
+
+        result
+    }
+
+    /// Verify a ZK proof for a claim with caching.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found, it returns the cached result immediately.
+    /// Otherwise, it verifies the proof and caches the result for future calls.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries are stored indefinitely until explicitly cleared.
+    ///
+    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_with_cache(
+        env: Env,
+        admin: Address,
+        quorum_proof_id: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) -> bool {
+        // Use default TTL of 1000 ledgers (approximately 1 day)
+        Self::verify_proof_cached(env, admin, credential_id, claim_type, proof, 1000)
+    }
+
+    /// Verify a Groth16 ZK proof anonymously using a holder commitment.
+    /// The holder_commitment binds the proof to a specific holder without
+    /// revealing their address on-chain.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_anonymous(
+        env: Env,
+        _credential_id: u64,
+        _claim_type: ClaimType,
+        holder_commitment: Bytes,
+        proof: Bytes,
+    ) -> bool {
+        if holder_commitment.is_empty() {
+            return false;
+        }
+        let vk_hash: BytesN<32> = match env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+        {
+            Some(h) => h,
+            None => return false,
+        };
+        groth16_verify(&env, &vk_hash, &proof)
+    }
+}
+
 #[cfg(test)]
 mod proptest_zk_verifier;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
     use crate::plonk_test_prover;
