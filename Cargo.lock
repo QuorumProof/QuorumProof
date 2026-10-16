@@ -1704,6 +1704,7 @@ name = "sbt_registry"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "proptest",
  "rand 0.8.6",
  "serde_json",
  "soroban-sdk",
@@ -2957,6 +2958,7 @@ version = "0.1.0"
 dependencies = [
  "bls12_381",
  "ff",
+ "proptest",
  "sha2",
  "soroban-sdk",
 ]
