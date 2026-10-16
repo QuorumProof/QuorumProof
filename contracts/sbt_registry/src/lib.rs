@@ -5832,7 +5832,6 @@ mod tests {
         client.unpause(&admin);
         assert!(!client.is_paused());
     }
-}
 
     #[test]
     #[should_panic(expected = "credential is revoked")]
