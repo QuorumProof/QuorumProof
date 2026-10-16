@@ -106,6 +106,33 @@ export function requireMfa(req: Request, res: Response, next: NextFunction): voi
 }
 
 // ---------------------------------------------------------------------------
+// requireAdmin middleware
+// ---------------------------------------------------------------------------
+
+/**
+ * Requires a valid access token whose signed `role` claim is `admin`.
+ *
+ * Use this instead of rbac.requirePermission for endpoints that must be
+ * admin-only: rbac takes the role from the unsigned `x-role` request header,
+ * which any caller can set.
+ *
+ * Returns 401 if the token is missing/invalid, 403 if the role is not admin.
+ */
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  requireAuth(req, res, () => {
+    if (req.auth?.role !== 'admin') {
+      res.status(403).json({
+        error: 'Insufficient permissions',
+        message: 'This endpoint requires the admin role',
+        required: 'admin',
+      });
+      return;
+    }
+    next();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // optionalAuth middleware
 // ---------------------------------------------------------------------------
 

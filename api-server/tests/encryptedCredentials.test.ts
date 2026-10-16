@@ -225,3 +225,57 @@ describe('POST /api/credentials/:id/decrypt/authorize (#1742)', () => {
     expect(approvedBy).toEqual(CUSTODIANS.slice(0, 3).map((kp) => kp.publicKey()));
   });
 });
+
+describe('GET /api/credentials/:id/decrypt/audit (#1744)', () => {
+  const tokenFor = useTestSessions();
+  let app: express.Express;
+  const url = `/api/credentials/${CREDENTIAL_ID}/decrypt/audit`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    app = buildApp();
+    storeMock.getActiveAuthorizations.mockResolvedValue([
+      {
+        credential_id: BigInt(CREDENTIAL_ID),
+        requester_address: REQUESTER,
+        authorized_at: Date.now(),
+        expires_at: Date.now() + 3600000,
+        reason: 'audit',
+        approved_by: [CUSTODIANS[0].publicKey()],
+      },
+    ]);
+  });
+
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).get(url);
+
+    expect(res.status).toBe(401);
+    expect(storeMock.getActiveAuthorizations).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-admin authenticated caller with 403', async () => {
+    const res = await request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`);
+
+    expect(res.status).toBe(403);
+    expect(storeMock.getActiveAuthorizations).not.toHaveBeenCalled();
+  });
+
+  it('ignores an x-role header and rejects it without an admin token', async () => {
+    const res = await request(app).get(url).set('x-role', 'admin');
+
+    expect(res.status).toBe(401);
+    expect(storeMock.getActiveAuthorizations).not.toHaveBeenCalled();
+  });
+
+  it('returns the audit log to an admin', async () => {
+    const res = await request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${tokenFor('admin-1', 'admin')}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.active_authorizations).toHaveLength(1);
+    expect(res.body.active_authorizations[0].requester_address).toBe(REQUESTER);
+  });
+});

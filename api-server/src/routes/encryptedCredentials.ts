@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { ThresholdEncryption, type EncryptedData } from '../crypto/thresholdEncryption.js';
 import { EncryptedCredentialStore } from '../services/encryptedCredentialStore.js';
 import { StrKey } from '@stellar/stellar-sdk';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import {
   DecryptionChallengeStore,
   buildDecryptionChallengeMessage,
@@ -400,10 +400,8 @@ export function createEncryptedCredentialsRouter() {
 
   // GET /api/credentials/:id/decrypt/audit
   // Get decryption audit log (admin only)
-  router.get('/:id/decrypt/audit', async (req: Request, res: Response) => {
+  router.get('/:id/decrypt/audit', requireAdmin, async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-
-    // TODO: Add authorization check for admin-only access
 
     try {
       const credentialId = BigInt(id);
