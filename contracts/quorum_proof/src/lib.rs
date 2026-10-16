@@ -32690,6 +32690,10 @@ mod tests_issue_1597;
 #[path = "tests_issue_1730.rs"]
 mod tests_issue_1730;
 
+#[cfg(test)]
+#[path = "tests_issue_1731.rs"]
+mod tests_issue_1731;
+
 mod circuit_breaker;
 mod migration;
 mod state_metrics;
