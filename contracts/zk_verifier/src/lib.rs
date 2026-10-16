@@ -697,6 +697,10 @@ pub const EVENT_SET_GROTH16_VK: &str = "zk:set_groth16_verifying_key";
 /// when circuit parameters are first registered.
 pub const EVENT_SET_CIRCUIT_PARAMS: &str = "zk:set_circuit_parameters";
 
+/// Event topic emitted by [`ZkVerifierContract::store_proof_timestamp`] when a
+/// write is rejected because a submission timestamp is already recorded.
+pub const EVENT_PROOF_TIMESTAMP_REJECTED: &str = "zk:proof_timestamp_rejected";
+
 #[contract]
 /// Design rationale: docs/adr/adr-003-zk-verification.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct ZkVerifierContract;
@@ -2292,23 +2296,41 @@ impl ZkVerifierContract {
             .unwrap_or(ProtocolConfig { proof_ttl_seconds: 2_592_000 })
     }
 
-    /// Record the Unix-epoch timestamp at which a proof was first submitted
-    /// for a given `(credential_id, claim_type)` pair.
+    /// Record the submission time of a proof for a `(credential_id, claim_type)`
+    /// pair. Admin only.
     ///
-    /// Calling this more than once for the same pair is a no-op — the original
-    /// submission timestamp is preserved so that TTL is measured from first
-    /// submission, not from the most-recent call.
+    /// The timestamp is taken from the ledger, never from the caller, so a
+    /// submitter cannot backdate or pre-fix the time that later verifiers read.
+    ///
+    /// The first recorded value is kept. A later call for the same pair does
+    /// not overwrite it: it emits an [`EVENT_PROOF_TIMESTAMP_REJECTED`] event
+    /// and returns `false`. The event is emitted without panicking because a
+    /// panic would roll the event back.
+    ///
+    /// Returns `true` when this call recorded the timestamp.
     pub fn store_proof_timestamp(
         env: Env,
+        admin: Address,
         credential_id: u64,
         claim_type: ClaimType,
-        submitted_at: u64,
-    ) {
+    ) -> bool {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
         let key = DataKey::ProofTimestamp(credential_id, claim_type);
-        // Preserve the original submission time; ignore if already set.
-        if !env.storage().instance().has(&key) {
-            env.storage().instance().set(&key, &submitted_at);
+        if let Some(existing) = env.storage().instance().get::<_, u64>(&key) {
+            env.events().publish(
+                (String::from_str(&env, EVENT_PROOF_TIMESTAMP_REJECTED), credential_id),
+                existing,
+            );
+            return false;
         }
+
+        env.storage().instance().set(&key, &env.ledger().timestamp());
+        true
     }
 
     /// Return the age (in seconds) of the stored proof for
@@ -4405,13 +4427,14 @@ mod tests {
     fn test_store_proof_timestamp_and_get_age() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 1u64;
         let claim_type = ClaimType::HasDegree;
         let submitted_at = 1_000_000u64;
 
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // Age at submitted_at + 3600 should be 3600 seconds
         let age = client.get_proof_age(&credential_id, &claim_type, &(submitted_at + 3600));
@@ -4432,19 +4455,69 @@ mod tests {
     fn test_store_proof_timestamp_is_idempotent() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 2u64;
         let claim_type = ClaimType::HasCertification;
         let first_ts = 1_000_000u64;
-        let second_ts = 1_100_000u64; // later timestamp should be ignored
+        let second_ts = 1_100_000u64;
 
-        client.store_proof_timestamp(&credential_id, &claim_type, &first_ts);
-        client.store_proof_timestamp(&credential_id, &claim_type, &second_ts);
+        env.ledger().set_timestamp(first_ts);
+        assert!(client.store_proof_timestamp(&admin, &credential_id, &claim_type));
+
+        // A later write is rejected: it returns false and keeps first_ts
+        env.ledger().set_timestamp(second_ts);
+        assert!(!client.store_proof_timestamp(&admin, &credential_id, &claim_type));
 
         // Age must still be based on first_ts
         let age = client.get_proof_age(&credential_id, &claim_type, &(first_ts + 500));
         assert_eq!(age, Some(500u64));
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_rejected_write_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 3u64;
+        let claim_type = ClaimType::HasDegree;
+
+        env.ledger().set_timestamp(1_000);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
+        let events_before = env.events().all().len();
+
+        env.ledger().set_timestamp(2_000);
+        assert!(!client.store_proof_timestamp(&admin, &credential_id, &claim_type));
+
+        // The rejected write must leave a visible audit event behind
+        assert!(env.events().all().len() > events_before);
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_non_admin_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attacker = Address::generate(&env);
+        env.ledger().set_timestamp(1_000);
+
+        // Non-admin cannot write, so the first-write slot stays free
+        let result = client.try_store_proof_timestamp(&attacker, &4u64, &ClaimType::HasLicense);
+        assert!(result.is_err());
+        assert_eq!(client.get_proof_age(&4u64, &ClaimType::HasLicense, &2_000u64), None);
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_uses_ledger_time_not_caller_input() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        env.ledger().set_timestamp(7_777);
+        assert!(client.store_proof_timestamp(&admin, &5u64, &ClaimType::HasDegree));
+        assert_eq!(client.get_proof_age(&5u64, &ClaimType::HasDegree, &7_777u64), Some(0u64));
     }
 
     #[test]
@@ -4459,7 +4532,8 @@ mod tests {
 
         // TTL = 1 day
         client.set_protocol_config(&admin, &ProtocolConfig { proof_ttl_seconds: 86_400 });
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // Check at 1 hour — well within TTL
         let expired = client.is_proof_expired(&credential_id, &claim_type, &3_600u64);
@@ -4478,7 +4552,8 @@ mod tests {
 
         // TTL = 1 day
         client.set_protocol_config(&admin, &ProtocolConfig { proof_ttl_seconds: 86_400 });
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // Check at 2 days — past TTL
         let expired = client.is_proof_expired(&credential_id, &claim_type, &172_801u64);
@@ -4489,13 +4564,14 @@ mod tests {
     fn test_proof_expired_default_ttl_30_days() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 12u64;
         let claim_type = ClaimType::HasEmploymentHistory;
         let submitted_at = 0u64;
 
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // 31 days in seconds > 30-day default TTL
         let expired = client.is_proof_expired(&credential_id, &claim_type, &2_678_401u64);
@@ -4521,12 +4597,13 @@ mod tests {
     fn test_proof_age_saturates_at_zero_for_future_timestamp() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 20u64;
         let claim_type = ClaimType::HasDegree;
         // stored timestamp is in the future relative to now_seconds
-        client.store_proof_timestamp(&credential_id, &claim_type, &5_000_000u64);
+        env.ledger().set_timestamp(5_000_000u64);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         let age = client.get_proof_age(&credential_id, &claim_type, &1_000_000u64);
         // saturating_sub should give 0
