@@ -10,6 +10,8 @@ import {
   type IssuerMetrics,
 } from '../services/metrics.js';
 import { validate, schemas } from '../middleware/validate.js';
+import { requireAuth, isAdmin } from '../middleware/auth.js';
+import { createRateLimiter, ipKey } from '../middleware/rateLimiter.js';
 
 type SorobanClient = {
   simulateCall: (fn: string) => Promise<unknown>;
@@ -18,17 +20,34 @@ type SorobanClient = {
   addressVal: (a: string) => unknown;
 };
 
+/** Per-caller limit on analytics writes (#1748). Keyed by authenticated subject. */
+const WRITE_WINDOW_MS = 60_000;
+const WRITE_MAX_PER_WINDOW = 60;
+
 export function createAnalyticsRouter(soroban: SorobanClient) {
   const router = Router();
 
-  router.post('/events', validate(schemas.analyticsEvent), (req: Request, res: Response) => {
+  // Writes need an authenticated, rate-limited source so events cannot be
+  // injected anonymously to skew metrics and anomaly detection (#1748).
+  const writeRateLimiter = createRateLimiter(
+    {
+      windowMs: WRITE_WINDOW_MS,
+      max: WRITE_MAX_PER_WINDOW,
+      name: 'analytics-write',
+      backoffMultiplier: 2,
+      maxViolations: 5,
+    },
+    (req) => `sub:${req.auth?.sub ?? ipKey(req)}`,
+  );
+
+  router.post('/events', requireAuth, writeRateLimiter, validate(schemas.analyticsEvent), (req: Request, res: Response) => {
     const event: CredentialEvent = req.body;
 
     metricsStore.recordEvent(event);
     res.status(201).json({ success: true, event_id: event.credential_id });
   });
 
-  router.get('/metrics', (req: Request, res: Response) => {
+  router.get('/metrics', requireAuth, (req: Request, res: Response) => {
     try {
       const query = buildMetricsQuery(
         req.query.start_date as string | undefined,
@@ -51,7 +70,7 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
     }
   });
 
-  router.get('/anomalies', (req: Request, res: Response) => {
+  router.get('/anomalies', requireAuth, (req: Request, res: Response) => {
     try {
       const threshold = req.query.threshold ? parseFloat(req.query.threshold as string) : undefined;
       const query = buildAnomalyQuery(
@@ -85,7 +104,7 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
     }
   });
 
-  router.get('/events', (req: Request, res: Response) => {
+  router.get('/events', requireAuth, (req: Request, res: Response) => {
     try {
       const query = buildEventLogQuery(
         req.query.start_date as string | undefined,
@@ -109,8 +128,13 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
 
   // GET /api/analytics/issuer/:address
   // Query params: period_days (default 30)
-  router.get('/issuer/:address', (req: Request, res: Response) => {
+  // Scoped: an issuer may read only their own metrics; admins may read any.
+  router.get('/issuer/:address', requireAuth, (req: Request, res: Response) => {
     const { address } = req.params;
+    if (!isAdmin(req) && req.auth?.sub !== address) {
+      res.status(403).json({ error: 'Insufficient permissions for this issuer' });
+      return;
+    }
     const periodDays = req.query.period_days
       ? parseInt(req.query.period_days as string, 10)
       : 30;
@@ -128,7 +152,7 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
     res.json(metrics);
   });
 
-  router.get('/summary', (req: Request, res: Response) => {
+  router.get('/summary', requireAuth, (req: Request, res: Response) => {
     const summary = metricsStore.getSummary();
     res.json({
       ...summary,
@@ -136,6 +160,7 @@ export function createAnalyticsRouter(soroban: SorobanClient) {
     });
   });
 
+  // Public liveness probe; returns no analytics data.
   router.get('/health', (req: Request, res: Response) => {
     res.json({
       status: 'ok',

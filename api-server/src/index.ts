@@ -49,6 +49,7 @@ import v2Router from './routes/v2/index.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { apiMeteringMiddleware, getApiMeteringPrometheus, getApiMeteringReport } from './middleware/apiMetering.js';
 import { rbac } from './middleware/rbac.js';
+import { requireAuth } from './middleware/auth.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
@@ -223,7 +224,7 @@ app.use('/api/credentials', createCredentialRedemptionRouter()); // #1603 creden
 app.use('/api/verify', verifyRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
-app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
+app.use('/api/analytics', requireAuth, issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes) — #1748 requires auth
 app.use('/api/attestor', attestorRouter);
 app.use('/api/attestors', createAttestorsRouter()); // #875 attestor availability status
 app.use('/api/issuer', issuerRouter);

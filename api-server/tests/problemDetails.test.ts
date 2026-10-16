@@ -9,9 +9,18 @@
  *  4. Content-Type is set to application/problem+json when sendProblem() is used.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterAll } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import {
+  SessionManager,
+  getDefaultSessionManager,
+  _setDefaultSessionManagerForTest,
+  _resetDefaultSessionManagerForTest,
+} from '../src/services/sessionManager.js';
 
 import { problemJson, sendProblem, problemDetailsErrorHandler } from '../src/middleware/problemDetails.js';
 
@@ -132,9 +141,21 @@ const costsApp = express();
 costsApp.use(express.json());
 costsApp.use('/api/costs', costsRouter);
 
+// Cost routes are admin-only (#1747): authenticate as admin for these error-shape checks.
+const costsAuthDir = fs.mkdtempSync(path.join(os.tmpdir(), 'problem-details-costs-'));
+process.env.JWT_SECRET = 'test-secret-problem-details-1747';
+_setDefaultSessionManagerForTest(new SessionManager({ dataDir: costsAuthDir }));
+const COSTS_ADMIN = `Bearer ${getDefaultSessionManager().createSession('GADMIN_PROBLEM', { role: 'admin', mfaVerified: true }).accessToken}`;
+
+afterAll(() => {
+  _resetDefaultSessionManagerForTest();
+  fs.rmSync(costsAuthDir, { recursive: true, force: true });
+  delete process.env.JWT_SECRET;
+});
+
 describe('costs.ts — Problem Details error shape', () => {
   it('returns 400 Problem Details when operation param is missing', async () => {
-    const res = await request(costsApp).get('/api/costs/projection');
+    const res = await request(costsApp).get('/api/costs/projection').set('Authorization', COSTS_ADMIN);
     expect(res.status).toBe(400);
     expect(res.body.type).toMatch(/missing-parameter/);
     expect(res.body.status).toBe(400);
@@ -143,14 +164,14 @@ describe('costs.ts — Problem Details error shape', () => {
   });
 
   it('returns 400 Problem Details when callsPerDay is invalid', async () => {
-    const res = await request(costsApp).get('/api/costs/projection?operation=foo&callsPerDay=bad');
+    const res = await request(costsApp).get('/api/costs/projection?operation=foo&callsPerDay=bad').set('Authorization', COSTS_ADMIN);
     expect(res.status).toBe(400);
     expect(res.body.type).toMatch(/invalid-parameter/);
     expect(res.body.error).toBeTruthy();
   });
 
   it('returns 404 Problem Details when operation has no data', async () => {
-    const res = await request(costsApp).get('/api/costs/projection?operation=missing_op&callsPerDay=100');
+    const res = await request(costsApp).get('/api/costs/projection?operation=missing_op&callsPerDay=100').set('Authorization', COSTS_ADMIN);
     expect(res.status).toBe(404);
     expect(res.body.type).toMatch(/not-found/);
     expect(res.body.error).toBeTruthy();
