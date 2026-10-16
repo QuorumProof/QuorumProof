@@ -1,0 +1,92 @@
+WEBVTT
+Kind: captions
+Language: en
+
+NOTE
+Tutorial 5 — Sharing a Credential and Revoking Access.
+Planning timestamps generated from the script's scene budgets.
+Re-time against the final edit before publishing (see docs/video-tutorials.md).
+
+1
+00:00:00.500 --> 00:00:07.400
+You control who sees your credentials.
+
+2
+00:00:07.500 --> 00:00:14.400
+Share links give a specific verifier time-
+limited access, and you can revoke
+
+3
+00:00:14.500 --> 00:00:20.110
+them at any time.
+
+4
+00:00:45.500 --> 00:00:52.400
+Create a link for your credential.
+
+5
+00:00:52.500 --> 00:00:59.400
+Set how many hours it lasts, between one
+and eight thousand seven hundred sixty,
+
+6
+00:00:59.500 --> 00:01:06.400
+and choose view only or download.
+
+7
+00:01:06.500 --> 00:01:13.400
+Adding a password is optional but
+recommended.
+
+8
+00:01:13.500 --> 00:01:20.400
+The response contains a token; send it to
+the verifier through a private
+
+9
+00:01:20.500 --> 00:01:23.008
+channel.
+
+10
+00:02:15.500 --> 00:02:22.400
+The verifier validates the token, with the
+password if you set one.
+
+11
+00:02:22.500 --> 00:02:29.400
+They get the credential ID, the
+permission, and when the link expires.
+
+12
+00:02:29.500 --> 00:02:36.400
+After it expires the link stops working.
+
+13
+00:03:30.500 --> 00:03:37.400
+Changed your mind?
+
+14
+00:03:37.500 --> 00:03:44.400
+Delete the share link.
+
+15
+00:03:44.500 --> 00:03:51.400
+Any later attempt to validate it fails
+straight away.
+
+16
+00:04:30.500 --> 00:04:37.400
+Share for the shortest time that works,
+use a password, and revoke links you no
+
+17
+00:04:37.500 --> 00:04:39.868
+longer need.
+
+18
+00:04:39.968 --> 00:04:46.038
+That's the end of this series.
+
+19
+00:04:46.138 --> 00:04:50.152
+Thanks for watching.

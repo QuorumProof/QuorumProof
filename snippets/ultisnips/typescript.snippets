@@ -1,0 +1,63 @@
+# QuorumProof TypeScript & Client SDK Snippets
+
+snippet qp-invoke-contract "Stellar SDK Contract Invocation" b
+import { Contract, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
+
+async function invokeContract(client: any, sourceKeypair: any, contractId: string, method: string, args: any[]) {
+    const contract = new Contract(contractId);
+    const account = await client.horizon.loadAccount(sourceKeypair.publicKey());
+
+    const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: client.networkPassphrase,
+    })
+        .addOperation(contract.call(method, ...args))
+        .setTimeout(180)
+        .build();
+
+    tx.sign(sourceKeypair);
+    return await client.horizon.submitTransaction(tx);
+}
+endsnippet
+
+snippet qp-verify-credential "Verify Credential Function" b
+export async function verifyCredential(credential: {
+    id: string;
+    issuer: string;
+    holder: string;
+    expirationTimestamp: number;
+    signature: string;
+}): Promise<{ isValid: boolean; reason?: string }> {
+    const now = Math.floor(Date.now() / 1000);
+    if (credential.expirationTimestamp && now > credential.expirationTimestamp) {
+        return { isValid: false, reason: "Credential has expired" };
+    }
+
+    ${0}
+    return { isValid: true };
+}
+endsnippet
+
+snippet qp-ws-subscribe "WebSocket Event Subscription" b
+export function subscribeToEvents(url: string, onEvent: (data: any) => void) {
+    const ws = new WebSocket(url);
+
+    ws.onopen = () => {
+        console.log("Connected to QuorumProof event feed");
+        ws.send(JSON.stringify({ action: "subscribe", topic: "credentials" }));
+    };
+
+    ws.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        onEvent(payload);
+    };
+
+    ws.onerror = (error) => console.error("WebSocket error:", error);
+    ws.onclose = () => {
+        console.log("Reconnecting in 3s...");
+        setTimeout(() => subscribeToEvents(url, onEvent), 3000);
+    };
+
+    return () => ws.close();
+}
+endsnippet

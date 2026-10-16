@@ -2,12 +2,23 @@
 db-path = "$CARGO_HOME/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db/raw/main/db.json.gz"]
 vulnerability = "deny"
+# unsound: promoted from "warn" to "deny" — unsound crates represent
+# undefined-behaviour risk even without a published CVE. Any new unsound
+# advisory must be explicitly allowed here with a tracking comment.
+unsound = "deny"
 unmaintained = "warn"
-unsound = "warn"
-yanked = "warn"
+# yanked: promoted from "warn" to "deny" — a yanked crate version has been
+# explicitly retracted by its publisher, usually for a correctness or security
+# reason. Accepting a yanked version silently is equivalent to ignoring the
+# publisher's own retraction notice. Any exception must be explicitly allowed.
+yanked = "deny"
 notice = "warn"
 allow = [
-    "RUSTSEC-2026-0258", # h2 0.3.27: unbounded empty DATA frames
+    # h2 0.3.27: unbounded empty DATA frames (RUSTSEC-2026-0258)
+    # Tracking issue: https://github.com/cryptonautt/QuorumProof/issues/1490
+    # Added: 2026-09-24. Re-evaluate once hyperium/h2 >=0.4 is available as a
+    # transitive dep. scripts/check_deps.sh warns if this entry is >90 days old.
+    "RUSTSEC-2026-0258",
 ]
 
 [licenses]

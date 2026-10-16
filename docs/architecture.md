@@ -1,5 +1,8 @@
 # Architecture Overview
 
+> Visual diagrams of the full system, contract interactions, data flow and
+> deployment are in [architecture-diagrams.md](./architecture-diagrams.md).
+
 ## Contract Dependency Graph
 
 ```

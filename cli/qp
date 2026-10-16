@@ -1,0 +1,125 @@
+#!/bin/bash
+# cli/qp — QuorumProof CLI dispatcher.
+#
+# Routes subcommands to dedicated command scripts under cli/commands/.
+# Usage: ./cli/qp <command> [options]
+#
+# Commands:
+#   deploy   Deploy contracts to a Stellar network
+#   verify   Verify a credential by ID
+#   analyze  Analyze a quorum slice
+#
+# Global options:
+#   --help, -h      Show this help message
+#   --version, -v   Show version information
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Load environment if present (before any subcommand parsing)
+if [ -f "$PROJECT_ROOT/.env" ]; then
+  # shellcheck disable=SC1091
+  source "$PROJECT_ROOT/.env"
+fi
+
+# ── ANSI colour helpers ────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+info()    { echo -e "${GREEN}[qp]${RESET} $*"; }
+warn()    { echo -e "${YELLOW}[qp] WARNING:${RESET} $*" >&2; }
+error()   { echo -e "${RED}[qp] ERROR:${RESET} $*" >&2; }
+
+# ── Version / metadata ────────────────────────────────────────────────────────
+QP_VERSION="1.0.0"
+
+print_version() {
+  echo "qp version $QP_VERSION (QuorumProof CLI)"
+  echo "Project root: $PROJECT_ROOT"
+}
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+print_help() {
+  echo -e "${BOLD}qp${RESET} — QuorumProof CLI"
+  echo ""
+  echo -e "${BOLD}USAGE${RESET}"
+  echo "  ./cli/qp <command> [options]"
+  echo ""
+  echo -e "${BOLD}COMMANDS${RESET}"
+  echo "  deploy    Deploy contracts to a Stellar network"
+  echo "  verify    Verify a credential by ID"
+  echo "  analyze   Analyze a quorum slice"
+  echo ""
+  echo -e "${BOLD}GLOBAL OPTIONS${RESET}"
+  echo "  --help, -h       Show this help message and exit"
+  echo "  --version, -v    Show version information and exit"
+  echo ""
+  echo -e "${BOLD}EXAMPLES${RESET}"
+  echo "  ./cli/qp deploy --network testnet --contract all"
+  echo "  ./cli/qp verify --credential-id 42 --network testnet"
+  echo "  ./cli/qp analyze --slice-id 7 --network testnet"
+  echo ""
+  echo -e "${BOLD}DOCUMENTATION${RESET}"
+  echo "  See cli/README.md for full usage documentation."
+  echo ""
+  echo "  Each subcommand also accepts --help:"
+  echo "    ./cli/qp deploy  --help"
+  echo "    ./cli/qp verify  --help"
+  echo "    ./cli/qp analyze --help"
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+if [ $# -eq 0 ]; then
+  print_help
+  exit 2
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+  --help|-h|help)
+    print_help
+    exit 0
+    ;;
+  --version|-v|version)
+    print_version
+    exit 0
+    ;;
+  deploy)
+    COMMAND_SCRIPT="$SCRIPT_DIR/commands/deploy.sh"
+    ;;
+  verify)
+    COMMAND_SCRIPT="$SCRIPT_DIR/commands/verify.sh"
+    ;;
+  analyze)
+    COMMAND_SCRIPT="$SCRIPT_DIR/commands/analyze.sh"
+    ;;
+  *)
+    error "Unknown command: '$COMMAND'"
+    echo ""
+    echo "Run './cli/qp --help' for a list of available commands."
+    exit 2
+    ;;
+esac
+
+# Verify the subcommand script exists and is executable
+if [ ! -f "$COMMAND_SCRIPT" ]; then
+  error "Command script not found: $COMMAND_SCRIPT"
+  exit 1
+fi
+
+if [ ! -x "$COMMAND_SCRIPT" ]; then
+  error "Command script is not executable: $COMMAND_SCRIPT"
+  echo "Run: chmod +x $COMMAND_SCRIPT"
+  exit 1
+fi
+
+# Delegate to the subcommand, passing all remaining arguments
+exec "$COMMAND_SCRIPT" "$@"

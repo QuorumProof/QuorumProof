@@ -1,0 +1,43 @@
+{
+  "teams": {
+    "credentials": [
+      "issue_credential",
+      "get_credential",
+      "revoke_credential",
+      "batch_issue_credentials",
+      "get_credential_count"
+    ],
+    "attestation": [
+      "attest",
+      "is_attested",
+      "get_attestors",
+      "remove_attestor"
+    ],
+    "zk": [
+      "verify_claim",
+      "generate_proof_request",
+      "verify_groth16_proof",
+      "verify_plonk_proof",
+      "create_disclosure_proof",
+      "verify_disclosure"
+    ],
+    "slices": [
+      "create_slice",
+      "get_slice",
+      "add_attestor",
+      "get_slice_count"
+    ],
+    "registry": [
+      "register_sbt",
+      "get_sbt",
+      "get_sbt_count"
+    ],
+    "infrastructure": [
+      "get_version",
+      "get_supported_claim_types",
+      "admin_pause",
+      "admin_unpause",
+      "upgrade"
+    ]
+  }
+}

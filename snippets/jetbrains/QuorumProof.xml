@@ -1,0 +1,42 @@
+<templateSet group="QuorumProof">
+  <template name="qp-contract" value="#![no_std]&#10;use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec};&#10;&#10;#[contract]&#10;pub struct $CONTRACT_NAME$;&#10;&#10;#[contractimpl]&#10;impl $CONTRACT_NAME$ {&#10;    pub fn initialize(env: Env, admin: Address) {&#10;        admin.require_auth();&#10;        if env.storage().instance().has(&amp;DataKey::Admin) {&#10;            panic!(&quot;Already initialized&quot;);&#10;        }&#10;        env.storage().instance().set(&amp;DataKey::Admin, &amp;admin);&#10;    }&#10;&#10;    pub fn execute(env: Env, caller: Address) -&gt; Result&lt;bool, $ERROR$&gt; {&#10;        caller.require_auth();&#10;        $END$&#10;        Ok(true)&#10;    }&#10;}&#10;&#10;#[contracttype]&#10;#[derive(Clone)]&#10;pub enum DataKey {&#10;    Admin,&#10;    State(Address),&#10;}" description="Soroban Contract Boilerplate" toReformat="true" toShortenFQNames="true">
+    <variable name="CONTRACT_NAME" expression="" defaultValue="&quot;MyContract&quot;" alwaysStopAt="true" />
+    <variable name="ERROR" expression="" defaultValue="&quot;ContractError&quot;" alwaysStopAt="true" />
+    <context>
+      <option name="RUST" value="true" />
+    </context>
+  </template>
+
+  <template name="qp-error-enum" value="use soroban_sdk::contracterror;&#10;&#10;#[contracterror]&#10;#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]&#10;#[repr(u32)]&#10;pub enum $ERROR_ENUM$ {&#10;    NotInitialized = 1,&#10;    AlreadyInitialized = 2,&#10;    Unauthorized = 3,&#10;    InvalidThreshold = 4,&#10;    ProofVerificationFailed = 5,&#10;    CredentialExpired = 6,&#10;    $END$&#10;}" description="Soroban Contract Error Enum" toReformat="true" toShortenFQNames="true">
+    <variable name="ERROR_ENUM" expression="" defaultValue="&quot;ContractError&quot;" alwaysStopAt="true" />
+    <context>
+      <option name="RUST" value="true" />
+    </context>
+  </template>
+
+  <template name="qp-require-auth" value="$CALLER$.require_auth();" description="Soroban Require Auth" toReformat="true" toShortenFQNames="true">
+    <variable name="CALLER" expression="" defaultValue="&quot;caller&quot;" alwaysStopAt="true" />
+    <context>
+      <option name="RUST" value="true" />
+    </context>
+  </template>
+
+  <template name="qp-storage-get" value="let $VAL$: $TYPE$ = env&#10;    .storage()&#10;    .instance()&#10;    .get(&amp;$KEY$)&#10;    .ok_or($ERROR$)?;" description="Soroban Instance Storage Get" toReformat="true" toShortenFQNames="true">
+    <variable name="VAL" expression="" defaultValue="&quot;value&quot;" alwaysStopAt="true" />
+    <variable name="TYPE" expression="" defaultValue="&quot;Address&quot;" alwaysStopAt="true" />
+    <variable name="KEY" expression="" defaultValue="&quot;DataKey::Admin&quot;" alwaysStopAt="true" />
+    <variable name="ERROR" expression="" defaultValue="&quot;ContractError::NotInitialized&quot;" alwaysStopAt="true" />
+    <context>
+      <option name="RUST" value="true" />
+    </context>
+  </template>
+
+  <template name="qp-event-publish" value="env.events().publish(&#10;    (symbol_short!(&quot;$TOPIC$&quot;), $ENTITY$),&#10;    $PAYLOAD$&#10;);" description="Soroban Event Publish" toReformat="true" toShortenFQNames="true">
+    <variable name="TOPIC" expression="" defaultValue="&quot;verified&quot;" alwaysStopAt="true" />
+    <variable name="ENTITY" expression="" defaultValue="&quot;entity_address&quot;" alwaysStopAt="true" />
+    <variable name="PAYLOAD" expression="" defaultValue="&quot;event_data&quot;" alwaysStopAt="true" />
+    <context>
+      <option name="RUST" value="true" />
+    </context>
+  </template>
+</templateSet>

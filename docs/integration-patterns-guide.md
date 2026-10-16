@@ -316,5 +316,5 @@ error diagnosis (decision tree, log interpretation), see the
 
 If none of these match, capture the full `Error(Contract, #N)` code and the
 transaction hash, then check [Error Code Reference](error-codes.md) and
-[Troubleshooting Guide](troubleshooting-guide.md#decision-tree) before
+[Troubleshooting Guide](troubleshooting-guide.md#3-decision-tree) before
 opening a support request.

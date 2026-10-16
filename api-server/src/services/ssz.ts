@@ -132,3 +132,82 @@ export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
+
+/**
+ * Custom serialization for large fixed-shape SSZ containers.
+ *
+ * The generic path (`hashTreeRootBytes` + `merkleize`) re-allocates a fresh
+ * 32-byte chunk for every field and re-walks the whole tree on each call,
+ * which dominates the contract-state serialization profile for large types
+ * (e.g. `SyncCommittee`, whose 512 pubkeys expand to 768 chunks). This
+ * serializer writes the container's fixed-size fields directly into a single
+ * pre-sized buffer and merkleizes the resulting chunks in one pass, avoiding
+ * the per-field intermediate allocations.
+ */
+export interface SszField {
+  /** Byte length of the field's serialized form. */
+  size: number;
+  /** Fixed-size field value; omitted fields serialize as zero bytes. */
+  value?: Uint8Array;
+}
+
+/**
+ * Serialize a fixed-shape container of fixed-size fields into its SSZ byte
+ * representation, writing straight into one buffer instead of concatenating
+ * per-field allocations.
+ */
+export function serializeContainer(fields: SszField[]): Uint8Array {
+  let total = 0;
+  for (const f of fields) total += f.size;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const f of fields) {
+    if (f.value !== undefined) {
+      if (f.value.length !== f.size) {
+        throw new Error(`serializeContainer: field expected ${f.size} bytes, got ${f.value.length}`);
+      }
+      out.set(f.value, offset);
+    }
+    offset += f.size;
+  }
+  return out;
+}
+
+/**
+ * Deserialize a fixed-shape container of fixed-size fields, returning lazy
+ * views into the source buffer rather than copying each field out. Callers
+ * that only read a subset of fields (the common case for large containers)
+ * never pay for the fields they skip.
+ */
+export function deserializeContainer(
+  bytes: Uint8Array,
+  sizes: number[],
+): Array<Uint8Array | undefined> {
+  let total = 0;
+  for (const s of sizes) total += s;
+  if (bytes.length !== total) {
+    throw new Error(`deserializeContainer: expected ${total} bytes, got ${bytes.length}`);
+  }
+  const fields: Array<Uint8Array | undefined> = new Array(sizes.length);
+  let offset = 0;
+  for (let i = 0; i < sizes.length; i++) {
+    const size = sizes[i];
+    fields[i] = size === 0 ? undefined : bytes.subarray(offset, offset + size);
+    offset += size;
+  }
+  return fields;
+}
+
+/**
+ * hash_tree_root of a serialized fixed-shape container, merkleizing its
+ * 32-byte chunks in a single pass over the already-serialized bytes.
+ */
+export function hashTreeRootContainer(bytes: Uint8Array): Uint8Array {
+  const chunkCount = Math.ceil(bytes.length / 32);
+  const chunks: Uint8Array[] = new Array(chunkCount);
+  for (let i = 0; i < chunkCount; i++) {
+    const slice = bytes.subarray(i * 32, i * 32 + 32);
+    chunks[i] = slice.length === 32 ? slice : packBytes(slice);
+  }
+  return merkleize(chunks);
+}

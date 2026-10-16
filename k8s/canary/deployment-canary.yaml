@@ -1,0 +1,132 @@
+# k8s/canary/deployment-canary.yaml — Issue #1654: Canary Deployments.
+#
+# Canary Deployment for the QuorumProof API server.
+#
+# This manifest creates a small "canary" replica set that runs alongside the
+# stable deployment. Traffic is split by replica count ratio:
+#
+#   canary_pct ≈ canary_replicas / (stable_replicas + canary_replicas)
+#
+# For a 10% canary: 1 canary + 9 stable = ~10% of traffic to canary.
+# For a 25% canary: 1 canary + 3 stable = ~25% of traffic to canary.
+#
+# The single Service in service-canary.yaml selects `app: quorumproof-api-server`
+# (without a `track` label), so kube-proxy distributes traffic across all
+# matching pods (both stable and canary) weighted by replica count.
+#
+# Promotion path:
+#   1. Deploy canary (this file) at 10% (1 replica)
+#   2. Observe metrics for soak period (scripts/canary_k8s.sh --monitor)
+#   3. Promote: scale stable to new image + delete canary (scripts/canary_k8s.sh --promote)
+#
+# Rollback path:
+#   kubectl delete deployment quorumproof-api-server-canary -n quorumproof
+#   # Stable deployment continues serving 100% of traffic
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quorumproof-api-server-canary
+  namespace: quorumproof
+  labels:
+    app: quorumproof-api-server
+    track: canary
+    app.kubernetes.io/name: quorumproof-api-server
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/version: canary
+  annotations:
+    deployment.kubernetes.io/canary: "true"
+    deployment.kubernetes.io/canary-weight: "10"
+spec:
+  # 1 replica = ~10% when stable has 9 replicas.
+  # Adjust this number with scripts/canary_k8s.sh --scale or kubectl scale.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quorumproof-api-server
+      track: canary
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: quorumproof-api-server
+        track: canary
+        app.kubernetes.io/name: quorumproof-api-server
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: quorumproof
+        app.kubernetes.io/version: canary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics/events"
+        prometheus.io/port: "3001"
+        # Canary label surfaces in Prometheus for per-track error rate queries:
+        #   rate(quorumproof_api_errors_total{track="canary"}[1m])
+        deployment.kubernetes.io/track: "canary"
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api-server
+          # Replace with the canary image tag before applying.
+          # scripts/canary_k8s.sh sets this via `kubectl set image`.
+          image: quorumproof/api-server:canary
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+            - name: LOG_LEVEL
+              value: info
+            - name: LOG_FILE
+              value: /var/log/quorumproof/api.log
+            - name: DEPLOYMENT_TRACK
+              value: canary
+          envFrom:
+            - secretRef:
+                name: quorumproof-api-server-env
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: log-dir
+              mountPath: /var/log/quorumproof
+      volumes:
+        - name: log-dir
+          emptyDir: {}

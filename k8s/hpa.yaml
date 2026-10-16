@@ -1,0 +1,109 @@
+# HPA — Horizontal Pod Autoscaler for quorumproof-api-server
+#
+# Issue #1658 — Automated Scaling
+#
+# Scales the api-server Deployment between minReplicas and maxReplicas
+# based on CPU utilisation AND custom Prometheus metrics exposed by the
+# monitoring/exporter. The Prometheus Adapter (see k8s/prometheus-adapter-
+# config.yaml) bridges Prometheus time-series into the Kubernetes custom-
+# metrics API so the HPA can consume them.
+#
+# Apply alongside the main deployment:
+#   kubectl apply -f k8s/hpa.yaml
+#
+# Tune thresholds:
+#   - CPU target (50 % utilisation) matches a single api-server replica at
+#     the `requests.cpu: 100m` set in api-server-deployment.yaml, giving
+#     headroom before the 500m limit is hit.
+#   - request_rate target (200 req/s per replica) is derived from the p95
+#     latency floor measured in the load test (see docs/autoscaling-guide.md
+#     §Threshold Tuning).
+#   - Scale-down is deliberately conservative (300 s stabilisation, 20 %/
+#     60 s) to avoid flapping during bursty credential verification traffic.
+#
+# Prerequisites:
+#   1. metrics-server installed: kubectl apply -f \
+#        https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#   2. prometheus-adapter installed and configured (k8s/prometheus-adapter-config.yaml).
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: quorumproof-api-server
+  namespace: quorumproof
+  labels:
+    app: quorumproof-api-server
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: quorumproof-api-server
+
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    # ── CPU utilisation ─────────────────────────────────────────────────────
+    # Keep average CPU below 50 % across all pods to leave headroom for
+    # request spikes without immediately hitting the cpu limit.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+
+    # ── Memory utilisation ───────────────────────────────────────────────────
+    # Scale up before pods approach the 512 Mi limit to prevent OOM kills
+    # during large batch-verification bursts.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+    # ── HTTP request rate (custom metric via Prometheus Adapter) ─────────────
+    # quorumproof_http_requests_per_second is derived from the Prometheus
+    # counter quorumproof_api_requests_total (see monitoring/prometheus/
+    # prometheus.yml and the recording rules in alerts.yml).
+    # Target: 200 req/s per replica — above this the p95 latency rises
+    # above the 500 ms SLO (see load test results in docs/autoscaling-guide.md).
+    - type: Pods
+      pods:
+        metric:
+          name: quorumproof_http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "200"
+
+  behavior:
+    # ── Scale-up: react quickly to demand spikes ─────────────────────────────
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        # Allow doubling pod count per 60 s — fast enough for a sudden
+        # credential-verification burst from a relying party integration.
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        # Floor: add at least 2 pods per period regardless of percentage,
+        # so a single-replica deployment can bootstrap quickly.
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+
+    # ── Scale-down: conservative, avoid flapping ─────────────────────────────
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        # Remove at most 20 % of pods per 60 s — prevents a sudden scale-down
+        # immediately after a burst ends from starving an immediate follow-up.
+        - type: Percent
+          value: 20
+          periodSeconds: 60
+      selectPolicy: Min

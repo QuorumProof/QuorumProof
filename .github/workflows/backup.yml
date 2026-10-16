@@ -1,10 +1,11 @@
 # .github/workflows/backup.yml — Issue #912: Periodic contract state backup.
 #
 # Runs the daily backup documented in docs/backup-system.md: exports
-# testnet and mainnet contract state via scripts/backup.sh, encrypts it,
-# uploads it to S3, verifies the resulting artifact with
-# scripts/verify_backup.sh, and retains a copy as a GitHub Actions
-# artifact for 90 days. Can also be triggered manually for an on-demand
+# testnet and mainnet contract state via scripts/automated_backup.sh
+# (issue #1649), which encrypts it, uploads it to S3 and verifies the
+# result end to end (checksum, decrypt round-trip, restore dry-run, remote
+# re-download), then runs scripts/check_backup_integrity.sh and retains a
+# copy as a GitHub Actions artifact for 90 days. Can also be triggered manually for an on-demand
 # backup ahead of a risky operation (e.g. a contract upgrade).
 
 name: Backup
@@ -63,32 +64,37 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run backup
+      - name: Run backup with verification
+        # Issue #1649: automated_backup.sh wraps backup.sh and only succeeds
+        # once the artifact has been checksummed, decrypted, content-verified
+        # with a restore dry-run, and re-downloaded from S3 with a matching
+        # SHA-256. See docs/backup-verification.md.
         if: steps.gate.outputs.run == 'true'
         env:
           STELLAR_NETWORK: ${{ matrix.network }}
           CONTRACT_QUORUM_PROOF: ${{ matrix.network == 'testnet' && secrets.CONTRACT_QUORUM_PROOF_TESTNET || secrets.CONTRACT_QUORUM_PROOF_MAINNET }}
           BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+          BACKUP_NOTIFY_WEBHOOK: ${{ secrets.BACKUP_NOTIFY_WEBHOOK }}
         run: |
-          ./scripts/backup.sh \
+          ./scripts/automated_backup.sh \
             --network "$STELLAR_NETWORK" \
             --encrypt \
             --upload "${{ secrets.BACKUP_S3_BUCKET }}"
 
-      - name: Verify backup integrity
+      - name: Deep integrity check
         if: steps.gate.outputs.run == 'true'
-        run: |
-          latest="$(ls -t backups/daily/*.json 2>/dev/null | head -n1)"
-          if [[ -n "$latest" ]]; then
-            ./scripts/verify_backup.sh "$latest" --dry-run-restore
-          fi
+        env:
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+        run: ./scripts/check_backup_integrity.sh --deep
 
       - name: Upload backup artifact
         if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: backup-${{ matrix.network }}-${{ github.run_id }}
-          path: backups/daily/
+          path: |
+            backups/daily/
+            backups/manifest.json
           retention-days: 90
 
       - name: Notify on failure

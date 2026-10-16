@@ -1,0 +1,83 @@
+# Prometheus Adapter — Custom Metrics Configuration
+#
+# Issue #1658 — Automated Scaling (metrics-based scaling)
+#
+# This ConfigMap is consumed by the prometheus-adapter deployment.
+# It bridges Prometheus time-series into the Kubernetes custom-metrics API
+# so that the HPA in k8s/hpa.yaml can scale on application-level metrics.
+#
+# Install the adapter:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm install prometheus-adapter prometheus-community/prometheus-adapter \
+#     --namespace monitoring \
+#     --set prometheus.url=http://prometheus.monitoring.svc \
+#     --set prometheus.port=9090 \
+#     -f k8s/prometheus-adapter-config.yaml
+#
+# After installation, verify the custom metric is visible:
+#   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq .
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/component: autoscaling
+data:
+  config.yaml: |
+    rules:
+      # ── Per-pod HTTP request rate ──────────────────────────────────────────
+      # Exposed as: quorumproof_http_requests_per_second
+      # Used by:    k8s/hpa.yaml (Pods metric, target 200 req/s per pod)
+      #
+      # Derived from quorumproof_api_requests_total (Counter) by computing
+      # a 2-minute rate and associating it with the Kubernetes pod via the
+      # exported_pod label set by Prometheus scrape re-labelling.
+      - seriesQuery: 'quorumproof_api_requests_total{namespace!="",pod!=""}'
+        seriesFilters: []
+        resources:
+          overrides:
+            namespace:
+              resource: namespace
+            pod:
+              resource: pod
+        name:
+          matches: "^quorumproof_api_requests_total$"
+          as: "quorumproof_http_requests_per_second"
+        metricsQuery: 'rate(quorumproof_api_requests_total{<<.LabelMatchers>>}[2m])'
+
+      # ── Per-pod error rate ─────────────────────────────────────────────────
+      # Exposed as: quorumproof_error_rate_per_second
+      # Not used by the HPA directly, but available for ExternalMetric-based
+      # alerting and manual kubectl get --raw queries.
+      - seriesQuery: 'quorumproof_api_errors_total{namespace!="",pod!=""}'
+        seriesFilters: []
+        resources:
+          overrides:
+            namespace:
+              resource: namespace
+            pod:
+              resource: pod
+        name:
+          matches: "^quorumproof_api_errors_total$"
+          as: "quorumproof_error_rate_per_second"
+        metricsQuery: 'rate(quorumproof_api_errors_total{<<.LabelMatchers>>}[2m])'
+
+      # ── Per-pod attestation queue depth ───────────────────────────────────
+      # Exposed as: quorumproof_pending_attestations
+      # Allows scaling on backlog depth when attestation requests are queued.
+      - seriesQuery: 'quorumproof_pending_attestations{namespace!="",pod!=""}'
+        seriesFilters: []
+        resources:
+          overrides:
+            namespace:
+              resource: namespace
+            pod:
+              resource: pod
+        name:
+          matches: "^quorumproof_pending_attestations$"
+          as: "quorumproof_pending_attestations"
+        metricsQuery: 'quorumproof_pending_attestations{<<.LabelMatchers>>}'

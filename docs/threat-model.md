@@ -235,7 +235,51 @@ QuorumProof is a decentralized credential verification platform built on Stellar
 
 ---
 
-### 3.10 Pause/Unpause Abuse
+### 3.10 Revocation-Cache Staleness in `sbt_registry` (Issue #1509)
+
+**Attack**: A credential is revoked in `quorum_proof`, but `sbt_registry.mint`
+uses a cached `revoked = false` result to allow minting a new SBT before the
+cache entry expires.
+
+**Vector**:
+1. Issuer revokes credential in `quorum_proof`.
+2. Within the same `CREDENTIAL_CACHE_TTL_LEDGERS` window, an attacker calls
+   `sbt_registry.mint` for a **new** owner/credential pair.
+3. `mint` reads the still-valid cache entry (`revoked = false`) and skips the
+   cross-contract `is_revoked` call, successfully minting the SBT.
+
+**Staleness bound (default configuration)**:
+
+| Ledger cadence | TTL (ledgers) | Max staleness (wall-clock) |
+|----------------|---------------|---------------------------|
+| 5 s/ledger     | 720 (default) | ≈ 1 hour                  |
+| 5 s/ledger     | 120           | ≈ 10 minutes              |
+| 5 s/ledger     | 0             | No caching — always live  |
+
+The default `CREDENTIAL_CACHE_TTL_LEDGERS = 720` means a revoked credential
+can still produce a new valid SBT for up to approximately **1 hour** after
+revocation in the default configuration.
+
+**Accepted Risk**: The gas saving from avoiding cross-contract calls on every
+mint is deemed acceptable for the vast majority of use cases. Issuers or
+relying parties for whom this staleness is unacceptable have two options:
+
+1. Call `sbt_registry.set_credential_cache_ttl(admin, 0)` to disable the cache
+   entirely (always makes the live cross-contract call, ~2× higher gas).
+2. Reduce the TTL via `set_credential_cache_ttl` to match their risk tolerance.
+
+**Mitigation**:
+- ✅ Cache TTL is now governance-tunable via `set_credential_cache_ttl` / `get_credential_cache_ttl`
+- ✅ Staleness window is bounded and documented (see table above)
+- ✅ Test `test_stale_cache_allows_mint_within_ttl` documents this as expected behaviour
+- ✅ Test `test_stale_cache_rejected_after_ttl_expires` verifies that setting TTL = 0 re-enables liveness
+- ⚠️ No proactive cross-contract event invalidation: revocation events emitted by `quorum_proof` are not currently consumed by `sbt_registry` to eagerly flush the cache (cross-contract event-driven invalidation requires Soroban host support not yet stable)
+
+**Residual Risk**: Medium for time-critical revocations. Default TTL ≈ 1 hour staleness. Mitigated by governance TTL parameter.
+
+---
+
+### 3.11 Pause/Unpause Abuse
 
 **Attack**: Admin pauses contract indefinitely, blocking credential issuance.
 
@@ -956,7 +1000,7 @@ If a single admin key is compromised, an attacker can:
 ## 8. Known Limitations & Future Work
 
 1. **No circuit-breaker degraded mode on sbt_registry/zk_verifier**: Pause is binary (on/off). Rate limiting under load is not yet supported. Planned for v2.1.
-2. **Revocation cache staleness**: Credential revocation cache has a 1000-ledger TTL; in rare network partitions, a revoked credential might be accepted as valid for up to ~1 hour. Acceptable for most use cases; critical applications should query the authoritative source.
+2. **Revocation cache staleness (Issue #1509)**: `sbt_registry.mint` caches the result of the cross-contract `is_revoked` call for `CREDENTIAL_CACHE_TTL_LEDGERS` ledgers (default 720 ≈ 1 hour at 5 s/ledger). A credential revoked in `quorum_proof` can still produce a new SBT within this window. The TTL is now governance-tunable via `set_credential_cache_ttl`; setting it to 0 disables caching. See §3.10 for the full accepted-risk analysis.
 3. **Saga rollback auto-recovery**: If rollback fails (network partition), manual operator intervention is required. Planned for v2.2: automatic retry with exponential backoff.
 
 ---

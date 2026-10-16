@@ -292,6 +292,85 @@ fn read_fr(bytes: &[u8], offset: &mut usize) -> BbsResult<Fr> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Varint encoding (unsigned LEB128) — Issue #1558
+//
+// Many integer fields embedded in or alongside proofs (message counts, version
+// numbers, audit sequence numbers, etc.) are small non-negative integers that
+// waste up to 3 bytes when stored as fixed u32/u64.  LEB128 unsigned varint
+// encoding uses 1 byte for values 0–127, 2 bytes for 128–16383, and so on —
+// a 40–75 % saving for typical field values.
+//
+// The encoding matches the unsigned LEB128 standard used by DWARF, WebAssembly,
+// and many other binary formats:
+//   - Emit 7 bits per byte, least-significant group first.
+//   - Set the high bit (continuation bit) on all bytes except the last.
+//
+// Maximum encodable value is u64::MAX (10 bytes).
+
+/// Encode `value` as an unsigned LEB128 varint, appending bytes to `out`.
+pub fn encode_varint(value: u64, out: &mut Vec<u8>) {
+    let mut v = value;
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            break;
+        } else {
+            out.push(byte | 0x80);
+        }
+    }
+}
+
+/// Decode an unsigned LEB128 varint from `bytes` starting at `*offset`.
+///
+/// On success advances `*offset` past the consumed bytes and returns the
+/// decoded `u64`.
+///
+/// # Errors
+/// Returns `BbsError::DeserializationError` if:
+/// - the input is exhausted before the terminal byte (no high-bit-clear byte),
+/// - the encoded value would overflow a `u64` (more than 10 bytes with the
+///   high bit set on the 10th byte).
+pub fn decode_varint(bytes: &[u8], offset: &mut usize) -> BbsResult<u64> {
+    let mut result: u64 = 0;
+    let mut shift: u32 = 0;
+
+    loop {
+        if *offset >= bytes.len() {
+            return Err(BbsError::DeserializationError);
+        }
+        let byte = bytes[*offset];
+        *offset += 1;
+
+        // LEB128 uses 7 bits per group; 10 groups cover 70 bits ≥ 64.
+        if shift >= 64 {
+            return Err(BbsError::DeserializationError);
+        }
+
+        result |= ((byte & 0x7F) as u64) << shift;
+        shift += 7;
+
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+
+    Ok(result)
+}
+
+/// Returns the number of bytes that [`encode_varint`] would write for `value`,
+/// without actually writing them.  Useful for capacity pre-allocation.
+#[inline]
+pub fn varint_size(value: u64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    let bits = 64 - value.leading_zeros() as usize;
+    (bits + 6) / 7
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Benchmark helpers
 
 /// Size statistics for a single proof.
@@ -445,5 +524,95 @@ mod tests {
         assert!(test_bit(&bm, 8));
         assert!(!test_bit(&bm, 1));
         assert!(!test_bit(&bm, 9));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Varint encoding tests — Issue #1558
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_varint_encode_decode_roundtrip_small_values() {
+        for &v in &[0u64, 1, 63, 64, 127, 128, 255, 300, 16383, 16384] {
+            let mut buf = Vec::new();
+            encode_varint(v, &mut buf);
+            let mut offset = 0;
+            let decoded = decode_varint(&buf, &mut offset).unwrap();
+            assert_eq!(decoded, v, "roundtrip failed for {v}");
+            assert_eq!(offset, buf.len(), "offset should be at end for {v}");
+        }
+    }
+
+    #[test]
+    fn test_varint_encode_decode_roundtrip_large_values() {
+        for &v in &[u64::MAX, u64::MAX - 1, 1 << 32, (1 << 63) - 1] {
+            let mut buf = Vec::new();
+            encode_varint(v, &mut buf);
+            let mut offset = 0;
+            let decoded = decode_varint(&buf, &mut offset).unwrap();
+            assert_eq!(decoded, v, "roundtrip failed for {v}");
+        }
+    }
+
+    #[test]
+    fn test_varint_single_byte_for_small_values() {
+        // Values 0-127 must encode to exactly 1 byte.
+        for v in 0u64..=127 {
+            let mut buf = Vec::new();
+            encode_varint(v, &mut buf);
+            assert_eq!(buf.len(), 1, "expected 1 byte for {v}");
+            assert_eq!(varint_size(v), 1);
+        }
+    }
+
+    #[test]
+    fn test_varint_two_bytes_for_128_to_16383() {
+        let mut buf = Vec::new();
+        encode_varint(128, &mut buf);
+        assert_eq!(buf.len(), 2);
+        assert_eq!(varint_size(128), 2);
+
+        let mut buf2 = Vec::new();
+        encode_varint(16383, &mut buf2);
+        assert_eq!(buf2.len(), 2);
+    }
+
+    #[test]
+    fn test_varint_decode_truncated_returns_error() {
+        // A byte with the continuation bit set but no following byte.
+        let bad = vec![0x80u8];
+        let mut offset = 0;
+        assert!(decode_varint(&bad, &mut offset).is_err());
+    }
+
+    #[test]
+    fn test_varint_decode_empty_returns_error() {
+        let empty: Vec<u8> = Vec::new();
+        let mut offset = 0;
+        assert!(decode_varint(&empty, &mut offset).is_err());
+    }
+
+    #[test]
+    fn test_varint_size_matches_encode_len() {
+        for &v in &[0u64, 1, 127, 128, 16383, 16384, u32::MAX as u64, u64::MAX] {
+            let mut buf = Vec::new();
+            encode_varint(v, &mut buf);
+            assert_eq!(varint_size(v), buf.len(), "varint_size mismatch for {v}");
+        }
+    }
+
+    #[test]
+    fn test_varint_sequential_decode_in_stream() {
+        // Encode three values back-to-back and decode them sequentially.
+        let values = [42u64, 300, 65537];
+        let mut buf = Vec::new();
+        for &v in &values {
+            encode_varint(v, &mut buf);
+        }
+        let mut offset = 0;
+        for &expected in &values {
+            let got = decode_varint(&buf, &mut offset).unwrap();
+            assert_eq!(got, expected);
+        }
+        assert_eq!(offset, buf.len());
     }
 }

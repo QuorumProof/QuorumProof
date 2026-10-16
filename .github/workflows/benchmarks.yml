@@ -6,6 +6,11 @@
 # orchestrates both), and uploads the resulting Markdown report as a build
 # artifact on every run.
 #
+# On pushes to main only, the updated benches/history/*.jsonl files are
+# committed back to the repository so gradual complexity drift is visible via
+# `git log` (issue #1466).  PR runs do not attempt a commit — they only
+# generate the report and upload it as an artifact.
+#
 # This is additive to the existing fixed-threshold gate — it does not
 # replace scripts/benchmark_compare.sh, scripts/profile_contracts.sh, or the
 # assert!s already in benches/tests/benchmarks.rs.
@@ -30,6 +35,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fetch full history so `git log` comparisons work, and use a token
+          # that allows pushing back to main on the commit-back step.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -42,6 +52,28 @@ jobs:
             ~/.cargo/git
             benches/target
           key: ${{ runner.os }}-cargo-benches-${{ hashFiles('benches/Cargo.lock', 'Cargo.lock') }}
+
+      # Issue #1466: Fail loudly if the history directory is unwritable in CI
+      # rather than silently producing an empty / partial report.
+      - name: Check benches/history is writable
+        run: |
+          if [ ! -d benches/history ]; then
+            echo "ERROR: benches/history directory does not exist." >&2
+            echo "Create it (with a .gitkeep) and commit it before running benchmarks." >&2
+            exit 1
+          fi
+          if [ ! -w benches/history ]; then
+            echo "ERROR: benches/history is not writable by the current user." >&2
+            echo "Check repository permissions or runner configuration." >&2
+            exit 1
+          fi
+          # Verify we can actually create a file (directory permission bits alone
+          # can lie on some container setups).
+          touch benches/history/.write-check && rm benches/history/.write-check || {
+            echo "ERROR: benches/history exists but file creation failed." >&2
+            exit 1
+          }
+          echo "benches/history is writable ✓"
 
       - name: Run scaling benchmarks and generate report
         id: report
@@ -61,6 +93,32 @@ jobs:
             benches/target/bench-scaling/raw.jsonl
           retention-days: 90
           if-no-files-found: warn
+
+      # Issue #1466: Commit updated benches/history/*.jsonl back to main so
+      # the drift-detection history is persisted in the repo and visible via
+      # `git log`.  This step runs ONLY on push-to-main, never on PRs, so it
+      # cannot accidentally mutate branches under review.
+      - name: Commit benchmark history back to main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage only the history JSONL files — nothing else.
+          git add benches/history/*.jsonl 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No history files changed — nothing to commit."
+          else
+            git commit -m "chore(benches): update scaling history [skip ci]
+
+Automated commit from the Benchmark Scaling Report workflow.
+Updates benches/history/*.jsonl with the latest complexity-fit
+results so gradual drift is visible via git log.
+
+See .github/workflows/benchmarks.yml and benches/src/history.rs."
+            git push origin HEAD:main
+          fi
 
       - name: Fail if complexity gate failed
         if: steps.report.outputs.exit_code != '0'

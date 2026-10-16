@@ -1,0 +1,12 @@
+# checkov configuration for infra/terraform (#1652).
+# Each skip must carry a justification.
+compact: true
+quiet: true
+skip-check:
+  # ALB is intentionally internet-facing (public API); WAF is attached outside
+  # this repo by the edge/security team.
+  - CKV2_AWS_28
+  # Access logging on the log-archive bucket itself would create a logging loop.
+  - CKV_AWS_18
+  # Event notifications are not required on archive / backup buckets.
+  - CKV2_AWS_62

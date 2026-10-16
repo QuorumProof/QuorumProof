@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "artifactGlob": "*.cpuprofile",
+  "recommendedCommand": "node --cpu-prof dist/index.js",
+  "ciNotes": "Enable only in profiling jobs so normal CI remains fast."
+}

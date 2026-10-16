@@ -1,0 +1,33 @@
+{
+  "name": "@quorumproof/plugin-event-stats",
+  "version": "0.1.0",
+  "description": "Example QuorumProof API-server plugin: per-type credential event counters with an optional forwarder (issue #1647).",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "keywords": [
+    "quorumproof",
+    "quorumproof-plugin"
+  ],
+  "quorumproof": {
+    "apiVersion": 1
+  },
+  "peerDependencies": {
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "express": "^4.21.2",
+    "supertest": "^7.0.0",
+    "vitest": "^2.1.0"
+  },
+  "scripts": {
+    "test": "vitest --run"
+  },
+  "license": "MIT"
+}

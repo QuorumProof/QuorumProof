@@ -1,0 +1,19 @@
+# k8s/network-policy/kustomization.yaml — Issue #1655: Network Policy for Pod Security.
+#
+# Apply the full network policy set:
+#   kubectl apply -k k8s/network-policy/
+#
+# Or apply to a specific environment overlay:
+#   kubectl apply -k k8s/network-policy/ -n quorumproof
+#
+# WARNING: Apply default-deny.yaml LAST in the ordering if testing incrementally,
+# or apply all at once with kustomize. Applying default-deny without the allow
+# rules will break connectivity immediately.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - default-deny.yaml
+  - api-server-policy.yaml
+  - monitoring-policy.yaml

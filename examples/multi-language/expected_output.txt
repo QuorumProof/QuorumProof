@@ -1,0 +1,6 @@
+credential 42: type=1 revoked=false issuer=GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGZRXDMTGEYJ66SDOQ62RK
+batch: total=3 verified=2 not_found=1 duplicates=1
+  42 HasDegree -> verified
+  42 HasDegree -> verified
+  99 HasLicense -> not_found
+credential 99: not found (Credential not found)

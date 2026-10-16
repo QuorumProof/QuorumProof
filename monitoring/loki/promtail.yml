@@ -11,6 +11,23 @@ scrape_configs:
         labels:
           job: quorumproof-api
           __path__: /var/log/quorumproof/*.log
+    # #1653 — promote `level` and an `audit` flag to labels so Loki's
+    # per-stream retention (loki.yml → retention_stream) can apply different
+    # periods. Keep label cardinality low: only these two are extracted.
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            module: module
+      - template:
+          source: audit
+          # Security-relevant modules are tagged audit="true" (90-day hot
+          # retention + archival). Uses sprig's regexMatch; `.module` may be
+          # absent on lines logged without a module.
+          template: '{{ if and .module (regexMatch "^(audit|auth-audit|credential-audit|gdpr|privilege-escalation|region-failover)$" .module) }}true{{ else }}false{{ end }}'
+      - labels:
+          level:
+          audit:
 
   - job_name: system
     static_configs:

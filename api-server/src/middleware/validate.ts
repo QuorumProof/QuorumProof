@@ -23,6 +23,10 @@
  *    string becomes the error message in the 400 response.  This is useful for
  *    cross-field invariants, Stellar address checks, etc.
  *
+ * 4. **Field selection** (Issue #1569) — the `?fields=id,status` query
+ *    parameter lets clients request only the fields they need, reducing
+ *    response size.  See `fieldSelection` / `selectFields` below.
+ *
  * ## Usage
  *
  * ```ts
@@ -45,6 +49,29 @@
  *   handler,
  * );
  * ```
+ *
+ * ### Field selection
+ *
+ * ```ts
+ * import { fieldSelection, selectFields } from '../middleware/validate.js';
+ *
+ * router.get(
+ *   '/credentials/:id',
+ *   fieldSelection('credential'),
+ *   (req, res) => {
+ *     const credential = loadCredential(req.params.id);
+ *     res.json(selectFields(credential, req, 'credential'));
+ *   },
+ * );
+ * ```
+ *
+ * The `?fields=` parameter accepts a comma-separated list of field names
+ * (e.g. `?fields=id,status`).  Only fields declared in the resource's field
+ * schema are selectable; unknown fields produce a 400.  Fields marked
+ * `permission` are only selectable when the request carries the matching
+ * permission (populated by the RBAC middleware on `req.user.permissions`),
+ * otherwise a 403 is returned.  When `?fields=` is omitted the full object is
+ * returned unchanged.
  */
 
 import { Request, Response, NextFunction } from 'express';
@@ -194,6 +221,169 @@ export function validate(schemas: ValidationSchemas) {
 }
 
 // ---------------------------------------------------------------------------
+// Field selection (Issue #1569 — Response Size Optimization)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single selectable field in a resource's field schema.
+ *
+ * - `name`       — the response property name.
+ * - `permission` — optional permission required to select this field.  When
+ *                  set, the request must carry the permission (via the RBAC
+ *                  middleware populating `req.user.permissions`) or a 403 is
+ *                  returned.
+ */
+export interface FieldDefinition {
+  name: string;
+  permission?: string;
+}
+
+/**
+ * Field schema for a resource: the set of fields that may be selected via
+ * `?fields=`.  Fields not listed here are never selectable.
+ */
+export type FieldSchema = FieldDefinition[];
+
+/**
+ * Built-in field schemas, keyed by resource name.  Extend this map as new
+ * resources gain field-selection support.
+ */
+export const fieldSchemas: Record<string, FieldSchema> = {
+  credential: [
+    { name: 'id' },
+    { name: 'status' },
+    { name: 'issued_at' },
+    { name: 'expires_at' },
+    { name: 'subject' },
+    { name: 'issuer' },
+    { name: 'metadata', permission: 'credentials:read:metadata' },
+  ],
+  verification: [
+    { name: 'id' },
+    { name: 'status' },
+    { name: 'verified_at' },
+    { name: 'credential_id' },
+    { name: 'details', permission: 'verifications:read:details' },
+  ],
+};
+
+/**
+ * Parse the `?fields=` query parameter into a list of requested field names.
+ * Returns `null` when the parameter is absent (meaning: return all fields).
+ */
+export function parseFields(raw: unknown): string[] | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const value = Array.isArray(raw) ? raw.join(',') : String(raw);
+  const fields = value
+    .split(',')
+    .map((f) => f.trim())
+    .filter((f) => f.length > 0);
+  return fields.length > 0 ? fields : null;
+}
+
+/**
+ * Extract the permissions granted to the current request.  The RBAC
+ * middleware is expected to populate `req.user.permissions` (array of
+ * strings).  Absent user/permissions means no permissions.
+ */
+function requestPermissions(req: Request): string[] {
+  const user = (req as Request & { user?: { permissions?: unknown } }).user;
+  const perms = user?.permissions;
+  return Array.isArray(perms) ? perms.filter((p): p is string => typeof p === 'string') : [];
+}
+
+/**
+ * Express middleware that validates the `?fields=` query parameter against a
+ * resource's field schema and enforces per-field permissions.
+ *
+ * - Unknown fields → 400.
+ * - Fields requiring a permission the request lacks → 403.
+ * - Valid selections are stored on `req.selectedFields` for `selectFields`.
+ */
+export function fieldSelection(resource: string) {
+  const schema = fieldSchemas[resource];
+  const byName = new Map<string, FieldDefinition>();
+  if (schema) {
+    for (const field of schema) byName.set(field.name, field);
+  }
+
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const requested = parseFields(req.query.fields);
+    if (requested === null) {
+      next();
+      return;
+    }
+
+    if (!schema) {
+      res.status(400).json({
+        error: 'Validation failed',
+        location: 'query',
+        details: [{ path: '#/fields', keyword: 'unknownResource', message: `unknown resource '${resource}'` }],
+      });
+      return;
+    }
+
+    const unknown = requested.filter((f) => !byName.has(f));
+    if (unknown.length > 0) {
+      res.status(400).json({
+        error: 'Validation failed',
+        location: 'query',
+        details: unknown.map((f) => ({
+          path: '#/fields',
+          keyword: 'unknownField',
+          message: `unknown field '${f}' for resource '${resource}'`,
+        })),
+      });
+      return;
+    }
+
+    const permissions = requestPermissions(req);
+    const forbidden = requested.filter((f) => {
+      const perm = byName.get(f)?.permission;
+      return perm !== undefined && !permissions.includes(perm);
+    });
+    if (forbidden.length > 0) {
+      res.status(403).json({
+        error: 'Forbidden',
+        location: 'query',
+        details: forbidden.map((f) => ({
+          path: '#/fields',
+          keyword: 'permission',
+          message: `missing permission to select field '${f}'`,
+        })),
+      });
+      return;
+    }
+
+    (req as Request & { selectedFields?: string[] }).selectedFields = requested;
+    next();
+  };
+}
+
+/**
+ * Filter a response object down to the fields selected on the request.
+ *
+ * When no `?fields=` selection was made (or `fieldSelection` was not run),
+ * the object is returned unchanged.  Only top-level fields are filtered;
+ * nested objects are returned whole when their parent field is selected.
+ */
+export function selectFields<T extends Record<string, unknown>>(
+  obj: T,
+  req: Request,
+  _resource?: string,
+): Partial<T> {
+  const selected = (req as Request & { selectedFields?: string[] }).selectedFields;
+  if (!selected || selected.length === 0) return obj;
+  const result: Partial<T> = {};
+  for (const field of selected) {
+    if (Object.prototype.hasOwnProperty.call(obj, field)) {
+      result[field as keyof T] = obj[field as keyof T];
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Built-in custom validators
 // ---------------------------------------------------------------------------
 
@@ -237,6 +427,88 @@ export function noDuplicatesValidator(fieldName: string): CustomValidator {
 }
 
 // ---------------------------------------------------------------------------
+// Credential query filtering (Issue #1563)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fields that may be used as server-side credential query filters.  Only these
+ * fields are accepted; anything else is rejected to prevent unbounded or
+ * injection-prone queries.  `credential_type` and `status` are the common,
+ * indexed fields.
+ */
+export const CREDENTIAL_FILTER_FIELDS = ['credential_type', 'status'] as const;
+
+export type CredentialFilterField = (typeof CREDENTIAL_FILTER_FIELDS)[number];
+
+/**
+ * Allowed values per filter field.  Values are validated against this map so
+ * that only known, safe values reach the query layer.
+ */
+export const CREDENTIAL_FILTER_VALUES: Record<CredentialFilterField, readonly string[]> = {
+  credential_type: ['PE', 'EX', 'AC', 'DE'],
+  status: ['active', 'revoked', 'expired', 'pending'],
+};
+
+/**
+ * A single parsed credential filter, e.g. `{ field: 'credential_type', value: 'PE' }`.
+ */
+export interface CredentialFilter {
+  field: CredentialFilterField;
+  value: string;
+}
+
+/**
+ * Parses and validates credential query filters from a request query object.
+ *
+ * Supported syntax: `?credential_type=PE&status=active`.  Unknown fields,
+ * non-string values, and values outside the allow-list are rejected.
+ *
+ * Returns `{ filters }` on success or `{ error }` with a human-readable
+ * message on failure.  The returned filters are safe to pass to the query
+ * layer (parameterised), never interpolated into SQL.
+ */
+export function parseCredentialFilters(
+  query: unknown,
+): { filters: CredentialFilter[] } | { error: string } {
+  if (typeof query !== 'object' || query === null) {
+    return { filters: [] };
+  }
+
+  const filters: CredentialFilter[] = [];
+  const record = query as Record<string, unknown>;
+
+  for (const key of Object.keys(record)) {
+    if (!(CREDENTIAL_FILTER_FIELDS as readonly string[]).includes(key)) {
+      return { error: `Unknown filter field: ${key}` };
+    }
+
+    const raw = record[key];
+    if (typeof raw !== 'string') {
+      return { error: `Filter ${key} must be a single string value` };
+    }
+
+    const field = key as CredentialFilterField;
+    const allowed = CREDENTIAL_FILTER_VALUES[field];
+    if (!allowed.includes(raw)) {
+      return { error: `Invalid value for ${key}: ${raw}` };
+    }
+
+    filters.push({ field, value: raw });
+  }
+
+  return { filters };
+}
+
+/**
+ * Custom validator for the credential query endpoint.  Rejects unknown filter
+ * fields and invalid values before the handler runs.
+ */
+export const credentialFilterValidator: CustomValidator = (data) => {
+  const result = parseCredentialFilters(data);
+  return 'error' in result ? result.error : true;
+};
+
+// ---------------------------------------------------------------------------
 // Shared schemas
 // ---------------------------------------------------------------------------
 
@@ -247,128 +519,6 @@ export const schemas = {
       properties: {
         credential_ids: {
           type: 'array',
-          items: { type: 'integer', minimum: 1 },
-          minItems: 1,
-          maxItems: 50,
-        },
-        slice_id: { type: 'integer', minimum: 1 },
-      },
-      required: ['credential_ids', 'slice_id'],
-      additionalProperties: false,
-    },
-  },
+       
 
-  verifyBatchClaims: {
-    body: {
-      type: 'object',
-      properties: {
-        items: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 100,
-          items: {
-            type: 'object',
-            properties: {
-              credential_id: { type: 'integer', minimum: 1 },
-              claim_type: { type: 'string', minLength: 1, maxLength: 64 },
-            },
-            required: ['credential_id', 'claim_type'],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ['items'],
-      additionalProperties: false,
-    },
-  },
-
-  notificationPreferences: {
-    body: {
-      type: 'object',
-      properties: {
-        address: { type: 'string', minLength: 1 },
-        email: { type: 'string' },
-        phone: { type: 'string' },
-        channels: {
-          type: 'array',
-          items: { type: 'string', enum: ['email', 'sms'] },
-          minItems: 1,
-        },
-        events: {
-          type: 'array',
-          items: {
-            type: 'string',
-            enum: [
-              'credential_issued', 'credential_revoked', 'credential_suspended',
-              'credential_attested', 'credential_expiring',
-            ],
-          },
-          minItems: 1,
-        },
-        /** #928: optional per-type filter; 1=Degree, 2=License, 3=Employment */
-        credential_type_filters: {
-          type: 'array',
-          items: { type: 'integer', minimum: 1 },
-        },
-        enabled: { type: 'boolean' },
-      },
-      required: ['address', 'channels', 'events'],
-      additionalProperties: false,
-    },
-  },
-
-  notificationSend: {
-    body: {
-      type: 'object',
-      properties: {
-        address: { type: 'string', minLength: 1 },
-        event: {
-          type: 'string',
-          enum: [
-            'credential_issued', 'credential_revoked', 'credential_suspended',
-            'credential_attested', 'credential_expiring',
-          ],
-        },
-        credential_id: { type: 'integer', minimum: 1 },
-        /** #928: optional credential type for per-type preference filtering */
-        credential_type: { type: 'integer', minimum: 1 },
-        issuer: { type: 'string' },
-        holder: { type: 'string' },
-      },
-      required: ['address', 'event', 'credential_id'],
-      additionalProperties: false,
-    },
-  },
-
-  analyticsEvent: {
-    body: {
-      type: 'object',
-      properties: {
-        type: {
-          type: 'string',
-          enum: ['issued', 'attested', 'revoked', 'suspended', 'verified'],
-        },
-        credential_id: { type: 'string', minLength: 1 },
-        timestamp: { type: 'string', minLength: 1 },
-        issuer: { type: 'string' },
-        subject: { type: 'string' },
-        attestor: { type: 'string' },
-      },
-      required: ['type', 'credential_id', 'timestamp'],
-      additionalProperties: false,
-    },
-  },
-
-  auditVerify: {
-    body: {
-      type: 'object',
-      properties: {
-        batch_id: { type: 'integer', minimum: 1 },
-      },
-      required: ['batch_id'],
-      additionalProperties: false,
-    },
-  },
-};
-
-export default validate;
+/* … truncated 3359 chars — edit only what you need near the top … */

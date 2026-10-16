@@ -1,0 +1,106 @@
+WEBVTT
+Kind: captions
+Language: en
+
+NOTE
+Tutorial 3 — Issuing and Attesting a Credential.
+Planning timestamps generated from the script's scene budgets.
+Re-time against the final edit before publishing (see docs/video-tutorials.md).
+
+1
+00:00:00.500 --> 00:00:07.400
+Ledger data is public, so personal details
+never go on-chain.
+
+2
+00:00:07.500 --> 00:00:14.400
+The issuer keeps the credential document
+off-chain and publishes only its
+
+3
+00:00:14.500 --> 00:00:18.959
+SHA-256 hash.
+
+4
+00:00:19.059 --> 00:00:25.959
+Anyone holding the document can later
+prove it matches the hash.
+
+5
+00:01:15.500 --> 00:01:22.400
+The university issues the credential.
+
+6
+00:01:22.500 --> 00:01:29.400
+It signs as the issuer, names the holder
+as subject, sets credential type one
+
+7
+00:01:29.500 --> 00:01:36.400
+for a degree, and passes the metadata
+hash.
+
+8
+00:01:36.500 --> 00:01:43.400
+The nonce prevents the same issuance from
+being replayed.
+
+9
+00:01:43.500 --> 00:01:50.400
+The contract returns the credential ID.
+
+10
+00:03:00.500 --> 00:03:07.400
+Now the slice members attest.
+
+11
+00:03:07.500 --> 00:03:14.400
+Each attestor signs with its own key and
+states true to confirm the credential.
+
+12
+00:03:14.500 --> 00:03:21.400
+We'll have the university and the society
+attest.
+
+13
+00:03:21.500 --> 00:03:28.400
+Their weights add up to eighty, which is
+above our threshold of sixty.
+
+14
+00:05:00.500 --> 00:05:07.400
+Check the result with is_attested; it
+returns true.
+
+15
+00:05:07.500 --> 00:05:14.400
+The REST endpoint shows the same, with the
+attested weight and whether the
+
+16
+00:05:14.500 --> 00:05:21.400
+answer came from cache.
+
+17
+00:06:15.500 --> 00:06:22.400
+You issued a credential without putting
+personal data on-chain, and collected
+
+18
+00:06:22.500 --> 00:06:28.761
+enough attestations to reach quorum.
+
+19
+00:06:28.861 --> 00:06:35.761
+Issuers should protect their keys with
+hardware wallets; see the issuer security
+
+20
+00:06:35.861 --> 00:06:37.529
+checklist.
+
+21
+00:06:37.629 --> 00:06:44.529
+Next, we'll verify credentials as an
+employer.

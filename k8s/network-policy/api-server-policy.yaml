@@ -1,0 +1,150 @@
+# k8s/network-policy/api-server-policy.yaml — Issue #1655: Network Policy for Pod Security.
+#
+# Explicit ingress + egress rules for the QuorumProof API server pods.
+#
+# Ingress:
+#   - Port 3001 from ingress-nginx pods (production HTTP traffic)
+#   - Port 3001 from Prometheus scraper pods (metrics collection)
+#   - Port 3001 from quorumproof-api-server pods in the same namespace
+#     (readiness/liveness probes from the kubelet use the node IP, not a pod
+#     IP, so a node-level CIDR rule handles that — see kube-system allow below)
+#
+# Egress:
+#   - DNS on port 53 (UDP + TCP) to kube-dns in kube-system
+#   - Port 5432 to the PostgreSQL database pods/service
+#   - Port 6379 to the Redis cache pods/service
+#   - Port 443 to Soroban RPC (Stellar testnet/mainnet) via CIDR
+#   - Port 443 to external webhooks/notifications (Slack, PagerDuty)
+#   - Port 9090 to the Prometheus server within the monitoring namespace
+#
+# Lateral movement blocked:
+#   - API server pods cannot reach other application pods in the namespace
+#     on any port other than the ones explicitly listed above.
+#   - No pod-to-pod communication on arbitrary ports.
+
+---
+# ── Ingress policy ────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-server-ingress
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/managed-by: network-policy
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      app: quorumproof-api-server
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow HTTP traffic from the ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - port: 3001
+          protocol: TCP
+
+    # Allow Prometheus to scrape metrics
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 3001
+          protocol: TCP
+
+    # Allow kubelet health probes from the node network (10.0.0.0/8 covers
+    # most Kubernetes node CIDR ranges; adjust for your cluster's node CIDR).
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - port: 3001
+          protocol: TCP
+
+---
+# ── Egress policy ─────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-server-egress
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/managed-by: network-policy
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      app: quorumproof-api-server
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution (kube-dns in kube-system)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # PostgreSQL database
+    - to:
+        - podSelector:
+            matchLabels:
+              app: quorumproof-postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+
+    # Redis cache
+    - to:
+        - podSelector:
+            matchLabels:
+              app: quorumproof-redis
+      ports:
+        - port: 6379
+          protocol: TCP
+
+    # Soroban RPC (Stellar testnet: 34.223.49.0/24, mainnet: various — allow all HTTPS)
+    # Production: replace with specific Stellar RPC CIDR blocks from your
+    # cloud provider's routing table for tighter control.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8       # Block lateral movement to cluster-internal
+              - 172.16.0.0/12    # Block RFC-1918 (private) address ranges
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+
+    # Prometheus server in the monitoring namespace (push rules, federation)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 9090
+          protocol: TCP

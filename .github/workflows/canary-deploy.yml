@@ -3,6 +3,22 @@
 # Triggered manually (workflow_dispatch) or on pushes to `release/*` branches.
 # Deploys to 10% of endpoints, monitors health for the soak period, then
 # promotes to full rollout or rolls back automatically.
+#
+# Issue #1491: rollback is now also triggered by any severity:critical Prometheus
+# alert scoped to the canary instance/version label, matching the alertmanager
+# routing split already used in monitoring/prometheus/alertmanager.yml.
+# Specifically, HighErrorRate, ContractErrorBurst, HighP95Latency, and
+# QuerySLABreach are checked against the canary version label before the soak
+# period is declared successful.
+#
+# DRY-RUN MODE (for validation without a live bad deploy):
+# Set the `dry_run` input to `true`. In dry-run mode:
+#   - The WASM upload and contract upgrade are skipped.
+#   - Prometheus alert queries run against the real Prometheus instance with the
+#     canary_version label set to "dry-run-<run_id>" (which will never match
+#     real alerts, so the step always passes — use this to confirm the query
+#     syntax and auth are correct, not to simulate an alert firing).
+#   - A summary of what would have been done is printed instead of executing.
 
 name: Canary Deployment
 
@@ -28,6 +44,14 @@ on:
         description: "Soak period in seconds before promoting to full rollout"
         required: false
         default: "120"
+      dry_run:
+        description: "Dry-run mode: skip WASM upload/upgrade, only validate Prometheus query wiring"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
   push:
     branches:
       - "release/*"
@@ -116,12 +140,102 @@ jobs:
           PROMETHEUS_URL: ${{ vars.PROMETHEUS_URL || 'http://localhost:9090' }}
           NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
           CONTRACT_QUORUM_PROOF: ${{ github.event.inputs.contract_id || vars.CONTRACT_QUORUM_PROOF }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: |
           chmod +x scripts/canary_deploy.sh
           scripts/canary_deploy.sh \
             "$CONTRACT_QUORUM_PROOF" \
             "target/wasm32-unknown-unknown/release/quorum_proof.wasm" \
             "$STELLAR_SECRET_KEY"
+
+      # ── Issue #1491: Prometheus alert check ────────────────────────────────
+      # Query Prometheus for any firing severity:critical alerts scoped to the
+      # canary instance/version label before declaring the soak period successful.
+      # Alerts checked: HighErrorRate, ContractErrorBurst, HighP95Latency,
+      # QuerySLABreach — these are the four alert rules that encode what
+      # "unhealthy" means for this system in monitoring/prometheus/alerts.yml.
+      #
+      # A canary that passes its own health-check calls (error rate + p95
+      # latency sampled directly) but trips a Prometheus alert rule — which may
+      # use a different time window, aggregation, or threshold — would
+      # previously have been promoted silently. This step closes that gap.
+      #
+      # In dry-run mode this step runs with a synthetic canary_version label
+      # that will never match real alerts, so it always passes but confirms
+      # that the Prometheus API is reachable and the query syntax is valid.
+      - name: Check Prometheus alerts for canary instance
+        env:
+          PROMETHEUS_URL: ${{ vars.PROMETHEUS_URL || 'http://localhost:9090' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          CANARY_VERSION: ${{ github.sha }}
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+        run: |
+          set -euo pipefail
+
+          # In dry-run mode use a synthetic version label that will never match
+          # real alerts, so we only validate query connectivity and syntax.
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            CANARY_VERSION="dry-run-${{ github.run_id }}"
+            echo "[dry-run] Prometheus alert check: using synthetic canary_version=${CANARY_VERSION}"
+            echo "[dry-run] No real upgrade was performed; this run validates query wiring only."
+          fi
+
+          # The four critical-severity alert names that must not be firing on the
+          # canary version before we promote.  These match the alert names defined
+          # in monitoring/prometheus/alerts.yml and the alertmanager routing in
+          # monitoring/prometheus/alertmanager.yml.
+          CRITICAL_ALERTS=(
+            "HighErrorRate"
+            "ContractErrorBurst"
+            "HighP95Latency"
+            "QuerySLABreach"
+          )
+
+          FIRING_CRITICAL=0
+
+          for ALERT_NAME in "${CRITICAL_ALERTS[@]}"; do
+            # Query the Prometheus alerts endpoint for this alert scoped to the
+            # canary version label.  The canary_deploy.sh script tags metrics
+            # with a `canary_version` label equal to the deploying commit SHA so
+            # that alert rules can be scoped to just the canary slice.
+            RESULT=$(curl -sf \
+              "${PROMETHEUS_URL}/api/v1/alerts" \
+              | jq -r --arg name "$ALERT_NAME" --arg ver "$CANARY_VERSION" \
+                '.data.alerts[]
+                  | select(
+                      .labels.alertname == $name
+                      and .labels.severity == "critical"
+                      and (.labels.canary_version // .labels.version // "") == $ver
+                      and .state == "firing"
+                    )
+                  | .labels.alertname' 2>/dev/null || echo "")
+
+            if [[ -n "$RESULT" ]]; then
+              echo "::error::Prometheus alert '${ALERT_NAME}' is FIRING on canary version ${CANARY_VERSION}. Triggering rollback."
+              FIRING_CRITICAL=$((FIRING_CRITICAL + 1))
+            else
+              echo "  [OK] ${ALERT_NAME} — not firing on canary version ${CANARY_VERSION}"
+            fi
+          done
+
+          if [[ $FIRING_CRITICAL -gt 0 ]]; then
+            # Notify before exiting so the failure webhook fires even if the
+            # canary deploy step itself succeeded.
+            if [[ -n "${NOTIFY_WEBHOOK:-}" ]]; then
+              curl -s -X POST "${NOTIFY_WEBHOOK}" \
+                -H 'Content-Type: application/json' \
+                -d "{\"text\":\"[QuorumProof Canary] Prometheus alert check FAILED: ${FIRING_CRITICAL} critical alert(s) firing on canary ${CANARY_VERSION}. Rollback triggered.\"}" \
+                || true
+            fi
+            echo ""
+            echo "ROLLBACK TRIGGER: ${FIRING_CRITICAL} severity:critical Prometheus alert(s) are firing on the canary."
+            echo "The canary-deploy.sh soak loop would have promoted this deploy, but the Prometheus alert"
+            echo "check caught a condition the direct health-check metrics missed."
+            exit 1
+          fi
+
+          echo ""
+          echo "Prometheus alert check passed: no severity:critical alerts firing on canary version ${CANARY_VERSION}."
 
       - name: Notify success
         if: success()

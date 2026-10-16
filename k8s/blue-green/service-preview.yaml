@@ -1,0 +1,27 @@
+# Preview api-server Service — Issue #1648: blue-green deployment.
+#
+# Always points at the *idle* slot, so a new release can be smoke-tested
+# in-cluster (http://quorumproof-api-server-preview.quorumproof.svc) before
+# any production traffic reaches it. scripts/blue_green_deploy.sh keeps this
+# selector opposite to the live Service. Never expose this via Ingress.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: quorumproof-api-server-preview
+  namespace: quorumproof
+  labels:
+    app: quorumproof-api-server
+    app.kubernetes.io/name: quorumproof-api-server
+    app.kubernetes.io/component: api-preview
+    app.kubernetes.io/part-of: quorumproof
+spec:
+  selector:
+    app: quorumproof-api-server
+    slot: green
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  type: ClusterIP

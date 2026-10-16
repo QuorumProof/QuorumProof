@@ -8,6 +8,16 @@ route:
   repeat_interval: 12h
   receiver: quorumproof-ops
   routes:
+    # Issue #1661 — Cost alerts go to the platform team channel first so
+    # engineers can review before escalating. CostBudgetCritical also pages
+    # on-call via PagerDuty (matched by the severity:critical route below).
+    - match:
+        team: platform
+      receiver: quorumproof-platform
+      group_wait: 60s
+      repeat_interval: 4h
+      continue: true   # also evaluated by subsequent routes (severity:critical)
+
     # Critical-severity alerts (DisputeRaised, ContractUpgradeDetected, and
     # other `severity: critical` rules in alerts.yml) page on-call via
     # PagerDuty in addition to Slack. Everything else (warning) is Slack-only
@@ -28,6 +38,23 @@ receivers:
         channel: "#quorumproof-alerts"
         title: "{{ .GroupLabels.alertname }}"
         text: "{{ range .Alerts }}{{ .Annotations.description }}{{ end }}"
+        send_resolved: true
+
+  # Issue #1661 — Platform team receiver for cost alerts.
+  # Routes to a dedicated #quorumproof-cost channel so billing anomalies
+  # are separated from operational noise. CostBudgetCritical also triggers
+  # the quorumproof-critical receiver via `continue: true` on the route above.
+  - name: quorumproof-platform
+    slack_configs:
+      - api_url: "${SLACK_ALERT_WEBHOOK_URL}"
+        channel: "#quorumproof-cost"
+        title: ":moneybag: {{ .GroupLabels.alertname }}"
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Details:* {{ .Annotations.description }}
+          *Runbook:* <https://github.com/QuorumProof/QuorumProof/blob/main/docs/cost-alert-thresholds.md|Cost Alert Thresholds>
+          {{ end }}
         send_resolved: true
 
   - name: quorumproof-critical

@@ -1,0 +1,11 @@
+# .trivyignore — accepted container vulnerabilities (#1651).
+#
+# Every entry MUST have:
+#   * the CVE / GHSA / misconfiguration id
+#   * an `exp:` expiry date (max 90 days out) so the exception is re-reviewed
+#   * a comment with justification, owner, and tracking issue
+#
+# Example:
+#   # Not reachable: only affects the `foo` CLI, which is not in the runtime image.
+#   # Owner: @security-team  Tracking: #1234
+#   CVE-2024-00000 exp:2026-12-31

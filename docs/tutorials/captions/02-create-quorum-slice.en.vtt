@@ -1,0 +1,123 @@
+WEBVTT
+Kind: captions
+Language: en
+
+NOTE
+Tutorial 2 — Creating a Quorum Slice.
+Planning timestamps generated from the script's scene budgets.
+Re-time against the final edit before publishing (see docs/video-tutorials.md).
+
+1
+00:00:00.500 --> 00:00:07.400
+A quorum slice is your personal trust
+network.
+
+2
+00:00:07.500 --> 00:00:14.400
+It lists the institutions you trust to
+vouch for you, such as your university,
+
+3
+00:00:14.500 --> 00:00:21.400
+your licensing body, and a former
+employer.
+
+4
+00:00:21.500 --> 00:00:28.400
+Each attestor has a weight from one to one
+hundred, and the slice has a
+
+5
+00:00:28.500 --> 00:00:30.539
+threshold.
+
+6
+00:00:30.639 --> 00:00:37.539
+A credential is trusted once the combined
+weight of attestors who signed it
+
+7
+00:00:37.639 --> 00:00:42.458
+reaches that threshold.
+
+8
+00:01:15.500 --> 00:01:22.400
+For this demo we'll create four testnet
+identities: the holder, a university, an
+
+9
+00:01:22.500 --> 00:01:29.400
+engineering society, and an employer.
+
+10
+00:01:29.500 --> 00:01:36.400
+Export the quorum_proof contract ID from
+the previous video so we can reuse it.
+
+11
+00:02:15.500 --> 00:02:22.400
+Now call create_slice.
+
+12
+00:02:22.500 --> 00:02:29.400
+The holder is the creator and signs the
+transaction.
+
+13
+00:02:29.500 --> 00:02:36.400
+We pass three attestors with weights
+forty, forty, and twenty, and a threshold
+
+14
+00:02:36.500 --> 00:02:39.616
+of sixty.
+
+15
+00:02:39.716 --> 00:02:46.616
+That means any two of the university and
+society, or either one plus the
+
+16
+00:02:46.716 --> 00:02:53.616
+employer, is enough.
+
+17
+00:02:53.716 --> 00:03:00.616
+The contract returns the new slice ID.
+
+18
+00:04:00.500 --> 00:04:07.400
+Let's read it back, first directly from
+the contract with get_slice, then
+
+19
+00:04:07.500 --> 00:04:14.400
+through the REST API.
+
+20
+00:04:14.500 --> 00:04:21.400
+Both show the same attestors, weights, and
+threshold.
+
+21
+00:04:21.500 --> 00:04:28.400
+Verifiers will usually use the API.
+
+22
+00:05:15.500 --> 00:05:22.400
+You created a weighted quorum slice and
+read it back two ways.
+
+23
+00:05:22.500 --> 00:05:29.400
+Choose weights carefully; no single
+attestor should be able to reach the
+
+24
+00:05:29.500 --> 00:05:36.400
+threshold alone unless you intend that.
+
+25
+00:05:36.500 --> 00:05:43.400
+Next, we'll issue a credential and have
+the slice attest to it.

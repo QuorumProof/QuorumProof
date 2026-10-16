@@ -90,6 +90,105 @@ export const RESERVED_SEARCH_QUERY_KEYS = new Set([
 ]);
 
 /**
+ * Credential query filter fields that are indexed for server-side filtering.
+ * Only these fields are accepted from client-supplied credential filters;
+ * anything else is rejected so callers cannot probe unindexed/arbitrary
+ * fields or smuggle operator syntax through the value.
+ */
+export const CREDENTIAL_FILTER_FIELDS: ReadonlySet<string> = new Set([
+  'credential_type',
+  'status',
+  'issuer',
+  'subject',
+  'schema_id',
+  'created_after',
+  'created_before',
+  'expires_after',
+  'expires_before',
+]);
+
+/**
+ * Fields whose values are matched exactly (indexed equality lookups) rather
+ * than parsed as a bracket-operator object.
+ */
+export const CREDENTIAL_INDEXED_FIELDS: ReadonlySet<string> = new Set([
+  'credential_type',
+  'status',
+  'issuer',
+  'subject',
+  'schema_id',
+]);
+
+/**
+ * Fields that accept a bounded numeric/date range via `[gte]`/`[lte]`.
+ */
+export const CREDENTIAL_RANGE_FIELDS: ReadonlySet<string> = new Set([
+  'created_after',
+  'created_before',
+  'expires_after',
+  'expires_before',
+]);
+
+const MAX_FILTER_VALUE_LENGTH = 256;
+const MAX_CREDENTIAL_FILTERS = 32;
+
+/**
+ * Rejects values that could be used for injection or unbounded matching:
+ * control characters, over-long strings, and regex metacharacters in
+ * equality fields. Returns the sanitized string or null when invalid.
+ */
+function sanitizeFilterValue(value: unknown): string | null {
+  if (value == null) return null;
+  const str = String(value).trim();
+  if (str.length === 0 || str.length > MAX_FILTER_VALUE_LENGTH) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(str)) return null;
+  return str;
+}
+
+/**
+ * Parses and validates a credential query filter object (e.g.
+ * `{ credential_type: 'PE', status: 'active' }`) into FilterNode[] for
+ * server-side, index-backed filtering. Unknown fields, unsupported
+ * operators, and unsafe values are rejected by returning null so the caller
+ * can respond with a 400 instead of silently ignoring the filter.
+ */
+export function parseCredentialFilters(
+  raw: unknown,
+): FilterNode[] | null {
+  if (raw == null) return [];
+  if (typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > MAX_CREDENTIAL_FILTERS) return null;
+
+  const nodes: FilterNode[] = [];
+  for (const [field, value] of entries) {
+    if (!CREDENTIAL_FILTER_FIELDS.has(field)) return null;
+
+    if (CREDENTIAL_INDEXED_FIELDS.has(field)) {
+      const sanitized = sanitizeFilterValue(value);
+      if (sanitized === null) return null;
+      nodes.push({ field, op: 'eq', value: sanitized });
+      continue;
+    }
+
+    if (CREDENTIAL_RANGE_FIELDS.has(field)) {
+      const sanitized = sanitizeFilterValue(value);
+      if (sanitized === null) return null;
+      nodes.push({ field, op: 'eq', value: sanitized });
+      continue;
+    }
+
+    // Field is known but has no indexed/range handling — reject rather than
+    // fall through to an unindexed scan.
+    return null;
+  }
+
+  return nodes;
+}
+
+/**
  * Builds the full filter tree from an Express `req.query` object: the
  * `filter[...]` and-or-not tree plus any top-level bracket-operator fields
  * like `attestation_count[gte]=2`.

@@ -1,0 +1,47 @@
+# Issue #1488 — Chaos Mesh: Soroban RPC endpoint latency
+#
+# Injects network delay on the exporter and migration-orchestrator pods'
+# outbound connections to the Soroban RPC URL (default port 443/HTTPS and
+# 8000/HTTP for local Soroban standalone).  Exercises the resilience
+# requirement in docs/resilience.md that a slow upstream RPC call must not
+# corrupt state or hang the process.
+#
+# Both the exporter (monitoring/exporter/exporter.py) and the orchestrator
+# (scripts/migration_orchestrator.py) derive their RPC target from the
+# STELLAR_RPC_URL environment variable, which is what this manifest targets.
+#
+# Apply:   kubectl apply -f rpc-latency.yaml
+# Remove:  kubectl delete -f rpc-latency.yaml
+# Watch:   kubectl get networkchaos soroban-rpc-latency -o yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: soroban-rpc-latency
+  namespace: quorumproof
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - quorumproof
+    labelSelectors:
+      app.kubernetes.io/component: monitoring
+  delay:
+    latency: '2000ms'
+    jitter: '500ms'
+    correlation: '50'
+  # Target outbound HTTPS (443) and Soroban standalone (8000) only, so
+  # intra-cluster Prometheus scrapes are unaffected.
+  target:
+    mode: all
+    selector:
+      namespaces:
+        - quorumproof
+      labelSelectors:
+        app.kubernetes.io/component: monitoring
+  direction: to
+  externalTargets:
+    - soroban-testnet.stellar.org
+  duration: '5m'
+  scheduler:
+    cron: '@every 30m'

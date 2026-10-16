@@ -2,9 +2,11 @@
 
 A guide for diagnosing problems encountered while using QuorumProof —
 whether you're an issuer, a verifier, or an end user whose credential
-isn't behaving as expected. It's organized as: common errors and fixes, a
-decision tree to route you to the right fix quickly, and a guide to
-reading the logs you'll be looking at along the way.
+isn't behaving as expected — as well as for operators running the API
+server and infrastructure. It's organized as: common errors and fixes,
+step-by-step diagnostic procedures, decision trees to route you to the
+right fix quickly, and a guide to reading the logs you'll be looking at
+along the way.
 
 For integration-specific failures (SDK/RPC-level issues hit while
 *building* against QuorumProof), see
@@ -17,14 +19,21 @@ credential, transaction, or deployment.
 ## Table of Contents
 
 1. [Common Errors and Solutions](#1-common-errors-and-solutions)
-2. [Decision Tree](#2-decision-tree)
-3. [Logs Interpretation Guide](#3-logs-interpretation-guide)
-4. [Doc Cross-Reference Drift](#4-doc-cross-reference-drift)
-5. [Where to Go Next](#5-where-to-go-next)
+   - [1.1 Contract errors](#11-contract-errors)
+   - [1.2 API server issues](#12-api-server-issues)
+   - [1.3 Deployment and configuration issues](#13-deployment-and-configuration-issues)
+   - [1.4 Infrastructure and monitoring issues](#14-infrastructure-and-monitoring-issues)
+2. [Diagnostic Procedures](#2-diagnostic-procedures)
+3. [Decision Tree](#3-decision-tree)
+4. [Logs Interpretation Guide](#4-logs-interpretation-guide)
+5. [Doc Cross-Reference Drift](#5-doc-cross-reference-drift)
+6. [Where to Go Next](#6-where-to-go-next)
 
 ---
 
 ## 1. Common Errors and Solutions
+
+### 1.1 Contract errors
 
 | Error / Symptom | What it means | Solution |
 |---|---|---|
@@ -44,9 +53,162 @@ contracts, is in [Error Code Reference](error-codes.md) — use the table
 above to triage quickly, then look up the exact code there for the
 authoritative recovery steps.
 
+### 1.2 API server issues
+
+| Error / Symptom | What it means | Solution |
+|---|---|---|
+| `GET /health` returns `503` with `"status": "unhealthy"` | At least one registered health check failed (e.g. heap usage critical) | Read the `checks` object in the response body to see which check failed; for `memory`, follow [D3](#d3-api-server-unhealthy-or-slow) |
+| `GET /health` returns `200` with `"status": "degraded"` | The server is serving, but a check is in warning territory (e.g. heap usage high) | Not an outage — watch the trend; if it persists, see [Performance Tuning Guide](performance-tuning-guide.md) |
+| `GET /health/ready` returns `503` | The instance hasn't finished starting (or a readiness check failed) | Kubernetes won't route traffic to it — expected for the first seconds after start. If it persists, check startup logs for config errors (§1.3) |
+| `401 Unauthorized` | Missing/expired Bearer JWT or API key | Re-authenticate; confirm the `Authorization: Bearer …` or `x-api-key` header is actually sent (proxies sometimes strip it) |
+| `403 Forbidden` with "Only the credential holder may …" | Authenticated, but not as the party allowed to perform this action | Use the credential holder's session, not the issuer's/verifier's |
+| `429 Too Many Requests` | Rate limit exceeded | Honor the `Retry-After` header and back off exponentially; if a legitimate integration needs more, request a higher per-key limit rather than retrying harder |
+| Verification responses are slow or return cached/stale results; `RpcCircuitBreakerOpen` alert firing | The Soroban RPC circuit breaker opened after repeated RPC failures and is failing fast | Diagnose the RPC endpoint with [D2](#d2-rpc-connectivity); the breaker closes on its own once the RPC recovers |
+| WebSocket clients miss events; `SustainedWsMessageDrops` / `WsMessagesDropping` firing | Slow consumers overflowed their send queue (`WS_SEND_QUEUE_MAX_MESSAGES` / `WS_SEND_QUEUE_MAX_BYTES`) | See [Operational Runbook — WS Message Drops](operational-runbook.md#ws-message-drops) and [WebSocket Scaling](websocket-scaling.md) |
+| Requests hang, then time out; `DbPoolSaturated` firing | All database connections are in use | Look for slow queries/locks first; raise `DATABASE_POOL_MAX` only after confirming the database can accept more connections |
+
+### 1.3 Deployment and configuration issues
+
+| Error / Symptom | What it means | Solution |
+|---|---|---|
+| API server reads succeed but return "not found" for everything | `CONTRACT_QUORUM_PROOF` points at a contract on a different network than `STELLAR_RPC_URL` | Run `./scripts/validate_env.sh` — it checks that `STELLAR_NETWORK`, the RPC URL and contract addresses agree with `environments.toml` |
+| `sbt_registry.mint` fails for a credential that exists | `sbt_registry` was initialized with the wrong `quorum_proof` contract ID | Contracts must be deployed/initialized in the order in [Architecture — Deployment Order](architecture.md#deployment-order); redeploy `sbt_registry` pointing at the correct ID |
+| CI testnet deploy failed and the manifest rolled back | `testnet_smoke_test.sh` failed after `deploy_testnet.sh`, so `testnet_rollback.sh` restored the previous manifest | Expected safety behaviour. Read the smoke-test step output in the workflow run to find the failing call; fix and re-run |
+| Contract upgrade rolled back automatically | `upgrade_rollback.sh` post-upgrade smoke tests failed and the previous WASM hash was restored | See [Rollback Runbook](runbook-rollback.md); run `./scripts/pre_upgrade_checks.sh` against the new WASM before retrying |
+| `StateVersionMismatch` / `MigrationStalled` alert | A contract upgrade left state at an older schema version, or migration didn't finish | Follow [Contract Upgrade Guide](contract-upgrade-guide.md) and [Migration Invariants](migration-invariants.md); do not unpause until the migration verifier passes |
+| `npm run migrate` fails mid-way | A database migration errored | Fix forward or `npm run migrate:rollback`; see [Database Migrations](database-migrations.md) |
+| Blue/green switch left traffic on the old version | The idle slot failed preview health checks, so the switch was refused | `./scripts/blue_green_deploy.sh status` to see which slot is live; inspect the idle slot's pods. See [Blue-Green Deployment](blue-green-deployment.md) |
+
+### 1.4 Infrastructure and monitoring issues
+
+| Error / Symptom | What it means | Solution |
+|---|---|---|
+| `BackupMissing` / `BackupVerificationFailed` | The scheduled backup didn't run, or its integrity check failed | `gh run list --workflow backup.yml`; re-run the workflow; verify with `./scripts/verify_backup.sh`. See [Backup Verification](backup-verification.md) |
+| `RegionFailoverActive` / `RegionPeerUnreachable` | The API server has failed over (or cannot see its peer region) | `curl <api>/health/region`; follow [Multi-Region Failover](multi-region-failover.md) |
+| Grafana dashboards are empty | Prometheus isn't scraping the exporter or the API server | Open Prometheus → *Status → Targets*; fix any `DOWN` target. See [Observability Setup Guide](observability-setup-guide.md) |
+| Alerts fire but nobody is paged | Alertmanager routing/receiver misconfigured | Re-render with `./scripts/render_alertmanager_config.sh` and check the receiver secrets; see [Critical Event Alerting](critical-event-alerting.md) |
+| Terraform plan shows unexpected changes | Infrastructure drift (manual change outside Terraform) | See [Infrastructure as Code — drift detection](infrastructure-as-code.md); never `apply` a plan you don't understand |
+
 ---
 
-## 2. Decision Tree
+## 2. Diagnostic Procedures
+
+Each procedure is a short, ordered checklist. Run the steps in order and stop
+at the first one that explains the symptom. Commands assume the environment
+variables from `.env` (`STELLAR_NETWORK`, `STELLAR_RPC_URL`,
+`CONTRACT_QUORUM_PROOF`, …) are exported.
+
+### D1. Credential verification returns the wrong result
+
+1. **Confirm the network and contract.**
+   ```bash
+   ./scripts/validate_env.sh
+   ```
+2. **Read the credential directly from the contract** (bypasses API caches):
+   ```bash
+   stellar contract invoke --network "$STELLAR_NETWORK" --contract "$CONTRACT_QUORUM_PROOF" \
+     -- get_credential --credential_id <ID>
+   ```
+   Check `revoked`, `suspended` and expiry fields.
+3. **Check attestation status against the slice** used at attestation time:
+   `get_attestation_count` vs. the slice's threshold (`get_slice`).
+4. **Check the SBT** — `quorum_proof.verify_engineer` requires the subject to
+   hold an SBT for the credential (see [Architecture](architecture.md#cross-contract-call-map)).
+5. **Compare with the API response.** If the contract is right but the API is
+   wrong, the verification cache is stale — see
+   [Verification Cache Invalidation](verification-cache-invalidation.md).
+
+### D2. RPC connectivity
+
+1. **Is the RPC endpoint up?**
+   ```bash
+   curl -s -X POST "$STELLAR_RPC_URL" -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+   ```
+   Expect `"status":"healthy"`.
+2. **Is it on the right network and current?** Call `getLatestLedger` twice a
+   few seconds apart — the sequence should advance every ~5–6s. A stuck
+   sequence means the node is lagging.
+3. **Is the API server's circuit breaker open?** Check the
+   `quorumproof_rpc_circuit_breaker_state` metric (`2` = open).
+4. **Fail over** to a secondary RPC provider by changing `STELLAR_RPC_URL` and
+   rolling the deployment if the primary stays unhealthy for more than 5
+   minutes; record it in the incident log.
+
+### D3. API server unhealthy or slow
+
+1. `curl -s <api>/health | jq` — which check is failing?
+2. `curl -s <api>/health/ready` and `/health/live` — is it not ready (startup /
+   config), or not live (process wedged)?
+3. `kubectl -n <ns> get pods -l app=quorumproof-api-server` — restarts,
+   `CrashLoopBackOff`, `OOMKilled`?
+4. `kubectl -n <ns> logs <pod> --previous` — the last crash's logs.
+5. Check the latency / error dashboards: a spike in `HighP95Latency` with
+   `DbPoolSaturated` points to the database; with `RpcCircuitBreakerOpen`, to
+   the RPC (D2).
+6. If the problem started with a release, roll back first and investigate
+   later — see [Rollback Runbook](runbook-rollback.md).
+
+### D4. Transaction submitted but never lands
+
+1. Did you poll `getTransaction` after `sendTransaction`? `sendTransaction` only
+   acknowledges receipt.
+2. `stellar transaction info <TX_HASH>` (or `getTransaction`) —
+   `NOT_FOUND` after ~30s usually means the transaction was dropped (bad
+   sequence number or expired time bounds): rebuild and resubmit.
+3. `FAILED` — decode the result XDR; a contract error code maps to §1.1.
+4. Resource/fee errors — re-simulate instead of reusing an old footprint.
+
+### D5. Contract is paused unexpectedly
+
+1. `stellar contract invoke … -- is_paused`.
+2. Look for the `Paused` event and the admin address that emitted it in the
+   contract event stream (§4).
+3. Check the incident channel — a pause is normally part of the
+   [Incident Response Runbook](runbook-incident-response.md). **Do not
+   unpause** without the incident commander's sign-off.
+4. If nobody claims the pause, treat it as a potential admin-key compromise and
+   escalate as SEV-1.
+
+### D6. Collecting a support bundle
+
+When escalating, attach:
+
+- Network, contract IDs and API server version/image tag.
+- Exact error strings, including `Error(Contract, #N)`.
+- Transaction hashes and timestamps (UTC).
+- `curl -s <api>/health | jq` output.
+- Relevant log lines (with secrets and personal data redacted — see
+  [Log Retention Policy](log-retention-policy.md)).
+
+---
+
+---
+
+## 3. Decision Tree
+
+### 3.1 Triage: where is the problem?
+
+Start here to pick the right diagnostic procedure.
+
+```mermaid
+flowchart TD
+    A[Something is wrong] --> B{Who is affected?}
+    B -->|One credential / one user| C{Did a call return<br/>Error&#40;Contract, #N&#41;?}
+    B -->|Everyone| D{Does GET /health<br/>return 200?}
+    C -->|Yes| E[Look up #N in §1.1<br/>and Error Code Reference]
+    C -->|No, result is just wrong| F[D1: verification<br/>returns wrong result]
+    C -->|No result at all| G[D4: transaction<br/>never lands]
+    D -->|No / times out| H[D3: API server<br/>unhealthy or slow]
+    D -->|Yes| I{Are contract calls<br/>failing?}
+    I -->|ContractPaused| J[D5: contract paused]
+    I -->|Timeouts / RPC errors| K[D2: RPC connectivity]
+    I -->|No, only some features| L{Started right<br/>after a release?}
+    L -->|Yes| M[Rollback Runbook]
+    L -->|No| N[§1.2 – §1.4 tables,<br/>then escalate with D6]
+```
+
+### 3.2 Detailed tree for contract-level symptoms
 
 Start at the top and follow the first branch that matches your symptom.
 
@@ -69,7 +231,7 @@ Something isn't working. What are you seeing?
 │   └─ Is it something else / unrecognized?
 │         → Capture the full error string + tx hash, check Error Code
 │           Reference for the code's contract of origin, then escalate
-│           (see §4) if still unclear.
+│           (see §6) if still unclear.
 │
 ├─ No error was raised, but the result looks wrong
 │   │
@@ -100,7 +262,7 @@ Something isn't working. What are you seeing?
 
 ---
 
-## 3. Logs Interpretation Guide
+## 4. Logs Interpretation Guide
 
 QuorumProof produces two kinds of logs you'll typically be reading:
 on-chain contract events (the authoritative record) and your own
@@ -146,7 +308,7 @@ If you operate an issuer, verifier, or auditor backend:
   (submitted, included in a ledger, but the contract call itself panicked)
   — they need different fixes. Simulation failures are usually
   infrastructure/SDK issues; execution failures are usually the contract
-  error codes covered in §1.
+  error codes covered in §1.1.
 - If you run the on-chain snapshot/backup tooling from
   [Backup System](backup-system.md), the scheduled GitHub Actions workflow
   (`.github/workflows/backup.yml`) logs are the first place to check for a
@@ -154,7 +316,7 @@ If you operate an issuer, verifier, or auditor backend:
 
 ---
 
-## 4. Doc Cross-Reference Drift
+## 5. Doc Cross-Reference Drift
 
 With 70+ interlinked docs and ADRs, broken internal links and numbering
 collisions are an ongoing maintenance hazard. This section covers the known
@@ -197,8 +359,11 @@ The renaming work is tracked in
 
 ---
 
-## 5. Where to Go Next
+## 6. Where to Go Next
 
+- [Incident Response Runbook](runbook-incident-response.md) — if this is an outage, not a single-user problem
+- [Rollback Runbook](runbook-rollback.md) — undoing a bad release
+- [System Architecture Diagrams](architecture-diagrams.md) — how requests flow between components
 - [Error Code Reference](error-codes.md) — authoritative per-code recovery
 - [Integration Patterns Guide](integration-patterns-guide.md) — patterns and retry logic for developers
 - [Audit Log Format](audit-log-format.md) — full event schema

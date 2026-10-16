@@ -1,0 +1,36 @@
+# Live api-server Service — Issue #1648: blue-green deployment.
+#
+# Production traffic goes to whichever slot `spec.selector.slot` names.
+# scripts/blue_green_deploy.sh switches traffic atomically by patching this
+# selector; rollback is the same patch pointed back at the previous slot.
+#
+# The `quorumproof.io/active-slot` / `quorumproof.io/previous-slot`
+# annotations are maintained by the script and are what `rollback` reads.
+#
+# NOTE: this replaces the Service in k8s/api-server-deployment.yaml when
+# running blue-green — do not apply both, or the old Service (selector
+# `app` only) will route to both slots at once.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: quorumproof-api-server
+  namespace: quorumproof
+  labels:
+    app: quorumproof-api-server
+    app.kubernetes.io/name: quorumproof-api-server
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: quorumproof
+  annotations:
+    quorumproof.io/active-slot: blue
+    quorumproof.io/previous-slot: ""
+spec:
+  selector:
+    app: quorumproof-api-server
+    slot: blue
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  type: ClusterIP

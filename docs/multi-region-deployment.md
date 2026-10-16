@@ -4,6 +4,8 @@
 
 QuorumProof supports deployment to multiple Stellar networks (testnet, mainnet) with automated failover and consistency verification. This guide covers deployment strategies, failover procedures, and cross-region verification.
 
+> **See also:** [multi-region-failover.md](./multi-region-failover.md) for active/passive failover of the api-server, database and S3 data across AWS regions (#1650).
+
 ---
 
 ## Architecture

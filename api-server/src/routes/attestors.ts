@@ -259,13 +259,15 @@ export function createAttestorsRouter(): Router {
   /**
    * GET /api/attestors
    *
-   * Returns a filterable list of registered attestors.
+   * Returns a filterable, cursor-paginated list of registered attestors.
    *
    * Query params:
    *   type    — exact match on attestor type
    *   region  — exact match on region (case-insensitive)
    *   q       — substring search across name, region, and description
    *   active  — "true" / "false" to filter by active status
+   *   cursor  — opaque base64 pagination cursor (from previous response)
+   *   limit   — max records per page (default: 20, max: 100)
    */
   router.get('/', (req: Request, res: Response) => {
     const { type, region, q, active } = req.query;
@@ -297,7 +299,48 @@ export function createAttestorsRouter(): Router {
       );
     }
 
-    respondNegotiated(req, res, { total: results.length, attestors: results }, {
+    // Cursor-based pagination — Issue #1560
+    // The cursor encodes the numeric offset into the (filtered, sorted)
+    // result set as a base64 string, matching the convention used by
+    // slices.ts and audit.ts so API consumers get a consistent pattern.
+    const limitParam = req.query.limit;
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(String(limitParam ?? '20'), 10) || 20),
+    );
+    const cursorParam = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+
+    let offset = 0;
+    if (cursorParam) {
+      try {
+        const decoded = Buffer.from(cursorParam, 'base64').toString('utf-8');
+        offset = parseInt(decoded, 10);
+        if (isNaN(offset) || offset < 0) offset = 0;
+      } catch {
+        res.status(400).json({ error: 'Invalid cursor' });
+        return;
+      }
+    }
+
+    const total = results.length;
+    const page = results.slice(offset, offset + limit);
+    const nextOffset = offset + limit;
+    const hasMore = nextOffset < total;
+    const nextCursor = hasMore
+      ? Buffer.from(String(nextOffset)).toString('base64')
+      : null;
+
+    respondNegotiated(req, res, {
+      total,
+      attestors: page,
+      pagination: {
+        cursor: cursorParam ?? null,
+        next_cursor: nextCursor,
+        limit,
+        total,
+        has_more: hasMore,
+      },
+    }, {
       rootElement: 'attestors',
       itemElement: 'attestor',
     });

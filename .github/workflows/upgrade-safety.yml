@@ -1,0 +1,65 @@
+# Issue #1630: Contract upgrade safety checks
+#
+# Runs on every PR that touches contract code:
+#   1. Static state-compatibility diff against the base branch
+#      (storage keys, contracttype structs, error codes, public functions).
+#   2. The upgrade test suites in contracts/integration_tests
+#      (upgrade_simulation, upgrade_safety, contract_upgrade_testing).
+#
+# See docs/upgrade-testing.md.
+name: Upgrade Safety
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "contracts/**"
+      - "scripts/upgrade/**"
+      - ".github/workflows/upgrade-safety.yml"
+  workflow_dispatch:
+
+jobs:
+  state-compat:
+    name: State compatibility check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compare contract state layout against base branch
+        run: |
+          python3 scripts/upgrade/check_state_compat.py \
+            --base "origin/${{ github.base_ref || 'main' }}" \
+            --json upgrade-compat-report.json
+
+      - name: Upload compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-compat-report
+          path: upgrade-compat-report.json
+          if-no-files-found: ignore
+
+  upgrade-simulation:
+    name: Upgrade simulation tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-upgrade-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run upgrade simulation and safety tests
+        run: cargo test -p integration_tests upgrade -- --nocapture

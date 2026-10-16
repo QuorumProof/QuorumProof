@@ -182,3 +182,13 @@ SBOM generation is wired into two workflows:
 - **`.github/workflows/testnet-deploy.yml`** — SBOM generated immediately
   after the contract WASM build so the exact artifact deployed to testnet
   is covered.
+
+## Container Image Scanning — Issue #1651
+
+Every container image (api-server, monitoring exporter, tts) is scanned with
+Trivy for OS and dependency vulnerabilities, embedded secrets and Dockerfile
+misconfigurations on PRs, pushes to `main`, and daily. Fixable CRITICAL/HIGH
+vulnerabilities and any secret block the build; results appear in the GitHub
+Security tab (code scanning) and as downloadable reports. Accepted risks are
+tracked with an expiry in `.trivyignore`. See
+[docs/container-image-scanning.md](docs/container-image-scanning.md).

@@ -154,3 +154,195 @@ export function createRateLimiter(config: RateLimitConfig, keyFn: KeyFn = combin
 
   return middleware;
 }
+
+export interface ConcurrencyLimitConfig {
+  /** Maximum number of requests allowed to be in-flight at once. */
+  maxConcurrent: number;
+  /** Maximum number of requests allowed to wait in the queue before rejecting. */
+  maxQueue: number;
+  /** Maximum time (ms) a request may wait in the queue before being rejected. */
+  queueTimeoutMs: number;
+  /** Optional per-endpoint overrides keyed by `${method} ${path}` or by path. */
+  perEndpoint?: Record<string, Partial<Omit<ConcurrencyLimitConfig, 'perEndpoint'>>>;
+  /** Name used for metrics/logging. */
+  name: string;
+}
+
+export interface ConcurrencyMetrics {
+  name: string;
+  active: number;
+  queued: number;
+  maxConcurrent: number;
+  maxQueue: number;
+  totalProcessed: number;
+  totalQueued: number;
+  totalRejected: number;
+  totalTimedOut: number;
+  totalWaitMs: number;
+  averageWaitMs: number;
+}
+
+interface EndpointState {
+  active: number;
+  queue: Array<() => void>;
+  totalProcessed: number;
+  totalQueued: number;
+  totalRejected: number;
+  totalTimedOut: number;
+  totalWaitMs: number;
+}
+
+function endpointKey(req: Request): string {
+  const path = req.route?.path ?? req.path ?? req.url;
+  return `${req.method} ${path}`;
+}
+
+function resolveLimits(
+  config: ConcurrencyLimitConfig,
+  req: Request
+): { maxConcurrent: number; maxQueue: number; queueTimeoutMs: number } {
+  const overrides = config.perEndpoint ?? {};
+  const key = endpointKey(req);
+  const override = overrides[key] ?? overrides[req.path] ?? overrides[req.url];
+  return {
+    maxConcurrent: override?.maxConcurrent ?? config.maxConcurrent,
+    maxQueue: override?.maxQueue ?? config.maxQueue,
+    queueTimeoutMs: override?.queueTimeoutMs ?? config.queueTimeoutMs,
+  };
+}
+
+/**
+ * Semaphore-based concurrency limiter. When the in-flight limit is reached,
+ * requests are queued (graceful degradation) up to `maxQueue`; queued requests
+ * that exceed `queueTimeoutMs` are rejected with 503.
+ */
+export function createConcurrencyLimiter(config: ConcurrencyLimitConfig) {
+  const states = new Map<string, EndpointState>();
+
+  function getState(key: string): EndpointState {
+    let state = states.get(key);
+    if (!state) {
+      state = {
+        active: 0,
+        queue: [],
+        totalProcessed: 0,
+        totalQueued: 0,
+        totalRejected: 0,
+        totalTimedOut: 0,
+        totalWaitMs: 0,
+      };
+      states.set(key, state);
+    }
+    return state;
+  }
+
+  function release(state: EndpointState): void {
+    state.active--;
+    state.totalProcessed++;
+    const next = state.queue.shift();
+    if (next) {
+      state.active++;
+      next();
+    }
+  }
+
+  const middleware = (req: Request, res: Response, next: NextFunction): void => {
+    const limits = resolveLimits(config, req);
+    const state = getState(endpointKey(req));
+
+    res.setHeader('X-Concurrency-Limit', String(limits.maxConcurrent));
+
+    if (state.active < limits.maxConcurrent) {
+      state.active++;
+      res.setHeader('X-Concurrency-Active', String(state.active));
+      res.setHeader('X-Concurrency-Queued', String(state.queue.length));
+      let released = false;
+      const done = () => {
+        if (released) return;
+        released = true;
+        release(state);
+      };
+      res.on('finish', done);
+      res.on('close', done);
+      next();
+      return;
+    }
+
+    if (state.queue.length >= limits.maxQueue) {
+      state.totalRejected++;
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({
+        error: 'Server busy',
+        message: `Concurrency limit reached (${limits.maxConcurrent}). Queue is full.`,
+        limit: limits.maxConcurrent,
+        queue: state.queue.length,
+      });
+      return;
+    }
+
+    const enqueuedAt = Date.now();
+    state.totalQueued++;
+    res.setHeader('X-Concurrency-Queued', String(state.queue.length + 1));
+
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const idx = state.queue.indexOf(admit);
+      if (idx !== -1) state.queue.splice(idx, 1);
+      state.totalTimedOut++;
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({
+        error: 'Server busy',
+        message: `Request timed out waiting for a concurrency slot after ${limits.queueTimeoutMs}ms.`,
+        limit: limits.maxConcurrent,
+        queueTimeoutMs: limits.queueTimeoutMs,
+      });
+    }, limits.queueTimeoutMs);
+
+    const admit = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      state.totalWaitMs += Date.now() - enqueuedAt;
+      res.setHeader('X-Concurrency-Active', String(state.active));
+      res.setHeader('X-Concurrency-Queued', String(state.queue.length));
+      let released = false;
+      const done = () => {
+        if (released) return;
+        released = true;
+        release(state);
+      };
+      res.on('finish', done);
+      res.on('close', done);
+      next();
+    };
+
+    state.queue.push(admit);
+  };
+
+  middleware.metrics = (): ConcurrencyMetrics[] => {
+    const result: ConcurrencyMetrics[] = [];
+    for (const [key, state] of states.entries()) {
+      result.push({
+        name: `${config.name}:${key}`,
+        active: state.active,
+        queued: state.queue.length,
+        maxConcurrent: config.maxConcurrent,
+        maxQueue: config.maxQueue,
+        totalProcessed: state.totalProcessed,
+        totalQueued: state.totalQueued,
+        totalRejected: state.totalRejected,
+        totalTimedOut: state.totalTimedOut,
+        totalWaitMs: state.totalWaitMs,
+        averageWaitMs: state.totalProcessed > 0 ? state.totalWaitMs / state.totalProcessed : 0,
+      });
+    }
+    return result;
+  };
+
+  middleware.reset = () => states.clear();
+  middleware.states = states;
+
+  return middleware;
+}

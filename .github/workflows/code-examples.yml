@@ -1,0 +1,33 @@
+name: Code Examples
+
+# #1638 — keep the multi-language examples runnable and in sync.
+on:
+  pull_request:
+    paths:
+      - 'examples/multi-language/**'
+      - 'scripts/check_code_examples.sh'
+      - '.github/workflows/code-examples.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/multi-language/**'
+
+jobs:
+  examples:
+    runs-on: ubuntu-latest
+    env:
+      CODE_EXAMPLES_STRICT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run examples against mock API
+        run: ./scripts/check_code_examples.sh

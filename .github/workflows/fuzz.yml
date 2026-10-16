@@ -21,6 +21,9 @@ env:
 
 jobs:
   fuzz:
+    # PR-triggered / push-triggered run: crashes FAIL the build so a newly
+    # discovered crash blocks the PR and is immediately visible in CI status.
+    # continue-on-error has been removed intentionally (issue #1487).
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -45,9 +48,19 @@ jobs:
         run: |
           cd fuzz
           cargo +nightly fuzz run ${{ matrix.fuzz_target }} -- -max_total_time=30 -timeout=10
-        continue-on-error: true
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.fuzz_target }}
+          path: fuzz/artifacts/
 
   fuzz-nightly:
+    # Scheduled extended run: non-blocking for merges (the schedule trigger is
+    # not part of the required PR checks), but uploads crash artifacts and
+    # opens a GitHub issue when a crash is found so failures are not silently
+    # buried in the Actions tab (issue #1487).
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     strategy:
@@ -70,14 +83,51 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Run extended fuzzing (${{ matrix.fuzz_target }}) for 5 minutes
+        id: fuzz_run
         run: |
           cd fuzz
           cargo +nightly fuzz run ${{ matrix.fuzz_target }} -- -max_total_time=300 -timeout=10
         continue-on-error: true
 
       - name: Upload crash artifacts
-        if: failure()
+        if: steps.fuzz_run.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-crashes-${{ matrix.fuzz_target }}
           path: fuzz/artifacts/
+
+      - name: Open GitHub issue on crash
+        if: steps.fuzz_run.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const target = '${{ matrix.fuzz_target }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[fuzz-nightly] crash detected in ${target}`,
+              labels: ['bug', 'security', 'fuzz-crash'],
+              body: [
+                `## Nightly fuzz crash — \`${target}\``,
+                '',
+                `The nightly fuzz job found a crash in **${target}** during the run at ${new Date().toISOString()}.`,
+                '',
+                `**Actions run:** ${runUrl}`,
+                '',
+                'Crash artifacts have been uploaded to the run above.',
+                'Reproduce locally:',
+                '```bash',
+                'cd fuzz',
+                `cargo +nightly fuzz run ${target}`,
+                '```',
+                '',
+                'See [`fuzz/README.md`](fuzz/README.md) for full reproduction and triage instructions.',
+              ].join('\n'),
+            });
+
+      - name: Fail job if crash was found
+        if: steps.fuzz_run.outcome == 'failure'
+        run: |
+          echo "Crash detected in ${{ matrix.fuzz_target }}. See uploaded artifacts and the GitHub issue opened above."
+          exit 1

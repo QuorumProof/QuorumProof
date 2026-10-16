@@ -178,6 +178,36 @@ export function createCredentialExportRouter(soroban: SorobanClient) {
     }
   });
 
+  /**
+   * GET /api/credentials/export/stream?ids=1,2,3
+   * Streams newline-delimited JSON so large credential exports can start
+   * returning data immediately without buffering the whole response in memory.
+   */
+  router.get('/export/stream', async (req: Request, res: Response) => {
+    const ids = String(req.query.ids ?? '')
+      .split(',')
+      .map((id) => parseInt(id.trim(), 10))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .slice(0, 500);
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'ids query parameter must include at least one credential id' });
+      return;
+    }
+
+    res.set('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.set('Transfer-Encoding', 'chunked');
+    for (const credentialId of ids) {
+      try {
+        const cred = await soroban.simulateCall('get_credential', [soroban.u64Val(credentialId)]);
+        res.write(`${JSON.stringify({ credential_id: credentialId, credential: serializeBigInt(cred) })}\n`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        res.write(`${JSON.stringify({ credential_id: credentialId, error: message })}\n`);
+      }
+    }
+    res.end();
+  });
+
   return router;
 }
 

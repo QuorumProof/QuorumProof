@@ -1,0 +1,18 @@
+//! QuorumProof REST <scenario> — Rust (`ureq` + `serde_json`).
+//!
+//! Implements the scenario in ../SPEC.md. Run:
+//!
+//! ```sh
+//! QP_API_URL=http://localhost:3000 cargo run --quiet
+//! ```
+
+use serde_json::{json, Value};
+
+// Copy `Client` and `fail` from rust/src/main.rs.
+
+fn main() {
+    let client = Client::from_env();
+
+    // 1. <step one>
+    // 2. <step two>
+}

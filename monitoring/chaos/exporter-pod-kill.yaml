@@ -1,0 +1,38 @@
+# Issue #1488 — Chaos Mesh: exporter pod kill mid-scrape
+#
+# Kills the quorumproof-exporter pod while it is actively scraping the
+# Soroban RPC endpoint.  Verifies that:
+#
+#   1. Prometheus handles the resulting scrape gap cleanly (no stale-marker
+#      storm, no spurious MigrationStalled/APIDown alert firing due to a
+#      single missed scrape).
+#   2. The exporter container restarts and resumes publishing metrics within
+#      the standard grace period (two missed scrapes × scrape_interval).
+#   3. Alertmanager only fires MigrationStalled / APIDown when the gap
+#      exceeds the `for:` duration in alerts.yml (not on a single-pod
+#      restart).
+#
+# The pod is killed once per hour so the Deployment restart policy and
+# Prometheus gap-fill behaviour can be exercised in a staging cluster without
+# constant churn.
+#
+# Apply:   kubectl apply -f exporter-pod-kill.yaml
+# Remove:  kubectl delete -f exporter-pod-kill.yaml
+# Watch:   kubectl get podchaos exporter-pod-kill -o yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: exporter-pod-kill
+  namespace: quorumproof
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - quorumproof
+    labelSelectors:
+      app: quorumproof-exporter
+  gracePeriod: 0
+  duration: '1m'
+  scheduler:
+    cron: '@every 1h'

@@ -40,15 +40,34 @@ the CI-runnable, no-cluster-required counterpart to these manifests.
 
 ## Manifests
 
-| File | Failure class | What it does |
-| --- | --- | --- |
-| `network-delay.yaml` | Network delay | Adds 500ms±200ms latency to api-server's outbound traffic. |
-| `packet-loss.yaml` | Packet loss | Drops 15% of api-server's outbound packets. |
-| `service-unavailable.yaml` | Service unavailability | Kills an api-server pod outright for 2 minutes. |
+| File | Target component | Failure class | Expected / allowed blast radius |
+| --- | --- | --- | --- |
+| `network-delay.yaml` | `api-server` | Network delay | Adds 500ms±200ms latency to api-server's outbound traffic. Requests complete correctly (no state corruption); only latency increases. |
+| `packet-loss.yaml` | `api-server` | Packet loss | Drops 15% of api-server's outbound packets. A single dropped call degrades to a scoped error; the process never crashes and unrelated batch items are unaffected. |
+| `service-unavailable.yaml` | `api-server` | Pod failure | Kills one api-server pod for 2 minutes. The surviving replica continues to serve traffic; aggregate endpoints return well-formed (possibly empty) responses. |
+| `rpc-latency.yaml` | `quorumproof-exporter`, `migration-orchestrator` | Soroban RPC latency | Adds 2000ms±500ms latency to outbound calls from the exporter and orchestrator pods toward the Soroban RPC URL. The exporter must continue to publish metrics (with delayed values); the orchestrator must not corrupt on-chain migration state. |
+| `exporter-pod-kill.yaml` | `quorumproof-exporter` | Pod kill mid-scrape | Kills the exporter pod once per hour to verify Prometheus handles scrape gaps cleanly. `MigrationStalled`/`APIDown` alerts must **not** fire on a single missed scrape; they fire only once the gap exceeds the `for:` duration in `alerts.yml`. The pod restarts automatically and resumes exporting within two scrape intervals. |
 
 Each is scheduled (`spec.scheduler.cron`) to run periodically and
 self-terminate after `spec.duration` — safe to leave applied in a staging
 cluster for ongoing resilience verification rather than a one-off manual run.
+
+### Label requirements for `rpc-latency.yaml` and `exporter-pod-kill.yaml`
+
+The two new manifests (issue #1488) target pods by their
+`app.kubernetes.io/component: monitoring` and `app: quorumproof-exporter`
+labels respectively.  Ensure your exporter Deployment carries these labels:
+
+```yaml
+metadata:
+  labels:
+    app: quorumproof-exporter
+    app.kubernetes.io/component: monitoring
+```
+
+If you run the migration orchestrator as a Kubernetes Job or CronJob rather
+than a bare pod, add the same `app.kubernetes.io/component: monitoring` label
+to its pod template so `rpc-latency.yaml` also covers it.
 
 ## Usage
 

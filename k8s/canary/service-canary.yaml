@@ -1,0 +1,44 @@
+# k8s/canary/service-canary.yaml — Issue #1654: Canary Deployments.
+#
+# This Service is intentionally IDENTICAL to the stable api-server Service
+# in k8s/api-server-deployment.yaml except that it selects on
+# `app: quorumproof-api-server` WITHOUT a `track` label.
+#
+# This means kube-proxy load-balances across ALL pods with
+# `app: quorumproof-api-server` — both the stable and canary replica sets —
+# weighted by pod count. One canary pod out of ten total = 10% canary traffic.
+#
+# Do not apply this Service if you are using blue-green (k8s/blue-green/).
+# The canary strategy and blue-green strategy are mutually exclusive for the
+# same Service endpoint. Use one at a time.
+#
+# Direct canary-only traffic (for testing before exposing to production):
+#   kubectl port-forward -n quorumproof \
+#     $(kubectl get pod -n quorumproof -l track=canary -o name | head -1) \
+#     8080:3001
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: quorumproof-api-server-canary-direct
+  namespace: quorumproof
+  labels:
+    app: quorumproof-api-server
+    track: canary
+    app.kubernetes.io/name: quorumproof-api-server
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: quorumproof
+  annotations:
+    # This service routes ONLY to canary pods.
+    # Used for pre-release validation before enabling weighted traffic.
+    quorumproof.io/canary-service: "true"
+spec:
+  selector:
+    app: quorumproof-api-server
+    track: canary
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  type: ClusterIP

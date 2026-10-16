@@ -202,3 +202,153 @@ groups:
         annotations:
           summary: "Sustained WebSocket message drops detected"
           description: "WebSocket messages are being dropped at {{ $value | humanize }} drops/s over the last 5 minutes. A client (or multiple) is falling far behind the send queue. Check for slow consumers or systemic network issues. See docs/operational-runbook.md#ws-message-drops."
+
+      # #1650 — Multi-region failover
+      - alert: RegionFailoverActive
+        expr: quorumproof_region_failover_active == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Secondary region {{ $labels.region }} is serving — primary is down"
+          description: "The failover detector in {{ $labels.region }} reports the primary region unreachable. Route 53 should have moved traffic here. Decide whether to promote the Aurora secondary with scripts/region_failover.sh unplanned — see docs/multi-region-failover.md."
+
+      - alert: RegionPeerUnreachable
+        expr: quorumproof_region_peer_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Region {{ $labels.region }} cannot reach its peer region"
+          description: "{{ $labels.region }} ({{ $labels.role }}) has seen its peer region as unhealthy for 5 minutes. If this is the primary, failover capacity is lost."
+
+  # Issue #1646: performance alerts. Thresholds and the tuning response to
+  # each are documented in docs/performance-tuning-guide.md (section 4).
+  - name: quorumproof-performance
+    rules:
+      - alert: ApiLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(quorumproof_api_request_duration_seconds_bucket[5m]))) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API p95 latency above 500ms"
+          description: "p95 is {{ $value | humanizeDuration }}. See docs/performance-tuning-guide.md section 4.2."
+
+      - alert: ApiLatencyP99Critical
+        expr: histogram_quantile(0.99, sum by (le) (rate(quorumproof_api_request_duration_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API p99 latency above 2s"
+          description: "p99 is {{ $value | humanizeDuration }}. Check RPC breaker and concurrency queue first."
+
+      - alert: RpcCircuitBreakerOpen
+        expr: quorumproof_rpc_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Soroban RPC circuit breaker is open"
+          description: "Verification is being served from cache or failing fast. See docs/performance-tuning-guide.md section 4.2."
+
+      - alert: DbPoolSaturated
+        expr: quorumproof_db_pool_utilization_pct > 90 or quorumproof_db_pool_waiting > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection pool saturated"
+          description: "Pool utilisation {{ $value }}. See docs/performance-tuning-guide.md section 4.2."
+
+      - alert: WsMessagesDropping
+        expr: rate(quorumproof_ws_messages_dropped_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket messages are being dropped"
+          description: "Slow consumers are overflowing send queues. See docs/performance-tuning-guide.md section 4.2."
+
+  # Issue #1661: Cost Alert Thresholds
+  # Thresholds, routing, and tuning instructions are in
+  # docs/cost-alert-thresholds.md.
+  #
+  # Metrics are emitted by the api-server's /api/costs/report endpoint and
+  # scraped by the exporter via monitoring/exporter/exporter.py.
+  #
+  # quorumproof_cost_total_stroops_24h   — rolling 24-hour total gas cost (stroops)
+  # quorumproof_cost_operation_stroops   — per-operation cumulative cost (stroops)
+  # quorumproof_cost_daily_budget_stroops — operator-configured daily budget
+  #
+  # 1 XLM = 10,000,000 stroops. Default daily budget: 10 XLM = 100,000,000 stroops.
+  # Adjust quorumproof_cost_daily_budget_stroops in the exporter or via env var
+  # COST_DAILY_BUDGET_STROOPS. See docs/cost-alert-thresholds.md §Tuning.
+  - name: quorumproof-cost
+    rules:
+      # ── Recording rule: rolling 24-hour total gas cost ──────────────────────
+      # Precomputes the daily spend so the alert expressions stay readable.
+      - record: quorumproof_cost_total_stroops_24h
+        expr: >
+          increase(quorumproof_cost_operation_stroops_total[24h])
+
+      # ── Warning: 80 % of daily budget consumed ───────────────────────────────
+      # Fires when the rolling 24 h cost exceeds 80 % of the configured budget.
+      # Gives operators time to review top spenders before the critical threshold.
+      - alert: CostBudgetWarning
+        expr: >
+          quorumproof_cost_total_stroops_24h
+            > (quorumproof_cost_daily_budget_stroops * 0.80)
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Gas cost approaching daily budget ({{ $value | humanize }} stroops)"
+          description: >
+            Rolling 24-hour gas cost is {{ $value | humanize }} stroops, above 80% of
+            the configured daily budget. Review top-spending operations at
+            GET /api/costs/optimizations and consider applying the tuning steps in
+            docs/cost-alert-thresholds.md §Reducing Cost.
+
+      # ── Critical: 100 % of daily budget consumed ─────────────────────────────
+      # Pages on-call via PagerDuty. Cost overruns at this level may indicate
+      # a runaway integration, an unexpected traffic spike, or a pricing change.
+      - alert: CostBudgetCritical
+        expr: >
+          quorumproof_cost_total_stroops_24h
+            > quorumproof_cost_daily_budget_stroops
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Daily gas budget exceeded ({{ $value | humanize }} stroops)"
+          description: >
+            Rolling 24-hour gas cost is {{ $value | humanize }} stroops, above the
+            configured daily budget. Immediate action: check GET /api/costs/report
+            for the top spenders and GET /api/costs/optimizations for quick wins.
+            Consider throttling high-volume callers or enabling DISABLE_BACKGROUND_JOBS.
+            See docs/cost-alert-thresholds.md §Emergency Response.
+
+      # ── Single-operation spike alert ─────────────────────────────────────────
+      # Fires when one operation consumes more than 50 % of the hourly budget
+      # allocation (daily_budget / 24 / 2 = 25 % daily). This catches a single
+      # expensive operation that would exhaust the budget without the 24 h
+      # rolling window triggering first.
+      - alert: CostOperationSpike
+        expr: >
+          increase(quorumproof_cost_operation_stroops_total[1h])
+            > (quorumproof_cost_daily_budget_stroops / 48)
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Operation {{ $labels.operation }} cost spike ({{ $value | humanize }} stroops/h)"
+          description: >
+            Operation {{ $labels.operation }} consumed {{ $value | humanize }} stroops in
+            the last hour, more than half of the expected hourly budget allocation.
+            Investigate at GET /api/costs/projection?operation={{ $labels.operation }}&callsPerDay=...
+            and apply the tuning guidance in docs/cost-alert-thresholds.md §Per-Operation Tuning.

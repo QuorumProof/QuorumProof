@@ -120,6 +120,9 @@ Cargo.lock.bak
 fuzz/corpus/
 fuzz/artifacts/
 
+# Alertmanager rendered config (contains secrets — never commit)
+monitoring/prometheus/alertmanager.rendered.yml
+
 # Mutation testing
 mutants.out/
 mutants.out.old/
@@ -151,3 +154,6 @@ VERIFICATION_CHECKLIST.md
 # OS-generated junk
 **/.DS_Store
 **/Thumbs.db
+
+# Longevity test output (#1632)
+longevity-reports/

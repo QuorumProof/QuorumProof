@@ -1,0 +1,91 @@
+# .github/workflows/blue-green-deploy.yml — Issue #1648: zero-downtime
+# api-server releases via scripts/blue_green_deploy.sh.
+#
+# Manually triggered. `deploy` rolls the given image onto the idle slot,
+# validates it through the preview Service, switches traffic, soaks, and
+# auto-rolls back on failure. `rollback` points traffic back at the previous
+# slot. See docs/blue-green-deployment.md.
+#
+# Required secrets: KUBE_CONFIG (base64-encoded kubeconfig scoped to the
+# quorumproof namespace). Optional: PROMETHEUS_URL, DEPLOY_NOTIFY_WEBHOOK.
+
+name: Blue-Green Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Operation to perform"
+        required: true
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - rollback
+          - status
+      image:
+        description: "Image to deploy (required for deploy), e.g. ghcr.io/quorumproof/api-server:1.4.0"
+        required: false
+        type: string
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        default: staging
+        options:
+          - staging
+          - production
+
+concurrency:
+  # Never run two traffic switches against the same environment at once.
+  group: blue-green-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  blue-green:
+    name: ${{ github.event.inputs.action }} (${{ github.event.inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [[ -z "$KUBE_CONFIG" ]]; then
+            echo "::error::KUBE_CONFIG secret is not configured for environment ${{ github.event.inputs.environment }}"
+            exit 1
+          fi
+          mkdir -p ~/.kube
+          echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Validate inputs
+        if: github.event.inputs.action == 'deploy'
+        run: |
+          if [[ -z "${{ github.event.inputs.image }}" ]]; then
+            echo "::error::image input is required for deploy"
+            exit 1
+          fi
+
+      - name: Current state
+        run: ./scripts/blue_green_deploy.sh status
+
+      - name: Run ${{ github.event.inputs.action }}
+        env:
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+          NOTIFY_WEBHOOK: ${{ secrets.DEPLOY_NOTIFY_WEBHOOK }}
+          BG_POST_SWITCH_SOAK: ${{ github.event.inputs.environment == 'production' && '300' || '60' }}
+        run: |
+          case "${{ github.event.inputs.action }}" in
+            deploy)   ./scripts/blue_green_deploy.sh deploy "${{ github.event.inputs.image }}" ;;
+            rollback) ./scripts/blue_green_deploy.sh rollback ;;
+            status)   ;;
+          esac
+
+      - name: Final state
+        if: always()
+        run: ./scripts/blue_green_deploy.sh status || true

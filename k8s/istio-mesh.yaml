@@ -1,0 +1,192 @@
+# Service Mesh — Istio configuration for QuorumProof
+#
+# Issue #1660 — Implement Service Mesh for Observability
+#
+# This file contains all Istio resources needed to add service-mesh
+# observability to the quorumproof-api-server:
+#
+#   1. PeerAuthentication  — mTLS STRICT mode for the quorumproof namespace
+#   2. DestinationRule     — enforce mTLS for quorumproof-api-server
+#   3. VirtualService      — traffic management, retries, circuit-breaking
+#   4. ServiceEntry        — allow egress to Stellar RPC endpoints
+#   5. Telemetry           — Prometheus metrics, access logging, tracing
+#
+# Prerequisites:
+#   istioctl install --set profile=default
+#   kubectl label namespace quorumproof istio-injection=enabled
+#   kubectl rollout restart deployment/quorumproof-api-server -n quorumproof
+#
+# Apply:
+#   kubectl apply -f k8s/istio-mesh.yaml
+#
+# Verify mTLS:
+#   istioctl authn tls-check quorumproof-api-server.quorumproof.svc.cluster.local
+#
+# Visualise traffic (Kiali):
+#   istioctl dashboard kiali
+
+---
+# ── 1. mTLS: enforce STRICT mode namespace-wide ───────────────────────────────
+# All pods in the quorumproof namespace must present a valid workload
+# certificate. Plaintext requests from un-injected pods are rejected.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: quorumproof-mtls
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/component: service-mesh
+spec:
+  mtls:
+    mode: STRICT
+
+---
+# ── 2. DestinationRule: mTLS client settings for api-server ──────────────────
+# Outbound connections from any pod to quorumproof-api-server must also use
+# ISTIO_MUTUAL (workload certificate-based mTLS).
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: quorumproof-api-server
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/component: service-mesh
+spec:
+  host: quorumproof-api-server.quorumproof.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+
+    # Connection pool settings — limits per-host connections and pending
+    # requests to avoid cascading failures when the api-server is saturated.
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 5s
+      http:
+        http2MaxRequests: 1000
+        maxRequestsPerConnection: 100
+        maxPendingRequests: 200
+        idleTimeout: 90s
+
+    # Outlier detection — eject a pod from the load-balancer if it returns
+    # too many 5xx responses (circuit-breaking at the mesh layer).
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 30
+
+---
+# ── 3. VirtualService: retries and traffic splitting ─────────────────────────
+# Adds automatic retry on 503/504 for idempotent GET requests only, and
+# enforces a per-request timeout consistent with the API's 500 ms p95 SLO.
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: quorumproof-api-server
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/component: service-mesh
+spec:
+  hosts:
+    - quorumproof-api-server.quorumproof.svc.cluster.local
+  http:
+    # ── Credential verification (read-heavy, retryable) ─────────────────────
+    - match:
+        - uri:
+            prefix: /api/credentials
+          method:
+            exact: GET
+      route:
+        - destination:
+            host: quorumproof-api-server.quorumproof.svc.cluster.local
+            port:
+              number: 80
+      timeout: 10s
+      retries:
+        attempts: 3
+        perTryTimeout: 4s
+        retryOn: gateway-error,connect-failure,retriable-4xx
+
+    # ── Write path (non-retryable) ───────────────────────────────────────────
+    - route:
+        - destination:
+            host: quorumproof-api-server.quorumproof.svc.cluster.local
+            port:
+              number: 80
+      timeout: 30s
+
+---
+# ── 4. ServiceEntry: allow egress to Stellar RPC endpoints ───────────────────
+# By default Istio's egress policy is REGISTRY_ONLY. This entry whitelists
+# the Stellar Soroban RPC hosts so the api-server can reach the blockchain.
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: stellar-rpc-egress
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/component: service-mesh
+spec:
+  hosts:
+    - soroban-testnet.stellar.org
+    - soroban-mainnet.stellar.org
+    - horizon-testnet.stellar.org
+    - horizon.stellar.org
+  ports:
+    - number: 443
+      name: https
+      protocol: HTTPS
+  resolution: DNS
+  location: MESH_EXTERNAL
+
+---
+# ── 5. Telemetry: Prometheus metrics, access logging, distributed tracing ─────
+# Configures the Envoy proxy sidecar to:
+#   a) Export Prometheus metrics (scraped by monitoring/prometheus/prometheus.yml)
+#   b) Emit structured JSON access logs (consumed by Loki via promtail)
+#   c) Send traces to Jaeger / Zipkin at 100 % sample rate in staging
+#
+# Adjust `randomSamplingPercentage` for production (1-5 % is typical).
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: quorumproof-telemetry
+  namespace: quorumproof
+  labels:
+    app.kubernetes.io/part-of: quorumproof
+    app.kubernetes.io/component: service-mesh
+spec:
+  # ── Metrics ─────────────────────────────────────────────────────────────────
+  metrics:
+    - providers:
+        - name: prometheus
+      overrides:
+        # Add the quorumproof namespace label to every Istio metric so
+        # Prometheus queries can filter by service without regex hacks.
+        - match:
+            metric: ALL_METRICS
+          tagOverrides:
+            quorumproof_namespace:
+              value: "quorumproof"
+
+  # ── Access logging ───────────────────────────────────────────────────────────
+  accessLogging:
+    - providers:
+        - name: envoy
+      filter:
+        # Log 5xx errors at all times; log other requests in staging only.
+        # Remove or adjust in production.
+        expression: "response.code >= 500 || true"
+
+  # ── Distributed tracing ──────────────────────────────────────────────────────
+  tracing:
+    - providers:
+        - name: zipkin   # Replace with "jaeger" if using Jaeger
+      randomSamplingPercentage: 100  # Lower to 1-5 % in production
