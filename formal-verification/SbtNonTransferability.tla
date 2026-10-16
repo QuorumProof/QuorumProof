@@ -56,8 +56,8 @@ vars == <<tokens, balances, total_supply, paused, pending_mints>>
 -----------------------------------------------------------------------------
 (* Type definitions *)
 
-TokenId == Nat
-Address == Nat
+TokenId == TokenIds  \* finite for TLC; the contract uses u32
+Address == Addresses  \* finite for TLC
 
 TokenRecord == [
   owner          : Address,
@@ -113,12 +113,15 @@ SubmitMintRequest(req) ==
 MintToken(req) ==
   /\ ~paused
   /\ req \in pending_mints
-  /\ req.token_id \notin DOMAIN tokens \/ ~tokens[req.token_id].exists
+  /\ req.token_id \notin MintedTokenIds   \* no live token with this id
   /\ LET new_rec == [owner |-> req.owner,
                      exists |-> TRUE,
                      minted_at_ledger |-> total_supply + 1]  \* mock ledger
      IN
-     /\ tokens'        = [tokens EXCEPT ![req.token_id] = new_rec]
+     \* EXCEPT cannot grow a function's domain (a missing key is a no-op in
+     \* TLA+), so extend the domain explicitly.
+     /\ tokens'        = [id \in DOMAIN tokens \cup {req.token_id} |->
+                             IF id = req.token_id THEN new_rec ELSE tokens[id]]
      /\ balances'      = [balances EXCEPT ![req.owner] = balances[req.owner] + 1]
      /\ total_supply'  = total_supply + 1
      /\ pending_mints' = pending_mints \ {req}
@@ -136,6 +139,15 @@ BurnToken(token_id, owner) ==
   /\ total_supply' = total_supply  \* burned tokens still "existed" but no longer owned
   /\ UNCHANGED <<paused, pending_mints>>
 
+\* A pending mint for an id that is already live is rejected by the contract
+\* (the request leaves the queue) rather than blocking forever.
+RejectMint(req) ==
+  /\ ~paused
+  /\ req \in pending_mints
+  /\ req.token_id \in MintedTokenIds
+  /\ pending_mints' = pending_mints \ {req}
+  /\ UNCHANGED <<tokens, balances, total_supply, paused>>
+
 \* Query: check if address owns a token (non-modifying, included for completeness)
 CheckOwnership(token_id, addr) ==
   /\ token_id \in MintedTokenIds
@@ -152,17 +164,30 @@ UnpauseContract == /\ paused /\ paused' = FALSE /\ UNCHANGED <<tokens, balances,
 Next ==
   \/ \E req \in MintRequest : SubmitMintRequest(req)
   \/ \E req \in pending_mints : MintToken(req)
+  \/ \E req \in pending_mints : RejectMint(req)
   \/ \E tid \in MintedTokenIds, addr \in Addresses : 
        (tokens[tid].owner = addr /\ BurnToken(tid, addr))
   \/ \E tid \in MintedTokenIds, addr \in Addresses : CheckOwnership(tid, addr)
   \/ PauseContract
   \/ UnpauseContract
 
+\* Strong fairness on mint/reject (enabled between pause/unpause cycles, so weak
+\* fairness does not force them); weak fairness on unpause so the contract
+\* cannot stay paused forever.
 Fairness ==
-  \A req \in MintRequest :
-    WF_vars(MintToken(req))
+  /\ WF_vars(UnpauseContract)
+  /\ \A req \in MintRequest :
+       /\ SF_vars(MintToken(req))
+       /\ SF_vars(RejectMint(req))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
+
+(* MODEL BOUND *)
+
+\* Model-checking constraint, not part of the protocol. Supply and ledger
+\* numbers are unbounded in the contract; TLC needs a finite state space.
+MaxModelSupply == 3
+ModelBound == total_supply <= MaxModelSupply
 
 -----------------------------------------------------------------------------
 (* INVARIANTS *)
@@ -204,26 +229,24 @@ BalanceConsistency ==
   \A addr \in Addresses :
     balances[addr] = ActualBalance(addr)
 
-\* I6. NO TRANSFER POSSIBLE — The master invariant.
-\*     There exists no path (sequence of actions) that results in a token
-\*     being owned by a different address than it started with. This is
-\*     enforced by I2 above (ownership immutable between mints and burns),
-\*     and the mint guard (no remint to different owner).
+\* I6. NO TRANSFER POSSIBLE — The master invariant, stated as an action
+\*     property: no single step moves a live token from one address to a
+\*     different address. Follows from TokenOwnershipImmutable plus the mint
+\*     guard (no remint to a different owner).
 NoTransferPossible ==
-  \A addr1, addr2 \in Addresses :
-    addr1 # addr2 =>
-      ~\E id \in DOMAIN tokens :
-        /\ tokens[id].exists
-        /\ tokens[id].owner = addr1
-        /\ \E token' \in tokens' :
-             /\ token'.exists
-             /\ token'.owner = addr2
-             /\ id = CHOOSE k \in DOMAIN token' : TRUE
+  [][
+    \A addr1, addr2 \in Addresses :
+      addr1 # addr2 =>
+        ~\E id \in MintedTokenIds :
+          /\ tokens[id].owner = addr1
+          /\ tokens'[id].owner = addr2
+          /\ tokens'[id].exists
+  ]_vars
 
-\* Composite safety invariant
+\* State predicates only. TokenOwnershipImmutable is a temporal (action)
+\* property and is checked separately as a PROPERTY in the TLC config.
 SafetyInvariant ==
   /\ TypeInvariant
-  /\ TokenOwnershipImmutable
   /\ BalanceConsistency
   /\ NoDuplicateMint
 
@@ -248,28 +271,29 @@ MintEventually ==
 \*     - Pause/Unpause/Query: no token state changes, property holds.
 \*   Conclusion: Property holds in all reachable states.
 THEOREM Spec => TokenOwnershipImmutable
-<1>1. Init => TokenOwnershipImmutable
-  BY DEF Init, TokenOwnershipImmutable
-<1>2. ASSUME TokenOwnershipImmutable, [Next]_vars PROVE TokenOwnershipImmutable'
-  <2> SUFFICES ASSUME NEW s, s => TokenOwnershipImmutable, [Next]_vars
-    PROVE TokenOwnershipImmutable'
-    BY <1>2
-  <2>1. CASE SubmitMintRequest(req)
-    BY <2>1 DEF SubmitMintRequest, TokenOwnershipImmutable
-  <2>2. CASE MintToken(req)
-    BY <2>2 DEF MintToken, TokenOwnershipImmutable
-  <2>3. CASE BurnToken(token_id, owner)
-    BY <2>3 DEF BurnToken, TokenOwnershipImmutable
-  <2>4. CASE CheckOwnership(token_id, addr)
-    BY <2>4 DEF CheckOwnership, TokenOwnershipImmutable
-  <2>5. CASE PauseContract
-    BY <2>5 DEF PauseContract, TokenOwnershipImmutable
-  <2>6. CASE UnpauseContract
-    BY <2>6 DEF UnpauseContract, TokenOwnershipImmutable
-  <2>7. CASE UNCHANGED vars
-    BY <2>7 DEF TokenOwnershipImmutable
-  <2>8. QED BY <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7 DEF Next
-<1>3. QED BY <1>1, <1>2, PTL DEF Spec
+\* Proof sketch (informal; TLC does not check theorems and TLAPS is not run in CI):
+\* <1>1. Init => TokenOwnershipImmutable
+\*   BY DEF Init, TokenOwnershipImmutable
+\* <1>2. ASSUME TokenOwnershipImmutable, [Next]_vars PROVE TokenOwnershipImmutable'
+\*   <2> SUFFICES ASSUME NEW s, s => TokenOwnershipImmutable, [Next]_vars
+\*     PROVE TokenOwnershipImmutable'
+\*     BY <1>2
+\*   <2>1. CASE \E req \in MintRequest : SubmitMintRequest(req)
+\*     BY <2>1 DEF SubmitMintRequest, TokenOwnershipImmutable
+\*   <2>2. CASE \E req \in MintRequest : MintToken(req)
+\*     BY <2>2 DEF MintToken, TokenOwnershipImmutable
+\*   <2>3. CASE \E token_id \in TokenId, owner \in Addresses : BurnToken(token_id, owner)
+\*     BY <2>3 DEF BurnToken, TokenOwnershipImmutable
+\*   <2>4. CASE \E token_id \in TokenId, addr \in Addresses : CheckOwnership(token_id, addr)
+\*     BY <2>4 DEF CheckOwnership, TokenOwnershipImmutable
+\*   <2>5. CASE PauseContract
+\*     BY <2>5 DEF PauseContract, TokenOwnershipImmutable
+\*   <2>6. CASE UnpauseContract
+\*     BY <2>6 DEF UnpauseContract, TokenOwnershipImmutable
+\*   <2>7. CASE UNCHANGED vars
+\*     BY <2>7 DEF TokenOwnershipImmutable
+\*   <2>8. QED BY <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7 DEF Next
+\* <1>3. QED BY <1>1, <1>2 DEF Spec
 
 -----------------------------------------------------------------------------
 (* TLC model values — instantiate with small finite sets for checking *)
