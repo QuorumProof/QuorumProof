@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { ThresholdEncryption, type EncryptedData } from '../crypto/thresholdEncryption.js';
 import { EncryptedCredentialStore } from '../services/encryptedCredentialStore.js';
+import { requireAuth } from '../middleware/auth.js';
+import { collectValidApprovals } from '../services/encryptedCredentialAuth.js';
 
 /**
  * Encrypted Credentials Routes
@@ -111,12 +113,15 @@ export function createEncryptedCredentialsRouter() {
   });
 
   // POST /api/credentials/:id/decrypt/authorize
-  // Request decryption authorization
-  router.post('/:id/decrypt/authorize', async (req: Request, res: Response) => {
+  // Grant decryption authorization. Requires an authenticated caller and
+  // signed approvals from at least `threshold` of the credential's key custodians.
+  // Body: { requester_address, reason?, approvals: [{ custodian, issued_at, signature }] }
+  router.post('/:id/decrypt/authorize', requireAuth, async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-    const { requester_address, reason } = req.body as {
+    const { requester_address, reason, approvals } = req.body as {
       requester_address?: string;
       reason?: string;
+      approvals?: unknown;
     };
 
     if (!requester_address) {
@@ -127,8 +132,44 @@ export function createEncryptedCredentialsRouter() {
       return;
     }
 
+    if (!Array.isArray(approvals)) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'approvals array is required',
+      });
+      return;
+    }
+
     try {
       const credentialId = BigInt(id);
+
+      const encrypted = await store.getEncryptedCredential(credentialId);
+      if (!encrypted) {
+        res.status(404).json({
+          error: 'Not found',
+          message: 'No encrypted data found for this credential',
+        });
+        return;
+      }
+
+      const approvedBy = collectValidApprovals(
+        credentialId.toString(),
+        requester_address,
+        encrypted.key_custodians,
+        approvals,
+        Date.now(),
+      );
+      const required = encryption.getConfig().threshold;
+
+      if (approvedBy.length < required) {
+        res.status(403).json({
+          error: 'Insufficient approvals',
+          message: `At least ${required} valid approvals from key custodians are required`,
+          required,
+          valid_approvals: approvedBy.length,
+        });
+        return;
+      }
 
       // Authorize decryption for 1 hour by default
       const authorization = await store.authorizeDecryption(
@@ -136,7 +177,7 @@ export function createEncryptedCredentialsRouter() {
         requester_address,
         3600000,
         reason || 'Not specified',
-        [] // In production, require approval from multiple parties
+        approvedBy
       );
 
       res.json({
