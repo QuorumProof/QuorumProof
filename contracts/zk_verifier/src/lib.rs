@@ -1,4 +1,11 @@
 #![no_std]
+// Test builds use `std::` paths (formatting, catch_unwind, Vec); the crate itself stays no_std.
+#[cfg(test)]
+extern crate std;
+
+/// Topic for admin-transfer events emitted by [`ZkVerifierContract::update_admin`].
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
+
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Vec};
 use soroban_sdk::xdr::ToXdr;
 
@@ -1034,7 +1041,7 @@ impl ZkVerifierContract {
         claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1628,7 +1635,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -1965,7 +1972,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -2949,7 +2956,8 @@ mod proptest_zk_verifier;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use sha2::{Digest, Sha256};
     use soroban_sdk::{Bytes, Env};
     use crate::plonk_test_prover;
     use crate::groth16_test_prover;
