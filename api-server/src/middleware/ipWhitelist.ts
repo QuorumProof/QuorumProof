@@ -8,8 +8,6 @@ import { Request, Response, NextFunction } from 'express';
 interface IPWhitelistConfig {
   enabledEndpoints: string[];
   whitelistedIPs: Set<string>;
-  enableProxyDetection: boolean;
-  proxyHeadersToCheck: string[];
   enableAuditLogging: boolean;
   logDenials: boolean;
 }
@@ -36,13 +34,6 @@ let config: IPWhitelistConfig = {
     '/api/admin/recovery',
   ],
   whitelistedIPs: new Set(),
-  enableProxyDetection: true,
-  proxyHeadersToCheck: [
-    'x-forwarded-for',
-    'cf-connecting-ip', // Cloudflare
-    'x-client-ip',
-    'x-real-ip',
-  ],
   enableAuditLogging: true,
   logDenials: true,
 };
@@ -51,32 +42,17 @@ let config: IPWhitelistConfig = {
 const accessLog: AccessLogEntry[] = [];
 
 /**
- * Extract the client's real IP address, checking for proxy headers
+ * Use Express's client IP, which only considers forwarding headers when the
+ * application explicitly configures trusted proxies.
  */
 function getClientIP(req: Request): { clientIP: string; forwardedIP?: string } {
   let clientIP = req.ip || req.socket.remoteAddress || 'unknown';
-  let forwardedIP: string | undefined;
-
-  if (config.enableProxyDetection) {
-    for (const header of config.proxyHeadersToCheck) {
-      const headerValue = req.get(header);
-      if (headerValue) {
-        // X-Forwarded-For can contain multiple IPs, take the first
-        const ips = headerValue.split(',').map((ip) => ip.trim());
-        if (ips.length > 0) {
-          forwardedIP = ips[0];
-          clientIP = ips[0];
-          break;
-        }
-      }
-    }
-  }
 
   // Normalize IPv6 loopback
   if (clientIP === '::1') clientIP = '127.0.0.1';
   if (clientIP === '::ffff:127.0.0.1') clientIP = '127.0.0.1';
 
-  return { clientIP, forwardedIP };
+  return { clientIP };
 }
 
 /**
@@ -319,7 +295,7 @@ export function getConfigStatus() {
   return {
     enabledEndpoints: config.enabledEndpoints,
     whitelistSize: config.whitelistedIPs.size,
-    proxyDetectionEnabled: config.enableProxyDetection,
+    proxyDetectionEnabled: false,
     auditLoggingEnabled: config.enableAuditLogging,
     denialLoggingEnabled: config.logDenials,
   };
