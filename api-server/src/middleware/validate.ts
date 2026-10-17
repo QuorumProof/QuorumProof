@@ -737,6 +737,59 @@ export const schemas = {
       ) ? true : 'Request body must be empty',
     },
   },
+  atomicSwapInitiate: {
+    body: {
+      type: 'object',
+      properties: {
+        initiator_address: { type: 'string', minLength: 1, pattern: '\\S' },
+        responder_address: { type: 'string', minLength: 1, pattern: '\\S' },
+        initiator_credential_id: { type: 'integer', minimum: 1 },
+        responder_credential_id: { type: 'integer', minimum: 1 },
+      },
+      required: [
+        'initiator_address',
+        'responder_address',
+        'initiator_credential_id',
+        'responder_credential_id',
+      ],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapLock: {
+    body: {
+      type: 'object',
+      properties: { participant_address: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['participant_address'],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapComplete: {
+    body: {
+      type: 'object',
+      properties: {
+        initiator_signature: { type: 'string', minLength: 1 },
+        responder_signature: { type: 'string', minLength: 1 },
+      },
+      required: ['initiator_signature', 'responder_signature'],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapCancel: {
+    body: {
+      type: 'object',
+      properties: { canceller_address: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['canceller_address'],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapIdParams: {
+    params: {
+      type: 'object',
+      properties: { swap_id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['swap_id'],
+      additionalProperties: false,
+    },
+  },
 };
 
 export default validate;
