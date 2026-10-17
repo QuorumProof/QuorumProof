@@ -1,5 +1,6 @@
 import { getPool } from '../db.js';
 import type { EncryptedData, ThresholdKeyShare } from '../crypto/thresholdEncryption.js';
+import { logger } from './logger.js';
 
 /**
  * Encrypted Credential Store
@@ -24,6 +25,65 @@ export interface DecryptionAuthorization {
   expires_at: number;
   reason: string;
   approved_by: string[];
+}
+
+type EncryptedCredentialDatabaseRow = Omit<
+  EncryptedCredentialRecord,
+  'encrypted_data' | 'key_shares' | 'key_custodians'
+> & {
+  encrypted_data: unknown;
+  key_shares: unknown;
+  key_custodians: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseJsonField<T>(
+  value: unknown,
+  field: string,
+  isExpected: (candidate: unknown) => candidate is T,
+): T {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  } catch {
+    throw new Error(`Invalid JSON in ${field}`);
+  }
+
+  if (!isExpected(parsed)) {
+    throw new Error(`Invalid ${field} shape`);
+  }
+  return parsed;
+}
+
+function isEncryptedData(value: unknown): value is EncryptedData {
+  return isRecord(value) &&
+    typeof value.ciphertext === 'string' &&
+    typeof value.iv === 'string' &&
+    typeof value.tag === 'string' &&
+    Number.isInteger(value.threshold) &&
+    Number.isInteger(value.shares_count) &&
+    Array.isArray(value.share_metadata) &&
+    value.share_metadata.every((item) =>
+      isRecord(item) &&
+      Number.isInteger(item.share_id) &&
+      typeof item.commitment === 'string'
+    );
+}
+
+function isThresholdKeyShares(value: unknown): value is ThresholdKeyShare[] {
+  return Array.isArray(value) && value.every((share) =>
+    isRecord(share) &&
+    Number.isInteger(share.share_id) &&
+    typeof share.share_value === 'string' &&
+    typeof share.commitment === 'string'
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
 export class EncryptedCredentialStore {
@@ -57,7 +117,7 @@ export class EncryptedCredentialStore {
       RETURNING *;
     `;
 
-    const result = await pool.query<EncryptedCredentialRecord>(query, [
+    const result = await pool.query<EncryptedCredentialDatabaseRow>(query, [
       credentialId,
       JSON.stringify(encryptedData),
       JSON.stringify(keyShares),
@@ -67,7 +127,15 @@ export class EncryptedCredentialStore {
       now,
     ]);
 
-    return this.parseRecord(result.rows[0]);
+    try {
+      return this.parseRecord(result.rows[0]);
+    } catch (error) {
+      logger.error('Failed to parse encrypted credential returned from database', 'encrypted-credential-store', {
+        credentialId: credentialId.toString(),
+        error: String(error),
+      });
+      throw error;
+    }
   }
 
   /**
@@ -82,9 +150,19 @@ export class EncryptedCredentialStore {
       WHERE credential_id = $1;
     `;
 
-    const result = await pool.query<EncryptedCredentialRecord>(query, [credentialId]);
+    const result = await pool.query<EncryptedCredentialDatabaseRow>(query, [credentialId]);
 
-    return result.rows.length > 0 ? this.parseRecord(result.rows[0]) : null;
+    if (result.rows.length === 0) return null;
+
+    try {
+      return this.parseRecord(result.rows[0]);
+    } catch (error) {
+      logger.error('Skipping malformed encrypted credential row', 'encrypted-credential-store', {
+        credentialId: credentialId.toString(),
+        error: String(error),
+      });
+      return null;
+    }
   }
 
   /**
@@ -206,13 +284,21 @@ export class EncryptedCredentialStore {
       WHERE credential_id = $1;
     `;
 
-    const result = await pool.query<{ key_custodians: string }>(query, [credentialId]);
+    const result = await pool.query<{ key_custodians: unknown }>(query, [credentialId]);
 
     if (result.rows.length === 0) {
       return [];
     }
 
-    return JSON.parse(result.rows[0].key_custodians);
+    try {
+      return parseJsonField(result.rows[0].key_custodians, 'key_custodians', isStringArray);
+    } catch (error) {
+      logger.error('Skipping malformed key custodians value', 'encrypted-credential-store', {
+        credentialId: credentialId.toString(),
+        error: String(error),
+      });
+      return [];
+    }
   }
 
   /**
@@ -266,18 +352,12 @@ export class EncryptedCredentialStore {
   /**
    * Parse a record from database query result
    */
-  private parseRecord(row: EncryptedCredentialRecord): EncryptedCredentialRecord {
+  private parseRecord(row: EncryptedCredentialDatabaseRow): EncryptedCredentialRecord {
     return {
       ...row,
-      encrypted_data: typeof row.encrypted_data === 'string'
-        ? JSON.parse(row.encrypted_data)
-        : row.encrypted_data,
-      key_shares: typeof row.key_shares === 'string'
-        ? JSON.parse(row.key_shares)
-        : row.key_shares,
-      key_custodians: typeof row.key_custodians === 'string'
-        ? JSON.parse(row.key_custodians)
-        : row.key_custodians,
+      encrypted_data: parseJsonField(row.encrypted_data, 'encrypted_data', isEncryptedData),
+      key_shares: parseJsonField(row.key_shares, 'key_shares', isThresholdKeyShares),
+      key_custodians: parseJsonField(row.key_custodians, 'key_custodians', isStringArray),
     };
   }
 }

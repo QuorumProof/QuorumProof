@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { getPool } from '../db.js';
+import { logger } from './logger.js';
 
 /**
  * Credential Audit Trail
@@ -102,10 +103,10 @@ export class CredentialAuditTrail {
 
     const result = await pool.query<CredentialChange>(query, [credentialId]);
 
-    const changes = result.rows.map((row) => this.parseChange(row));
+    const changes = this.parseChanges(result.rows, 'change-history');
 
     // Verify integrity of the change history
-    const integrityVerified = this.verifyIntegrity(changes);
+    const integrityVerified = changes.length === result.rows.length && this.verifyIntegrity(changes);
 
     return {
       changes,
@@ -129,7 +130,7 @@ export class CredentialAuditTrail {
 
     const result = await pool.query<CredentialChange>(query, [credentialId, fieldName]);
 
-    return result.rows.map((row) => this.parseChange(row));
+    return this.parseChanges(result.rows, 'field-history');
   }
 
   /**
@@ -147,7 +148,7 @@ export class CredentialAuditTrail {
 
     const result = await pool.query<CredentialChange>(query, [credentialId, userAddress]);
 
-    return result.rows.map((row) => this.parseChange(row));
+    return this.parseChanges(result.rows, 'user-history');
   }
 
   /**
@@ -169,7 +170,7 @@ export class CredentialAuditTrail {
 
     const result = await pool.query<CredentialChange>(query, [credentialId, startTime, endTime]);
 
-    return result.rows.map((row) => this.parseChange(row));
+    return this.parseChanges(result.rows, 'date-range-history');
   }
 
   /**
@@ -322,5 +323,22 @@ export class CredentialAuditTrail {
       old_value: typeof row.old_value === 'string' ? JSON.parse(row.old_value) : row.old_value,
       new_value: typeof row.new_value === 'string' ? JSON.parse(row.new_value) : row.new_value,
     };
+  }
+
+  private parseChanges(rows: CredentialChange[], source: string): CredentialChange[] {
+    const changes: CredentialChange[] = [];
+    for (const row of rows) {
+      try {
+        changes.push(this.parseChange(row));
+      } catch (error) {
+        logger.error('Skipping malformed credential change row', 'credential-audit-trail', {
+          changeId: row.change_id,
+          credentialId: String(row.credential_id),
+          source,
+          error: String(error),
+        });
+      }
+    }
+    return changes;
   }
 }
