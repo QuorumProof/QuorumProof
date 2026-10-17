@@ -1,6 +1,58 @@
 import { Router, Request, Response } from 'express';
+import { Keypair, StrKey } from '@stellar/stellar-sdk';
 import { ThresholdEncryption, type EncryptedData } from '../crypto/thresholdEncryption.js';
 import { EncryptedCredentialStore } from '../services/encryptedCredentialStore.js';
+import { rbac } from '../middleware/rbac.js';
+import * as soroban from '../soroban.js';
+
+const SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000;
+
+export function buildDecryptionAuthorizationMessage(
+  credentialId: string,
+  requesterAddress: string,
+  reason: string,
+  timestamp: number,
+  nonce: string,
+): string {
+  return [
+    'QuorumProof Decryption Authorization',
+    `credential:${credentialId}`,
+    `requester:${requesterAddress}`,
+    `reason:${reason}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join('\n');
+}
+
+export function buildDecryptionRequestMessage(
+  credentialId: string,
+  requesterAddress: string,
+  timestamp: number,
+  nonce: string,
+): string {
+  return [
+    'QuorumProof Decryption Request',
+    `credential:${credentialId}`,
+    `requester:${requesterAddress}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join('\n');
+}
+
+function verifyStellarSignature(address: string, message: string, signature: string): boolean {
+  if (!StrKey.isValidEd25519PublicKey(address)) return false;
+  try {
+    const signatureBytes = Buffer.from(signature, 'base64');
+    if (signatureBytes.length !== 64 || signatureBytes.toString('base64') !== signature) return false;
+    return Keypair.fromPublicKey(address).verify(Buffer.from(message, 'utf8'), signatureBytes);
+  } catch {
+    return false;
+  }
+}
+
+function isRecentTimestamp(timestamp: number): boolean {
+  return Number.isSafeInteger(timestamp) && Math.abs(Date.now() - timestamp) <= SIGNATURE_MAX_AGE_MS;
+}
 
 /**
  * Encrypted Credentials Routes
@@ -14,10 +66,17 @@ import { EncryptedCredentialStore } from '../services/encryptedCredentialStore.j
  * GET /api/credentials/:id/decrypt/status - Check decryption authorization status
  */
 
-export function createEncryptedCredentialsRouter() {
+export function createEncryptedCredentialsRouter(
+  dependencies: {
+    store?: EncryptedCredentialStore;
+    encryption?: ThresholdEncryption;
+    simulateCall?: typeof soroban.simulateCall;
+  } = {},
+) {
   const router = Router();
-  const store = new EncryptedCredentialStore();
-  const encryption = new ThresholdEncryption(3, 5); // 3-of-5 threshold encryption
+  const store = dependencies.store ?? new EncryptedCredentialStore();
+  const encryption = dependencies.encryption ?? new ThresholdEncryption(3, 5); // 3-of-5 threshold encryption
+  const simulateCall = dependencies.simulateCall ?? soroban.simulateCall;
 
   // POST /api/credentials/:id/encrypt
   // Encrypt sensitive fields of a credential
@@ -114,29 +173,81 @@ export function createEncryptedCredentialsRouter() {
   // Request decryption authorization
   router.post('/:id/decrypt/authorize', async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-    const { requester_address, reason } = req.body as {
+    const { requester_address, reason, timestamp, nonce, signature, approvals } = req.body as {
       requester_address?: string;
       reason?: string;
+      timestamp?: number;
+      nonce?: string;
+      signature?: string;
+      approvals?: Array<{ address: string; signature: string }>;
     };
 
-    if (!requester_address) {
+    if (
+      typeof requester_address !== 'string' ||
+      typeof reason !== 'string' ||
+      typeof timestamp !== 'number' ||
+      typeof nonce !== 'string' ||
+      typeof signature !== 'string' ||
+      !Array.isArray(approvals)
+    ) {
       res.status(400).json({
         error: 'Invalid request',
-        message: 'requester_address is required',
+        message: 'requester_address, reason, timestamp, nonce, signature, and custodian approvals are required',
       });
+      return;
+    }
+
+    const authorizationMessage = buildDecryptionAuthorizationMessage(
+      id,
+      requester_address,
+      reason,
+      timestamp,
+      nonce,
+    );
+    if (
+      !isRecentTimestamp(timestamp) ||
+      !/^[a-f0-9]{32,128}$/i.test(nonce) ||
+      !verifyStellarSignature(requester_address, authorizationMessage, signature)
+    ) {
+      res.status(401).json({ error: 'Invalid requester signature or expired challenge' });
       return;
     }
 
     try {
       const credentialId = BigInt(id);
+      const credential = await simulateCall('get_credential', [soroban.u64Val(credentialId)]);
+      const credentialRecord = credential as { subject?: unknown; issuer?: unknown };
+      if (requester_address !== credentialRecord.subject && requester_address !== credentialRecord.issuer) {
+        res.status(403).json({ error: 'Only the credential holder or issuer may request decryption' });
+        return;
+      }
 
-      // Authorize decryption for 1 hour by default
+      const custodians = await store.getKeyCustodians(credentialId);
+      const threshold = encryption.getConfig().threshold;
+      const verifiedApprovers = new Set<string>();
+      for (const approval of approvals) {
+        if (
+          custodians.includes(approval.address) &&
+          !verifiedApprovers.has(approval.address) &&
+          verifyStellarSignature(approval.address, authorizationMessage, approval.signature)
+        ) {
+          verifiedApprovers.add(approval.address);
+        }
+      }
+      if (verifiedApprovers.size < threshold) {
+        res.status(403).json({
+          error: 'Insufficient custodian approvals',
+          message: `At least ${threshold} configured key custodians must approve`,
+        });
+        return;
+      }
+
       const authorization = await store.authorizeDecryption(
         credentialId,
         requester_address,
         3600000,
-        reason || 'Not specified',
-        [] // In production, require approval from multiple parties
+        reason,
+        [...verifiedApprovers]
       );
 
       res.json({
@@ -159,16 +270,35 @@ export function createEncryptedCredentialsRouter() {
   // Decrypt with key shares (requires authorization)
   router.post('/:id/decrypt', async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-    const { requester_address, key_shares } = req.body as {
+    const { requester_address, key_shares, timestamp, nonce, signature } = req.body as {
       requester_address?: string;
       key_shares?: unknown[];
+      timestamp?: number;
+      nonce?: string;
+      signature?: string;
     };
 
-    if (!requester_address || !key_shares || !Array.isArray(key_shares)) {
+    if (
+      typeof requester_address !== 'string' ||
+      !Array.isArray(key_shares) ||
+      typeof timestamp !== 'number' ||
+      typeof nonce !== 'string' ||
+      typeof signature !== 'string'
+    ) {
       res.status(400).json({
         error: 'Invalid request',
-        message: 'requester_address and key_shares array are required',
+        message: 'requester_address, key_shares, timestamp, nonce, and signature are required',
       });
+      return;
+    }
+
+    const requestMessage = buildDecryptionRequestMessage(id, requester_address, timestamp, nonce);
+    if (
+      !isRecentTimestamp(timestamp) ||
+      !/^[a-f0-9]{32,128}$/i.test(nonce) ||
+      !verifyStellarSignature(requester_address, requestMessage, signature)
+    ) {
+      res.status(401).json({ error: 'Invalid requester signature or expired challenge' });
       return;
     }
 
@@ -202,8 +332,10 @@ export function createEncryptedCredentialsRouter() {
           key_shares as any[]
         );
 
-        // Log successful decryption
+        const decryptedData = JSON.parse(decrypted.toString());
+
         await store.logDecryptionAttempt(credentialId, requester_address, true, {
+          verified_identity: requester_address,
           shared_count: key_shares.length,
         });
 
@@ -211,12 +343,13 @@ export function createEncryptedCredentialsRouter() {
           success: true,
           message: 'Decryption successful',
           credential_id: id,
-          decrypted_data: JSON.parse(decrypted.toString()),
+          decrypted_data: decryptedData,
           decrypted_at: new Date().toISOString(),
         });
       } catch (decryptErr: unknown) {
         // Log failed decryption
         await store.logDecryptionAttempt(credentialId, requester_address, false, {
+          verified_identity: requester_address,
           error: decryptErr instanceof Error ? decryptErr.message : String(decryptErr),
           share_count: key_shares.length,
         });
@@ -278,10 +411,8 @@ export function createEncryptedCredentialsRouter() {
 
   // GET /api/credentials/:id/decrypt/audit
   // Get decryption audit log (admin only)
-  router.get('/:id/decrypt/audit', async (req: Request, res: Response) => {
+  router.get('/:id/decrypt/audit', rbac.requirePermission('admin:all'), async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-
-    // TODO: Add authorization check for admin-only access
 
     try {
       const credentialId = BigInt(id);
