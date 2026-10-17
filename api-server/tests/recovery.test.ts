@@ -305,4 +305,13 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     const res = await request(app2).get('/api/recovery/status/nonexistent');
     expect(res.status).toBe(404);
   });
+
+  it('rejects OTP values that are not strings before querying recovery state', async () => {
+    const app = await buildApp();
+    const res = await request(app)
+      .post('/api/recovery/verify-otp')
+      .send({ requestId: 'unknown', code: 123456 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+  });
 });
