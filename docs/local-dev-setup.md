@@ -401,7 +401,7 @@ every variable used in local development.
 | `DATABASE_URL` | — | PostgreSQL connection string, e.g. `postgres://qp:devpassword@localhost:5432/quorumproof` |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window in ms |
 | `RATE_LIMIT_MAX` | `100` | Max requests per window |
-| `HMAC_SIGNING_SECRET` | — | Secret for HMAC request signing |
+| `HMAC_SIGNING_SECRET` | — | Secret for HMAC request signing; required when `NODE_ENV=production` |
 | `PUBLIC_APP_BASE_URL` | `http://localhost:3000` | Publicly reachable origin for QR codes / export links |
 | `REDIS_URL` | — | Redis URL for WebSocket cross-instance delivery (optional for local dev) |
 

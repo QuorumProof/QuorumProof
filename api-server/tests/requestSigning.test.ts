@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { createRequestSigning } from '../src/middleware/requestSigning.js';
@@ -144,6 +144,16 @@ describe('Request Signing Middleware', () => {
 
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('Invalid signature');
+  });
+
+  it('requires a signing secret when initialized in production', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('HMAC_SIGNING_SECRET', '');
+    try {
+      expect(() => createRequestSigning()).toThrow(/HMAC_SIGNING_SECRET/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('uses timing-safe signature comparison', () => {

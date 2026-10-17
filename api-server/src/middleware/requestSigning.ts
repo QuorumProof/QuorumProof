@@ -10,17 +10,17 @@ export interface RequestSigningConfig {
   enabled: boolean;
 }
 
-const DEFAULT_CONFIG: RequestSigningConfig = {
-  secret: process.env.HMAC_SIGNING_SECRET ?? '',
-  headerName: 'x-stellar-signature',
-  timestampHeader: 'x-signature-timestamp',
-  signatureHeader: 'x-signature-digest',
-  maxTimestampAgeMs: 300_000,
-  enabled: !!process.env.HMAC_SIGNING_SECRET,
-};
-
 function getConfig(overrides?: Partial<RequestSigningConfig>): RequestSigningConfig {
-  return { ...DEFAULT_CONFIG, ...overrides };
+  const secret = process.env.HMAC_SIGNING_SECRET ?? '';
+  return {
+    secret,
+    headerName: 'x-stellar-signature',
+    timestampHeader: 'x-signature-timestamp',
+    signatureHeader: 'x-signature-digest',
+    maxTimestampAgeMs: 300_000,
+    enabled: secret.trim().length > 0,
+    ...overrides,
+  };
 }
 
 function computeSignature(payload: string, secret: string): string {
@@ -29,7 +29,9 @@ function computeSignature(payload: string, secret: string): string {
 
 export function createRequestSigning(config?: Partial<RequestSigningConfig>) {
   const opts = getConfig(config);
-
+  if (process.env.NODE_ENV === 'production' && (!opts.enabled || !opts.secret.trim())) {
+    throw new Error('HMAC_SIGNING_SECRET must be set and request signing enabled in production');
+  }
   const middleware = (req: Request, res: Response, next: NextFunction): void => {
     if (!opts.enabled) {
       next();
