@@ -86,7 +86,7 @@ export default function Dashboard() {
     setSelectedIds(new Set());
   }
 
-  async function handleBulkRevokeConfirm(_ids: bigint[]): Promise<void> {
+  async function handleBulkRevokeConfirm(): Promise<void> {
     throw new Error(
       'Bulk revocation is unavailable because this dashboard only supports read-only contract access. No credentials were changed.',
     );
