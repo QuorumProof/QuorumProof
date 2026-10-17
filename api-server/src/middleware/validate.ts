@@ -81,6 +81,7 @@ const Ajv = AjvLib as unknown as new (opts: Record<string, unknown>) => {
   compile: (schema: Record<string, unknown>) => AjvValidatorFn;
 };
 const ajv = new Ajv({ coerceTypes: true, useDefaults: true, removeAdditional: true });
+const strictAjv = new Ajv({ coerceTypes: false, useDefaults: true, removeAdditional: true });
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -133,6 +134,10 @@ export type ValidationSchemas = {
   params?: LocationInput;
 };
 
+export interface ValidationOptions {
+  coerceTypes?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -153,7 +158,7 @@ function normalise(input: LocationInput): LocationConfig {
 // Middleware factory
 // ---------------------------------------------------------------------------
 
-export function validate(schemas: ValidationSchemas) {
+export function validate(schemas: ValidationSchemas, options: ValidationOptions = {}) {
   type Entry = {
     location: 'body' | 'query' | 'params';
     validator: AjvValidatorFn | null;
@@ -169,7 +174,7 @@ export function validate(schemas: ValidationSchemas) {
     const cfg = normalise(input);
 
     const validator = cfg.schema
-      ? (ajv.compile(cfg.schema) as AjvValidatorFn)
+      ? ((options.coerceTypes === false ? strictAjv : ajv).compile(cfg.schema) as AjvValidatorFn)
       : null;
 
     entries.push({
