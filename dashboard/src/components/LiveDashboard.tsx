@@ -7,9 +7,16 @@ interface DashboardStats {
   timestamp: string
 }
 
-const WS_URL =
-  import.meta.env.VITE_WS_URL ||
-  `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
+export function getWebSocketUrl(
+  configuredUrl: string | undefined,
+  location: Pick<Location, 'protocol' | 'host'> = window.location
+): string {
+  if (configuredUrl) return configuredUrl
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${location.host}/ws`
+}
+
+const WS_URL = getWebSocketUrl(import.meta.env.VITE_WS_URL)
 
 // Auth token from env — required by the server's /ws endpoint.
 // Set VITE_DASHBOARD_TOKEN to a valid operator token before running.
