@@ -2,11 +2,12 @@ import { Router, Request, Response } from 'express';
 import { privilegeEscalationManager } from '../services/privilegeEscalationPrevention.js';
 import { logger } from '../services/logger.js';
 import { problemJson } from '../middleware/problemDetails.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 
 // POST /api/admin/privilege-escalation/mfa-challenge - Request MFA for escalation
-router.post('/mfa-challenge', (req: Request, res: Response) => {
+router.post('/mfa-challenge', validate(schemas.privilegeMfaChallenge), (req: Request, res: Response) => {
   try {
     const { userId } = req.body;
 
@@ -33,7 +34,7 @@ router.post('/mfa-challenge', (req: Request, res: Response) => {
 });
 
 // POST /api/admin/privilege-escalation/verify-mfa - Verify MFA code
-router.post('/verify-mfa', (req: Request, res: Response) => {
+router.post('/verify-mfa', validate(schemas.privilegeVerifyMfa), (req: Request, res: Response) => {
   try {
     const { userId, code } = req.body;
 
@@ -61,7 +62,7 @@ router.post('/verify-mfa', (req: Request, res: Response) => {
 });
 
 // POST /api/admin/privilege-escalation/request - Submit privilege change request
-router.post('/request', (req: Request, res: Response) => {
+router.post('/request', validate(schemas.privilegeRequest), (req: Request, res: Response) => {
   try {
     const { userId, newRole, reason, approvers } = req.body;
 
@@ -93,7 +94,7 @@ router.post('/request', (req: Request, res: Response) => {
 });
 
 // POST /api/admin/privilege-escalation/approve - Approve a privilege change
-router.post('/approve', (req: Request, res: Response) => {
+router.post('/approve', validate(schemas.privilegeApproval), (req: Request, res: Response) => {
   try {
     const { requestId, approverId } = req.body;
 
@@ -121,7 +122,7 @@ router.post('/approve', (req: Request, res: Response) => {
 });
 
 // POST /api/admin/privilege-escalation/reject - Reject a privilege change
-router.post('/reject', (req: Request, res: Response) => {
+router.post('/reject', validate(schemas.privilegeRejection), (req: Request, res: Response) => {
   try {
     const { requestId, approverId, reason } = req.body;
 

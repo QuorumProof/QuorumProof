@@ -519,6 +519,173 @@ export const schemas = {
       properties: {
         credential_ids: {
           type: 'array',
-       
+          items: { type: 'integer', minimum: 1 },
+          minItems: 1,
+          maxItems: 50,
+        },
+        slice_id: { type: 'integer', minimum: 1 },
+      },
+      required: ['credential_ids', 'slice_id'],
+      additionalProperties: false,
+    },
+  },
+  verifyBatchClaims: {
+    body: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: 'object',
+            properties: {
+              credential_id: { type: 'integer', minimum: 1 },
+              claim_type: { type: 'string', minLength: 1, maxLength: 64 },
+            },
+            required: ['credential_id', 'claim_type'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['items'],
+      additionalProperties: false,
+    },
+  },
+  notificationPreferences: {
+    body: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', minLength: 1 },
+        email: { type: 'string' },
+        phone: { type: 'string' },
+        channels: {
+          type: 'array',
+          items: { type: 'string', enum: ['email', 'sms'] },
+          minItems: 1,
+        },
+        events: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: [
+              'credential_issued', 'credential_revoked', 'credential_suspended',
+              'credential_attested', 'credential_expiring',
+            ],
+          },
+          minItems: 1,
+        },
+        credential_type_filters: { type: 'array', items: { type: 'integer' } },
+        enabled: { type: 'boolean' },
+      },
+      required: ['address', 'channels', 'events'],
+      additionalProperties: false,
+    },
+  },
+  notificationSend: {
+    body: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', minLength: 1 },
+        event: {
+          type: 'string',
+          enum: [
+            'credential_issued', 'credential_revoked', 'credential_suspended',
+            'credential_attested', 'credential_expiring',
+          ],
+        },
+        credential_id: { type: 'integer', minimum: 1 },
+        credential_type: { type: 'integer' },
+        issuer: { type: 'string' },
+        holder: { type: 'string' },
+      },
+      required: ['address', 'event', 'credential_id'],
+      additionalProperties: false,
+    },
+  },
+  analyticsEvent: {
+    body: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['issued', 'attested', 'revoked', 'suspended', 'verified'],
+        },
+        credential_id: { type: 'string', minLength: 1 },
+        timestamp: { type: 'string', minLength: 1 },
+        issuer: { type: 'string' },
+        subject: { type: 'string' },
+        attestor: { type: 'string' },
+      },
+      required: ['type', 'credential_id', 'timestamp'],
+      additionalProperties: false,
+    },
+  },
+  auditVerify: {
+    body: {
+      type: 'object',
+      properties: {
+        batch_id: { type: 'integer', minimum: 1 },
+      },
+      required: ['batch_id'],
+      additionalProperties: false,
+    },
+  },
+  privilegeMfaChallenge: {
+    body: {
+      type: 'object',
+      properties: { userId: { type: 'string', minLength: 1 } },
+      required: ['userId'],
+      additionalProperties: false,
+    },
+  },
+  privilegeVerifyMfa: {
+    body: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', minLength: 1 },
+        code: { type: 'string', pattern: '^\\d{6}$' },
+      },
+      required: ['userId', 'code'],
+      additionalProperties: false,
+    },
+  },
+  privilegeRequest: {
+    body: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', minLength: 1 },
+        newRole: { type: 'string', minLength: 1, maxLength: 64 },
+        reason: { type: 'string', maxLength: 1000 },
+        approvers: { type: 'array', items: { type: 'string', minLength: 1 } },
+      },
+      required: ['userId', 'newRole'],
+      additionalProperties: false,
+    },
+  },
+  privilegeApproval: {
+    body: {
+      type: 'object',
+      properties: {
+        requestId: { type: 'string', minLength: 1 },
+        approverId: { type: 'string', minLength: 1 },
+      },
+      required: ['requestId', 'approverId'],
+      additionalProperties: false,
+    },
+  },
+  privilegeRejection: {
+    body: {
+      type: 'object',
+      properties: {
+        requestId: { type: 'string', minLength: 1 },
+        approverId: { type: 'string', minLength: 1 },
+        reason: { type: 'string', maxLength: 1000 },
+      },
+      required: ['requestId', 'approverId'],
+      additionalProperties: false,
+    },
+  },
+};
 
-/* … truncated 3359 chars — edit only what you need near the top … */
+export default validate;
