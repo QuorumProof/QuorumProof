@@ -4,7 +4,7 @@
  * Provides request cancellation, retry logic, timeout, and error normalization
  */
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+const API_BASE = import.meta.env.VITE_API_URL ?? '';
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export interface ApiRequestConfig {
@@ -70,6 +70,17 @@ export class ApiClient {
     this.abortControllers = new Map();
   }
 
+  private buildUrl(endpoint: string): string {
+    if (!this.baseUrl.trim()) {
+      throw new ApiError(
+        'API URL is not configured. Set VITE_API_URL before making API requests.',
+        0,
+        'CONFIGURATION_ERROR'
+      );
+    }
+    return `${this.baseUrl}${endpoint}`;
+  }
+
   /**
    * Register an abort controller for a request key (for cancellation)
    */
@@ -131,7 +142,7 @@ export class ApiClient {
     config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
-    const url = `${this.baseUrl}${endpoint}`;
+    const url = this.buildUrl(endpoint);
     const controller = signal ? undefined : createTimeoutController(timeout);
     const finalSignal = signal || controller?.signal;
 
@@ -174,7 +185,7 @@ export class ApiClient {
     config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
-    const url = `${this.baseUrl}${endpoint}`;
+    const url = this.buildUrl(endpoint);
     const controller = signal ? undefined : createTimeoutController(timeout);
     const finalSignal = signal || controller?.signal;
 
@@ -219,7 +230,7 @@ export class ApiClient {
     config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
-    const url = `${this.baseUrl}${endpoint}`;
+    const url = this.buildUrl(endpoint);
     const controller = signal ? undefined : createTimeoutController(timeout);
     const finalSignal = signal || controller?.signal;
 
@@ -263,7 +274,7 @@ export class ApiClient {
     config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
-    const url = `${this.baseUrl}${endpoint}`;
+    const url = this.buildUrl(endpoint);
     const controller = signal ? undefined : createTimeoutController(timeout);
     const finalSignal = signal || controller?.signal;
 

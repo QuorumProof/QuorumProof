@@ -17,6 +17,16 @@ describe('ApiClient', () => {
   });
 
   describe('GET requests', () => {
+    it('fails explicitly when the API URL is not configured', async () => {
+      const unconfiguredClient = new ApiClient('', 5000);
+
+      await expect(unconfiguredClient.get('/test')).rejects.toMatchObject({
+        code: 'CONFIGURATION_ERROR',
+        message: expect.stringContaining('VITE_API_URL'),
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
     it('should perform a successful GET request', async () => {
       const mockData = { id: 1, name: 'Test' };
       (global.fetch as any).mockResolvedValue({
