@@ -686,6 +686,57 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+  distributedRevocationEntry: {
+    body: {
+      schema: {
+        type: 'object',
+        properties: {
+          credential_id: { type: 'integer', minimum: 1 },
+          revoked_by: { type: 'string', minLength: 1 },
+          reason: { type: 'string', maxLength: 1000 },
+          locked_until: { type: 'string', minLength: 1 },
+        },
+        required: ['credential_id', 'revoked_by'],
+        additionalProperties: false,
+      },
+      custom: (data) => {
+        if (typeof data !== 'object' || data === null) return true;
+        const lockedUntil = (data as Record<string, unknown>).locked_until;
+        return lockedUntil === undefined || (typeof lockedUntil === 'string' && Number.isFinite(Date.parse(lockedUntil)))
+          ? true
+          : 'locked_until must be a valid date';
+      },
+    },
+  },
+  distributedRevocationPeer: {
+    body: {
+      type: 'object',
+      properties: {
+        peer_id: { type: 'string', minLength: 1, maxLength: 128, pattern: '\\S' },
+        peer_address: { type: 'string', minLength: 1, maxLength: 256, pattern: '\\S' },
+      },
+      required: ['peer_id', 'peer_address'],
+      additionalProperties: false,
+    },
+  },
+  distributedRevocationPeerParams: {
+    params: {
+      type: 'object',
+      properties: { peer_id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['peer_id'],
+      additionalProperties: false,
+    },
+  },
+  distributedRevocationCommit: {
+    body: {
+      custom: (data) => data === undefined || (
+        typeof data === 'object' &&
+        data !== null &&
+        !Array.isArray(data) &&
+        Object.keys(data).length === 0
+      ) ? true : 'Request body must be empty',
+    },
+  },
 };
 
 export default validate;
