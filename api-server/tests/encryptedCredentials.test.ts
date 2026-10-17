@@ -16,12 +16,13 @@ describe('Encrypted credential routes', () => {
   const encryption = new ThresholdEncryption(3, 5);
   const requester = Keypair.random();
   const custodians = Array.from({ length: 5 }, () => Keypair.random());
-  const encryptedData = encryption.encryptSensitiveData('{}').encrypted;
+  const encryptedRecord = encryption.encryptSensitiveData('{}');
+  const encryptedData = encryptedRecord.encrypted;
   const credentialRecord = {
     id: 1,
     credential_id: 42n,
     encrypted_data: encryptedData,
-    key_shares: [],
+    key_shares: encryptedRecord.keyShares,
     key_custodians: custodians.map((keypair) => keypair.publicKey()),
     threshold: 3,
     created_at: 1,
@@ -29,6 +30,7 @@ describe('Encrypted credential routes', () => {
   };
   const simulateCall = vi.fn<typeof soroban.simulateCall>();
   const getKeyCustodians = vi.spyOn(store, 'getKeyCustodians');
+  const storeEncryptedCredential = vi.spyOn(store, 'storeEncryptedCredential');
   const authorizeDecryption = vi.spyOn(store, 'authorizeDecryption');
   const isDecryptionAuthorized = vi.spyOn(store, 'isDecryptionAuthorized');
   const getEncryptedCredential = vi.spyOn(store, 'getEncryptedCredential');
@@ -91,7 +93,7 @@ describe('Encrypted credential routes', () => {
     const message = buildDecryptionRequestMessage('42', requester.publicKey(), timestamp, nonce);
     return {
       requester_address: requester.publicKey(),
-      key_shares: [],
+      key_shares: credentialRecord.key_shares.slice(0, 3),
       timestamp,
       nonce,
       signature: requester.sign(Buffer.from(message)).toString('base64'),
@@ -99,7 +101,7 @@ describe('Encrypted credential routes', () => {
   }
 
   it('requires the requester signature and threshold approvals from configured custodians', async () => {
-    const payload = signedAuthorization(custodians.slice(0, 2));
+    const payload = signedAuthorization(Array.from({ length: 3 }, () => Keypair.random()));
     const response = await request(app).post('/api/credentials/42/decrypt/authorize').send(payload);
 
     expect(response.status).toBe(403);
@@ -151,18 +153,47 @@ describe('Encrypted credential routes', () => {
   it('rejects decrypt requests without a valid requester signature', async () => {
     const response = await request(app)
       .post('/api/credentials/42/decrypt')
-      .send({ ...signedDecrypt(), signature: 'invalid' });
+      .send({ ...signedDecrypt(), signature: Buffer.alloc(64).toString('base64') });
 
     expect(response.status).toBe(401);
     expect(isDecryptionAuthorized).not.toHaveBeenCalled();
   });
 
+  it('rejects an invalid requester address before authorization checks', async () => {
+    const response = await request(app)
+      .post('/api/credentials/42/decrypt')
+      .send({ ...signedDecrypt(), requester_address: 'not-a-stellar-address' });
+
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body.details)).toContain('requester_address');
+    expect(isDecryptionAuthorized).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed key shares before authorization checks', async () => {
+    const response = await request(app)
+      .post('/api/credentials/42/decrypt')
+      .send({ ...signedDecrypt(), key_shares: ['not-a-key-share'] });
+
+    expect(response.status).toBe(400);
+    expect(isDecryptionAuthorized).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid key custodian addresses before encrypting', async () => {
+    const response = await request(app)
+      .post('/api/credentials/42/encrypt')
+      .send({ sensitive_fields: { secret: 'value' }, keyCustodians: ['invalid'] });
+
+    expect(response.status).toBe(400);
+    expect(storeEncryptedCredential).not.toHaveBeenCalled();
+  });
+
   it('records malformed decrypted JSON as one failed attempt', async () => {
-    vi.spyOn(encryption, 'decryptSensitiveData').mockReturnValue(Buffer.from('not-json'));
+    const decryptSpy = vi.spyOn(encryption, 'decryptSensitiveData').mockReturnValue(Buffer.from('not-json'));
 
     const response = await request(app)
       .post('/api/credentials/42/decrypt')
       .send(signedDecrypt());
+    decryptSpy.mockRestore();
 
     expect(response.status).toBe(400);
     expect(logDecryptionAttempt).toHaveBeenCalledTimes(1);
@@ -170,6 +201,22 @@ describe('Encrypted credential routes', () => {
       42n,
       requester.publicKey(),
       false,
+      expect.objectContaining({ verified_identity: requester.publicKey() }),
+    );
+  });
+
+  it('decrypts with valid shares and records the verified requester identity', async () => {
+    const response = await request(app)
+      .post('/api/credentials/42/decrypt')
+      .send(signedDecrypt());
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.decrypted_data).toEqual({});
+    expect(logDecryptionAttempt).toHaveBeenCalledTimes(1);
+    expect(logDecryptionAttempt).toHaveBeenCalledWith(
+      42n,
+      requester.publicKey(),
+      true,
       expect.objectContaining({ verified_identity: requester.publicKey() }),
     );
   });

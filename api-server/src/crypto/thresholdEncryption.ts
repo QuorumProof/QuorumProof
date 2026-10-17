@@ -75,7 +75,7 @@ export class ThresholdEncryption {
     // Create Pedersen commitments for verifiability
     const shareMetadata = keyShares.map((share) => ({
       share_id: share.share_id,
-      commitment: crypto.createHash('sha256').update(share.share_value).digest('base64'),
+      commitment: share.commitment,
     }));
 
     return {
