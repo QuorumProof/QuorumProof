@@ -401,6 +401,7 @@ every variable used in local development.
 | `DATABASE_URL` | — | PostgreSQL connection string, e.g. `postgres://qp:devpassword@localhost:5432/quorumproof` |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window in ms |
 | `RATE_LIMIT_MAX` | `100` | Max requests per window |
+| `TRUST_PROXY_HOPS` | `1` | Number of trusted reverse-proxy hops; set to the exact ingress/load-balancer hop count |
 | `HMAC_SIGNING_SECRET` | — | Secret for HMAC request signing; required when `NODE_ENV=production` |
 | `PUBLIC_APP_BASE_URL` | `http://localhost:3000` | Publicly reachable origin for QR codes / export links |
 | `REDIS_URL` | — | Redis URL for WebSocket cross-instance delivery (optional for local dev) |
@@ -409,6 +410,11 @@ When request signing is enabled, signed API requests must include the
 `x-signature-nonce` header. The HMAC-SHA256 input is the UTF-8 string
 `METHOD\nPATH\nTIMESTAMP\nNONCE\nJSON_BODY`, where `JSON_BODY` is
 `JSON.stringify(body || {})`. Use a new URL-safe nonce for every request.
+
+`TRUST_PROXY_HOPS` controls how many reverse proxies Express trusts when
+resolving `req.ip`. The ingress/load balancer must sanitize forwarded headers;
+do not set this to an unbounded trust mode. Use `0` when the API is not behind
+a trusted proxy, or set the actual hop count for your deployment.
 
 ### Frontend
 
