@@ -142,7 +142,7 @@ export const attestorsPaths: PathsFragment = {
                 slice_id: { type: 'string' },
                 signature: {
                   type: 'string',
-                  description: 'Hex signature of UTF-8 `QuorumProof Batch Attestation\\nattestor:<address>\\nsliceId:<decimal>\\ncredentialIds:<comma-separated decimal IDs>`.',
+                  description: 'Hex-encoded ed25519 signature of the canonical batch-attestation message.',
                 },
               },
               required: ['attestor', 'credential_ids', 'slice_id', 'signature'],
