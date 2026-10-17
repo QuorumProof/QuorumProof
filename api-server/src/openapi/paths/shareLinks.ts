@@ -16,7 +16,7 @@ export const shareLinksPaths: PathsFragment = {
                 subject: { type: 'string', description: 'Stellar address of the credential holder.' },
                 expiry_hours: { type: 'integer', minimum: 1, maximum: 8760 },
                 permission: { type: 'string', enum: ['view_only', 'download'] },
-                password: { type: 'string', description: 'Optional; omit for a public link.' },
+                password: { type: 'string', description: 'Optional; omit for a public link. Password-protected links require SHARE_LINK_HMAC_SECRET.' },
               },
               required: ['subject', 'expiry_hours', 'permission'],
             },
@@ -31,6 +31,7 @@ export const shareLinksPaths: PathsFragment = {
         '400': { description: 'Missing/invalid fields.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': { description: 'Only the credential holder can create share links.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '404': { description: 'Credential not found.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+        '503': { description: 'Password-protected links are unavailable because SHARE_LINK_HMAC_SECRET is missing or too short.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
       },
     },
   },
@@ -42,7 +43,7 @@ export const shareLinksPaths: PathsFragment = {
         required: true,
         content: {
           'application/json': {
-            schema: { type: 'object', properties: { token: { type: 'string', description: '32-char hex.' }, password: { type: 'string' } }, required: ['token'] },
+            schema: { type: 'object', properties: { token: { type: 'string', description: '32-char hex.' }, password: { type: 'string', description: 'Plaintext password; requires the same configured SHARE_LINK_HMAC_SECRET used when the link was created.' } }, required: ['token'] },
           },
         },
       },
@@ -51,6 +52,7 @@ export const shareLinksPaths: PathsFragment = {
         '400': { description: 'Malformed token.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': { description: 'Invalid or missing password.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '410': { description: 'Link expired, revoked, or invalid.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+        '503': { description: 'Password-protected links are unavailable because SHARE_LINK_HMAC_SECRET is missing or too short.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
       },
     },
   },
