@@ -29,6 +29,7 @@
  */
 
 import { Server as HttpServer } from 'http';
+import { logger } from './logger.js';
 
 export const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
 
@@ -133,14 +134,10 @@ export function createGracefulShutdown(
     shutdownInProgress = true;
     draining = true;
 
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      level: 'info',
-      service: 'quorumproof-api',
-      event: 'graceful_shutdown_start',
+    logger.info('Graceful shutdown started', 'graceful-shutdown', {
       inFlightRequests: inFlight,
       drainTimeoutMs,
-    }));
+    });
 
     options.onShutdownStart?.();
 
@@ -167,22 +164,14 @@ export function createGracefulShutdown(
     }
 
     if (timedOut) {
-      console.warn(JSON.stringify({
-        ts: new Date().toISOString(),
-        level: 'warn',
-        service: 'quorumproof-api',
-        event: 'graceful_shutdown_timeout',
+      logger.warn('Graceful shutdown timed out', 'graceful-shutdown', {
         remainingInFlight: inFlight,
         drainTimeoutMs,
-      }));
+      });
     } else {
-      console.log(JSON.stringify({
-        ts: new Date().toISOString(),
-        level: 'info',
-        service: 'quorumproof-api',
-        event: 'graceful_shutdown_drained',
+      logger.info('Graceful shutdown drained', 'graceful-shutdown', {
         drainTimeoutMs,
-      }));
+      });
     }
 
     // Run registered cleanup tasks sequentially so each one sees a
@@ -191,25 +180,17 @@ export function createGracefulShutdown(
       try {
         await task();
       } catch (err) {
-        console.error(JSON.stringify({
-          ts: new Date().toISOString(),
-          level: 'error',
-          service: 'quorumproof-api',
-          event: 'graceful_shutdown_cleanup_error',
+        logger.error('Graceful shutdown cleanup task failed', 'graceful-shutdown', {
           error: String(err),
-        }));
+        });
       }
     }
 
     options.onShutdownComplete?.(timedOut);
 
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      level: 'info',
-      service: 'quorumproof-api',
-      event: 'graceful_shutdown_complete',
+    logger.info('Graceful shutdown completed', 'graceful-shutdown', {
       timedOut,
-    }));
+    });
 
     if (resolveShutdown) {
       resolveShutdown();
@@ -224,7 +205,7 @@ export function createGracefulShutdown(
 
     const handler = () => {
       shutdown().catch((err) => {
-        console.error('Graceful shutdown error:', err);
+        logger.error('Graceful shutdown failed', 'graceful-shutdown', { error: String(err) });
         process.exit(1);
       });
     };

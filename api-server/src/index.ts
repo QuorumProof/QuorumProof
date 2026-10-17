@@ -68,6 +68,7 @@ import { getDefaultCriticalEventListener } from './services/criticalEventListene
 import { broadcastEvent as _wsServerBroadcastEvent, getConnectionCount, closeWsServer } from './ws/server.js';
 import { dispatchWebhookEvent } from './services/webhooks.js';
 import { createGracefulShutdown } from './services/gracefulShutdown.js';
+import { logger } from './services/logger.js';
 // #1559: Connection pooling for the API server.
 import { createConnectionPool, createConnectionPoolMiddleware } from './services/connectionPool.js';
 import * as Soroban from './soroban.js';
@@ -396,7 +397,7 @@ async function runStartupMigrations(): Promise<void> {
   const pool = await initPool(process.env.DATABASE_URL);
   const applied = await runMigrations(pool);
   if (applied.length > 0) {
-    console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
+    logger.info('Applied database migrations', 'startup', { count: applied.length, migrations: applied });
   }
   // Note: do NOT call pool.end() here — the pool lives for the full server
   // lifetime.  closePool() is called on graceful shutdown below.
@@ -406,7 +407,7 @@ async function runStartupMigrations(): Promise<void> {
   try {
     await runStartupMigrations();
   } catch (err) {
-    console.error('Startup migration failed, refusing to start:', err);
+    logger.error('Startup migration failed; refusing to start', 'startup', { error: String(err) });
     process.exit(1);
     return;
   }
@@ -415,12 +416,12 @@ async function runStartupMigrations(): Promise<void> {
   try {
     await loadPluginsFromEnv();
   } catch (err) {
-    console.error('Plugin loading failed, refusing to start:', err);
+    logger.error('Plugin loading failed; refusing to start', 'startup', { error: String(err) });
     process.exit(1);
     return;
   }
   httpServer.listen(PORT, () =>
-    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
+    logger.info('API server listening', 'startup', { port: PORT, websocketPath: '/ws' })
   );
   // #1650: no-op unless PEER_REGION_HEALTH_URL is set.
   regionFailoverDetector.start();
@@ -428,7 +429,7 @@ async function runStartupMigrations(): Promise<void> {
   // Issue #870: Graceful shutdown — drain the connection pool so in-flight
   // queries finish cleanly before the process exits.
   async function shutdown(signal: string): Promise<void> {
-    console.log(`Received ${signal}, shutting down gracefully…`);
+    logger.info('Shutdown signal received', 'startup', { signal });
     httpServer.close(async () => {
       try {
         const { closePool } = await import('./db.js');

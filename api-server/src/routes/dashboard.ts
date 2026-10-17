@@ -10,6 +10,7 @@
 
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
+import { logger } from '../services/logger.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -158,7 +159,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         expiring_soon: expiringCount,
       });
     } catch (error) {
-      console.error('Error fetching credentials:', error);
+      logger.error('Error fetching credentials', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch credentials' });
     }
   });
@@ -258,7 +259,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
 
       res.json(response);
     } catch (error) {
-      console.error('Error fetching credential details:', error);
+      logger.error('Error fetching credential details', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch credential details' });
     }
   });
@@ -350,7 +351,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         resolved_count: resolvedCount,
       });
     } catch (error) {
-      console.error('Error fetching disputes:', error);
+      logger.error('Error fetching disputes', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch disputes' });
     }
   });
@@ -447,7 +448,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         total_access_count: allLogs.reduce((sum, log) => sum + 1, 0),
       });
     } catch (error) {
-      console.error('Error fetching access log:', error);
+      logger.error('Error fetching access log', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch access log' });
     }
   });
@@ -494,7 +495,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
 
       res.status(201).json(newDispute);
     } catch (error) {
-      console.error('Error creating dispute:', error);
+      logger.error('Error creating dispute', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to create dispute' });
     }
   });
@@ -535,7 +536,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
 
       res.status(201).json(logEntry);
     } catch (error) {
-      console.error('Error logging access:', error);
+      logger.error('Error logging access', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to log access' });
     }
   });
@@ -622,7 +623,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         last_access_at: lastAccess?.toISOString() || null,
       });
     } catch (error) {
-      console.error('Error fetching dashboard summary:', error);
+      logger.error('Error fetching dashboard summary', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch dashboard summary' });
     }
   });

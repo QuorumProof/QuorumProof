@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { logger } from '../services/logger.js';
 
 /**
  * IP-based access control middleware for sensitive endpoints
@@ -135,17 +136,25 @@ function isProtectedEndpoint(path: string): boolean {
 /**
  * Log access attempt
  */
-function logAccess(entry: AccessLogEntry): void {
+function logAccess(entry: AccessLogEntry, requestId?: string): void {
   if (!config.enableAuditLogging) return;
   if (entry.action === 'denied' && !config.logDenials) return;
 
   accessLog.push(entry);
 
-  // Log to console in production this would go to a proper logging service
-  const logLevel = entry.action === 'denied' ? 'WARN' : 'INFO';
-  console.log(
-    `[IP_ACL] ${logLevel}: ${entry.action.toUpperCase()} ${entry.endpoint} from ${entry.clientIP}${entry.forwardedIP ? ` (forwarded: ${entry.forwardedIP})` : ''} - ${entry.reason || ''}`
-  );
+  const metadata = {
+    requestId,
+    action: entry.action,
+    endpoint: entry.endpoint,
+    clientIP: entry.clientIP,
+    forwardedIP: entry.forwardedIP,
+    reason: entry.reason,
+  };
+  if (entry.action === 'denied') {
+    logger.warn('IP whitelist access denied', 'ip-whitelist', metadata);
+  } else {
+    logger.info('IP whitelist access allowed', 'ip-whitelist', metadata);
+  }
 }
 
 /**
@@ -169,7 +178,7 @@ export function createIPWhitelistMiddleware() {
         endpoint: path,
         action: 'denied',
         reason: 'IP not in whitelist',
-      });
+      }, req.requestId);
 
       return res.status(403).json({
         error: 'Forbidden',
@@ -184,7 +193,7 @@ export function createIPWhitelistMiddleware() {
       forwardedIP,
       endpoint: path,
       action: 'allowed',
-    });
+    }, req.requestId);
 
     next();
   };
@@ -200,20 +209,20 @@ export function getWhitelist(): string[] {
 /**
  * Add an IP to the whitelist
  */
-export function addToWhitelist(ip: string): void {
+export function addToWhitelist(ip: string, requestId?: string): void {
   if (!ip) throw new Error('IP cannot be empty');
   config.whitelistedIPs.add(ip);
-  console.log(`[IP_ACL] Added ${ip} to whitelist`);
+  logger.info('IP added to whitelist', 'ip-whitelist', { requestId, ip });
 }
 
 /**
  * Remove an IP from the whitelist
  */
-export function removeFromWhitelist(ip: string): boolean {
+export function removeFromWhitelist(ip: string, requestId?: string): boolean {
   const wasPresent = config.whitelistedIPs.has(ip);
   if (wasPresent) {
     config.whitelistedIPs.delete(ip);
-    console.log(`[IP_ACL] Removed ${ip} from whitelist`);
+    logger.info('IP removed from whitelist', 'ip-whitelist', { requestId, ip });
   }
   return wasPresent;
 }
@@ -221,17 +230,17 @@ export function removeFromWhitelist(ip: string): boolean {
 /**
  * Clear the entire whitelist
  */
-export function clearWhitelist(): void {
+export function clearWhitelist(requestId?: string): void {
   config.whitelistedIPs.clear();
-  console.log('[IP_ACL] Cleared whitelist');
+  logger.info('IP whitelist cleared', 'ip-whitelist', { requestId });
 }
 
 /**
  * Update the protected endpoints list
  */
-export function setProtectedEndpoints(endpoints: string[]): void {
+export function setProtectedEndpoints(endpoints: string[], requestId?: string): void {
   config.enabledEndpoints = endpoints;
-  console.log(`[IP_ACL] Updated protected endpoints: ${endpoints.join(', ')}`);
+  logger.info('Protected endpoints updated', 'ip-whitelist', { requestId, endpoints });
 }
 
 /**
@@ -255,9 +264,9 @@ export function getAccessLog(filters?: {
 /**
  * Clear access log
  */
-export function clearAccessLog(): void {
+export function clearAccessLog(requestId?: string): void {
   accessLog.length = 0;
-  console.log('[IP_ACL] Access log cleared');
+  logger.info('IP access log cleared', 'ip-whitelist', { requestId });
 }
 
 /**
@@ -286,7 +295,7 @@ export function getAccessStats() {
 /**
  * Set IP whitelist configuration from environment or config
  */
-export function initializeWhitelist(ips: string[], protectedEndpoints?: string[]): void {
+export function initializeWhitelist(ips: string[], protectedEndpoints?: string[], requestId?: string): void {
   config.whitelistedIPs.clear();
   ips.forEach(ip => config.whitelistedIPs.add(ip));
 
@@ -294,7 +303,7 @@ export function initializeWhitelist(ips: string[], protectedEndpoints?: string[]
     config.enabledEndpoints = protectedEndpoints;
   }
 
-  console.log(`[IP_ACL] Initialized with ${ips.length} whitelisted IPs`);
+  logger.info('IP whitelist initialized', 'ip-whitelist', { requestId, count: ips.length });
 }
 
 /**
@@ -304,7 +313,7 @@ export function initializeWhitelist(ips: string[], protectedEndpoints?: string[]
 export function loadWhitelistFromEnv(): void {
   const envWhitelist = process.env.IP_WHITELIST || '';
   if (!envWhitelist) {
-    console.log('[IP_ACL] No IP_WHITELIST environment variable found');
+    logger.info('No IP_WHITELIST environment variable found', 'ip-whitelist');
     return;
   }
 
