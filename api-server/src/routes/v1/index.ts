@@ -34,6 +34,7 @@ import apiKeysRouter from '../apiKeys.js';
 import oauth2Router from '../oauth2.js';
 import { createDashboardRouter } from '../dashboard.js';
 import * as Soroban from '../../soroban.js';
+import walletLinkRouter from '../walletLink.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -79,6 +80,7 @@ export function createV1Router(soroban = sorobanClient): Router {
   router.use('/gdpr', gdprRouter);
 
   // Auth subsystem
+  router.use('/auth/wallet/link', walletLinkRouter);
   router.use('/api-keys', apiKeysRouter);
   router.use('/oauth2', oauth2Router);
 

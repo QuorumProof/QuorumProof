@@ -12,6 +12,8 @@
  */
 import { Router, Request, Response } from 'express';
 import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { requireAuth } from '../middleware/auth.js';
+import { requireLinkedWallet } from '../middleware/walletAuth.js';
 
 const router = Router({ mergeParams: true });
 
@@ -146,7 +148,7 @@ router.get('/:id/consent/access-log', async (req: Request, res: Response) => {
 //   verifier   string  Stellar address to grant consent to        (required)
 //   expires_at number  Unix timestamp (0 = no expiry)             (optional, default 0)
 // ---------------------------------------------------------------------------
-router.post('/:id/consent/grants', async (req: Request, res: Response) => {
+router.post('/:id/consent/grants', requireAuth, requireLinkedWallet((req) => req.body?.holder), async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -201,7 +203,7 @@ router.post('/:id/consent/grants', async (req: Request, res: Response) => {
 //
 // Body: { holder: string }
 // ---------------------------------------------------------------------------
-router.delete('/:id/consent/grants/:verifier', async (req: Request, res: Response) => {
+router.delete('/:id/consent/grants/:verifier', requireAuth, requireLinkedWallet((req) => req.body?.holder), async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -300,7 +302,7 @@ router.get('/:id/consent/grants/:verifier/status', async (req: Request, res: Res
 //   verifier    string  verifier address   (required)
 //   access_type number  1=share_link | 2=delegation | 3=proof_request (required)
 // ---------------------------------------------------------------------------
-router.post('/:id/consent/access', async (req: Request, res: Response) => {
+router.post('/:id/consent/access', requireAuth, requireLinkedWallet((req) => req.body?.holder), async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 

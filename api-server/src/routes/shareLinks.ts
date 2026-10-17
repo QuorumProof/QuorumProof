@@ -11,6 +11,8 @@ import { Router, Request, Response } from 'express';
 import { createHmac } from 'crypto';
 import type { SorobanClient } from './credentials.js';
 import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { requireAuth } from '../middleware/auth.js';
+import { requireLinkedWallet } from '../middleware/walletAuth.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,7 +68,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    *
    * Returns: { token: string (hex), expires_at: number, permission: string }
    */
-  router.post('/:id/share', async (req: Request, res: Response) => {
+  router.post('/:id/share', requireAuth, requireLinkedWallet((req) => req.body?.subject), async (req: Request, res: Response) => {
     const credentialId = parseInt(String(req.params.id), 10);
     if (!Number.isInteger(credentialId) || credentialId <= 0) {
       res.status(400).json({ error: 'Invalid credential ID' });
@@ -207,7 +209,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    * Body: { subject: string }
    * Revokes the link early. Only the creator can revoke.
    */
-  router.delete('/share/:token', async (req: Request, res: Response) => {
+  router.delete('/share/:token', requireAuth, requireLinkedWallet((req) => req.body?.subject), async (req: Request, res: Response) => {
     const token = String(req.params.token);
     const { subject } = req.body as { subject?: unknown };
 
