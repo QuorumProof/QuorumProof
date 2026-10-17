@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { simulateCall, u64Val, addressVal } from '../soroban.js';
+import { prepareCalls, simulateCall, u64Val, addressVal } from '../soroban.js';
 import { metricsStore } from '../services/metrics.js';
-import { liveDashboard } from '../services/liveDashboard.js';
 
 const router = Router();
 
@@ -14,6 +13,19 @@ function serializeBigInt(value: unknown): unknown {
     );
   }
   return value;
+}
+
+function positiveU64(value: unknown, label: string): bigint {
+  let parsed: bigint;
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    parsed = BigInt(value);
+  } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    parsed = BigInt(value);
+  } else {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  if (parsed <= 0n) throw new Error(`${label} must be a positive integer`);
+  return parsed;
 }
 
 // GET /api/attestor/pending?address=<addr>
@@ -107,7 +119,8 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
 router.post('/batch-attest', async (req: Request, res: Response) => {
   const { attestor, credential_ids, slice_id } = req.body;
 
-  if (!attestor || !Array.isArray(credential_ids) || credential_ids.length === 0 || !slice_id) {
+  if (typeof attestor !== 'string' || attestor.length === 0 ||
+      !Array.isArray(credential_ids) || credential_ids.length === 0 || slice_id === undefined || slice_id === null) {
     res.status(400).json({ error: 'attestor, credential_ids (array), and slice_id are required' });
     return;
   }
@@ -117,37 +130,41 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
     return;
   }
 
-  const results: { credential_id: string; success: boolean; error?: string }[] = [];
-
-  for (const credId of credential_ids) {
-    try {
-      await simulateCall('attest_credential', [
-        u64Val(BigInt(credId)),
-        u64Val(BigInt(slice_id)),
-        addressVal(attestor),
-      ]);
-      results.push({ credential_id: credId, success: true });
-
-      metricsStore.recordEvent({
-        type: 'attested',
-        credential_id: credId,
-        timestamp: new Date().toISOString(),
-        attestor,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Attestation failed';
-      results.push({ credential_id: credId, success: false, error: msg });
-      liveDashboard.recordAttestation(false);
-    }
+  let credentialIds: bigint[];
+  let sliceId: bigint;
+  try {
+    credentialIds = credential_ids.map((id: unknown, index: number) => positiveU64(id, `credential_ids[${index}]`));
+    sliceId = positiveU64(slice_id, 'slice_id');
+  } catch (err: unknown) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    return;
   }
 
-  const succeeded = results.filter((r) => r.success).length;
-  res.json({
-    total: credential_ids.length,
-    succeeded,
-    failed: credential_ids.length - succeeded,
-    results,
-  });
+  try {
+    const transaction = await prepareCalls(attestor, credentialIds.map((credentialId) => ({
+      method: 'attest_credential',
+      args: [
+        u64Val(credentialId),
+        u64Val(sliceId),
+        addressVal(attestor),
+      ],
+    })));
+
+    res.status(202).json({
+      total: credentialIds.length,
+      succeeded: 0,
+      failed: 0,
+      pending: credentialIds.length,
+      ...transaction,
+      results: credentialIds.map((credentialId) => ({
+        credential_id: credentialId.toString(),
+        status: 'pending_signature',
+      })),
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
 });
 
 export default router;

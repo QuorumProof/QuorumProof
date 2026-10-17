@@ -48,12 +48,13 @@ must be invalidated or rebuilt when chain state changes.
 
 ## Decision
 
-- `api-server/` reads contract state only through `simulateCall`, which
-  simulates a transaction against Soroban RPC and never submits it. The
-  simulation source account is an ephemeral random keypair, so the server holds
-  no signing keys.
-- On-chain writes (issuing, attesting, revoking) stay client-side, signed by
-  the actor's own wallet.
+- `api-server/` reads contract state through `simulateCall`. The server may
+  prepare write transactions against Soroban RPC, but returns unsigned XDR for
+  the acting account to sign and submit. It never signs or submits a write
+  transaction and holds no signing keys.
+- On-chain writes (issuing, attesting, revoking) remain authorized by the
+  actor's own wallet. An API response that contains a prepared transaction is
+  pending, not confirmation that contract state changed.
 - Postgres (`api-server/src/db.ts`) stores only off-chain operational data:
   API keys, webhooks, audit and analytics records, search index snapshots.
   The contracts remain the only source of truth for whether a credential
@@ -71,7 +72,7 @@ database can be lost or rebuilt without losing credential state.
 
 ### Positive
 
-- The server holds no private keys and has no on-chain write path.
+- The server holds no private keys and cannot submit on-chain writes.
 - Losing the database loses operational data only, never credential state.
 
 ### Negative
@@ -90,7 +91,7 @@ database can be lost or rebuilt without losing credential state.
 
 ## Related Code
 
-- `api-server/src/soroban.ts`: `simulateCall`
+- `api-server/src/soroban.ts`: `simulateCall` and keyless `prepareCall(s)`
 - `api-server/src/db.ts`: Postgres pool for off-chain data
 - `api-server/src/routes/credentials.ts`, `api-server/src/routes/slices.ts`
 - `api-server/Dockerfile`

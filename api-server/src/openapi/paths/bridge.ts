@@ -79,8 +79,22 @@ export const bridgePaths: PathsFragment = {
         },
       },
       responses: {
-        '201': { description: 'Anchor registered on-chain.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
-        '202': { description: 'Anchor prepared but on-chain registration pending.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': {
+          description: 'Unsigned anchor-registration transaction prepared; the admin must sign and submit it before an on-chain anchor exists.',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  status: { type: 'string', const: 'pending_signature' },
+                  transaction_xdr: { type: 'string' },
+                  network_passphrase: { type: 'string' },
+                  anchor: { type: 'object', additionalProperties: true },
+                },
+              },
+            },
+          },
+        },
         '400': { description: 'Missing or invalid fields.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': { description: 'Unauthorized.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '404': { description: 'Credential not found.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
@@ -176,7 +190,7 @@ export const bridgePaths: PathsFragment = {
     post: {
       tags: ['Bridge'],
       summary: 'Verify anchor via Merkle-Patricia receipt proof',
-      description: 'Verifies the anchor against a checkpointed block header\'s receiptsRoot, then calls verify_chain_anchor on-chain.',
+      description: 'Verifies the anchor against a checkpointed block header\'s receiptsRoot and prepares verify_chain_anchor for the admin wallet to sign and submit.',
       parameters: [
         { name: 'id', in: 'path', required: true, schema: { type: 'integer' }, description: 'Anchor ID.' },
       ],
@@ -197,8 +211,7 @@ export const bridgePaths: PathsFragment = {
         },
       },
       responses: {
-        '200': { description: 'Verified.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
-        '202': { description: 'Proof verified off-chain; on-chain update pending.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': { description: 'Receipt proof validated; unsigned on-chain verification transaction prepared. The anchor is not verified until the admin signs and submits it.', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, proof_valid: { type: 'boolean' }, verified: { type: 'boolean', const: false } } } } } },
         '400': { description: 'Invalid input.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': { description: 'Unauthorized.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '404': { description: 'Anchor not found.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },

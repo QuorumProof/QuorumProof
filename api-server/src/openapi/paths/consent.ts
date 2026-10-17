@@ -56,7 +56,7 @@ export const consentPaths: PathsFragment = {
         },
       },
       responses: {
-        '201': { description: 'Granted.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': { description: 'Unsigned transaction prepared; consent is not granted until the holder signs and submits it.', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, credential_id: { type: 'integer' }, holder: { type: 'string' }, verifier: { type: 'string' }, expires_at: { type: 'integer' } } } } } },
         '400': { description: 'Missing fields or invalid expires_at.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,
@@ -88,7 +88,7 @@ export const consentPaths: PathsFragment = {
         content: { 'application/json': { schema: { type: 'object', properties: { holder: { type: 'string' } }, required: ['holder'] } } },
       },
       responses: {
-        '200': { description: 'Revoked.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': { description: 'Unsigned transaction prepared; consent remains active until the holder signs and submits it.', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, credential_id: { type: 'integer' }, verifier: { type: 'string' } } } } } },
         '400': { description: 'Missing holder.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,
@@ -127,7 +127,7 @@ export const consentPaths: PathsFragment = {
         },
       },
       responses: {
-        '201': { description: 'Recorded.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': { description: 'Unsigned transaction prepared; the access event is not recorded until the holder signs and submits it.', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, credential_id: { type: 'integer' }, verifier: { type: 'string' }, access_type: { type: 'integer' }, access_type_label: { type: 'string' } } } } } },
         '400': { description: 'Missing/invalid fields.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,

@@ -25,6 +25,49 @@ const PASSPHRASES = {
 const server = new StellarRpc.Server(RPC_URL);
 const networkPassphrase = PASSPHRASES[NETWORK] ?? Networks.TESTNET;
 
+export interface ContractCall {
+  method: string;
+  args?: ReturnType<typeof nativeToScVal>[];
+}
+
+export interface PreparedTransaction {
+  transaction_xdr: string;
+  network_passphrase: string;
+}
+
+/**
+ * Prepare a contract transaction for the source account to sign and submit.
+ * This server never signs or submits the transaction.
+ */
+export async function prepareCalls(sourceAddress: string, calls: ContractCall[]): Promise<PreparedTransaction> {
+  if (!CONTRACT_ID) throw new Error('CONTRACT_QUORUM_PROOF env var not set');
+  if (calls.length === 0) throw new Error('At least one contract call is required');
+
+  const account = await server.getAccount(sourceAddress);
+  const contract = new Contract(CONTRACT_ID);
+  const builder = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase });
+
+  for (const { method, args = [] } of calls) {
+    builder.addOperation(contract.call(method, ...args));
+  }
+
+  const transaction = builder.setTimeout(30).build();
+  const prepared = await server.prepareTransaction(transaction);
+
+  return {
+    transaction_xdr: prepared.toXDR(),
+    network_passphrase: networkPassphrase,
+  };
+}
+
+export async function prepareCall(
+  sourceAddress: string,
+  method: string,
+  args: ReturnType<typeof nativeToScVal>[] = []
+): Promise<PreparedTransaction> {
+  return prepareCalls(sourceAddress, [{ method, args }]);
+}
+
 /**
  * Custom serialization for large contract state values (issue #1567).
  *
