@@ -12,8 +12,39 @@
  */
 import { Router, Request, Response } from 'express';
 import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { validate } from '../middleware/validate.js';
 
 const router = Router({ mergeParams: true });
+const MAX_CONSENT_EXPIRY_SECONDS = 365 * 24 * 60 * 60;
+
+const requiredAddress = { type: 'string', minLength: 1 };
+const consentGrantValidation = {
+  body: {
+    schema: {
+      type: 'object',
+      properties: {
+        holder: requiredAddress,
+        verifier: requiredAddress,
+        expires_at: { type: 'integer', minimum: 0 },
+      },
+      required: ['holder', 'verifier'],
+      additionalProperties: false,
+    },
+    custom: (data: unknown) => {
+      if (typeof data !== 'object' || data === null) return 'Request body must be an object';
+      const expiresAt = (data as { expires_at?: unknown }).expires_at;
+      if (expiresAt === undefined || expiresAt === 0) return true;
+      const now = Math.floor(Date.now() / 1000);
+      if (typeof expiresAt !== 'number' || expiresAt <= now) {
+        return 'expires_at must be in the future or 0 for no expiry';
+      }
+      if (expiresAt > now + MAX_CONSENT_EXPIRY_SECONDS) {
+        return 'expires_at cannot be more than one year in the future';
+      }
+      return true;
+    },
+  },
+};
 
 function serializeBigInt(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString();
@@ -146,7 +177,7 @@ router.get('/:id/consent/access-log', async (req: Request, res: Response) => {
 //   verifier   string  Stellar address to grant consent to        (required)
 //   expires_at number  Unix timestamp (0 = no expiry)             (optional, default 0)
 // ---------------------------------------------------------------------------
-router.post('/:id/consent/grants', async (req: Request, res: Response) => {
+router.post('/:id/consent/grants', validate(consentGrantValidation), async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -201,7 +232,19 @@ router.post('/:id/consent/grants', async (req: Request, res: Response) => {
 //
 // Body: { holder: string }
 // ---------------------------------------------------------------------------
-router.delete('/:id/consent/grants/:verifier', async (req: Request, res: Response) => {
+router.delete(
+  '/:id/consent/grants/:verifier',
+  validate({
+    body: {
+      schema: {
+        type: 'object',
+        properties: { holder: requiredAddress },
+        required: ['holder'],
+        additionalProperties: false,
+      },
+    },
+  }),
+  async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -224,7 +267,8 @@ router.delete('/:id/consent/grants/:verifier', async (req: Request, res: Respons
       credential_id: credentialId,
       verifier,
       revoked: true,
-    });
+      },
+    );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('CredentialNotFound')) {
@@ -300,7 +344,23 @@ router.get('/:id/consent/grants/:verifier/status', async (req: Request, res: Res
 //   verifier    string  verifier address   (required)
 //   access_type number  1=share_link | 2=delegation | 3=proof_request (required)
 // ---------------------------------------------------------------------------
-router.post('/:id/consent/access', async (req: Request, res: Response) => {
+router.post(
+  '/:id/consent/access',
+  validate({
+    body: {
+      schema: {
+        type: 'object',
+        properties: {
+          holder: requiredAddress,
+          verifier: requiredAddress,
+          access_type: { type: 'integer', enum: [1, 2, 3] },
+        },
+        required: ['holder', 'verifier', 'access_type'],
+        additionalProperties: false,
+      },
+    },
+  }),
+  async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -338,7 +398,8 @@ router.post('/:id/consent/access', async (req: Request, res: Response) => {
       access_type: accessTypeNum,
       access_type_label: ACCESS_TYPE_LABELS[accessTypeNum],
       recorded: true,
-    });
+      },
+    );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('CredentialNotFound')) {
