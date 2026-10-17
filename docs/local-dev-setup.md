@@ -405,6 +405,11 @@ every variable used in local development.
 | `PUBLIC_APP_BASE_URL` | `http://localhost:3000` | Publicly reachable origin for QR codes / export links |
 | `REDIS_URL` | — | Redis URL for WebSocket cross-instance delivery (optional for local dev) |
 
+When request signing is enabled, signed API requests must include the
+`x-signature-nonce` header. The HMAC-SHA256 input is the UTF-8 string
+`METHOD\nPATH\nTIMESTAMP\nNONCE\nJSON_BODY`, where `JSON_BODY` is
+`JSON.stringify(body || {})`. Use a new URL-safe nonce for every request.
+
 ### Frontend
 
 | Variable | Default | Description |
