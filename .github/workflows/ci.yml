@@ -162,6 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PROMETHEUS_VERSION: "2.55.1"
+      REQUIRE_PROMETHEUS: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

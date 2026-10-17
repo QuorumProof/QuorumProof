@@ -11,8 +11,8 @@
  * Requires a `prometheus` binary. Set PROMETHEUS_BIN, or have it on PATH
  * (`brew install prometheus`, or download from
  * https://github.com/prometheus/prometheus/releases). Skips (not fails) if
- * unavailable, matching how tests/helpers/wsCluster.ts treats a missing
- * redis-server.
+ * unavailable for local runs. The CI monitoring-integration job sets
+ * REQUIRE_PROMETHEUS=true so a missing binary fails the test instead.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { getFreePort } from './helpers/wsCluster.js';
@@ -21,6 +21,10 @@ import { startCriticalEventFixture, type CriticalEventFixtureHandle } from './he
 
 const SCRAPE_INTERVAL_SECONDS = 2;
 const binaryAvailable = prometheusBinary() !== null;
+
+if (process.env.REQUIRE_PROMETHEUS === 'true' && !binaryAvailable) {
+  throw new Error('REQUIRE_PROMETHEUS is true, but no prometheus binary was found');
+}
 
 describe.skipIf(!binaryAvailable)('critical-event metrics scraped by a real Prometheus', () => {
   let fixture: CriticalEventFixtureHandle;
