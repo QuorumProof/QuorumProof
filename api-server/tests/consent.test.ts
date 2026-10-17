@@ -132,13 +132,13 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         .post('/api/credentials/42/consent/grants')
         .send({ verifier: VERIFIER_ADDR });
       expect(missingHolder.status).toBe(400);
-      expect(missingHolder.body.error).toContain('holder (Stellar address) is required');
+      expect(JSON.stringify(missingHolder.body.details)).toContain('holder');
 
       const missingVerifier = await request(app)
         .post('/api/credentials/42/consent/grants')
         .send({ holder: HOLDER_ADDR });
       expect(missingVerifier.status).toBe(400);
-      expect(missingVerifier.body.error).toContain('verifier (Stellar address) is required');
+      expect(JSON.stringify(missingVerifier.body.details)).toContain('verifier');
     });
 
     it('returns 403 when non-holder attempts to grant consent (UnauthorizedAction)', async () => {
@@ -169,9 +169,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
       expect(res.body.error).toBe('Credential not found');
     });
 
-    it('returns 400 when expires_at is invalid (InvalidInput)', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('InvalidInput: expiry timestamp is in past'));
-
+    it('rejects an expired expires_at before calling Soroban', async () => {
       const res = await request(app)
         .post('/api/credentials/42/consent/grants')
         .send({
@@ -181,7 +179,22 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe('expires_at must be in the future');
+      expect(JSON.stringify(res.body.details)).toContain('expires_at must be in the future');
+      expect(mockSimulateCall).not.toHaveBeenCalled();
+    });
+
+    it('rejects an expires_at more than one year away', async () => {
+      const res = await request(app)
+        .post('/api/credentials/42/consent/grants')
+        .send({
+          holder: HOLDER_ADDR,
+          verifier: VERIFIER_ADDR,
+          expires_at: Math.floor(Date.now() / 1000) + 366 * 24 * 60 * 60,
+        });
+
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body.details)).toContain('cannot be more than one year');
+      expect(mockSimulateCall).not.toHaveBeenCalled();
     });
   });
 
@@ -216,7 +229,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         .send({});
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('holder (Stellar address) is required');
+      expect(JSON.stringify(res.body.details)).toContain('holder');
     });
 
     it('returns 403 when non-holder attempts revocation (UnauthorizedAction)', async () => {
@@ -370,7 +383,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('access_type must be 1 (share_link), 2 (delegation), or 3 (proof_request)');
+      expect(JSON.stringify(res.body.details)).toContain('access_type');
     });
 
     it('retrieves and filters access log with human-readable labels', async () => {

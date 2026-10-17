@@ -519,6 +519,101 @@ export const schemas = {
       properties: {
         credential_ids: {
           type: 'array',
-       
-
-/* … truncated 3359 chars — edit only what you need near the top … */
+          items: { type: 'integer', minimum: 1 },
+          minItems: 1,
+        },
+        slice_id: { type: 'integer', minimum: 1 },
+      },
+      required: ['credential_ids', 'slice_id'],
+      additionalProperties: false,
+    },
+  },
+  verifyBatchClaims: {
+    body: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: 'object',
+            properties: {
+              credential_id: { type: 'integer', minimum: 1 },
+              claim_type: { type: 'string', minLength: 1, maxLength: 128 },
+            },
+            required: ['credential_id', 'claim_type'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['items'],
+      additionalProperties: false,
+    },
+  },
+  analyticsEvent: {
+    body: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['issued', 'attested', 'revoked', 'suspended', 'verified', 'disputed'] },
+        credential_id: { type: 'string', minLength: 1 },
+        timestamp: { type: 'string', minLength: 1 },
+        issuer: { type: 'string' },
+        subject: { type: 'string' },
+        attestor: { type: 'string' },
+        attestation_duration_ms: { type: 'number', minimum: 0 },
+        metadata: { type: 'object' },
+      },
+      required: ['type', 'credential_id', 'timestamp'],
+      additionalProperties: false,
+    },
+  },
+  auditVerify: {
+    body: {
+      type: 'object',
+      properties: { batch_id: { type: 'integer', minimum: 1 } },
+      required: ['batch_id'],
+      additionalProperties: false,
+    },
+  },
+  notificationPreferences: {
+    body: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', minLength: 1 },
+        email: { type: 'string' },
+        phone: { type: 'string' },
+        channels: { type: 'array', items: { type: 'string', enum: ['email', 'sms'] }, minItems: 1 },
+        events: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['credential_issued', 'credential_revoked', 'credential_suspended', 'credential_attested', 'credential_expiring'],
+          },
+        },
+        credential_type_filters: { type: 'array', items: { type: 'integer', minimum: 0 } },
+        enabled: { type: 'boolean' },
+      },
+      required: ['address', 'channels', 'events'],
+      additionalProperties: false,
+    },
+  },
+  notificationSend: {
+    body: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', minLength: 1 },
+        event: {
+          type: 'string',
+          enum: ['credential_issued', 'credential_revoked', 'credential_suspended', 'credential_attested', 'credential_expiring'],
+        },
+        credential_id: { type: 'integer', minimum: 1 },
+        credential_type: { type: 'integer', minimum: 0 },
+        issuer: { type: 'string' },
+        holder: { type: 'string' },
+      },
+      required: ['address', 'event', 'credential_id'],
+      additionalProperties: false,
+    },
+  },
+};
