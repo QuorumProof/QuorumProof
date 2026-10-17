@@ -201,6 +201,7 @@ export function createEncryptedCredentialsRouter() {
           encrypted.encrypted_data,
           key_shares as any[]
         );
+        const decryptedData = JSON.parse(decrypted.toString());
 
         // Log successful decryption
         await store.logDecryptionAttempt(credentialId, requester_address, true, {
@@ -211,7 +212,7 @@ export function createEncryptedCredentialsRouter() {
           success: true,
           message: 'Decryption successful',
           credential_id: id,
-          decrypted_data: JSON.parse(decrypted.toString()),
+          decrypted_data: decryptedData,
           decrypted_at: new Date().toISOString(),
         });
       } catch (decryptErr: unknown) {
