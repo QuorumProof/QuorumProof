@@ -94,8 +94,6 @@ export default function Dashboard() {
           : card,
       ),
     );
-    setSelectedIds(new Set());
-    setShowBulkRevoke(false);
   }
 
   const fetchCredentials = useCallback(async (walletAddress: string) => {
@@ -373,7 +371,10 @@ export default function Dashboard() {
         <BulkRevokeDialog
           credentials={selectedCards.map(c => c.credential)}
           onConfirm={handleBulkRevokeConfirm}
-          onClose={() => setShowBulkRevoke(false)}
+          onClose={() => {
+            setShowBulkRevoke(false);
+            setSelectedIds(new Set());
+          }}
         />
       )}
 
