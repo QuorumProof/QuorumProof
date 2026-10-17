@@ -221,7 +221,6 @@ app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
 app.use('/api/credentials', createCredentialTiersRouter()); // #1602 credential tiering
 app.use('/api/credentials', createCredentialRedemptionRouter()); // #1603 credential redemption
-app.use('/api/verify', verifyRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
