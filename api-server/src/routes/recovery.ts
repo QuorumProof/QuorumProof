@@ -97,12 +97,8 @@ router.post('/request', async (req: Request, res: Response) => {
     return;
   }
 
-  // Stub: in production, dispatch via SendGrid / Twilio
-  if (contactType === 'email') {
-    console.log(`[recovery] OTP for request ${id} → email ${contactValue}: ${otp}`);
-  } else {
-    console.log(`[recovery] OTP for request ${id} → SMS ${contactValue}: ${otp}`);
-  }
+  // TODO: dispatch through the configured email/SMS provider. Never log the
+  // OTP or contact value; logs are not a secure delivery channel.
 
   res.status(201).json({ requestId: id, message: `Verification code sent to your ${contactType}` });
 });
@@ -227,12 +223,6 @@ router.post('/resend-otp', async (req: Request, res: Response) => {
              attempts = 0`,
       [requestId, otp, expiresAt],
     );
-
-    if (request.contact_type === 'email') {
-      console.log(`[recovery] Resent OTP for request ${requestId} → email ${request.contact_value}: ${otp}`);
-    } else {
-      console.log(`[recovery] Resent OTP for request ${requestId} → SMS ${request.contact_value}: ${otp}`);
-    }
 
     res.json({ message: `Verification code resent to your ${request.contact_type}` });
   } catch (err) {
