@@ -43,7 +43,9 @@ export interface RewardTier {
 }
 
 export class CredentialRedemptionService {
-  private pool = getPool();
+  private get pool() {
+    return getPool();
+  }
 
   async getRewardTier(tier: 'bronze' | 'silver' | 'gold'): Promise<RewardTier | null> {
     const result = await this.pool.query(
