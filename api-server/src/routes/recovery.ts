@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import { getPool } from '../db.js';
+import { sendRecoveryCode } from '../notifications.js';
 
 const router = Router();
 
@@ -31,7 +32,7 @@ function generateId(): string {
 }
 
 function generateOtp(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(randomInt(100000, 1000000));
 }
 
 /** Delete expired OTP rows (best-effort; does not throw on failure). */
@@ -97,11 +98,12 @@ router.post('/request', async (req: Request, res: Response) => {
     return;
   }
 
-  // Stub: in production, dispatch via SendGrid / Twilio
-  if (contactType === 'email') {
-    console.log(`[recovery] OTP for request ${id} → email ${contactValue}: ${otp}`);
-  } else {
-    console.log(`[recovery] OTP for request ${id} → SMS ${contactValue}: ${otp}`);
+  try {
+    await sendRecoveryCode(contactType, contactValue, otp);
+  } catch (err) {
+    console.error('[recovery] Failed to deliver verification code:', err);
+    res.status(502).json({ error: 'Failed to send verification code', requestId: id });
+    return;
   }
 
   res.status(201).json({ requestId: id, message: `Verification code sent to your ${contactType}` });
@@ -228,10 +230,12 @@ router.post('/resend-otp', async (req: Request, res: Response) => {
       [requestId, otp, expiresAt],
     );
 
-    if (request.contact_type === 'email') {
-      console.log(`[recovery] Resent OTP for request ${requestId} → email ${request.contact_value}: ${otp}`);
-    } else {
-      console.log(`[recovery] Resent OTP for request ${requestId} → SMS ${request.contact_value}: ${otp}`);
+    try {
+      await sendRecoveryCode(request.contact_type, request.contact_value, otp);
+    } catch (err) {
+      console.error('[recovery] Failed to redeliver verification code:', err);
+      res.status(502).json({ error: 'Failed to resend verification code' });
+      return;
     }
 
     res.json({ message: `Verification code resent to your ${request.contact_type}` });
