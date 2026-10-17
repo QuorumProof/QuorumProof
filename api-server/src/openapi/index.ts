@@ -50,6 +50,7 @@ import { auditPaths } from './paths/audit.js';
 import { authAuditPaths } from './paths/authAudit.js';
 import { graphqlPaths } from './paths/graphql.js';
 import { passwordlessAuthPaths } from './paths/passwordlessAuth.js';
+import { walletAuthPaths } from './paths/walletAuth.js';
 import { reportsPaths } from './paths/reports.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -114,6 +115,7 @@ export function buildOpenApiSpec(): OpenAPIObject {
     authAuditPaths,
     graphqlPaths,
     passwordlessAuthPaths,
+    walletAuthPaths,
     reportsPaths,
   );
 

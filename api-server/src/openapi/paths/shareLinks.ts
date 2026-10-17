@@ -5,6 +5,7 @@ export const shareLinksPaths: PathsFragment = {
     post: {
       tags: ['Share Links'],
       summary: 'Create a time-limited share link for a credential',
+      security: [{ bearerAuth: [] }],
       parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } }],
       requestBody: {
         required: true,
@@ -28,6 +29,8 @@ export const shareLinksPaths: PathsFragment = {
           description: 'Created.',
           content: { 'application/json': { schema: { type: 'object', properties: { token: { type: 'string' }, expires_at: { type: 'integer' }, permission: { type: 'string' }, password_protected: { type: 'boolean' }, credential_id: { type: 'integer' } } } } },
         },
+        '401': { description: 'Authentication required.' },
+        '403': { description: 'The account has no linked wallet or the supplied holder address is not its wallet.' },
         '400': { description: 'Missing/invalid fields.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': { description: 'Only the credential holder can create share links.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '404': { description: 'Credential not found.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
@@ -68,6 +71,7 @@ export const shareLinksPaths: PathsFragment = {
     delete: {
       tags: ['Share Links'],
       summary: 'Revoke a share link early',
+      security: [{ bearerAuth: [] }],
       parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
       requestBody: {
         required: true,
@@ -75,6 +79,8 @@ export const shareLinksPaths: PathsFragment = {
       },
       responses: {
         '200': { description: 'Revoked.', content: { 'application/json': { schema: { type: 'object', properties: { success: { type: 'boolean' }, message: { type: 'string' } } } } } },
+        '401': { description: 'Authentication required.' },
+        '403': { description: 'The account has no linked wallet or the supplied holder address is not its wallet.' },
         '400': { description: 'Missing subject or malformed token.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': { description: 'Only the link creator can revoke it.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '404': { description: 'Not found.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
