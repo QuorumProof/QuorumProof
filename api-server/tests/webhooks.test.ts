@@ -19,9 +19,15 @@ import {
 } from '../src/services/webhooks.js';
 import { WebhookStore } from '../src/services/webhookStore.js';
 import { WebhookCircuitBreaker, type CircuitBreakerConfig } from '../src/services/webhookCircuitBreaker.js';
+import { SessionManager, _setDefaultSessionManagerForTest } from '../src/services/sessionManager.js';
 
 const app = express();
 app.use(express.json());
+let authToken = '';
+app.use('/api/webhooks', (req, _res, next) => {
+  if (req.header('x-anonymous') !== 'true') req.headers.authorization = `Bearer ${authToken}`;
+  next();
+});
 app.use('/api/webhooks', webhooksRouter);
 
 /** Point the module-level webhook service at a fresh temp-dir-backed store/breaker — real isolation, real durability. */
@@ -41,12 +47,29 @@ function freshService(opts: { maxRetries?: number; retryDelaysMs?: number[]; bre
 beforeEach(() => {
   vi.restoreAllMocks();
   dnsMock.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
-  freshService();
+  const { dataDir } = freshService();
+  const sessionManager = new SessionManager({ dataDir: path.join(dataDir, 'sessions') });
+  _setDefaultSessionManagerForTest(sessionManager);
+  authToken = sessionManager.createSession('webhook-test-user').accessToken;
 });
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
 describe('POST /api/webhooks', () => {
+  it('requires authentication for every webhook management endpoint', async () => {
+    const unauthenticated = await Promise.all([
+      request(app).post('/api/webhooks').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks/deliveries/log').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks/dead-letters').set('x-anonymous', 'true'),
+      request(app).post('/api/webhooks/dead-letters/dlv_1/replay').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks/wh_1').set('x-anonymous', 'true'),
+      request(app).delete('/api/webhooks/wh_1').set('x-anonymous', 'true'),
+    ]);
+
+    expect(unauthenticated.map((response) => response.status)).toEqual(Array(7).fill(401));
+  });
+
   it('registers a webhook and returns 201', async () => {
     const res = await request(app)
       .post('/api/webhooks')

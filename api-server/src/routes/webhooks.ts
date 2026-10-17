@@ -10,8 +10,10 @@ import {
   type WebhookEvent,
 } from '../services/webhooks.js';
 import { validateWebhookUrl, WebhookUrlValidationError } from '../services/webhookUrl.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
+router.use(requireAuth);
 
 const VALID_EVENTS: WebhookEvent[] = ['credential_issued', 'credential_attested', 'credential_revoked'];
 
