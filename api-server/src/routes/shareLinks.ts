@@ -10,7 +10,8 @@
 import { Router, Request, Response } from 'express';
 import { createHmac } from 'crypto';
 import type { SorobanClient } from './credentials.js';
-import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { simulateCall, submitCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { respondIfNotConfirmed } from './sorobanSubmission.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -111,6 +112,14 @@ export function createShareLinksRouter(soroban: SorobanClient) {
       passwordHashHex = hexDigest;
       passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
     }
+    const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+    if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+      res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+      return;
+    }
+    const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
+      ? signed_transaction_xdr
+      : undefined;
 
     try {
       // Call contract: generate_share_link(subject, credential_id, expiry_hours, password_hash, permission)
@@ -122,11 +131,12 @@ export function createShareLinksRouter(soroban: SorobanClient) {
         soroban.u32Val(permissionCode),
       ];
 
-      const tokenBytes = await simulateCall('generate_share_link', args);
-      const tokenHex = Buffer.from(tokenBytes as Uint8Array).toString('hex');
+      const submission = await submitCall('generate_share_link', args, signedTransactionXdr);
+      if (respondIfNotConfirmed(res, submission)) return;
+      const rawBuf = Buffer.from(submission.result as Uint8Array);
+      const tokenHex = rawBuf.toString('hex');
 
       // Decode expires_at from the token (bytes 8–16)
-      const rawBuf = Buffer.from(tokenBytes as Uint8Array);
       const expiresAt = rawBuf.readBigUInt64BE(8);
 
       res.status(201).json({
@@ -135,6 +145,8 @@ export function createShareLinksRouter(soroban: SorobanClient) {
         permission: PERMISSION_LABELS[permissionCode],
         password_protected: passwordHashHex !== null,
         credential_id: credentialId,
+        transaction_hash: submission.transaction_hash,
+        status: submission.status,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -187,7 +199,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
 
     try {
       const tokenScVal = nativeToScVal(tokenBuf, { type: 'bytes' });
-      const link = await simulateCall('validate_share_token', [tokenScVal, passwordHashArg]);
+      const link = await simulateCall('validate_share_token', [tokenScVal, passwordHashArg], { cache: false });
       res.json(serializeBigInt(link));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -209,12 +221,22 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    */
   router.delete('/share/:token', async (req: Request, res: Response) => {
     const token = String(req.params.token);
-    const { subject } = req.body as { subject?: unknown };
+    const { subject, signed_transaction_xdr } = req.body as {
+      subject?: unknown;
+      signed_transaction_xdr?: unknown;
+    };
 
     if (typeof subject !== 'string' || subject.length === 0) {
       res.status(400).json({ error: 'subject (Stellar address) is required' });
       return;
     }
+    if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+      res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+      return;
+    }
+    const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
+      ? signed_transaction_xdr
+      : undefined;
 
     let tokenBuf: Buffer;
     try {
@@ -228,8 +250,18 @@ export function createShareLinksRouter(soroban: SorobanClient) {
     try {
       const { nativeToScVal } = await import('@stellar/stellar-sdk');
       const tokenScVal = nativeToScVal(tokenBuf, { type: 'bytes' });
-      await simulateCall('revoke_share_link', [addressVal(subject), tokenScVal]);
-      res.json({ success: true, message: 'Share link revoked' });
+      const submission = await submitCall(
+        'revoke_share_link',
+        [addressVal(subject), tokenScVal],
+        signedTransactionXdr,
+      );
+      if (respondIfNotConfirmed(res, submission)) return;
+      res.json({
+        success: true,
+        message: 'Share link revoked',
+        transaction_hash: submission.transaction_hash,
+        status: submission.status,
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('InvalidInput')) {

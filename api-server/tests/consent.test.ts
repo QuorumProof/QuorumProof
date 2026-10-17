@@ -21,8 +21,10 @@ import consentRouter from '../src/routes/consent.js';
 import * as soroban from '../src/soroban.js';
 
 // Mock soroban module
+const { mockSubmitCall } = vi.hoisted(() => ({ mockSubmitCall: vi.fn() }));
 vi.mock('../src/soroban.js', () => ({
   simulateCall: vi.fn(),
+  submitCall: mockSubmitCall,
   u64Val: vi.fn((n: number | bigint) => n),
   u32Val: vi.fn((n: number) => n),
   addressVal: vi.fn((a: string) => a),
@@ -38,6 +40,11 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSubmitCall.mockResolvedValue({
+      status: 'confirmed',
+      transaction_hash: 'confirmed-tx-hash',
+      result: null,
+    });
     app = express();
     app.use(express.json());
     app.use('/api/credentials', consentRouter);
@@ -79,8 +86,6 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
   // ---------------------------------------------------------------------------
   describe('POST /api/credentials/:id/consent/grants', () => {
     it('grants consent to a verifier successfully (201)', async () => {
-      mockSimulateCall.mockResolvedValueOnce(null);
-
       const expiresAt = Math.floor(Date.now() / 1000) + 86400;
       const res = await request(app)
         .post('/api/credentials/42/consent/grants')
@@ -97,19 +102,19 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         verifier: VERIFIER_ADDR,
         expires_at: expiresAt,
         granted: true,
+        transaction_hash: 'confirmed-tx-hash',
+        status: 'confirmed',
       });
 
-      expect(mockSimulateCall).toHaveBeenCalledWith('grant_verifier_consent', [
+      expect(mockSubmitCall).toHaveBeenCalledWith('grant_verifier_consent', [
         HOLDER_ADDR,
         VERIFIER_ADDR,
         42,
         expiresAt,
-      ]);
+      ], undefined);
     });
 
     it('defaults expires_at to 0 when omitted', async () => {
-      mockSimulateCall.mockResolvedValueOnce(null);
-
       const res = await request(app)
         .post('/api/credentials/42/consent/grants')
         .send({
@@ -119,12 +124,28 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.expires_at).toBe(0);
-      expect(mockSimulateCall).toHaveBeenCalledWith('grant_verifier_consent', [
+      expect(mockSubmitCall).toHaveBeenCalledWith('grant_verifier_consent', [
         HOLDER_ADDR,
         VERIFIER_ADDR,
         42,
         0,
-      ]);
+      ], undefined);
+    });
+
+    it('returns the prepared transaction instead of reporting unconfirmed consent', async () => {
+      mockSubmitCall.mockResolvedValueOnce({
+        status: 'prepared',
+        transaction_xdr: 'unsigned-xdr',
+        authorization_entries_xdr: ['unsigned-auth-xdr'],
+      });
+
+      const res = await request(app)
+        .post('/api/credentials/42/consent/grants')
+        .send({ holder: HOLDER_ADDR, verifier: VERIFIER_ADDR });
+
+      expect(res.status).toBe(428);
+      expect(res.body.granted).toBeUndefined();
+      expect(res.body.transaction_xdr).toBe('unsigned-xdr');
     });
 
     it('returns 400 when holder or verifier is missing from request body', async () => {
@@ -142,7 +163,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
     });
 
     it('returns 403 when non-holder attempts to grant consent (UnauthorizedAction)', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('UnauthorizedAction: Caller is not the credential holder'));
+      mockSubmitCall.mockRejectedValueOnce(new Error('UnauthorizedAction: Caller is not the credential holder'));
 
       const res = await request(app)
         .post('/api/credentials/42/consent/grants')
@@ -156,7 +177,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
     });
 
     it('returns 404 when credential does not exist (CredentialNotFound)', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('CredentialNotFound'));
+      mockSubmitCall.mockRejectedValueOnce(new Error('CredentialNotFound'));
 
       const res = await request(app)
         .post('/api/credentials/999/consent/grants')
@@ -170,7 +191,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
     });
 
     it('returns 400 when expires_at is invalid (InvalidInput)', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('InvalidInput: expiry timestamp is in past'));
+      mockSubmitCall.mockRejectedValueOnce(new Error('InvalidInput: expiry timestamp is in past'));
 
       const res = await request(app)
         .post('/api/credentials/42/consent/grants')
@@ -190,8 +211,6 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
   // ---------------------------------------------------------------------------
   describe('DELETE /api/credentials/:id/consent/grants/:verifier', () => {
     it('revokes consent for a verifier successfully', async () => {
-      mockSimulateCall.mockResolvedValueOnce(null);
-
       const res = await request(app)
         .delete(`/api/credentials/42/consent/grants/${VERIFIER_ADDR}`)
         .send({ holder: HOLDER_ADDR });
@@ -201,13 +220,15 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         credential_id: 42,
         verifier: VERIFIER_ADDR,
         revoked: true,
+        transaction_hash: 'confirmed-tx-hash',
+        status: 'confirmed',
       });
 
-      expect(mockSimulateCall).toHaveBeenCalledWith('revoke_verifier_consent', [
+      expect(mockSubmitCall).toHaveBeenCalledWith('revoke_verifier_consent', [
         HOLDER_ADDR,
         VERIFIER_ADDR,
         42,
-      ]);
+      ], undefined);
     });
 
     it('returns 400 when holder is missing in request body', async () => {
@@ -220,7 +241,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
     });
 
     it('returns 403 when non-holder attempts revocation (UnauthorizedAction)', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('UnauthorizedAction: Caller is not the credential holder'));
+      mockSubmitCall.mockRejectedValueOnce(new Error('UnauthorizedAction: Caller is not the credential holder'));
 
       const res = await request(app)
         .delete(`/api/credentials/42/consent/grants/${VERIFIER_ADDR}`)
@@ -231,7 +252,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
     });
 
     it('returns 404 when credential is not found during revocation', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('CredentialNotFound'));
+      mockSubmitCall.mockRejectedValueOnce(new Error('CredentialNotFound'));
 
       const res = await request(app)
         .delete(`/api/credentials/999/consent/grants/${VERIFIER_ADDR}`)
@@ -333,8 +354,6 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
   // ---------------------------------------------------------------------------
   describe('Bridge Access Logging and Log Retrieval', () => {
     it('records an access event via POST /:id/consent/access', async () => {
-      mockSimulateCall.mockResolvedValueOnce(null);
-
       const res = await request(app)
         .post('/api/credentials/42/consent/access')
         .send({
@@ -350,14 +369,16 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         access_type: 1,
         access_type_label: 'share_link',
         recorded: true,
+        transaction_hash: 'confirmed-tx-hash',
+        status: 'confirmed',
       });
 
-      expect(mockSimulateCall).toHaveBeenCalledWith('record_verifier_access', [
+      expect(mockSubmitCall).toHaveBeenCalledWith('record_verifier_access', [
         HOLDER_ADDR,
         42,
         VERIFIER_ADDR,
         1,
-      ]);
+      ], undefined);
     });
 
     it('returns 400 for invalid access_type code', async () => {
@@ -424,7 +445,11 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
       expect(statusBefore.body.consent_active).toBe(true);
 
       // Step 2: Record access while consent is active -> succeeds
-      mockSimulateCall.mockResolvedValueOnce(null);
+      mockSubmitCall.mockResolvedValueOnce({
+        status: 'confirmed',
+        transaction_hash: 'access-tx-hash',
+        result: null,
+      });
       const accessBefore = await request(app)
         .post('/api/credentials/42/consent/access')
         .send({
@@ -436,7 +461,11 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
       expect(accessBefore.body.recorded).toBe(true);
 
       // Step 3: Revoke consent
-      mockSimulateCall.mockResolvedValueOnce(null);
+      mockSubmitCall.mockResolvedValueOnce({
+        status: 'confirmed',
+        transaction_hash: 'revoke-tx-hash',
+        result: null,
+      });
       const revokeRes = await request(app)
         .delete(`/api/credentials/42/consent/grants/${VERIFIER_ADDR}`)
         .send({ holder: HOLDER_ADDR });
@@ -452,7 +481,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
       expect(statusAfter.body.consent_active).toBe(false);
 
       // Step 5: Subsequent access recording is blocked by contract (UnauthorizedAction) -> 403
-      mockSimulateCall.mockRejectedValueOnce(
+      mockSubmitCall.mockRejectedValueOnce(
         new Error('UnauthorizedAction: Verifier consent is not active or has been revoked'),
       );
       const accessAfter = await request(app)

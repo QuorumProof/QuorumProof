@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -7,6 +7,20 @@ import request from 'supertest';
 import bridgeRouter from '../src/routes/bridge.js';
 import { BridgeStore, _setDefaultBridgeStoreForTest } from '../src/services/bridgeStore.js';
 import { BlockHeaderStore, _setDefaultBlockHeaderStoreForTest } from '../src/services/blockHeaderStore.js';
+import { getAllAnchors } from '../src/services/crossChainBridge.js';
+
+const { submitCall, simulateCall } = vi.hoisted(() => ({
+  submitCall: vi.fn(),
+  simulateCall: vi.fn(),
+}));
+
+vi.mock('../src/soroban.js', () => ({
+  submitCall,
+  simulateCall,
+  u64Val: (value: number | bigint) => value,
+  u32Val: (value: number) => value,
+  addressVal: (value: string) => value,
+}));
 
 function loadFixture(name: string) {
   return JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/headers', `${name}.json`), 'utf8'));
@@ -22,6 +36,12 @@ beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-route-test-'));
   _setDefaultBridgeStoreForTest(new BridgeStore(dataDir));
   _setDefaultBlockHeaderStoreForTest(new BlockHeaderStore(dataDir));
+  submitCall.mockReset().mockResolvedValue({
+    status: 'prepared',
+    transaction_xdr: 'unsigned-anchor-xdr',
+    authorization_entries_xdr: ['unsigned-anchor-auth-xdr'],
+  });
+  simulateCall.mockReset();
 });
 
 afterEach(() => {
@@ -87,7 +107,7 @@ describe('POST /api/bridge/headers', () => {
 });
 
 describe('POST /api/bridge/anchors', () => {
-  it('registers a pending anchor (contract not deployed in test env, so it falls back to durable storage)', async () => {
+  it('returns authorization data without treating a simulated anchor ID as registered', async () => {
     const res = await request(app)
       .post('/api/bridge/anchors')
       .send({
@@ -100,8 +120,36 @@ describe('POST /api/bridge/anchors', () => {
         contract_address: '0x' + 'ef'.repeat(20),
         admin: 'GADMIN',
       });
-    expect(res.status).toBe(202);
-    expect(res.body.anchor.verified).toBe(false);
+    expect(res.status).toBe(428);
+    expect(res.body.transaction_xdr).toBe('unsigned-anchor-xdr');
+    expect(res.body.anchor_id).toBeUndefined();
+  });
+
+  it('registers the anchor only after its transaction is confirmed', async () => {
+    submitCall.mockResolvedValueOnce({
+      status: 'confirmed',
+      transaction_hash: 'confirmed-anchor-hash',
+      result: 8n,
+    });
+
+    const res = await request(app)
+      .post('/api/bridge/anchors')
+      .send({
+        credential_id: 1,
+        chain_id: 1,
+        tx_hash: '0x' + 'cd'.repeat(32),
+        block_number: 100,
+        block_hash: '0x' + 'ef'.repeat(32),
+        block_timestamp: 1700000000,
+        contract_address: '0x' + '12'.repeat(20),
+        admin: 'GADMIN',
+        signed_transaction_xdr: 'signed-anchor-xdr',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.anchor_id).toBe(8);
+    expect(res.body.transaction_hash).toBe('confirmed-anchor-hash');
+    expect(getAllAnchors().some((anchor) => anchor.anchorId === 8)).toBe(true);
   });
 
   it('returns 400 for an unsupported chain', async () => {
@@ -142,5 +190,7 @@ describe('POST /api/bridge/anchors/:id/verify', () => {
         receipt_proof: { claim: { txIndex: 0, txType: 0, status: 1, cumulativeGasUsed: '1', logsBloom: '0x' + '00'.repeat(256), logs: [] }, proofNodes: [] },
       });
     expect(res.status).toBe(404);
+    expect(simulateCall).toHaveBeenCalledWith('get_chain_anchor', [999], { cache: false });
+    expect(submitCall).not.toHaveBeenCalled();
   });
 });

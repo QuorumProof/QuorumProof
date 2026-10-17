@@ -11,7 +11,8 @@
  *   POST   /api/credentials/:id/consent/access               — record an access event (bridge use)
  */
 import { Router, Request, Response } from 'express';
-import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { simulateCall, submitCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { respondIfNotConfirmed } from './sorobanSubmission.js';
 
 const router = Router({ mergeParams: true });
 
@@ -166,14 +167,21 @@ router.post('/:id/consent/grants', async (req: Request, res: Response) => {
   }
 
   const expiresAtNum = typeof expires_at === 'number' ? expires_at : 0;
+  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+    return;
+  }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
 
   try {
-    await simulateCall('grant_verifier_consent', [
+    const submission = await submitCall('grant_verifier_consent', [
       addressVal(holder),
       addressVal(String(verifier)),
       u64Val(credentialId),
       u64Val(expiresAtNum),
-    ]);
+    ], signedTransactionXdr);
+    if (respondIfNotConfirmed(res, submission)) return;
 
     res.status(201).json({
       credential_id: credentialId,
@@ -181,6 +189,8 @@ router.post('/:id/consent/grants', async (req: Request, res: Response) => {
       verifier,
       expires_at: expiresAtNum,
       granted: true,
+      transaction_hash: submission.transaction_hash,
+      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -213,17 +223,27 @@ router.delete('/:id/consent/grants/:verifier', async (req: Request, res: Respons
     return;
   }
 
+  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+    return;
+  }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
+
   try {
-    await simulateCall('revoke_verifier_consent', [
+    const submission = await submitCall('revoke_verifier_consent', [
       addressVal(holder),
       addressVal(String(verifier)),
       u64Val(credentialId),
-    ]);
+    ], signedTransactionXdr);
+    if (respondIfNotConfirmed(res, submission)) return;
 
     res.json({
       credential_id: credentialId,
       verifier,
       revoked: true,
+      transaction_hash: submission.transaction_hash,
+      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -324,13 +344,21 @@ router.post('/:id/consent/access', async (req: Request, res: Response) => {
     return;
   }
 
+  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+    return;
+  }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
+
   try {
-    await simulateCall('record_verifier_access', [
+    const submission = await submitCall('record_verifier_access', [
       addressVal(holder),
       u64Val(credentialId),
       addressVal(String(verifier)),
       u32Val(accessTypeNum),
-    ]);
+    ], signedTransactionXdr);
+    if (respondIfNotConfirmed(res, submission)) return;
 
     res.status(201).json({
       credential_id: credentialId,
@@ -338,6 +366,8 @@ router.post('/:id/consent/access', async (req: Request, res: Response) => {
       access_type: accessTypeNum,
       access_type_label: ACCESS_TYPE_LABELS[accessTypeNum],
       recorded: true,
+      transaction_hash: submission.transaction_hash,
+      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

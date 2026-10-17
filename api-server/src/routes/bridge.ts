@@ -17,13 +17,15 @@
  * has changed. See crossChainBridge.ts for the trust-model rationale.
  */
 import { Router, Request, Response } from 'express';
-import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { simulateCall, submitCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { respondIfNotConfirmed } from './sorobanSubmission.js';
 import { rbac } from '../middleware/rbac.js';
 import {
   SUPPORTED_CHAINS,
   ProofType,
   prepareAnchor,
   confirmAnchor,
+  markAnchorVerified,
   getPendingAnchors,
   getAnchorByTxHash,
   getAnchorById,
@@ -208,6 +210,7 @@ router.post('/anchors', async (req: Request, res: Response) => {
     contract_address,
     proof_type,
     admin,
+    signed_transaction_xdr,
   } = req.body as Record<string, unknown>;
 
   const missingFields: string[] = [];
@@ -219,11 +222,17 @@ router.post('/anchors', async (req: Request, res: Response) => {
   if (typeof block_timestamp !== 'number') missingFields.push('block_timestamp');
   if (typeof contract_address !== 'string') missingFields.push('contract_address');
   if (typeof admin !== 'string') missingFields.push('admin (Stellar admin address)');
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    missingFields.push('signed_transaction_xdr (string)');
+  }
 
   if (missingFields.length > 0) {
     res.status(400).json({ error: `Missing required fields: ${missingFields.join(', ')}` });
     return;
   }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
+    ? signed_transaction_xdr
+    : undefined;
 
   if (!SUPPORTED_CHAINS[chain_id as number]) {
     res.status(400).json({
@@ -273,16 +282,20 @@ router.post('/anchors', async (req: Request, res: Response) => {
   const foreignTxBytes = txHashBuf.length <= 64 ? txHashBuf : txHashBuf.slice(0, 64);
 
   try {
-    const anchorIdRaw = await simulateCall('register_chain_anchor', [
+    const submission = await submitCall('register_chain_anchor', [
       addressVal(admin as string),
       u32Val(chain_id as number),
       u64Val(credential_id as number),
       nativeToScVal(foreignTxBytes, { type: 'bytes' }),
       nativeToScVal(proofHashBuf, { type: 'bytes' }),
       u32Val(ptCode),
-    ]);
+    ], signedTransactionXdr);
+    if (respondIfNotConfirmed(res, submission)) return;
 
-    const anchorId = Number(anchorIdRaw);
+    const anchorId = Number(submission.result);
+    if (!Number.isSafeInteger(anchorId) || anchorId <= 0) {
+      throw new Error('Confirmed registration returned an invalid anchor ID');
+    }
     confirmAnchor(txHashStr, anchorId);
 
     res.status(201).json({
@@ -295,6 +308,8 @@ router.post('/anchors', async (req: Request, res: Response) => {
       proof_type: pending.proofType,
       anchored_at: pending.anchoredAt,
       verified: false,
+      transaction_hash: submission.transaction_hash,
+      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -303,12 +318,7 @@ router.post('/anchors', async (req: Request, res: Response) => {
     } else if (msg.includes('UnauthorizedAction')) {
       res.status(403).json({ error: 'Only the contract admin may register anchors' });
     } else {
-      // Return the prepared anchor even if on-chain call is simulated
-      res.status(202).json({
-        message: 'Anchor prepared (on-chain registration pending — contract may not be deployed)',
-        anchor: pending,
-        simulation_error: msg,
-      });
+      res.status(500).json({ error: msg });
     }
   }
 });
@@ -443,13 +453,36 @@ router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
     return;
   }
 
+  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+    return;
+  }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
+    ? signed_transaction_xdr
+    : undefined;
+
+  try {
+    const chainAnchor = await simulateCall('get_chain_anchor', [u64Val(id)], { cache: false });
+    if (!chainAnchor) {
+      res.status(404).json({ error: 'Anchor is not confirmed on-chain' });
+      return;
+    }
+  } catch (err: unknown) {
+    res.status(503).json({
+      error: 'Unable to confirm anchor on-chain',
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
   let verification;
   try {
     verification = await verifyAnchorReceiptProof({
       anchorId: id,
       logIndexInReceipt: log_index,
       receiptProof: receipt_proof as ReceiptProof,
-    });
+    }, undefined, undefined, { persistVerification: false });
   } catch (err: unknown) {
     if (err instanceof AnchorVerificationError) {
       res.status(404).json({ error: err.message });
@@ -464,12 +497,20 @@ router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
   }
 
   try {
-    await simulateCall('verify_chain_anchor', [addressVal(admin), u64Val(id)]);
+    const submission = await submitCall(
+      'verify_chain_anchor',
+      [addressVal(admin), u64Val(id)],
+      signedTransactionXdr,
+    );
+    if (respondIfNotConfirmed(res, submission)) return;
+    markAnchorVerified(id);
     res.json({
       success: true,
       anchor_id: id,
       verified: true,
       decoded_event: verification.decoded,
+      transaction_hash: submission.transaction_hash,
+      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -478,15 +519,7 @@ router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
     } else if (msg.includes('UnauthorizedAction')) {
       res.status(403).json({ error: 'Only the contract admin may verify anchors' });
     } else {
-      // Off-chain proof verification already succeeded and is durably
-      // recorded; only the on-chain confirmation is pending.
-      res.status(202).json({
-        message: 'Proof verified and recorded (on-chain update pending — contract may not be deployed)',
-        anchor_id: id,
-        verified: true,
-        decoded_event: verification.decoded,
-        simulation_error: msg,
-      });
+      res.status(500).json({ error: msg });
     }
   }
 });

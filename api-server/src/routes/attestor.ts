@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { simulateCall, u64Val, addressVal } from '../soroban.js';
+import { simulateCall, submitCall, u64Val, addressVal } from '../soroban.js';
 import { metricsStore } from '../services/metrics.js';
-import { liveDashboard } from '../services/liveDashboard.js';
 
 const router = Router();
 
@@ -105,7 +104,7 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
 // POST /api/attestor/batch-attest
 // Body: { attestor: string; credential_ids: string[]; slice_id: string }
 router.post('/batch-attest', async (req: Request, res: Response) => {
-  const { attestor, credential_ids, slice_id } = req.body;
+  const { attestor, credential_ids, slice_id, signed_transactions } = req.body;
 
   if (!attestor || !Array.isArray(credential_ids) || credential_ids.length === 0 || !slice_id) {
     res.status(400).json({ error: 'attestor, credential_ids (array), and slice_id are required' });
@@ -117,16 +116,62 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
     return;
   }
 
-  const results: { credential_id: string; success: boolean; error?: string }[] = [];
+  if (
+    signed_transactions !== undefined &&
+    (!signed_transactions || typeof signed_transactions !== 'object' || Array.isArray(signed_transactions))
+  ) {
+    res.status(400).json({ error: 'signed_transactions must map credential IDs to signed transaction XDR' });
+    return;
+  }
+
+  const transactions = signed_transactions as Record<string, unknown> | undefined;
+  const results: Array<{
+    credential_id: string;
+    success: boolean;
+    status?: 'authorization_required' | 'pending' | 'confirmed';
+    transaction_hash?: string;
+    transaction_xdr?: string;
+    authorization_entries_xdr?: string[];
+    error?: string;
+  }> = [];
 
   for (const credId of credential_ids) {
     try {
-      await simulateCall('attest_credential', [
+      const transactionXdr = transactions?.[String(credId)];
+      if (transactionXdr !== undefined && typeof transactionXdr !== 'string') {
+        throw new Error(`Signed transaction for credential ${credId} must be an XDR string`);
+      }
+      const signedTransactionXdr = typeof transactionXdr === 'string' ? transactionXdr : undefined;
+      const submission = await submitCall('attest_credential', [
         u64Val(BigInt(credId)),
         u64Val(BigInt(slice_id)),
         addressVal(attestor),
-      ]);
-      results.push({ credential_id: credId, success: true });
+      ], signedTransactionXdr);
+      if (submission.status === 'prepared') {
+        results.push({
+          credential_id: credId,
+          success: false,
+          status: 'authorization_required',
+          transaction_xdr: submission.transaction_xdr,
+          authorization_entries_xdr: submission.authorization_entries_xdr,
+        });
+        continue;
+      }
+      if (submission.status === 'pending') {
+        results.push({
+          credential_id: credId,
+          success: false,
+          status: 'pending',
+          transaction_hash: submission.transaction_hash,
+        });
+        continue;
+      }
+      results.push({
+        credential_id: credId,
+        success: true,
+        status: 'confirmed',
+        transaction_hash: submission.transaction_hash,
+      });
 
       metricsStore.recordEvent({
         type: 'attested',
@@ -137,15 +182,16 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Attestation failed';
       results.push({ credential_id: credId, success: false, error: msg });
-      liveDashboard.recordAttestation(false);
     }
   }
 
   const succeeded = results.filter((r) => r.success).length;
-  res.json({
+  const authorizationRequired = results.some((r) => r.status === 'authorization_required');
+  const pending = results.some((r) => r.status === 'pending');
+  res.status(authorizationRequired ? 428 : pending ? 202 : 200).json({
     total: credential_ids.length,
     succeeded,
-    failed: credential_ids.length - succeeded,
+    failed: results.filter((r) => r.error !== undefined).length,
     results,
   });
 });

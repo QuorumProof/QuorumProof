@@ -33,11 +33,9 @@
  *   137 – Polygon Mainnet
  *   80001 – Polygon Mumbai (testnet, deprecated)
  *
- * NOTE: This service performs simulation-only calls against the Soroban
- * contract (read path).  Write operations (register / verify anchor) are
- * prepared here as signed transaction envelopes and must be submitted by
- * a funded Stellar account with the Admin role.  In a production setup,
- * this service holds an HSM-backed keypair for that account.
+ * NOTE: Read paths simulate contract calls. Write operations (register /
+ * verify anchor) are prepared by the API, authorized by the caller, then
+ * signed and submitted by the configured funded transaction-source account.
  *
  * TRUST MODEL: step 3 (`verifyAnchorReceiptProof`) is what makes an anchor
  * `verified`, and it is backed by cryptographic MPT proof verification
@@ -153,6 +151,10 @@ export function confirmAnchor(txHash: string, anchorId: number, store: BridgeSto
   store.confirm(txHash, anchorId);
 }
 
+export function markAnchorVerified(anchorId: number, store: BridgeStore = getDefaultBridgeStore()): void {
+  store.markVerified(anchorId);
+}
+
 export interface VerifyAnchorInput {
   anchorId: number;
   logIndexInReceipt: number;
@@ -183,6 +185,7 @@ export async function verifyAnchorReceiptProof(
   input: VerifyAnchorInput,
   bridgeStore: BridgeStore = getDefaultBridgeStore(),
   headerStore: BlockHeaderStore = getDefaultBlockHeaderStore(),
+  options: { persistVerification?: boolean } = {},
 ): Promise<VerifyAnchorResult> {
   const anchor = bridgeStore.getById(input.anchorId);
   if (!anchor) throw new AnchorVerificationError(`Unknown anchor ${input.anchorId}`);
@@ -219,7 +222,7 @@ export async function verifyAnchorReceiptProof(
     );
   }
 
-  bridgeStore.markVerified(input.anchorId);
+  if (options.persistVerification !== false) bridgeStore.markVerified(input.anchorId);
   return { anchor: { ...anchor, verified: true }, decoded, header };
 }
 

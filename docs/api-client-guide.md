@@ -9,19 +9,20 @@ This guide covers everything you need to integrate with the QuorumProof smart co
 1. [Overview](#overview)
 2. [Prerequisites](#prerequisites)
 3. [Authentication](#authentication)
-4. [Contract Addresses](#contract-addresses)
-5. [Error Handling](#error-handling)
-6. [Retry Logic](#retry-logic)
-7. [Common Use Cases](#common-use-cases)
+4. [API-Mediated Writes](#api-mediated-writes)
+5. [Contract Addresses](#contract-addresses)
+6. [Error Handling](#error-handling)
+7. [Retry Logic](#retry-logic)
+8. [Common Use Cases](#common-use-cases)
    - [Issue a Credential](#issue-a-credential)
    - [Create a Quorum Slice](#create-a-quorum-slice)
    - [Attest a Credential](#attest-a-credential)
    - [Verify a Credential](#verify-a-credential)
    - [Revoke a Credential](#revoke-a-credential)
-8. [Read-Only Queries](#read-only-queries)
-9. [ZK Claim Verification](#zk-claim-verification)
-10. [SBT Operations](#sbt-operations)
-11. [Handling API Version Changes](#handling-api-version-changes)
+9. [Read-Only Queries](#read-only-queries)
+10. [ZK Claim Verification](#zk-claim-verification)
+11. [SBT Operations](#sbt-operations)
+12. [Handling API Version Changes](#handling-api-version-changes)
 
 ---
 
@@ -65,6 +66,12 @@ QuorumProof contracts use Soroban's native auth model. Every mutating call must 
 | **Attestor** | Attest credentials within a quorum slice |
 | **Holder** | Mint/burn their own SBTs |
 | **Anyone** | Read credentials, slices, and attestation status |
+
+## API-Mediated Writes
+
+The consent grant/revoke/access, batch-attestation, share-link create/revoke, and bridge anchor register/verify endpoints submit Soroban transactions. The API uses `STELLAR_SOURCE_SECRET_KEY` only for the transaction source and fees; it does not authorize contract actions as a holder, attestor, or admin.
+
+For these endpoints, the first request returns `428 Caller authorization required` with `transaction_xdr` and `authorization_entries_xdr` (for batch attestation, these fields are returned per credential in `results`). Sign the Soroban authorization entries in each transaction with the required wallet, then retry the same request with `signed_transaction_xdr`; batch attestation uses a `signed_transactions` map keyed by credential ID. A confirmed call returns its `transaction_hash`; a still-pending call returns `202` and must not be treated as successful yet. Keep the source secret funded and configure it only in the API server environment.
 
 ---
 
