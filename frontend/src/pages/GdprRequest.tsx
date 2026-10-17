@@ -97,7 +97,6 @@ export default function GdprRequest() {
       } else {
         setSubmitError(message);
       }
-      }
     } finally {
       setSubmitting(false);
     }

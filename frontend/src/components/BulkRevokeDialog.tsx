@@ -4,22 +4,30 @@ import type { Credential } from '../lib/contracts/quorumProof';
 
 interface BulkRevokeDialogProps {
   credentials: Credential[];
-  onConfirm: (ids: bigint[]) => void;
+  onConfirm: (ids: bigint[]) => void | Promise<void>;
   onClose: () => void;
 }
 
 export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevokeDialogProps) {
   const [revoking, setRevoking] = useState(false);
   const [done, setDone] = useState(false);
+  const [completedCount, setCompletedCount] = useState(0);
+  const [error, setError] = useState<string | null>(null);
 
   const revokable = credentials.filter((c) => !c.revoked);
 
   async function handleConfirm() {
     setRevoking(true);
-    await new Promise((r) => setTimeout(r, 600));
-    setRevoking(false);
-    setDone(true);
-    onConfirm(revokable.map((c) => c.id));
+    setError(null);
+    try {
+      await onConfirm(revokable.map((c) => c.id));
+      setCompletedCount(revokable.length);
+      setDone(true);
+    } catch {
+      setError('Failed to revoke credentials. Please try again.');
+    } finally {
+      setRevoking(false);
+    }
   }
 
   if (done) {
@@ -33,7 +41,7 @@ export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevoke
           <div className="modal-body" style={{ textAlign: 'center', padding: '32px 24px' }}>
             <div style={{ fontSize: '40px', marginBottom: '16px' }}>🚫</div>
             <p style={{ color: 'var(--text-secondary)' }}>
-              {revokable.length} credential{revokable.length !== 1 ? 's' : ''} marked as revoked.
+              {completedCount} credential{completedCount !== 1 ? 's' : ''} marked as revoked.
             </p>
           </div>
           <div className="modal-footer">
@@ -67,6 +75,8 @@ export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevoke
             ⚠️ Revoking credentials is irreversible. Revoked credentials can no longer be
             verified or attested.
           </div>
+
+          {error && <p role="alert">{error}</p>}
 
           <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
             The following {revokable.length} credential{revokable.length !== 1 ? 's' : ''} will be

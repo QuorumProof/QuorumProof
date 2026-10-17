@@ -7,6 +7,13 @@
 const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+interface TimeoutController {
+  controller: AbortController;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
+export type ResponseValidator<T> = (data: unknown) => data is T;
+
 export interface ApiRequestConfig {
   timeout?: number;
   retries?: number;
@@ -34,14 +41,10 @@ export class ApiError extends Error {
 /**
  * Create an AbortController with timeout
  */
-function createTimeoutController(timeoutMs: number): AbortController {
+function createTimeoutController(timeoutMs: number): TimeoutController {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  
-  // Store timeout ID for cleanup (optional, but prevents memory leaks in some scenarios)
-  (controller as any)._timeoutId = timeoutId;
-  
-  return controller;
+  return { controller, timeoutId };
 }
 
 /**
@@ -62,7 +65,7 @@ async function normalizeError(response: Response): Promise<string> {
 export class ApiClient {
   private baseUrl: string;
   private defaultTimeout: number;
-  private abortControllers: Map<string, AbortController>;
+  private abortControllers: Map<string, TimeoutController>;
 
   constructor(baseUrl: string = API_BASE, defaultTimeout: number = DEFAULT_TIMEOUT_MS) {
     this.baseUrl = baseUrl;
@@ -73,11 +76,12 @@ export class ApiClient {
   /**
    * Register an abort controller for a request key (for cancellation)
    */
-  private setAbortController(key: string, controller: AbortController): void {
+  private setAbortController(key: string, controller: TimeoutController): void {
     // Cancel any existing request with the same key
     const existing = this.abortControllers.get(key);
     if (existing) {
-      existing.abort();
+      existing.controller.abort();
+      this.clearAbortController(key, existing);
     }
     this.abortControllers.set(key, controller);
   }
@@ -85,12 +89,11 @@ export class ApiClient {
   /**
    * Clear abort controller after request completes
    */
-  private clearAbortController(key: string): void {
-    const controller = this.abortControllers.get(key);
-    if (controller && (controller as any)._timeoutId) {
-      clearTimeout((controller as any)._timeoutId);
+  private clearAbortController(key: string, controller: TimeoutController): void {
+    clearTimeout(controller.timeoutId);
+    if (this.abortControllers.get(key) === controller) {
+      this.abortControllers.delete(key);
     }
-    this.abortControllers.delete(key);
   }
 
   /**
@@ -99,8 +102,8 @@ export class ApiClient {
   cancelRequest(key: string): void {
     const controller = this.abortControllers.get(key);
     if (controller) {
-      controller.abort();
-      this.clearAbortController(key);
+      controller.controller.abort();
+      this.clearAbortController(key, controller);
     }
   }
 
@@ -116,7 +119,7 @@ export class ApiClient {
   /**
    * Validate response data against expected shape
    */
-  private validateResponse<T>(data: unknown, validator?: (data: any) => data is T): T {
+  private validateResponse<T>(data: unknown, validator?: ResponseValidator<T>): T {
     if (validator && !validator(data)) {
       throw new ApiError('Invalid response format', 500, 'INVALID_RESPONSE');
     }
@@ -128,12 +131,12 @@ export class ApiClient {
    */
   async get<T = unknown>(
     endpoint: string,
-    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+    config: ApiRequestConfig & { validator?: ResponseValidator<T>; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
     const url = `${this.baseUrl}${endpoint}`;
     const controller = signal ? undefined : createTimeoutController(timeout);
-    const finalSignal = signal || controller?.signal;
+    const finalSignal = signal || controller?.controller.signal;
 
     if (requestKey && controller) {
       this.setAbortController(requestKey, controller);
@@ -154,13 +157,15 @@ export class ApiClient {
       return this.validateResponse<T>(data, validator);
     } catch (err) {
       if (err instanceof ApiError) throw err;
-      if (err instanceof TypeError && err.message.includes('fetch')) {
+      if (err instanceof TypeError) {
         throw new ApiError('Network error', 0, 'NETWORK_ERROR');
       }
       throw err;
     } finally {
       if (requestKey && controller) {
-        this.clearAbortController(requestKey);
+        this.clearAbortController(requestKey, controller);
+      } else if (controller) {
+        clearTimeout(controller.timeoutId);
       }
     }
   }
@@ -171,12 +176,12 @@ export class ApiClient {
   async post<T = unknown>(
     endpoint: string,
     body: unknown,
-    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+    config: ApiRequestConfig & { validator?: ResponseValidator<T>; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
     const url = `${this.baseUrl}${endpoint}`;
     const controller = signal ? undefined : createTimeoutController(timeout);
-    const finalSignal = signal || controller?.signal;
+    const finalSignal = signal || controller?.controller.signal;
 
     if (requestKey && controller) {
       this.setAbortController(requestKey, controller);
@@ -199,13 +204,15 @@ export class ApiClient {
       return this.validateResponse<T>(data, validator);
     } catch (err) {
       if (err instanceof ApiError) throw err;
-      if (err instanceof TypeError && err.message.includes('fetch')) {
+      if (err instanceof TypeError) {
         throw new ApiError('Network error', 0, 'NETWORK_ERROR');
       }
       throw err;
     } finally {
       if (requestKey && controller) {
-        this.clearAbortController(requestKey);
+        this.clearAbortController(requestKey, controller);
+      } else if (controller) {
+        clearTimeout(controller.timeoutId);
       }
     }
   }
@@ -216,12 +223,12 @@ export class ApiClient {
   async put<T = unknown>(
     endpoint: string,
     body: unknown,
-    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+    config: ApiRequestConfig & { validator?: ResponseValidator<T>; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
     const url = `${this.baseUrl}${endpoint}`;
     const controller = signal ? undefined : createTimeoutController(timeout);
-    const finalSignal = signal || controller?.signal;
+    const finalSignal = signal || controller?.controller.signal;
 
     if (requestKey && controller) {
       this.setAbortController(requestKey, controller);
@@ -244,13 +251,15 @@ export class ApiClient {
       return this.validateResponse<T>(data, validator);
     } catch (err) {
       if (err instanceof ApiError) throw err;
-      if (err instanceof TypeError && err.message.includes('fetch')) {
+      if (err instanceof TypeError) {
         throw new ApiError('Network error', 0, 'NETWORK_ERROR');
       }
       throw err;
     } finally {
       if (requestKey && controller) {
-        this.clearAbortController(requestKey);
+        this.clearAbortController(requestKey, controller);
+      } else if (controller) {
+        clearTimeout(controller.timeoutId);
       }
     }
   }
@@ -260,12 +269,12 @@ export class ApiClient {
    */
   async delete<T = unknown>(
     endpoint: string,
-    config: ApiRequestConfig & { validator?: (data: any) => data is T; requestKey?: string } = {}
+    config: ApiRequestConfig & { validator?: ResponseValidator<T>; requestKey?: string } = {}
   ): Promise<T> {
     const { timeout = this.defaultTimeout, validator, requestKey, signal } = config;
     const url = `${this.baseUrl}${endpoint}`;
     const controller = signal ? undefined : createTimeoutController(timeout);
-    const finalSignal = signal || controller?.signal;
+    const finalSignal = signal || controller?.controller.signal;
 
     if (requestKey && controller) {
       this.setAbortController(requestKey, controller);
@@ -286,13 +295,15 @@ export class ApiClient {
       return this.validateResponse<T>(data, validator);
     } catch (err) {
       if (err instanceof ApiError) throw err;
-      if (err instanceof TypeError && err.message.includes('fetch')) {
+      if (err instanceof TypeError) {
         throw new ApiError('Network error', 0, 'NETWORK_ERROR');
       }
       throw err;
     } finally {
       if (requestKey && controller) {
-        this.clearAbortController(requestKey);
+        this.clearAbortController(requestKey, controller);
+      } else if (controller) {
+        clearTimeout(controller.timeoutId);
       }
     }
   }
