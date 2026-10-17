@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { GraphQLResolvers, type SorobanClient } from '../services/graphqlResolvers.js';
+import { requireAuth } from '../middleware/auth.js';
 
 type BulkOperationType =
   | 'credential'
@@ -21,7 +22,7 @@ const MAX_BULK_OPERATIONS = 50;
 export function createBulkOperationsRouter(soroban: SorobanClient) {
   const router = Router();
 
-  router.post('/', async (req: Request, res: Response) => {
+  router.post('/', requireAuth, async (req: Request, res: Response) => {
     const operations = (req.body as { operations?: unknown }).operations;
     if (!Array.isArray(operations) || operations.length === 0) {
       res.status(400).json({ error: 'operations must be a non-empty array' });

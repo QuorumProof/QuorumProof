@@ -16,17 +16,14 @@ import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Convert a hex password to a 32-byte Soroban-compatible Bytes value. */
-function buildPasswordHashArg(soroban: SorobanClient, rawPassword: string) {
-  // We accept either a pre-computed 64-char hex SHA-256 or a plain password
-  // that we hash here before sending on-chain (the contract stores the hash,
-  // never the plaintext).
-  const isHex64 = /^[0-9a-fA-F]{64}$/.test(rawPassword);
-  const hexDigest = isHex64
-    ? rawPassword
-    : createHmac('sha256', process.env.SHARE_LINK_HMAC_SECRET ?? 'quorumproof')
-        .update(rawPassword)
-        .digest('hex');
+function getShareLinkHmacSecret(): string | null {
+  const secret = process.env.SHARE_LINK_HMAC_SECRET?.trim();
+  return secret && secret.length >= 32 ? secret : null;
+}
+
+/** Convert a password to a 32-byte Soroban-compatible HMAC value. */
+function buildPasswordHashArg(rawPassword: string, secret: string) {
+  const hexDigest = createHmac('sha256', secret).update(rawPassword).digest('hex');
   // Convert hex string to a bytes buffer for nativeToScVal
   const buf = Buffer.from(hexDigest, 'hex'); // 32 bytes
   return { hexDigest, buf };
@@ -107,7 +104,12 @@ export function createShareLinksRouter(soroban: SorobanClient) {
     const { nativeToScVal } = await import('@stellar/stellar-sdk');
 
     if (typeof password === 'string' && password.length > 0) {
-      const { hexDigest, buf } = buildPasswordHashArg(soroban, password);
+      const secret = getShareLinkHmacSecret();
+      if (!secret) {
+        res.status(503).json({ error: 'Password-protected share links require a securely configured SHARE_LINK_HMAC_SECRET' });
+        return;
+      }
+      const { hexDigest, buf } = buildPasswordHashArg(password, secret);
       passwordHashHex = hexDigest;
       passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
     }
@@ -174,14 +176,19 @@ export function createShareLinksRouter(soroban: SorobanClient) {
       return;
     }
 
+    const passwordText = typeof password === 'string' && password.length > 0 ? password : null;
+    const passwordProvided = passwordText !== null;
+    const secret = passwordProvided ? getShareLinkHmacSecret() : null;
+    if (passwordProvided && !secret) {
+      res.status(503).json({ error: 'Password-protected share links require a securely configured SHARE_LINK_HMAC_SECRET' });
+      return;
+    }
+
     const { nativeToScVal } = await import('@stellar/stellar-sdk');
     let passwordHashArg = nativeToScVal(null, { type: 'void' });
 
-    if (typeof password === 'string' && password.length > 0) {
-      const { buf } = buildPasswordHashArg(
-        soroban,
-        password
-      );
+    if (passwordText && secret) {
+      const { buf } = buildPasswordHashArg(passwordText, secret);
       passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
     }
 
