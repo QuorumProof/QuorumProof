@@ -38,6 +38,14 @@ export interface WsBroadcastEvent {
   holder?: string;
   attestor?: string;
   proof_request_id?: string;
+  from_tier?: string;
+  to_tier?: string;
+  points?: number;
+  current_tier?: string;
+  current_points?: number;
+  request_id?: number;
+  amount?: string;
+  destination?: string;
   timestamp: string;
 }
 

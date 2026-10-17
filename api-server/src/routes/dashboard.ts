@@ -106,7 +106,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
   router.get('/credentials', async (req: Request, res: Response) => {
     try {
       // Get authenticated user from request (via auth middleware)
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -189,7 +189,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/credentials/:id', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -291,7 +291,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/disputes', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -382,7 +382,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/access-log', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -467,7 +467,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.post('/disputes', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -557,7 +557,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/summary', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
