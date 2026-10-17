@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Keypair } from '@stellar/stellar-sdk';
 import shareLinksRouter from '../src/routes/shareLinks.js';
-import authRouter, { buildWalletLinkMessage } from '../src/routes/auth.js';
+import walletLinkRouter, { buildWalletLinkMessage } from '../src/routes/walletLink.js';
 import { SessionManager, _setDefaultSessionManagerForTest } from '../src/services/sessionManager.js';
 import { UserWalletStore, _setDefaultUserWalletStoreForTest } from '../src/services/userWalletStore.js';
 import * as soroban from '../src/soroban.js';
@@ -39,7 +39,7 @@ describe('share-link holder authentication', () => {
 
     app = express();
     app.use(express.json());
-    app.use('/api/auth', authRouter);
+    app.use('/api/auth/wallet/link', walletLinkRouter);
     app.use('/api/credentials', shareLinksRouter);
   });
 

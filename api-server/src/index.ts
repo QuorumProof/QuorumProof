@@ -35,7 +35,7 @@ import { createEventsRouter } from './routes/events.js';
 import docsRouter from './routes/docs.js';
 import { createDashboardRouter } from './routes/dashboard.js';
 import { cacheControl } from './middleware/cacheControl.js';
-import authRouter from './routes/auth.js';
+import walletLinkRouter from './routes/walletLink.js';
 // #1303: CORS middleware
 import { createCorsFromEnv } from './middleware/cors.js';
 // #1304: Adaptive rate limiter
@@ -219,7 +219,7 @@ app.use('/api/verify', verifyRouter);
 app.use('/api/graphql', createGraphqlRouter(sorobanClient)); // #1614 GraphQL query/subscription surface
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
-app.use('/api/auth', authRouter); // #1299 authenticated account and wallet management
+app.use('/api/auth/wallet/link', walletLinkRouter); // Bind verified wallets to authenticated accounts
 app.use('/api/credentials', createCredentialTiersRouter()); // #1602 credential tiering
 app.use('/api/credentials', createCredentialRedemptionRouter()); // #1603 credential redemption
 app.use('/api/verify', verifyRouter);

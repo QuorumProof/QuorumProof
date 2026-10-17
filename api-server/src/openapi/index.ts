@@ -116,6 +116,8 @@ export function buildOpenApiSpec(): OpenAPIObject {
     graphqlPaths,
     passwordlessAuthPaths,
     walletAuthPaths,
+    remount(walletAuthPaths, '/api/auth', '/api/v1/auth'),
+    remount(walletAuthPaths, '/api/auth', '/api/v2/auth'),
     reportsPaths,
   );
 
