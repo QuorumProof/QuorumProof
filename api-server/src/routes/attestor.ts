@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { simulateCall, u64Val, addressVal } from '../soroban.js';
 import { metricsStore } from '../services/metrics.js';
 import { liveDashboard } from '../services/liveDashboard.js';
+import { verifyBatchAttestationSignature } from '../services/batchAttestationSignature.js';
 
 const router = Router();
 
@@ -103,12 +104,22 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
 });
 
 // POST /api/attestor/batch-attest
-// Body: { attestor: string; credential_ids: string[]; slice_id: string }
+// Body: { attestor: string; credential_ids: string[]; slice_id: string; signature: string }
 router.post('/batch-attest', async (req: Request, res: Response) => {
-  const { attestor, credential_ids, slice_id } = req.body;
+  const { attestor, credential_ids, slice_id, signature } = req.body as {
+    attestor?: unknown;
+    credential_ids?: unknown;
+    slice_id?: unknown;
+    signature?: unknown;
+  };
 
-  if (!attestor || !Array.isArray(credential_ids) || credential_ids.length === 0 || !slice_id) {
-    res.status(400).json({ error: 'attestor, credential_ids (array), and slice_id are required' });
+  if (
+    typeof attestor !== 'string' || attestor.length === 0 ||
+    !Array.isArray(credential_ids) || credential_ids.length === 0 ||
+    (typeof slice_id !== 'string' && typeof slice_id !== 'number') ||
+    signature === undefined
+  ) {
+    res.status(400).json({ error: 'attestor, credential_ids (array), slice_id, and signature are required' });
     return;
   }
 
@@ -117,33 +128,71 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
     return;
   }
 
+  const maxU64 = 18446744073709551615n;
+  const parseU64 = (value: unknown): bigint | null => {
+    if (typeof value !== 'string' && typeof value !== 'number') return null;
+    if (typeof value === 'number' && !Number.isSafeInteger(value)) return null;
+    try {
+      const parsed = BigInt(value);
+      return parsed >= 0n && parsed <= maxU64 ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const sliceId = parseU64(slice_id);
+  const credentialIds = credential_ids.map(parseU64);
+  if (sliceId === null || credentialIds.some((id) => id === null)) {
+    res.status(400).json({ error: 'slice_id and credential_ids must be unsigned 64-bit integers' });
+    return;
+  }
+  const parsedCredentialIds = credentialIds.filter((id): id is bigint => id !== null);
+
+  if (typeof signature !== 'string') {
+    res.status(400).json({ error: 'signature must be a hex-encoded ed25519 signature' });
+    return;
+  }
+
+  const canonicalIds = parsedCredentialIds.map((id) => id.toString());
+  const verification = verifyBatchAttestationSignature(
+    attestor,
+    sliceId.toString(),
+    canonicalIds,
+    signature,
+  );
+  if (!verification.valid) {
+    res.status(401).json({ error: 'Invalid attestor signature', reason: verification.reason });
+    return;
+  }
+
   const results: { credential_id: string; success: boolean; error?: string }[] = [];
 
-  for (const credId of credential_ids) {
+  for (const [index, credId] of parsedCredentialIds.entries()) {
+    const credentialId = canonicalIds[index];
     try {
       await simulateCall('attest_credential', [
-        u64Val(BigInt(credId)),
-        u64Val(BigInt(slice_id)),
+        u64Val(credId),
+        u64Val(sliceId),
         addressVal(attestor),
       ]);
-      results.push({ credential_id: credId, success: true });
+      results.push({ credential_id: credentialId, success: true });
 
       metricsStore.recordEvent({
         type: 'attested',
-        credential_id: credId,
+        credential_id: credentialId,
         timestamp: new Date().toISOString(),
         attestor,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Attestation failed';
-      results.push({ credential_id: credId, success: false, error: msg });
+      results.push({ credential_id: credentialId, success: false, error: msg });
       liveDashboard.recordAttestation(false);
     }
   }
 
   const succeeded = results.filter((r) => r.success).length;
   res.json({
-    total: credential_ids.length,
+    total: parsedCredentialIds.length,
     succeeded,
     failed: credential_ids.length - succeeded,
     results,
