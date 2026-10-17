@@ -8,8 +8,8 @@ interface DashboardStats {
 }
 
 const WS_URL =
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_WS_URL) ||
-  'ws://localhost:3000/ws'
+  import.meta.env.VITE_WS_URL ||
+  `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
 
 // Auth token from env — required by the server's /ws endpoint.
 // Set VITE_DASHBOARD_TOKEN to a valid operator token before running.

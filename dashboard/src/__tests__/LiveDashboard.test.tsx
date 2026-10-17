@@ -115,6 +115,13 @@ describe('LiveDashboard connection states', () => {
     expect(screen.getByText(/connecting/i)).toBeInTheDocument()
   })
 
+  it('uses the current origin for WebSocket connections when no URL is configured', () => {
+    render(<LiveDashboard />)
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    expect(MockWebSocket).toHaveBeenCalledWith(`${protocol}//${window.location.host}/ws`)
+    expect(MockWebSocket).not.toHaveBeenCalledWith('ws://localhost:3000/ws')
+  })
+
   it('transitions to "connected" after WebSocket opens', () => {
     render(<LiveDashboard />)
     act(() => ws().simulateOpen())
