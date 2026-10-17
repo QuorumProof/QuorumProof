@@ -790,6 +790,70 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+  passwordlessStart: {
+    body: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', minLength: 3, maxLength: 254, pattern: '^[^\\s@]+@[^\\s@]+$' },
+      },
+      required: ['email'],
+      additionalProperties: false,
+    },
+  },
+  passwordlessVerify: {
+    body: {
+      type: 'object',
+      properties: { token: { type: 'string', pattern: '^[a-f0-9]{64}$' } },
+      required: ['token'],
+      additionalProperties: false,
+    },
+  },
+  webAuthnStart: {
+    body: {
+      type: 'object',
+      properties: { user_id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['user_id'],
+      additionalProperties: false,
+    },
+  },
+  webAuthnRegistrationVerify: {
+    body: {
+      type: 'object',
+      properties: {
+        challenge: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
+        credential_id: { type: 'string', minLength: 1, maxLength: 1024 },
+        public_key: { type: 'string', minLength: 1, maxLength: 4096, pattern: '^[A-Za-z0-9_-]+$' },
+        client_data_json: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        user_id: { type: 'string', minLength: 1, pattern: '\\S' },
+      },
+      required: ['challenge', 'credential_id', 'public_key', 'client_data_json', 'user_id'],
+      additionalProperties: false,
+    },
+  },
+  webAuthnAuthenticationVerify: {
+    body: {
+      type: 'object',
+      properties: {
+        challenge: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
+        credential_id: { type: 'string', minLength: 1, maxLength: 1024 },
+        client_data_json: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        authenticator_data: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        signature: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        sign_count: { type: 'integer', minimum: 0 },
+        user_id: { type: 'string', minLength: 1, pattern: '\\S' },
+      },
+      required: [
+        'challenge',
+        'credential_id',
+        'client_data_json',
+        'authenticator_data',
+        'signature',
+        'sign_count',
+        'user_id',
+      ],
+      additionalProperties: false,
+    },
+  },
 };
 
 export default validate;

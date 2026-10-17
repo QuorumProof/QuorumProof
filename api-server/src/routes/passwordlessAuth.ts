@@ -19,6 +19,7 @@ import {
   getCredentialsForUser,
 } from '../services/passwordlessAuth.js';
 import { logAuthEvent } from '../services/authAudit.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 
@@ -41,7 +42,7 @@ function getUserAgent(req: Request): string {
  * In production this would dispatch an email; here we return the token
  * in the response (dev/test mode) so the flow can be tested end-to-end.
  */
-router.post('/start', (req: Request, res: Response): void => {
+router.post('/start', validate(schemas.passwordlessStart), (req: Request, res: Response): void => {
   const { email } = req.body as { email?: string };
 
   if (!email || typeof email !== 'string' || !email.includes('@')) {
@@ -80,7 +81,7 @@ router.post('/start', (req: Request, res: Response): void => {
  *
  * Body: { token: string }
  */
-router.post('/verify', (req: Request, res: Response): void => {
+router.post('/verify', validate(schemas.passwordlessVerify), (req: Request, res: Response): void => {
   const { token } = req.body as { token?: string };
 
   if (!token || typeof token !== 'string') {
@@ -124,7 +125,7 @@ router.post('/verify', (req: Request, res: Response): void => {
  *
  * Body: { user_id: string }
  */
-router.post('/webauthn/register/start', (req: Request, res: Response): void => {
+router.post('/webauthn/register/start', validate(schemas.webAuthnStart), (req: Request, res: Response): void => {
   const { user_id } = req.body as { user_id?: string };
 
   if (!user_id || typeof user_id !== 'string') {
@@ -172,7 +173,7 @@ router.post('/webauthn/register/start', (req: Request, res: Response): void => {
  *   user_id: string
  * }
  */
-router.post('/webauthn/register/verify', (req: Request, res: Response): void => {
+router.post('/webauthn/register/verify', validate(schemas.webAuthnRegistrationVerify), (req: Request, res: Response): void => {
   const { challenge, credential_id, public_key, client_data_json, user_id } =
     req.body as Record<string, string | undefined>;
 
@@ -226,7 +227,7 @@ router.post('/webauthn/register/verify', (req: Request, res: Response): void => 
  *
  * Body: { user_id: string }
  */
-router.post('/webauthn/authenticate/start', (req: Request, res: Response): void => {
+router.post('/webauthn/authenticate/start', validate(schemas.webAuthnStart), (req: Request, res: Response): void => {
   const { user_id } = req.body as { user_id?: string };
 
   if (!user_id || typeof user_id !== 'string') {
@@ -270,7 +271,7 @@ router.post('/webauthn/authenticate/start', (req: Request, res: Response): void 
  *   user_id: string
  * }
  */
-router.post('/webauthn/authenticate/verify', (req: Request, res: Response): void => {
+router.post('/webauthn/authenticate/verify', validate(schemas.webAuthnAuthenticationVerify), (req: Request, res: Response): void => {
   const {
     challenge, credential_id, client_data_json,
     authenticator_data, signature, user_id,

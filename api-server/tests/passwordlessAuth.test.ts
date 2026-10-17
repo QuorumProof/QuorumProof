@@ -253,6 +253,36 @@ function makeApp() {
   return app;
 }
 
+describe('passwordless route validation', () => {
+  it.each([
+    ['/start', { email: 'not-an-email' }],
+    ['/verify', { token: 'not-a-token' }],
+    ['/webauthn/register/start', { user_id: {} }],
+    ['/webauthn/register/verify', {
+      challenge: 'A'.repeat(43),
+      credential_id: 'credential-1',
+      public_key: 'public-key',
+      client_data_json: 'invalid!',
+      user_id: 'user-1',
+    }],
+    ['/webauthn/authenticate/start', { user_id: {} }],
+    ['/webauthn/authenticate/verify', {
+      challenge: 'A'.repeat(43),
+      credential_id: 'credential-1',
+      client_data_json: 'e30',
+      authenticator_data: 'data',
+      signature: 'signature',
+      sign_count: 'not-a-number',
+      user_id: 'user-1',
+    }],
+  ])('rejects malformed input for %s', async (path, body) => {
+    const response = await request(makeApp()).post(`/api/auth/passwordless${path}`).send(body);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('Validation failed');
+  });
+});
+
 describe('POST /api/auth/passwordless/start', () => {
   beforeEach(() => clearPasswordlessStores());
 
@@ -271,7 +301,7 @@ describe('POST /api/auth/passwordless/start', () => {
       .post('/api/auth/passwordless/start')
       .send({});
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('valid email');
+    expect(res.body.error).toBe('Validation failed');
   });
 
   it('returns 400 for invalid email', async () => {
