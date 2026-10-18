@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import { logger } from './logger.js';
 
 interface PrivilegeChangeAuditLog {
@@ -15,9 +15,12 @@ interface PrivilegeChangeAuditLog {
 interface MFAChallenge {
   userId: string;
   method: string;
-  code: string;
   expiresAt: number;
   attempts: number;
+}
+
+interface StoredMFAChallenge extends MFAChallenge {
+  code: string;
 }
 
 interface PrivilegeChangeRequest {
@@ -30,7 +33,7 @@ interface PrivilegeChangeRequest {
 
 class PrivilegeEscalationManager {
   private auditLog: PrivilegeChangeAuditLog[] = [];
-  private mfaChallenges: Map<string, MFAChallenge> = new Map();
+  private mfaChallenges: Map<string, StoredMFAChallenge> = new Map();
   private pendingApprovals: Map<string, PrivilegeChangeRequest> = new Map();
   private readonly MFA_TIMEOUT = 5 * 60 * 1000; // 5 minutes
   private readonly MFA_MAX_ATTEMPTS = 3;
@@ -72,11 +75,10 @@ class PrivilegeEscalationManager {
   }
 
   requireMFAForEscalation(userId: string): MFAChallenge {
-    const code = Math.random().toString().slice(2, 8).padEnd(6, '0');
-    const challenge: MFAChallenge = {
+    const challenge: StoredMFAChallenge = {
       userId,
       method: 'totp',
-      code,
+      code: String(randomInt(100000, 1000000)),
       expiresAt: Date.now() + this.MFA_TIMEOUT,
       attempts: 0,
     };
@@ -89,7 +91,8 @@ class PrivilegeEscalationManager {
       { userId, expiresAt: new Date(challenge.expiresAt).toISOString() },
     );
 
-    return challenge;
+    const { code: _code, ...publicChallenge } = challenge;
+    return publicChallenge;
   }
 
   verifyMFACode(userId: string, code: string): boolean {
