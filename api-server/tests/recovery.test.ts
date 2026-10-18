@@ -247,6 +247,8 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     const otpMatch = logEntry?.match(/:\s*(\d{6})$/);
     expect(otpMatch).not.toBeNull();
     const otp = otpMatch![1];
+    expect(fakeDb.tables.recovery_otps[0]['code']).not.toBe(otp);
+    expect(fakeDb.tables.recovery_otps[0]['code']).toMatch(/^[\da-f]{64}$/);
 
     vi.restoreAllMocks();
 
