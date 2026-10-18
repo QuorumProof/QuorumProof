@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { logger } from './logger.js';
 
 interface PrivilegeChangeAuditLog {
@@ -135,7 +136,7 @@ class PrivilegeEscalationManager {
     approvers: string[],
     reason?: string,
   ): string {
-    const requestId = `priv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const requestId = `priv-${Date.now()}-${randomBytes(16).toString('hex')}`;
 
     this.pendingApprovals.set(requestId, {
       userId,
