@@ -34,6 +34,7 @@ import { createEventsRouter } from './routes/events.js';
 // #1309: Auto-generated OpenAPI docs (Swagger UI / ReDoc)
 import docsRouter from './routes/docs.js';
 import { createDashboardRouter } from './routes/dashboard.js';
+import { requireAuth } from './middleware/auth.js';
 import { cacheControl } from './middleware/cacheControl.js';
 // #1303: CORS middleware
 import { createCorsFromEnv } from './middleware/cors.js';
@@ -236,7 +237,7 @@ app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 app.use('/api/plugins', pluginRegistry.router); // #1647 plugin routes (/api/plugins/<name>/...)
 
 // #997 Credential Holder Dashboard API
-app.use('/api/me', createDashboardRouter(sorobanClient));
+app.use('/api/me', requireAuth, createDashboardRouter(sorobanClient));
 
 // #1650: Multi-region failover status (mounted before /health so it is not
 // shadowed by the generic health router).
