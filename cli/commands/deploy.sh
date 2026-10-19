@@ -17,6 +17,7 @@
 #   --manifest <path>        Output path for the JSON deployment manifest
 #                            (default: deployment-<network>.json)
 #   --source <key>           Stellar key name to sign with (default: deployer)
+#   --yes                    Skip the interactive confirmation for mainnet deploys
 #   --help, -h               Show this help message
 
 set -e
@@ -61,6 +62,7 @@ print_help() {
   echo "  --manifest <path>     Deployment manifest output path"
   echo "                        (default: deployment-<network>.json)"
   echo "  --source <key>        Stellar signing key name (default: deployer)"
+  echo "  --yes                 Skip the interactive confirmation for mainnet deploys"
   echo "  --help, -h            Show this help message"
   echo ""
   echo -e "${BOLD}EXAMPLES${RESET}"
@@ -89,6 +91,7 @@ WASM_DIR="${WASM_DIR:-$PROJECT_ROOT/target/wasm32-unknown-unknown/release}"
 DRY_RUN=false
 MANIFEST_PATH=""
 SOURCE_KEY="deployer"
+ASSUME_YES=false
 
 # ── Parse arguments ────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -120,6 +123,9 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { error "--source requires a value"; exit 2; }
       SOURCE_KEY="$2"; shift 2
       ;;
+    --yes)
+      ASSUME_YES=true; shift
+      ;;
     *)
       error "Unknown option: '$1'"
       echo "Run './cli/qp deploy --help' for usage."
@@ -150,6 +156,39 @@ esac
 # Default manifest path based on network
 if [ -z "$MANIFEST_PATH" ]; then
   MANIFEST_PATH="$PROJECT_ROOT/deployment-${NETWORK}.json"
+fi
+
+# ── Mainnet safety checks ─────────────────────────────────────────────────────
+if [ "$NETWORK" = "mainnet" ] && [ "$DRY_RUN" = false ]; then
+  # Require an explicit confirmation: either --yes or typing the network name.
+  if [ "$ASSUME_YES" != true ]; then
+    if [ ! -t 0 ]; then
+      error "Refusing to deploy to mainnet without confirmation."
+      error "Re-run with --yes, or run interactively and type 'mainnet' to confirm."
+      exit 1
+    fi
+    printf '%s' "$(echo -e "${YELLOW}[deploy] Type 'mainnet' to confirm the mainnet deployment:${RESET} ")" >&2
+    read -r CONFIRMATION || CONFIRMATION=""
+    if [ "$CONFIRMATION" != "mainnet" ]; then
+      error "Confirmation failed (got '$CONFIRMATION'). Aborting mainnet deploy."
+      exit 1
+    fi
+  fi
+
+  # Refuse to deploy from a dirty working tree.
+  if command -v git &>/dev/null && git -C "$PROJECT_ROOT" rev-parse --git-dir &>/dev/null; then
+    if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
+      error "Working tree is dirty. Commit or stash changes before deploying to mainnet."
+      exit 1
+    fi
+    # Refuse to deploy from a commit that is not tagged.
+    if ! git -C "$PROJECT_ROOT" describe --exact-match --tags HEAD &>/dev/null; then
+      error "HEAD is not at a tagged commit. Tag the release before deploying to mainnet."
+      exit 1
+    fi
+  else
+    warn "Not a git repository — skipping clean-tree and tag checks."
+  fi
 fi
 
 # ── Dependency check ────────────────────────────────────────────────────────────
@@ -213,7 +252,11 @@ echo ""
 if [ "$DRY_RUN" = false ]; then
   if [ "$NETWORK" != "mainnet" ]; then
     info "Ensuring deployer key '$SOURCE_KEY' exists on $NETWORK ..."
-    stellar keys generate "$SOURCE_KEY" --network "$NETWORK" --fund 2>/dev/null || true
+    if ! KEYGEN_OUTPUT=$(stellar keys generate "$SOURCE_KEY" --network "$NETWORK" --fund 2>&1); then
+      error "Failed to generate/fund key '$SOURCE_KEY' on $NETWORK."
+      [ -n "$KEYGEN_OUTPUT" ] && error "$KEYGEN_OUTPUT"
+      exit 1
+    fi
   else
     # On mainnet, key must already exist
     if ! stellar keys address "$SOURCE_KEY" &>/dev/null; then
