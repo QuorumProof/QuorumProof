@@ -17,7 +17,7 @@ export const shareLinksPaths: PathsFragment = {
                 subject: { type: 'string', description: 'Stellar address of the credential holder.' },
                 expiry_hours: { type: 'integer', minimum: 1, maximum: 8760 },
                 permission: { type: 'string', enum: ['view_only', 'download'] },
-                password: { type: 'string', description: 'Optional; omit for a public link.' },
+                password: { type: 'string', description: 'Optional plaintext password; the API derives a salted scrypt hash. Omit for a public link.' },
               },
               required: ['subject', 'expiry_hours', 'permission'],
             },

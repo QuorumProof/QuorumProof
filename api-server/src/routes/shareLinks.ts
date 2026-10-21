@@ -8,7 +8,8 @@
  *   GET    /api/credentials/share/:token       — inspect link metadata
  */
 import { Router, Request, Response } from 'express';
-import { createHmac } from 'crypto';
+import { scrypt as scryptCallback } from 'crypto';
+import { promisify } from 'util';
 import type { SorobanClient } from './credentials.js';
 import { prepareCall, simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -18,19 +19,28 @@ import { requireLinkedWallet } from '../middleware/walletAuth.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Convert a hex password to a 32-byte Soroban-compatible Bytes value. */
-function buildPasswordHashArg(soroban: SorobanClient, rawPassword: string) {
-  // We accept either a pre-computed 64-char hex SHA-256 or a plain password
-  // that we hash here before sending on-chain (the contract stores the hash,
-  // never the plaintext).
-  const isHex64 = /^[0-9a-fA-F]{64}$/.test(rawPassword);
-  const hexDigest = isHex64
-    ? rawPassword
-    : createHmac('sha256', process.env.SHARE_LINK_HMAC_SECRET ?? 'quorumproof')
-        .update(rawPassword)
-        .digest('hex');
-  // Convert hex string to a bytes buffer for nativeToScVal
-  const buf = Buffer.from(hexDigest, 'hex'); // 32 bytes
+const scryptAsync = promisify(scryptCallback);
+const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1 };
+
+export function assertShareLinkHmacSecretConfigured(): void {
+  if (
+    !process.env.SHARE_LINK_HMAC_SECRET?.trim() &&
+    process.env.NODE_ENV !== 'development' &&
+    process.env.NODE_ENV !== 'test'
+  ) {
+    throw new Error('SHARE_LINK_HMAC_SECRET must be configured outside local development');
+  }
+}
+
+assertShareLinkHmacSecretConfigured();
+
+/** Derive a 32-byte, salted scrypt digest for the contract's password field. */
+async function buildPasswordHashArg(rawPassword: string, credentialId: bigint) {
+  const secret = process.env.SHARE_LINK_HMAC_SECRET?.trim() ?? '';
+  const salt = Buffer.from(`QuorumProof share-link password:${credentialId}`, 'utf8');
+  const digest = await scryptAsync(`${secret}\0${rawPassword}`, salt, 32, SCRYPT_OPTIONS) as Buffer;
+  const hexDigest = digest.toString('hex');
+  const buf = digest;
   return { hexDigest, buf };
 }
 
@@ -101,20 +111,17 @@ export function createShareLinksRouter(soroban: SorobanClient) {
       return;
     }
 
-    // Build optional password hash argument
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let passwordHashArg: any = null;
     let passwordHashHex: string | null = null;
 
-    const { nativeToScVal } = await import('@stellar/stellar-sdk');
-
-    if (typeof password === 'string' && password.length > 0) {
-      const { hexDigest, buf } = buildPasswordHashArg(soroban, password);
-      passwordHashHex = hexDigest;
-      passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
-    }
-
     try {
+      const { nativeToScVal } = await import('@stellar/stellar-sdk');
+      let passwordHashArg: ReturnType<typeof nativeToScVal> | null = null;
+      if (typeof password === 'string' && password.length > 0) {
+        const { hexDigest, buf } = await buildPasswordHashArg(password, BigInt(credentialId));
+        passwordHashHex = hexDigest;
+        passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
+      }
+
       // Call contract: generate_share_link(subject, credential_id, expiry_hours, password_hash, permission)
       const args = [
         addressVal(subject),
@@ -172,20 +179,16 @@ export function createShareLinksRouter(soroban: SorobanClient) {
       return;
     }
 
-    const { nativeToScVal } = await import('@stellar/stellar-sdk');
-    let passwordHashArg = nativeToScVal(null, { type: 'void' });
-
-    if (typeof password === 'string' && password.length > 0) {
-      const { buf } = buildPasswordHashArg(
-        soroban,
-        password
-      );
-      passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
-    }
-
     try {
+      const { nativeToScVal } = await import('@stellar/stellar-sdk');
+      let passwordHashArg = nativeToScVal(null, { type: 'void' });
+      if (typeof password === 'string' && password.length > 0) {
+        const credentialId = tokenBuf.readBigUInt64BE(0);
+        const { buf } = await buildPasswordHashArg(password, credentialId);
+        passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
+      }
       const tokenScVal = nativeToScVal(tokenBuf, { type: 'bytes' });
-      const link = await simulateCall('validate_share_token', [tokenScVal, passwordHashArg]);
+      const link = await soroban.simulateCall('validate_share_token', [tokenScVal, passwordHashArg]);
       res.json(serializeBigInt(link));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -264,7 +267,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
     try {
       const { nativeToScVal } = await import('@stellar/stellar-sdk');
       const tokenScVal = nativeToScVal(tokenBuf, { type: 'bytes' });
-      const link = await simulateCall('get_share_link', [tokenScVal]);
+      const link = await soroban.simulateCall('get_share_link', [tokenScVal]);
       if (link === null || link === undefined) {
         res.status(404).json({ error: 'Share link not found' });
         return;

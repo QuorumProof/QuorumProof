@@ -50,7 +50,7 @@ export const consentPaths: PathsFragment = {
           'application/json': {
             schema: {
               type: 'object',
-              properties: { holder: { type: 'string' }, verifier: { type: 'string' }, expires_at: { type: 'integer', description: 'Unix timestamp; 0 = no expiry.', default: 0 } },
+              properties: { holder: { type: 'string' }, verifier: { type: 'string' }, expires_at: { type: 'integer', minimum: 0, description: 'Unix timestamp; 0 = no expiry. Otherwise, it must be in the future and no more than one year away.', default: 0 } },
               required: ['holder', 'verifier'],
             },
           },

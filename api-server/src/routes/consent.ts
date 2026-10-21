@@ -16,6 +16,36 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireLinkedWallet } from '../middleware/walletAuth.js';
 
 const router = Router({ mergeParams: true });
+const MAX_CONSENT_EXPIRY_SECONDS = 365 * 24 * 60 * 60;
+
+const requiredAddress = { type: 'string', minLength: 1 };
+const consentGrantValidation = {
+  body: {
+    schema: {
+      type: 'object',
+      properties: {
+        holder: requiredAddress,
+        verifier: requiredAddress,
+        expires_at: { type: 'integer', minimum: 0 },
+      },
+      required: ['holder', 'verifier'],
+      additionalProperties: false,
+    },
+    custom: (data: unknown) => {
+      if (typeof data !== 'object' || data === null) return 'Request body must be an object';
+      const expiresAt = (data as { expires_at?: unknown }).expires_at;
+      if (expiresAt === undefined || expiresAt === 0) return true;
+      const now = Math.floor(Date.now() / 1000);
+      if (typeof expiresAt !== 'number' || expiresAt <= now) {
+        return 'expires_at must be in the future or 0 for no expiry';
+      }
+      if (expiresAt > now + MAX_CONSENT_EXPIRY_SECONDS) {
+        return 'expires_at cannot be more than one year in the future';
+      }
+      return true;
+    },
+  },
+};
 
 function serializeBigInt(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString();
