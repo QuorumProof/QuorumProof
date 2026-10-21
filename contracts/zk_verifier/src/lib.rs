@@ -57,6 +57,11 @@ const MAX_GROTH16_PUBLIC_INPUTS: usize = groth16::MAX_PUBLIC_INPUTS;
 /// allocator).
 const MAX_GROTH16_AGGREGATE_BATCH: usize = 16;
 
+/// Issue #1732: Upper bound on the number of entries accepted by
+/// `verify_batch_proofs` in a single call. Oversized batches are rejected up
+/// front instead of failing at the per-transaction resource limit.
+pub const MAX_VERIFY_BATCH: u32 = 16;
+
 /// Key rotation audit entry
 #[contracttype]
 #[derive(Clone)]
@@ -709,17 +714,23 @@ pub struct ZkVerifierContract;
 #[contractimpl]
 impl ZkVerifierContract {
     /// Generate a proof request for a given credential and claim type.
+    ///
+    /// The nonce comes from a stored, strictly increasing counter (Issue #1733), not
+    /// the ledger sequence, so requests in the same ledger never share a nonce. The
+    /// issued request is recorded under its nonce; see `get_issued_proof_request`.
     pub fn generate_proof_request(
         env: Env,
         credential_id: u64,
         claim_type: ClaimType,
     ) -> ProofRequest {
-        let nonce = env.ledger().sequence() as u64;
-        ProofRequest {
-            credential_id,
-            claim_type,
-            nonce,
-        }
+        Self::issue_proof_request(&env, credential_id, claim_type)
+    }
+
+    /// Issue #1733: Look up the proof request recorded under `nonce`, if one was issued.
+    pub fn get_issued_proof_request(env: Env, nonce: u64) -> Option<ProofRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey::IssuedProofRequest(nonce))
     }
 
     /// Generate an anonymous proof request using a holder commitment instead of an address.
@@ -732,13 +743,49 @@ impl ZkVerifierContract {
         holder_commitment: Bytes,
     ) -> AnonymousProofRequest {
         assert!(!holder_commitment.is_empty(), "holder_commitment cannot be empty");
-        let nonce = env.ledger().sequence() as u64;
+        let nonce = Self::next_proof_nonce(&env, credential_id, claim_type);
         AnonymousProofRequest {
             credential_id,
             claim_type,
             nonce,
             holder_commitment,
         }
+    }
+
+    /// Issue #1733: Build and record a proof request under a freshly allocated nonce.
+    fn issue_proof_request(env: &Env, credential_id: u64, claim_type: ClaimType) -> ProofRequest {
+        let nonce = Self::next_proof_nonce(env, credential_id, claim_type);
+        ProofRequest {
+            credential_id,
+            claim_type,
+            nonce,
+        }
+    }
+
+    /// Issue #1733: Allocate the next proof-request nonce from the stored counter and
+    /// record the (credential, claim) it was issued for under that nonce.
+    fn next_proof_nonce(env: &Env, credential_id: u64, claim_type: ClaimType) -> u64 {
+        let last: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProofRequestNonceCounter)
+            .unwrap_or(0u64);
+        let nonce = last
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("proof request nonce space exhausted"));
+        env.storage()
+            .instance()
+            .set(&DataKey::ProofRequestNonceCounter, &nonce);
+        env.storage().instance().set(
+            &DataKey::IssuedProofRequest(nonce),
+            &ProofRequest {
+                credential_id,
+                claim_type,
+                nonce,
+            },
+        );
+        env.storage().instance().extend_ttl(16_384, 524_288);
+        nonce
     }
 
     /// Register the SHA-256 hash of the off-chain Groth16 verifying key.
@@ -1142,91 +1189,7 @@ impl ZkVerifierContract {
         env.events().publish(topics, event_data);
     }
 
-    /// Verify a ZK proof with caching and TTL support.
-    ///
-    /// This function first checks if the proof has been verified before by 
-    /// looking up the cache. If found and not expired, it returns the cached result.
-    /// Otherwise, it verifies the proof and caches the result with the specified TTL.
-    /// 
-    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
-    /// Cache entries expire after `ttl` ledgers.
-    ///
-    /// **Test-only**: like [`groth16_verify`], this verifies via the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_proof_cached(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
-        proof: Bytes,
-        ttl: u32,
-    ) -> bool {
-        // Admin gate
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
 
-        // Generate cache key from proof bytes, credential_id, and claim_type
-        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
-
-        // Check cache first
-        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
-            // Check if cache entry has expired
-            let current_ledger = env.ledger().sequence();
-            if current_ledger <= entry.cached_at_ledger + entry.ttl {
-                // Cache hit: increment hit counter
-                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
-                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
-                return entry.result;
-            }
-        }
-
-        // Not in cache or expired, perform Groth16 verification
-        // Cache miss: increment miss counter
-        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
-        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
-        let vk_hash: BytesN<32> = env.storage().instance()
-            .get(&DataKey::VerifyingKeyHash)
-            .expect("verifying key not set");
-        let result = groth16_verify(&env, &vk_hash, &proof);
-
-        // Cache the result with TTL
-        let entry = CacheEntry {
-            result,
-            cached_at_ledger: env.ledger().sequence(),
-            ttl,
-        };
-        env.storage().temporary().set(&cache_key, &entry);
-
-        result
-    }
-
-    /// Verify a ZK proof for a claim with caching.
-    ///
-    /// This function first checks if the proof has been verified before by 
-    /// looking up the cache. If found, it returns the cached result immediately.
-    /// Otherwise, it verifies the proof and caches the result for future calls.
-    /// 
-    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
-    /// Cache entries are stored indefinitely until explicitly cleared.
-    ///
-    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_claim_with_cache(
-        env: Env,
-        admin: Address,
-        quorum_proof_id: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
-        proof: Bytes,
-    ) -> bool {
-        // Use default TTL of 1000 ledgers (approximately 1 day)
-        Self::verify_proof_cached(env, admin, credential_id, claim_type, proof, 1000)
-    }
 
     /// Internal helper to generate cache key from proof components.
     /// Uses (credential_id, claim_type, proof_hash) to create a unique key.
@@ -1625,31 +1588,6 @@ impl ZkVerifierContract {
 
     // ===== Anonymous Verification =====
 
-    /// Verify a Groth16 ZK proof anonymously using a holder commitment.
-    /// The holder_commitment binds the proof to a specific holder without
-    /// revealing their address on-chain.
-    ///
-    /// **Test-only**: like [`groth16_verify`], this verifies via the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_claim_anonymous(
-        env: Env,
-        _credential_id: u64,
-        _claim_type: ClaimType,
-        holder_commitment: Bytes,
-        proof: Bytes,
-    ) -> bool {
-        if holder_commitment.is_empty() {
-            return false;
-        }
-        let vk_hash: BytesN<32> = match env.storage().instance()
-            .get(&DataKey::VerifyingKeyHash)
-        {
-            Some(h) => h,
-            None => return false,
-        };
-        groth16_verify(&env, &vk_hash, &proof)
-    }
 
     /// Verify a Groth16 proof with explicit verifying-key hash and public inputs.
     ///
@@ -1701,13 +1639,21 @@ impl ZkVerifierContract {
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
     }
 
+    /// Maximum number of entries `verify_batch_proofs` accepts in one call.
+    /// Clients should chunk larger batches to this size.
+    pub fn get_max_verify_batch(_env: Env) -> u32 {
+        MAX_VERIFY_BATCH
+    }
+
     /// Verify a batch of Groth16 proofs in a single call.
     ///
     /// Each element at index `i` of `proofs`, `public_inputs`, and `vk_hashes`
     /// is verified independently using the same logic as `verify_groth16_proof`.
     /// The returned `Vec<bool>` preserves the input order.
     ///
-    /// All three vectors must have the same length; panics otherwise.
+    /// All three vectors must have the same length, and no more than
+    /// [`MAX_VERIFY_BATCH`] entries; panics otherwise. Use
+    /// [`ZkVerifierContract::get_max_verify_batch`] to chunk larger workloads.
     pub fn verify_batch_proofs(
         env: Env,
         proofs: soroban_sdk::Vec<Bytes>,
@@ -1715,6 +1661,10 @@ impl ZkVerifierContract {
         vk_hashes: soroban_sdk::Vec<BytesN<32>>,
     ) -> soroban_sdk::Vec<bool> {
         let len = proofs.len();
+        assert!(
+            len <= MAX_VERIFY_BATCH,
+            "batch size exceeds MAX_VERIFY_BATCH"
+        );
         assert!(
             public_inputs.len() == len && vk_hashes.len() == len,
             "proofs, public_inputs, and vk_hashes must have the same length"
@@ -2542,6 +2492,13 @@ pub enum DataKey {
     MpcContributionCount(BytesN<32>),
     /// Verifier addresses admitted to take part in MPC sessions.
     MpcVerifierRegistry,
+    // ===== Issue #1733: Proof request nonces =====
+    /// Last proof-request nonce handed out. Nonces are drawn from this counter, so
+    /// two requests in the same ledger never share a nonce.
+    ProofRequestNonceCounter,
+    /// The proof request issued under a nonce. Written once per nonce, so each
+    /// nonce binds to exactly one request.
+    IssuedProofRequest(u64),
 }
 
 // ===== Issue #994: ProtocolConfig =====
@@ -4219,7 +4176,110 @@ mod tests {
         assert!(client.verify_claim(&admin, &qp_id, &5u64, &ClaimType::HasDegree, &proof));
     }
 
+    // --- Issue #1733: proof request nonces ---
+
+    #[test]
+    fn test_two_proof_requests_in_same_ledger_get_different_nonces() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        // Same ledger sequence for both calls: the old ledger-sequence nonce collided here.
+        let first = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        let second = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        assert_ne!(first.nonce, second.nonce);
+        assert!(second.nonce > first.nonce);
+    }
+
+    #[test]
+    fn test_anonymous_and_plain_requests_share_nonce_space() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let plain = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        let anon = client.generate_anonymous_proof_request(
+            &2u64,
+            &ClaimType::HasLicense,
+            &Bytes::from_slice(&env, b"commitment"),
+        );
+        assert_ne!(plain.nonce, anon.nonce);
+        assert!(client.get_issued_proof_request(&anon.nonce).is_some());
+    }
+
+    #[test]
+    fn test_issued_nonce_is_bound_to_its_request() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let req_a = client.generate_proof_request(&10u64, &ClaimType::HasDegree);
+        let req_b = client.generate_proof_request(&20u64, &ClaimType::HasLicense);
+
+        let recorded_a = client.get_issued_proof_request(&req_a.nonce).unwrap();
+        assert_eq!(recorded_a.credential_id, 10u64);
+        assert_eq!(recorded_a.claim_type, ClaimType::HasDegree);
+        let recorded_b = client.get_issued_proof_request(&req_b.nonce).unwrap();
+        assert_eq!(recorded_b.credential_id, 20u64);
+        assert_eq!(recorded_b.claim_type, ClaimType::HasLicense);
+    }
+
+    #[test]
+    fn test_unissued_nonce_has_no_request() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        assert!(client.get_issued_proof_request(&999u64).is_none());
+    }
+
     // --- verify_batch_proofs tests ---
+
+    /// Issue #1732: a batch of exactly MAX_VERIFY_BATCH entries is accepted.
+    #[test]
+    fn test_verify_batch_proofs_at_max_batch_size_accepted() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let max = client.get_max_verify_batch();
+        assert_eq!(max, MAX_VERIFY_BATCH);
+
+        let invalid = Bytes::from_slice(&env, b"bad");
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        let mut vks = soroban_sdk::Vec::new(&env);
+        let vk_hash = BytesN::from_array(&env, &[0u8; 32]);
+        for _ in 0..max {
+            proofs.push_back(invalid.clone());
+            pis.push_back(invalid.clone());
+            vks.push_back(vk_hash.clone());
+        }
+
+        let results = client.verify_batch_proofs(&proofs, &pis, &vks);
+        assert_eq!(results.len(), max);
+    }
+
+    /// Issue #1732: one entry above MAX_VERIFY_BATCH is rejected before any verification.
+    #[test]
+    #[should_panic(expected = "batch size exceeds MAX_VERIFY_BATCH")]
+    fn test_verify_batch_proofs_one_above_max_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let invalid = Bytes::from_slice(&env, b"bad");
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        let mut vks = soroban_sdk::Vec::new(&env);
+        let vk_hash = BytesN::from_array(&env, &[0u8; 32]);
+        for _ in 0..(MAX_VERIFY_BATCH + 1) {
+            proofs.push_back(invalid.clone());
+            pis.push_back(invalid.clone());
+            vks.push_back(vk_hash.clone());
+        }
+
+        client.verify_batch_proofs(&proofs, &pis, &vks);
+    }
 
     #[test]
     fn test_verify_batch_proofs_all_valid() {
@@ -6059,5 +6119,126 @@ mod tests_governance_1511 {
         let admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
         client.update_admin(&admin, &new_admin);
+    }
+}
+
+// ===== Test-only verifiers =====
+// Heuristic verifiers that do not perform real pairing checks. They are compiled only
+// for tests and the `testutils` feature, so they never ship in a production build.
+// Kept in their own impl block because `#[contractimpl]` does not honour `cfg` on
+// individual functions.
+#[cfg(any(test, feature = "testutils"))]
+#[contractimpl]
+impl ZkVerifierContract {
+    /// Verify a ZK proof with caching and TTL support.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found and not expired, it returns the cached result.
+    /// Otherwise, it verifies the proof and caches the result with the specified TTL.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries expire after `ttl` ledgers.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_proof_cached(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+        ttl: u32,
+    ) -> bool {
+        // Admin gate
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Generate cache key from proof bytes, credential_id, and claim_type
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+
+        // Check cache first
+        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
+            // Check if cache entry has expired
+            let current_ledger = env.ledger().sequence();
+            if current_ledger <= entry.cached_at_ledger + entry.ttl {
+                // Cache hit: increment hit counter
+                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
+                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
+                return entry.result;
+            }
+        }
+
+        // Not in cache or expired, perform Groth16 verification
+        // Cache miss: increment miss counter
+        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
+        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
+        let vk_hash: BytesN<32> = env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+            .expect("verifying key not set");
+        let result = groth16_verify(&env, &vk_hash, &proof);
+
+        // Cache the result with TTL
+        let entry = CacheEntry {
+            result,
+            cached_at_ledger: env.ledger().sequence(),
+            ttl,
+        };
+        env.storage().temporary().set(&cache_key, &entry);
+
+        result
+    }
+
+    /// Verify a ZK proof for a claim with caching.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found, it returns the cached result immediately.
+    /// Otherwise, it verifies the proof and caches the result for future calls.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries are stored indefinitely until explicitly cleared.
+    ///
+    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_with_cache(
+        env: Env,
+        admin: Address,
+        quorum_proof_id: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) -> bool {
+        // Use default TTL of 1000 ledgers (approximately 1 day)
+        Self::verify_proof_cached(env, admin, credential_id, claim_type, proof, 1000)
+    }
+
+    /// Verify a Groth16 ZK proof anonymously using a holder commitment.
+    /// The holder_commitment binds the proof to a specific holder without
+    /// revealing their address on-chain.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_anonymous(
+        env: Env,
+        _credential_id: u64,
+        _claim_type: ClaimType,
+        holder_commitment: Bytes,
+        proof: Bytes,
+    ) -> bool {
+        if holder_commitment.is_empty() {
+            return false;
+        }
+        let vk_hash: BytesN<32> = match env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+        {
+            Some(h) => h,
+            None => return false,
+        };
+        groth16_verify(&env, &vk_hash, &proof)
     }
 }

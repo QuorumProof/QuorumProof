@@ -6,7 +6,10 @@
 
 use soroban_sdk::{contracttype, Address, Bytes, Env, String, Symbol, Vec};
 
-use crate::{migration, EXTENDED_TTL, STANDARD_TTL};
+use crate::{migration, Credential, DataKey, EXTENDED_TTL, STANDARD_TTL};
+
+/// Version tag written to each credential once it passes the V1→V2 transform (Issue #1731).
+const V2_VERSION_TAG: &str = "v2";
 
 /// Schema version identifier
 #[contracttype]
@@ -71,6 +74,8 @@ pub enum DataKeyMigrationV2 {
     TransformationRules,
     /// Validation errors during migration, keyed by `MigrationJob::id`
     ValidationErrors(u32),
+    /// V2 version tag for a credential, written by the V1→V2 transform (Issue #1731)
+    CredentialVersionTag(u64),
 }
 
 /// Get current schema version
@@ -91,6 +96,24 @@ fn set_schema_version(env: &Env, version: SchemaVersion) {
         .set(&key, &version.as_u32());
 }
 
+/// Issue #1731: Read the V2 version tag the transform wrote for a credential, if any.
+pub fn get_credential_version_tag(env: &Env, credential_id: u64) -> Option<String> {
+    env.storage()
+        .persistent()
+        .get(&DataKeyMigrationV2::CredentialVersionTag(credential_id))
+}
+
+/// Every migration entry point is admin-only. The caller must be the stored admin,
+/// not merely an address that can authorize itself.
+fn require_stored_admin(env: &Env, admin: &Address) {
+    let stored: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .unwrap_or_else(|| panic!("not initialized"));
+    assert!(stored == *admin, "unauthorized");
+}
+
 /// Initialize migration infrastructure
 pub fn init_migration_v2(env: &Env) {
     set_schema_version(env, SchemaVersion::V1);
@@ -105,10 +128,14 @@ pub fn start_migration_v1_to_v2(env: &Env, admin: &Address) -> u32 {
     }
 
     admin.require_auth();
+    require_stored_admin(env, admin);
 
-    // Get total credentials count (this would call get_credential_count)
-    // For now, use a placeholder
-    let total_items: u64 = 1000; // This should be queried from actual state
+    // Credential ids are 1..=CredentialCount, so the snapshot is the live count.
+    let total_items: u64 = env
+        .storage()
+        .instance()
+        .get::<DataKey, u64>(&DataKey::CredentialCount)
+        .unwrap_or(0u64);
 
     // Start chunked migration job using existing migration infrastructure
     let job = migration::start_job(
@@ -118,6 +145,9 @@ pub fn start_migration_v1_to_v2(env: &Env, admin: &Address) -> u32 {
         total_items,
     );
 
+    let now = env.ledger().timestamp();
+    // With nothing to migrate the job is already complete, so the schema can move now.
+    let empty = total_items == 0;
     let checkpoint = MigrationCheckpoint {
         from_version: SchemaVersion::V1,
         to_version: SchemaVersion::V2,
@@ -125,11 +155,18 @@ pub fn start_migration_v1_to_v2(env: &Env, admin: &Address) -> u32 {
         migrated_items: 0,
         skipped_items: 0,
         failed_items: 0,
-        started_at: env.ledger().timestamp(),
-        last_updated_at: env.ledger().timestamp(),
-        completed_at: None,
-        status: MigrationStatus::InProgress,
+        started_at: now,
+        last_updated_at: now,
+        completed_at: if empty { Some(now) } else { None },
+        status: if empty {
+            MigrationStatus::Completed
+        } else {
+            MigrationStatus::InProgress
+        },
     };
+    if empty {
+        set_schema_version(env, SchemaVersion::V2);
+    }
 
     let key = DataKeyMigrationV2::MigrationCheckpoint;
     env.storage().persistent().set(&key, &checkpoint);
@@ -146,6 +183,7 @@ pub fn migrate_chunk_v1_to_v2(env: &Env, admin: &Address, chunk_size: u32) -> Mi
     }
 
     admin.require_auth();
+    require_stored_admin(env, admin);
 
     // Get the migration job
     let job = migration::get_job(env, 2).unwrap_or_else(|| {
@@ -230,38 +268,53 @@ pub fn migrate_chunk_v1_to_v2(env: &Env, admin: &Address, chunk_size: u32) -> Mi
     env.storage().persistent().set(&key, &checkpoint);
 
     // Log any validation errors
+    // Append rather than overwrite, so failures from earlier chunks are kept.
     if !errors.is_empty() {
         let error_key = DataKeyMigrationV2::ValidationErrors(updated_job.id);
-        env.storage().persistent().set(&error_key, &errors);
+        let mut all_errors: Vec<(u64, String)> = env
+            .storage()
+            .persistent()
+            .get(&error_key)
+            .unwrap_or(Vec::new(env));
+        for entry in errors.iter() {
+            all_errors.push_back(entry);
+        }
+        env.storage().persistent().set(&error_key, &all_errors);
     }
 
     checkpoint
 }
 
-/// Transform a single credential from V1 to V2 schema
-/// Returns Ok(()) on success, Err(reason) on failure
+/// Transform a single credential from V1 to V2 schema (Issue #1731).
+///
+/// The V1 record is validated first. A record that fails validation returns `Err`,
+/// and the chunk loop records it in `ValidationErrors` and counts it as failed.
+/// A valid record gets the V2 version tag. The tag is also the idempotency marker,
+/// so a replayed chunk does not transform the same credential twice.
 fn transform_credential_v1_to_v2(env: &Env, credential_id: u64) -> Result<(), String> {
-    // V1 schema transformations:
-    // 1. Add new fields with defaults
-    // 2. Migrate metadata format if needed
-    // 3. Validate against V2 constraints
-    //
-    // Example transformations (varies by actual schema):
-    // - Add `version_tag: String` (default: "v2")
-    // - Migrate `metadata: Bytes` → `metadata_v2: Map<String, Bytes>` (if needed)
-    // - Validate all required fields present
+    let credential: Credential = env
+        .storage()
+        .instance()
+        .get(&DataKey::Credential(credential_id))
+        .ok_or_else(|| String::from_str(env, "credential not found"))?;
 
-    // Placeholder implementation
-    if credential_id == 0 {
-        return Err(soroban_sdk::String::from_str(env, "invalid credential_id"));
+    if credential.id != credential_id {
+        return Err(String::from_str(env, "credential id mismatch"));
+    }
+    if credential.credential_type == 0 {
+        return Err(String::from_str(env, "credential_type must be greater than 0"));
+    }
+    if credential.metadata_hash.is_empty() {
+        return Err(String::from_str(env, "metadata_hash is empty"));
     }
 
-    // In production, this would:
-    // 1. Load credential by ID
-    // 2. Apply transformation rules
-    // 3. Validate result
-    // 4. Write back to storage
-
+    let key = DataKeyMigrationV2::CredentialVersionTag(credential_id);
+    if env.storage().persistent().has(&key) {
+        return Ok(());
+    }
+    env.storage()
+        .persistent()
+        .set(&key, &String::from_str(env, V2_VERSION_TAG));
     Ok(())
 }
 
@@ -296,6 +349,7 @@ pub fn get_migration_status(env: &Env) -> Option<MigrationCheckpoint> {
 /// Pause ongoing migration
 pub fn pause_migration(env: &Env, admin: &Address) {
     admin.require_auth();
+    require_stored_admin(env, admin);
 
     let key = DataKeyMigrationV2::MigrationCheckpoint;
     if let Some(mut checkpoint) = env
@@ -314,6 +368,7 @@ pub fn pause_migration(env: &Env, admin: &Address) {
 /// Resume paused migration
 pub fn resume_migration(env: &Env, admin: &Address) {
     admin.require_auth();
+    require_stored_admin(env, admin);
 
     let key = DataKeyMigrationV2::MigrationCheckpoint;
     if let Some(mut checkpoint) = env
@@ -332,6 +387,7 @@ pub fn resume_migration(env: &Env, admin: &Address) {
 /// Rollback migration (restore to V1)
 pub fn rollback_migration(env: &Env, admin: &Address) {
     admin.require_auth();
+    require_stored_admin(env, admin);
 
     let key = DataKeyMigrationV2::MigrationCheckpoint;
     if let Some(checkpoint) = env
