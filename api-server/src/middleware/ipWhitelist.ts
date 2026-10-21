@@ -10,6 +10,7 @@ interface IPWhitelistConfig {
   whitelistedIPs: Set<string>;
   enableProxyDetection: boolean;
   proxyHeadersToCheck: string[];
+  trustedProxies: Set<string>;
   enableAuditLogging: boolean;
   logDenials: boolean;
 }
@@ -43,6 +44,7 @@ let config: IPWhitelistConfig = {
     'x-client-ip',
     'x-real-ip',
   ],
+  trustedProxies: new Set(),
   enableAuditLogging: true,
   logDenials: true,
 };
@@ -54,29 +56,49 @@ const accessLog: AccessLogEntry[] = [];
  * Extract the client's real IP address, checking for proxy headers
  */
 function getClientIP(req: Request): { clientIP: string; forwardedIP?: string } {
-  let clientIP = req.ip || req.socket.remoteAddress || 'unknown';
+  let clientIP = normalizeIP(req.socket.remoteAddress || 'unknown');
   let forwardedIP: string | undefined;
 
-  if (config.enableProxyDetection) {
+  if (config.enableProxyDetection && isTrustedProxy(clientIP)) {
     for (const header of config.proxyHeadersToCheck) {
       const headerValue = req.get(header);
       if (headerValue) {
-        // X-Forwarded-For can contain multiple IPs, take the first
-        const ips = headerValue.split(',').map((ip) => ip.trim());
-        if (ips.length > 0) {
-          forwardedIP = ips[0];
-          clientIP = ips[0];
+        if (header === 'x-forwarded-for') {
+          const ips = headerValue.split(',').map(normalizeIP).filter(Boolean);
+          for (let i = ips.length - 1; i >= 0; i--) {
+            if (!isTrustedProxy(ips[i])) {
+              forwardedIP = ips[i];
+              clientIP = ips[i];
+              break;
+            }
+          }
+        } else {
+          forwardedIP = normalizeIP(headerValue);
+          clientIP = forwardedIP;
+        }
+        if (forwardedIP) {
           break;
         }
       }
     }
   }
 
-  // Normalize IPv6 loopback
-  if (clientIP === '::1') clientIP = '127.0.0.1';
-  if (clientIP === '::ffff:127.0.0.1') clientIP = '127.0.0.1';
-
   return { clientIP, forwardedIP };
+}
+
+function normalizeIP(ip: string): string {
+  const trimmed = ip.trim();
+  if (trimmed === '::1' || trimmed === '::ffff:127.0.0.1') return '127.0.0.1';
+  return trimmed.startsWith('::ffff:') ? trimmed.slice(7) : trimmed;
+}
+
+function isTrustedProxy(ip: string): boolean {
+  for (const trustedProxy of config.trustedProxies) {
+    if (trustedProxy === ip || (trustedProxy.includes('/') && isIPInCIDR(ip, trustedProxy))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -298,10 +320,21 @@ export function initializeWhitelist(ips: string[], protectedEndpoints?: string[]
 }
 
 /**
- * Load whitelist from environment variables
+ * Configure proxy addresses that are allowed to supply client IP headers.
+ */
+export function setTrustedProxies(proxies: string[]): void {
+  config.trustedProxies = new Set(proxies.map(normalizeIP).filter(Boolean));
+}
+
+/**
+ * Load whitelist and trusted proxies from environment variables.
  * Format: IP_WHITELIST="192.168.1.0/24,10.0.0.1,127.0.0.1"
+ * Format: TRUSTED_PROXY_IPS="10.0.0.1,192.168.1.0/24"
  */
 export function loadWhitelistFromEnv(): void {
+  const envTrustedProxies = process.env.TRUSTED_PROXY_IPS || '';
+  setTrustedProxies(envTrustedProxies.split(',').map(ip => ip.trim()).filter(Boolean));
+
   const envWhitelist = process.env.IP_WHITELIST || '';
   if (!envWhitelist) {
     console.log('[IP_ACL] No IP_WHITELIST environment variable found');
