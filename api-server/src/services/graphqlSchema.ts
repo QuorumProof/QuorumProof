@@ -2,7 +2,7 @@ export const graphqlSchema = `
 type Query {
   credential(id: ID!): Credential
   credentials(ids: [ID!]!): [Credential]
-  credentialsByIssuer(issuer: String!, limit: Int, offset: Int): CredentialConnection
+  credentialsByIssuer(issuer: String!, limit: Int, offset: Int, cursor: String): CredentialConnection
   credentialsByHolder(holder: String!, limit: Int, offset: Int): CredentialConnection
   slice(id: ID!): Slice
   credentialCount: Int!
