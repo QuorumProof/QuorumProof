@@ -966,13 +966,6 @@ pub enum DataKey {
     SuspensionReason(u64),
     /// Number of migrations still pending, surfaced by the health check.
     PendingMigrationCount,
-    /// Issue #1389: Total number of verification calls made (across all
-    /// verification entry points), regardless of outcome.
-    TotalVerificationCount,
-    /// Issue #1389: Number of verification calls that succeeded.
-    SuccessfulVerificationCount,
-    /// Issue #1389: Number of verification calls that failed.
-    FailedVerificationCount,
     /// Issue #1511: Stored SBT registry contract address for governance repointing.
     SbtRegistryId,
     /// Issue #1511: Stored ZK verifier contract address for governance repointing.
@@ -1431,6 +1424,20 @@ pub enum DataKey11 {
     BbsDisclosureProof(u64),
     /// Flag indicating a credential was issued with BBS+ selective disclosure
     BbsCredentialFlag(u64),
+}
+
+/// Issue #1389 counters, split out of `DataKey` to stay under Soroban's
+/// 50-variant limit for `#[contracttype]` enums.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey13 {
+    /// Issue #1389: Total number of verification calls made (across all
+    /// verification entry points), regardless of outcome.
+    TotalVerificationCount,
+    /// Issue #1389: Number of verification calls that succeeded.
+    SuccessfulVerificationCount,
+    /// Issue #1389: Number of verification calls that failed.
+    FailedVerificationCount,
 }
 
 /// Storage keys for issues #1590-1593: Slice Templates, Performance Scoring, Derivatives, and Staking
@@ -17477,17 +17484,17 @@ impl QuorumProofContract {
     fn record_verification(env: &Env, success: bool) {
         let storage = env.storage().instance();
 
-        let total: u64 = storage.get(&DataKey::TotalVerificationCount).unwrap_or(0);
-        storage.set(&DataKey::TotalVerificationCount, &(total + 1));
+        let total: u64 = storage.get(&DataKey13::TotalVerificationCount).unwrap_or(0);
+        storage.set(&DataKey13::TotalVerificationCount, &(total + 1));
 
         if success {
             let successful: u64 = storage
-                .get(&DataKey::SuccessfulVerificationCount)
+                .get(&DataKey13::SuccessfulVerificationCount)
                 .unwrap_or(0);
-            storage.set(&DataKey::SuccessfulVerificationCount, &(successful + 1));
+            storage.set(&DataKey13::SuccessfulVerificationCount, &(successful + 1));
         } else {
-            let failed: u64 = storage.get(&DataKey::FailedVerificationCount).unwrap_or(0);
-            storage.set(&DataKey::FailedVerificationCount, &(failed + 1));
+            let failed: u64 = storage.get(&DataKey13::FailedVerificationCount).unwrap_or(0);
+            storage.set(&DataKey13::FailedVerificationCount, &(failed + 1));
         }
     }
 
@@ -17497,11 +17504,11 @@ impl QuorumProofContract {
     pub fn get_verification_stats(env: Env) -> VerificationStats {
         let storage = env.storage().instance();
         VerificationStats {
-            total_verifications: storage.get(&DataKey::TotalVerificationCount).unwrap_or(0),
+            total_verifications: storage.get(&DataKey13::TotalVerificationCount).unwrap_or(0),
             successful_verifications: storage
-                .get(&DataKey::SuccessfulVerificationCount)
+                .get(&DataKey13::SuccessfulVerificationCount)
                 .unwrap_or(0),
-            failed_verifications: storage.get(&DataKey::FailedVerificationCount).unwrap_or(0),
+            failed_verifications: storage.get(&DataKey13::FailedVerificationCount).unwrap_or(0),
         }
     }
 
@@ -32186,6 +32193,39 @@ mod doc_tests {
 
     #[test]
     fn test_issue_credential_derivative() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_derivative");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64; // 1 day from now
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32, // Call option
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        assert!(derivative_id > 0, "derivative should have been issued");
+
+        let derivative = client.get_credential_derivative(derivative_id);
+        assert!(derivative.is_some(), "derivative should be retrievable");
+
+        let deriv = derivative.unwrap();
+        assert_eq!(deriv.underlying_credential, credential_id);
+        assert!(!deriv.is_exercised, "derivative should not be exercised initially");
+    }
+
     // ===== Tests for Issue #1599: Batch Credential Amendments =====
 
     #[test]

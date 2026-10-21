@@ -599,7 +599,7 @@ mod tests {
             client.register_did(
                 &Address::generate(&test.env),
                 &String::from_str(&test.env, did),
-                &crate::DidKeyType::Ed25519,
+                &crate::DidKeyType::Ed25519VerificationKey2020,
                 &soroban_sdk::Bytes::from_array(&test.env, &[7u8; 32]),
             );
         }
@@ -608,7 +608,7 @@ mod tests {
         let result = client.try_register_did(
             &Address::generate(&test.env),
             &String::from_str(&test.env, "did:example:over"),
-            &crate::DidKeyType::Ed25519,
+            &crate::DidKeyType::Ed25519VerificationKey2020,
             &soroban_sdk::Bytes::from_array(&test.env, &[8u8; 32]),
         );
         assert_eq!(

@@ -106,7 +106,8 @@ pub enum ContractError {
     UnauthorizedClawback = 27,
     /// Issue #1402: `entries` is empty or exceeds `MAX_BATCH_SIZE`.
     BatchTooLarge = 28,
-    /// No pending co-owner proposal exists for this SBT / candidate.
+    /// No pending co-owner proposal exists for this SBT (or it names a
+    /// different candidate). Renumbered from 28, which `BatchTooLarge` now uses.
     CoOwnerProposalNotFound = 29,
 }
 
