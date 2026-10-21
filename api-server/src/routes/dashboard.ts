@@ -10,6 +10,7 @@
 
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
+import { logger } from '../services/logger.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -105,7 +106,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
   router.get('/credentials', async (req: Request, res: Response) => {
     try {
       // Get authenticated user from request (via auth middleware)
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -158,7 +159,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         expiring_soon: expiringCount,
       });
     } catch (error) {
-      console.error('Error fetching credentials:', error);
+      logger.error('Error fetching credentials', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch credentials' });
     }
   });
@@ -188,7 +189,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/credentials/:id', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -258,7 +259,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
 
       res.json(response);
     } catch (error) {
-      console.error('Error fetching credential details:', error);
+      logger.error('Error fetching credential details', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch credential details' });
     }
   });
@@ -290,7 +291,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/disputes', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -350,7 +351,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         resolved_count: resolvedCount,
       });
     } catch (error) {
-      console.error('Error fetching disputes:', error);
+      logger.error('Error fetching disputes', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch disputes' });
     }
   });
@@ -381,7 +382,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/access-log', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -447,7 +448,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         total_access_count: allLogs.reduce((sum, log) => sum + 1, 0),
       });
     } catch (error) {
-      console.error('Error fetching access log:', error);
+      logger.error('Error fetching access log', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch access log' });
     }
   });
@@ -466,7 +467,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.post('/disputes', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -494,7 +495,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
 
       res.status(201).json(newDispute);
     } catch (error) {
-      console.error('Error creating dispute:', error);
+      logger.error('Error creating dispute', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to create dispute' });
     }
   });
@@ -535,7 +536,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
 
       res.status(201).json(logEntry);
     } catch (error) {
-      console.error('Error logging access:', error);
+      logger.error('Error logging access', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to log access' });
     }
   });
@@ -556,7 +557,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.get('/summary', async (req: Request, res: Response) => {
     try {
-      const userAddress = (req as any).userAddress;
+      const userAddress = req.auth?.sub;
       if (!userAddress) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
@@ -622,7 +623,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
         last_access_at: lastAccess?.toISOString() || null,
       });
     } catch (error) {
-      console.error('Error fetching dashboard summary:', error);
+      logger.error('Error fetching dashboard summary', 'dashboard', { requestId: req.requestId, error: String(error) });
       res.status(500).json({ error: 'Failed to fetch dashboard summary' });
     }
   });

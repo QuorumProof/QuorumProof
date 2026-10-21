@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
 import { getPool } from '../db.js';
 import { validate } from '../middleware/validate.js';
+import { logger } from '../services/logger.js';
 
 const router = Router();
 
@@ -105,13 +106,21 @@ router.post('/request', validate({
       [id, otp, expiresAt],
     );
   } catch (err) {
-    console.error('[recovery] DB error creating request:', err);
+    logger.error('Database error creating recovery request', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to create recovery request' });
     return;
   }
 
   // TODO: dispatch through the configured email/SMS provider. Never log the
   // OTP or contact value; logs are not a secure delivery channel.
+  logger.info('Recovery OTP generated for delivery', 'recovery', {
+    requestId: req.requestId,
+    recoveryRequestId: id,
+    deliveryChannel: contactType,
+  });
 
   res.status(201).json({ requestId: id, message: `Verification code sent to your ${contactType}` });
 });
@@ -199,7 +208,10 @@ router.post('/verify-otp', validate({
 
     res.json({ success: true, message: 'Identity verified. Your request is now pending attestor approval.' });
   } catch (err) {
-    console.error('[recovery] DB error verifying OTP:', err);
+    logger.error('Database error verifying recovery OTP', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to verify OTP' });
   }
 });
@@ -252,9 +264,18 @@ router.post('/resend-otp', validate({
       [requestId, otp, expiresAt],
     );
 
+    logger.info('Recovery OTP resent for delivery', 'recovery', {
+      requestId: req.requestId,
+      recoveryRequestId: requestId,
+      deliveryChannel: request.contact_type,
+    });
+
     res.json({ message: `Verification code resent to your ${request.contact_type}` });
   } catch (err) {
-    console.error('[recovery] DB error resending OTP:', err);
+    logger.error('Database error resending recovery OTP', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to resend OTP' });
   }
 });
@@ -274,7 +295,10 @@ router.get('/status/:requestId', async (req: Request, res: Response) => {
     const { contact_value: _hidden, ...safeRequest } = result.rows[0];
     res.json(safeRequest);
   } catch (err) {
-    console.error('[recovery] DB error fetching status:', err);
+    logger.error('Database error fetching recovery status', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to fetch recovery request' });
   }
 });
@@ -302,7 +326,10 @@ router.get('/pending', async (req: Request, res: Response) => {
     const items = result.rows;
     res.json({ attestor, items, total: items.length });
   } catch (err) {
-    console.error('[recovery] DB error fetching pending requests:', err);
+    logger.error('Database error fetching pending recovery requests', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to fetch pending requests' });
   }
 });
@@ -362,10 +389,17 @@ router.post('/approve', validate({
       [attestor, updatedAttestors, requestId],
     );
 
-    console.log(`[recovery] Request ${requestId} approved by attestor ${attestor}`);
+    logger.info('Recovery request approved', 'recovery', {
+      requestId: req.requestId,
+      recoveryRequestId: requestId,
+      attestor,
+    });
     res.json({ success: true, message: 'Recovery request approved. Credential re-issuance has been initiated.' });
   } catch (err) {
-    console.error('[recovery] DB error approving request:', err);
+    logger.error('Database error approving recovery request', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to approve recovery request' });
   }
 });
@@ -422,10 +456,17 @@ router.post('/reject', validate({
       [attestor, reason ?? 'No reason provided', requestId],
     );
 
-    console.log(`[recovery] Request ${requestId} rejected by attestor ${attestor}`);
+    logger.info('Recovery request rejected', 'recovery', {
+      requestId: req.requestId,
+      recoveryRequestId: requestId,
+      attestor,
+    });
     res.json({ success: true, message: 'Recovery request rejected.' });
   } catch (err) {
-    console.error('[recovery] DB error rejecting request:', err);
+    logger.error('Database error rejecting recovery request', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to reject recovery request' });
   }
 });

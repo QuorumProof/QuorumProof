@@ -1,5 +1,6 @@
 import { getPool } from '../db.js';
 import type { EncryptedData, ThresholdKeyShare } from '../crypto/thresholdEncryption.js';
+import { logger } from './logger.js';
 
 /**
  * Encrypted Credential Store
@@ -179,7 +180,15 @@ export class EncryptedCredentialStore {
       now,
     ]);
 
-    return this.parseRecord(result.rows[0]);
+    try {
+      return this.parseRecord(result.rows[0]);
+    } catch (error) {
+      logger.error('Failed to parse encrypted credential returned from database', 'encrypted-credential-store', {
+        credentialId: credentialId.toString(),
+        error: String(error),
+      });
+      throw error;
+    }
   }
 
   /**
