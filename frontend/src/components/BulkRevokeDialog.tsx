@@ -4,13 +4,14 @@ import type { Credential } from '../lib/contracts/quorumProof';
 
 interface BulkRevokeDialogProps {
   credentials: Credential[];
-  onConfirm: (ids: bigint[]) => Promise<void>;
+  onConfirm: (ids: bigint[]) => void | Promise<void>;
   onClose: () => void;
 }
 
 export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevokeDialogProps) {
   const [revoking, setRevoking] = useState(false);
   const [done, setDone] = useState(false);
+  const [completedCount, setCompletedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const revokable = credentials.filter((c) => !c.revoked);
@@ -20,6 +21,7 @@ export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevoke
     setError(null);
     try {
       await onConfirm(revokable.map((c) => c.id));
+      setCompletedCount(revokable.length);
       setDone(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to revoke credentials.');
@@ -39,7 +41,7 @@ export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevoke
           <div className="modal-body" style={{ textAlign: 'center', padding: '32px 24px' }}>
             <div style={{ fontSize: '40px', marginBottom: '16px' }}>🚫</div>
             <p style={{ color: 'var(--text-secondary)' }}>
-              {revokable.length} credential{revokable.length !== 1 ? 's' : ''} marked as revoked.
+              {completedCount} credential{completedCount !== 1 ? 's' : ''} marked as revoked.
             </p>
           </div>
           <div className="modal-footer">

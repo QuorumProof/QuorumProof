@@ -367,7 +367,10 @@ export default function Dashboard() {
         <BulkRevokeDialog
           credentials={selectedCards.map(c => c.credential)}
           onConfirm={handleBulkRevokeConfirm}
-          onClose={() => setShowBulkRevoke(false)}
+          onClose={() => {
+            setShowBulkRevoke(false);
+            setSelectedIds(new Set());
+          }}
         />
       )}
 

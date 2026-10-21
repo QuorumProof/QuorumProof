@@ -159,11 +159,12 @@ export function LiveDashboard() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const unmounted = useRef(false)
+  const connectRef = useRef<() => void>(() => {})
   // Holds current attempt count in a ref so closures inside connect() always
   // see the latest value without needing to be recreated.
   const attemptRef = useRef(0)
 
-  const clearTimers = () => {
+  const clearTimers = useCallback(() => {
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current)
       reconnectTimer.current = null
@@ -172,7 +173,7 @@ export function LiveDashboard() {
       clearInterval(countdownTimer.current)
       countdownTimer.current = null
     }
-  }
+  }, [])
 
   const scheduleReconnect = useCallback((currentAttempt: number) => {
     if (unmounted.current) return
@@ -197,13 +198,11 @@ export function LiveDashboard() {
       clearInterval(countdownTimer.current!)
       countdownTimer.current = null
       setRetryInMs(null)
-      // eslint-disable-next-line @typescript-eslint/no-use-before-define
-      connect()
+      connectRef.current()
     }, delay)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  function connect() {
+  const connect = useCallback(() => {
     if (unmounted.current) return
 
     setConnState('connecting')
@@ -267,7 +266,9 @@ export function LiveDashboard() {
     ws.onerror = () => {
       ws.close()
     }
-  }
+  }, [scheduleReconnect])
+
+  connectRef.current = connect
 
   /** Manual retry — resets attempt counter */
   const handleManualRetry = useCallback(() => {
@@ -277,18 +278,17 @@ export function LiveDashboard() {
     setRetryInMs(null)
     wsRef.current?.close()
     connect()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [clearTimers, connect])
 
   useEffect(() => {
+    unmounted.current = false
     connect()
     return () => {
       unmounted.current = true
       clearTimers()
       wsRef.current?.close()
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [clearTimers, connect])
 
   const currentIssuanceRate = stats
     ? stats.issuances_per_minute[stats.issuances_per_minute.length - 1]
