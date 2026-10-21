@@ -47,7 +47,6 @@ pub const GROTH16_BLS_PROOF_LEN: u32 = groth16::PROOF_LEN;
 
 /// Maximum public-input field elements accepted by
 /// [`ZkVerifierContract::verify_groth16_proof`] / `verify_aggregated_proofs`.
-const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
 const MAX_GROTH16_PUBLIC_INPUTS: usize = groth16::MAX_PUBLIC_INPUTS;
 
 /// Maximum number of proofs verifiable in a single `verify_aggregated_proofs`
