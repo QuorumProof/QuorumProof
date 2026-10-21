@@ -102,5 +102,7 @@ Manual-only deployment with two gates:
 - Never commit secret keys. All keys are stored as GitHub environment secrets.
 - The `mainnet` environment requires human approval — automated triggers are intentionally not supported.
 - `cargo audit` runs on every CI check and again before every mainnet deployment.
-- TruffleHog scans every PR diff for accidentally committed secrets.
+- TruffleHog scans every PR diff for accidentally committed secrets. CI pins
+  `trufflesecurity/trufflehog` to v3.99.2 at commit
+  `e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9`.
 - See `docs/deployment-guide.md` for the full manual deployment procedure and post-deployment security checklist.

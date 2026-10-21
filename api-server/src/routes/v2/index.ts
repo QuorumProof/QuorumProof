@@ -35,6 +35,7 @@ import apiKeysRouter from '../apiKeys.js';
 import oauth2Router from '../oauth2.js';
 import { createDashboardRouter } from '../dashboard.js';
 import * as Soroban from '../../soroban.js';
+import walletLinkRouter from '../walletLink.js';
 
 // ── v2-only route handlers ────────────────────────────────────────────────────
 import proofRequestsRouter from './proofRequests.js';
@@ -176,6 +177,7 @@ export function createV2Router(soroban = sorobanClient): Router {
   router.use('/recovery', recoveryRouter);
   router.use('/webhooks', webhooksRouter);
   router.use('/gdpr', gdprRouter);
+  router.use('/auth/wallet/link', walletLinkRouter);
   router.use('/api-keys', apiKeysRouter);
   router.use('/oauth2', oauth2Router);
   router.use('/me', createDashboardRouter(soroban));

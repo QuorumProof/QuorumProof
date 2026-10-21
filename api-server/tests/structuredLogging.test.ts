@@ -46,6 +46,7 @@ describe('structuredLoggingMiddleware (#1443)', () => {
     app.get('/test', (req: Request, res: Response) => {
       // Find the request ID currently in cache
       expect(_getRequestContextsCount()).toBe(1);
+      expect(req.requestId).toBeTruthy();
       res.status(200).json({ ok: true });
     });
 

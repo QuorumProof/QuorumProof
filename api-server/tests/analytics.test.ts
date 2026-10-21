@@ -1,4 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import {
+  SessionManager,
+  _setDefaultSessionManagerForTest,
+  _resetDefaultSessionManagerForTest,
+  getDefaultSessionManager,
+} from '../src/services/sessionManager.js';
 import express from 'express';
 import request from 'supertest';
 import { createAnalyticsRouter } from '../src/routes/analytics.js';
@@ -20,6 +29,12 @@ const mockSoroban = {
   addressVal: (a: string) => a,
 };
 
+// Real signed JWTs for an admin caller (#1748). Routes now require auth.
+const authDir = fs.mkdtempSync(path.join(os.tmpdir(), 'analytics-auth-'));
+process.env.JWT_SECRET = 'test-secret-analytics-1748';
+_setDefaultSessionManagerForTest(new SessionManager({ dataDir: authDir }));
+const ADMIN_AUTH = `Bearer ${getDefaultSessionManager().createSession('GADMIN_ANALYTICS', { role: 'admin', mfaVerified: true }).accessToken}`;
+
 function createTestApp() {
   const testApp = express();
   testApp.use(express.json());
@@ -27,7 +42,25 @@ function createTestApp() {
   return testApp;
 }
 
-const app = createTestApp();
+/** Wraps an app so every request carries the admin token unless the test sets its own. */
+function withAdminAuth(inner: express.Express) {
+  const outer = express();
+  outer.use((req, _res, next) => {
+    if (!req.headers.authorization) req.headers.authorization = ADMIN_AUTH;
+    next();
+  });
+  outer.use(inner);
+  return outer;
+}
+
+afterAll(() => {
+  _resetDefaultSessionManagerForTest();
+  fs.rmSync(authDir, { recursive: true, force: true });
+  delete process.env.JWT_SECRET;
+});
+
+const rawApp = createTestApp();
+const app = withAdminAuth(rawApp);
 
 function generateSyntheticEvents(count: number, startDate: string): CredentialEvent[] {
   const events: CredentialEvent[] = [];
@@ -345,6 +378,79 @@ describe('Analytics API', () => {
         expect(metric).not.toHaveProperty('subject');
         expect(metric).not.toHaveProperty('issuer');
       }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Authentication, issuer scoping and write rate limiting (#1748)
+  // ---------------------------------------------------------------------------
+  describe('access control (#1748)', () => {
+    const sampleEvent = {
+      type: 'issued',
+      credential_id: '42',
+      timestamp: new Date().toISOString(),
+      issuer: 'GISSUER_1748',
+    };
+
+    const tokenFor = (sub: string, role?: string) =>
+      `Bearer ${getDefaultSessionManager().createSession(sub, { role, mfaVerified: true }).accessToken}`;
+
+    it.each([
+      ['GET', '/api/analytics/metrics'],
+      ['GET', '/api/analytics/anomalies'],
+      ['GET', '/api/analytics/events'],
+      ['GET', '/api/analytics/summary'],
+      ['GET', '/api/analytics/issuer/GISSUER_1748'],
+    ])('rejects unauthenticated %s %s with 401', async (method, route) => {
+      const res = await request(rawApp)[method.toLowerCase() as 'get'](route);
+      expect(res.status).toBe(401);
+    });
+
+    it('rejects unauthenticated POST /events and does not record the event', async () => {
+      const spy = vi.spyOn(metricsStore, 'recordEvent');
+      try {
+        const res = await request(rawApp).post('/api/analytics/events').send(sampleEvent);
+        expect(res.status).toBe(401);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('keeps /health public', async () => {
+      const res = await request(rawApp).get('/api/analytics/health');
+      expect(res.status).toBe(200);
+    });
+
+    it('lets an issuer read their own issuer metrics', async () => {
+      const res = await request(rawApp)
+        .get('/api/analytics/issuer/GISSUER_SELF_1748')
+        .set('Authorization', tokenFor('GISSUER_SELF_1748', 'issuer'));
+      expect(res.status).toBe(200);
+    });
+
+    it('forbids an issuer from reading another issuer’s metrics', async () => {
+      const res = await request(rawApp)
+        .get('/api/analytics/issuer/GISSUER_OTHER_1748')
+        .set('Authorization', tokenFor('GISSUER_SELF_1748', 'issuer'));
+      expect(res.status).toBe(403);
+    });
+
+    it('lets an admin read any issuer’s metrics', async () => {
+      const res = await request(rawApp)
+        .get('/api/analytics/issuer/GISSUER_OTHER_1748')
+        .set('Authorization', tokenFor('GADMIN_OTHER_1748', 'admin'));
+      expect(res.status).toBe(200);
+    });
+
+    it('rate-limits authenticated writes per caller', async () => {
+      const limited = withAdminAuth(createTestApp());
+      let saw429 = false;
+      for (let i = 0; i < 80 && !saw429; i++) {
+        const res = await request(limited).post('/api/analytics/events').send(sampleEvent);
+        if (res.status === 429) saw429 = true;
+      }
+      expect(saw429).toBe(true);
     });
   });
 });

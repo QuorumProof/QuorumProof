@@ -230,7 +230,7 @@ export class TimeLockPuzzleService {
    * Generates a unique puzzle ID
    */
   private generatePuzzleId(): string {
-    return 'puzzle_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
+    return 'puzzle_' + Date.now() + '_' + randomBytes(16).toString('hex');
   }
 
   /**

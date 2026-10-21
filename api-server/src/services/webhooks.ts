@@ -28,6 +28,7 @@
 import type { Pool as PgPool } from 'pg';
 import { WebhookStore, type WebhookEvent, type WebhookRegistration, type WebhookPayload, type DeliveryRecord } from './webhookStore.js';
 import { WebhookCircuitBreaker } from './webhookCircuitBreaker.js';
+import { validateWebhookUrl } from './webhookUrl.js';
 
 export type { WebhookEvent, WebhookRegistration, WebhookPayload, DeliveryRecord };
 
@@ -173,7 +174,8 @@ export class WebhookService {
       }
 
       try {
-        const res = await fetch(reg.url, { method: 'POST', headers, body });
+        await validateWebhookUrl(reg.url);
+        const res = await fetch(reg.url, { method: 'POST', headers, body, redirect: 'error' });
         if (res.ok) {
           record.status = 'success';
           record.completedAt = new Date().toISOString();

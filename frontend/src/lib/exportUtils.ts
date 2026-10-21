@@ -323,7 +323,7 @@ function credentialTemplate(credential: Credential, id: string, qrUrl: string, v
       <div class="footer-text">Issued ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
     </div>
   </div>
-  <script>window.onload = () => { setTimeout(() => window.print(), 500); };</script>
+  <script>window.onload = () => { setTimeout(() => { window.print(); URL.revokeObjectURL(window.location.href); }, 500); };</script>
 </body>
 </html>`;
 }
@@ -337,15 +337,7 @@ export function exportToPDF(credential: Credential, baseUrl = window.location.or
 
   const blob = new Blob([html], { type: 'text/html' });
   const url = URL.createObjectURL(blob);
-  const win = window.open(url, '_blank');
-  if (win) {
-    win.onload = () => {
-      setTimeout(() => {
-        win.print();
-        URL.revokeObjectURL(url);
-      }, 500);
-    };
-  }
+  window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 export function exportCredentials(

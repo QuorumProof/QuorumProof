@@ -18,6 +18,9 @@ on:
       - ".github/workflows/upgrade-safety.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   state-compat:
     name: State compatibility check

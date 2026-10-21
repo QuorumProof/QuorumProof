@@ -41,6 +41,9 @@ concurrency:
   group: blue-green-${{ github.event.inputs.environment }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   blue-green:
     name: ${{ github.event.inputs.action }} (${{ github.event.inputs.environment }})
@@ -70,6 +73,23 @@ jobs:
             echo "::error::image input is required for deploy"
             exit 1
           fi
+          if [[ "${{ github.event.inputs.image }}" == *:latest ]]; then
+            echo "::error::Deploying :latest is not allowed. Provide an immutable tag or digest."
+            exit 1
+          fi
+
+      - name: Reject :latest in manifests
+        run: |
+          if grep -rE 'image:.*:latest' k8s/; then
+            echo "::error::A manifest under k8s/ still contains :latest. Pin the tag before deploying."
+            exit 1
+          fi
+
+      - name: Substitute IMAGE_TAG in api-server-deployment.yaml
+        if: github.event.inputs.action == 'deploy'
+        run: |
+          sed -i "s|quorumproof/api-server:IMAGE_TAG|${{ github.event.inputs.image }}|g" \
+            k8s/api-server-deployment.yaml
 
       - name: Current state
         run: ./scripts/blue_green_deploy.sh status

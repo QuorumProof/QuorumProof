@@ -42,6 +42,7 @@ export const consentPaths: PathsFragment = {
     post: {
       tags: ['Consent'],
       summary: 'Grant a verifier consent to access a credential',
+      security: [{ bearerAuth: [] }],
       parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } }],
       requestBody: {
         required: true,
@@ -56,7 +57,8 @@ export const consentPaths: PathsFragment = {
         },
       },
       responses: {
-        '201': { description: 'Granted.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': { description: 'Unsigned transaction prepared; consent is not granted until the holder signs and submits it.', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, credential_id: { type: 'integer' }, holder: { type: 'string' }, verifier: { type: 'string' }, expires_at: { type: 'integer' } } } } } },
+        '401': { description: 'Authentication required.' },
         '400': { description: 'Missing fields or invalid expires_at.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,
@@ -79,6 +81,7 @@ export const consentPaths: PathsFragment = {
     delete: {
       tags: ['Consent'],
       summary: 'Revoke a verifier consent grant',
+      security: [{ bearerAuth: [] }],
       parameters: [
         { name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } },
         { name: 'verifier', in: 'path', required: true, schema: { type: 'string' } },
@@ -88,7 +91,8 @@ export const consentPaths: PathsFragment = {
         content: { 'application/json': { schema: { type: 'object', properties: { holder: { type: 'string' } }, required: ['holder'] } } },
       },
       responses: {
-        '200': { description: 'Revoked.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': { description: 'Unsigned transaction prepared; consent remains active until the holder signs and submits it.', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, credential_id: { type: 'integer' }, verifier: { type: 'string' } } } } } },
+        '401': { description: 'Authentication required.' },
         '400': { description: 'Missing holder.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,
@@ -112,7 +116,8 @@ export const consentPaths: PathsFragment = {
     post: {
       tags: ['Consent'],
       summary: 'Record a verifier access event',
-      description: 'Used by internal services / the bridge relay to log access.',
+      description: 'Used by internal services / the bridge relay to log access. Requires an authenticated account linked to the holder wallet.',
+      security: [{ bearerAuth: [] }],
       parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } }],
       requestBody: {
         required: true,
@@ -127,7 +132,8 @@ export const consentPaths: PathsFragment = {
         },
       },
       responses: {
-        '201': { description: 'Recorded.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '202': { description: 'Unsigned transaction prepared; the access event is not recorded until the holder signs and submits it.', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, credential_id: { type: 'integer' }, verifier: { type: 'string' }, access_type: { type: 'integer' }, access_type_label: { type: 'string' } } } } } },
+        '401': { description: 'Authentication required.' },
         '400': { description: 'Missing/invalid fields.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,

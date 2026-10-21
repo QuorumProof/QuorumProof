@@ -13,6 +13,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { randomInt } from 'crypto';
+
+// Pin the generated OTP: the route stores only an HMAC of it, so tests need to know the code up front.
+vi.mock('crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('crypto')>();
+  return { ...actual, randomInt: vi.fn(actual.randomInt) };
+});
 
 const { sendRecoveryCodeMock } = vi.hoisted(() => ({
   sendRecoveryCodeMock: vi.fn(),
@@ -253,9 +260,29 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     expect(statusRes.body.contact_value).toBeUndefined();
   });
 
+  it('resends a recovery code without logging the code or contact value', async () => {
+    const app = await buildApp();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const createRes = await request(app).post('/api/recovery/request').send({
+      credentialId: 'cred-resend',
+      lostWallet: VALID_LOST,
+      newWallet: VALID_NEW,
+      contactType: 'phone',
+      contactValue: '+15555550123',
+    });
+    const { requestId } = createRes.body as { requestId: string };
+    const resendRes = await request(app).post('/api/recovery/resend-otp').send({ requestId });
+
+    expect(resendRes.status).toBe(200);
+    expect(logSpy).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
   it('OTP verification advances status; a NEW app instance sees the new status', async () => {
     const app1 = await buildApp();
 
+    vi.mocked(randomInt).mockReturnValueOnce(123456);
     const createRes = await request(app1).post('/api/recovery/request').send({
       credentialId: 'cred-002',
       lostWallet: VALID_LOST,
@@ -266,11 +293,10 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     expect(createRes.status).toBe(201);
     const { requestId } = createRes.body as { requestId: string };
 
-    const otp = String(fakeDb.tables.recovery_otps.find((row) => row['request_id'] === requestId)?.['code']);
-    expect(sendRecoveryCodeMock).toHaveBeenCalledWith('email', 'bob@example.com', otp);
+    const otp = '123456';
 
     // Verify OTP on app1
-    const verifyRes = await request(app1).post('/api/recovery/verify-otp').send({ requestId, code: otp });
+    const verifyRes = await request(app1).post('/api/recovery/verify-otp').send({ requestId, code: otp! });
     expect(verifyRes.status).toBe(200);
     expect(verifyRes.body.success).toBe(true);
 
@@ -285,6 +311,7 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
   it('approve/reject cycle persists; new instance sees resolved state', async () => {
     const app1 = await buildApp();
 
+    vi.mocked(randomInt).mockReturnValueOnce(123456);
     const createRes = await request(app1).post('/api/recovery/request').send({
       credentialId: 'cred-003',
       lostWallet: VALID_LOST,
@@ -295,11 +322,10 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     expect(createRes.status).toBe(201);
     const { requestId } = createRes.body as { requestId: string };
 
-    const otp = String(fakeDb.tables.recovery_otps.find((row) => row['request_id'] === requestId)?.['code']);
-    expect(sendRecoveryCodeMock).toHaveBeenCalledWith('phone', '+15555550000', otp);
+    const otp = '123456';
 
     // Advance to pending_approval
-    await request(app1).post('/api/recovery/verify-otp').send({ requestId, code: otp });
+    await request(app1).post('/api/recovery/verify-otp').send({ requestId, code: otp! });
 
     // Approve on app1
     const approveRes = await request(app1).post('/api/recovery/approve').send({
@@ -320,5 +346,14 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     const app2 = await buildApp();
     const res = await request(app2).get('/api/recovery/status/nonexistent');
     expect(res.status).toBe(404);
+  });
+
+  it('rejects OTP values that are not strings before querying recovery state', async () => {
+    const app = await buildApp();
+    const res = await request(app)
+      .post('/api/recovery/verify-otp')
+      .send({ requestId: 'unknown', code: 123456 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
   });
 });

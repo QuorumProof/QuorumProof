@@ -11,6 +11,12 @@ export interface RealtimeOptions {
   onUpdate: () => void;
 }
 
+interface RealtimeState {
+  wsUrl?: string;
+  pollIntervalMs: number;
+  status: ConnectionStatus;
+}
+
 /**
  * useRealtimeUpdates — WebSocket connection with automatic polling fallback.
  *
@@ -22,7 +28,21 @@ export function useRealtimeUpdates({
   pollIntervalMs = 15_000,
   onUpdate,
 }: RealtimeOptions): { status: ConnectionStatus; reconnect: () => void } {
-  const [status, setStatus] = useState<ConnectionStatus>('disconnected');
+  const [realtimeState, setRealtimeState] = useState<RealtimeState>(() => ({
+    wsUrl,
+    pollIntervalMs,
+    status: wsUrl ? 'connecting' : 'polling',
+  }));
+  const status =
+    realtimeState.wsUrl === wsUrl && realtimeState.pollIntervalMs === pollIntervalMs
+      ? realtimeState.status
+      : wsUrl
+        ? 'connecting'
+        : 'polling';
+  const updateStatus = useCallback(
+    (nextStatus: ConnectionStatus) => setRealtimeState({ wsUrl, pollIntervalMs, status: nextStatus }),
+    [wsUrl, pollIntervalMs]
+  );
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onUpdateRef = useRef(onUpdate);
@@ -37,13 +57,17 @@ export function useRealtimeUpdates({
     }
   }, []);
 
-  const startPolling = useCallback(() => {
+  const setupPolling = useCallback(() => {
     stopPolling();
-    setStatus('polling');
     pollRef.current = setInterval(() => {
       onUpdateRef.current();
     }, pollIntervalMs);
   }, [pollIntervalMs, stopPolling]);
+
+  const startPolling = useCallback(() => {
+    setupPolling();
+    updateStatus('polling');
+  }, [setupPolling, updateStatus]);
 
   const closeWs = useCallback(() => {
     if (wsRef.current) {
@@ -61,17 +85,16 @@ export function useRealtimeUpdates({
     stopPolling();
 
     if (!wsUrl) {
-      startPolling();
+      setupPolling();
       return;
     }
 
-    setStatus('connecting');
     try {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        setStatus('connected');
+        updateStatus('connected');
         stopPolling();
       };
 
@@ -90,29 +113,27 @@ export function useRealtimeUpdates({
         if (ev.code !== 1000) {
           startPolling();
         } else {
-          setStatus('disconnected');
+          updateStatus('disconnected');
         }
       };
     } catch {
-      startPolling();
+      setupPolling();
+      queueMicrotask(() => updateStatus('polling'));
     }
-  }, [wsUrl, closeWs, stopPolling, startPolling]);
+  }, [wsUrl, closeWs, stopPolling, setupPolling, startPolling, updateStatus]);
+
+  const reconnect = useCallback(() => {
+    updateStatus(wsUrl ? 'connecting' : 'polling');
+    connect();
+  }, [connect, updateStatus, wsUrl]);
 
   useEffect(() => {
-    // `connect()` synchronously calls setStatus as part of establishing the
-    // WebSocket/polling connection (an external system) on mount and whenever
-    // wsUrl/pollIntervalMs change. Deferring this to a microtask would delay
-    // the initial "connecting"/"polling" status by a tick, which callers and
-    // tests rely on being synchronous with mount — so it is intentionally
-    // called directly here rather than deferred.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     connect();
     return () => {
       closeWs();
       stopPolling();
-      setStatus('disconnected');
     };
   }, [connect, closeWs, stopPolling]);
 
-  return { status, reconnect: connect };
+  return { status, reconnect };
 }

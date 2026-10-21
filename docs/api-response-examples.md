@@ -21,6 +21,7 @@
    - [Health](#health)
    - [Credentials](#credentials)
    - [Share links](#share-links)
+   - [Wallet-signable contract writes](#wallet-signable-contract-writes)
    - [Verification](#verification)
    - [Quorum slices](#quorum-slices)
    - [Attestors](#attestors)
@@ -124,6 +125,7 @@ headers; clients should log a warning when they see them.
 | Date | Version | Change |
 |---|---|---|
 | 2026-09-26 | v1, v2 | Initial response catalog (issue #1636). |
+| 2026-10-17 | v1, v2 | Documented unsigned Soroban transaction responses for state-changing routes. |
 
 ---
 
@@ -438,16 +440,20 @@ Request
 ```json
 { "subject": "GBVZ…LM4H", "expiry_hours": 72, "permission": "view_only", "password": "optional" }
 ```
-`201 Created`
+`202 Accepted`
 ```json
 {
-  "token": "000000000000002a0000000068d7a3c4…",
-  "expires_at": 1759139700,
+  "status": "pending_signature",
+  "message": "Share link creation is prepared; sign and submit the transaction before using the link",
+  "transaction_xdr": "AAAAAgAAA…",
+  "network_passphrase": "Public Global Stellar Network ; September 2015",
   "permission": "view_only",
   "password_protected": true,
   "credential_id": 42
 }
 ```
+No share token is returned until the signed transaction is submitted and the
+link exists on-chain.
 Errors:
 - `400 Invalid credential ID`
 - `400 subject (Stellar address) is required`
@@ -469,9 +475,61 @@ Errors:
 Errors: `400` malformed token, `401` wrong password, `410` expired or revoked link.
 
 #### `DELETE /api/credentials/share/:token`
-`200 OK`
+`202 Accepted`
 ```json
-{ "revoked": true, "token": "000000000000002a…" }
+{
+  "status": "pending_signature",
+  "message": "Share link revocation is prepared; sign and submit the transaction before the link is revoked",
+  "transaction_xdr": "AAAAAgAAA…",
+  "network_passphrase": "Public Global Stellar Network ; September 2015"
+}
+```
+
+### Wallet-signable contract writes
+
+These routes remain keyless: `transaction_xdr` is an unsigned transaction for
+the acting Stellar account to sign and submit. `202 Accepted` means the
+transaction is prepared, not that contract state changed. Use the corresponding
+read endpoint after transaction submission to confirm the on-chain state.
+
+#### `POST /api/credentials/:id/consent/grants`
+`202 Accepted` — consent is not active until submitted:
+```json
+{
+  "status": "pending_signature",
+  "message": "Consent grant is prepared; the holder must sign and submit the transaction before access is granted",
+  "transaction_xdr": "AAAAAgAAA…",
+  "network_passphrase": "Public Global Stellar Network ; September 2015",
+  "credential_id": 42,
+  "holder": "GBVZ…LM4H",
+  "verifier": "GD7H…4567",
+  "expires_at": 1759139700
+}
+```
+
+#### `DELETE /api/credentials/:id/consent/grants/:verifier`
+`202 Accepted` — consent remains active until submitted:
+```json
+{
+  "status": "pending_signature",
+  "message": "Consent revocation is prepared; the holder must sign and submit the transaction before access is revoked",
+  "transaction_xdr": "AAAAAgAAA…",
+  "network_passphrase": "Public Global Stellar Network ; September 2015",
+  "credential_id": 42,
+  "verifier": "GD7H…4567"
+}
+```
+
+#### `POST /api/bridge/anchors`
+`202 Accepted` — no on-chain anchor ID is assigned before submission:
+```json
+{
+  "status": "pending_signature",
+  "message": "Anchor registration is prepared; the admin must sign and submit the transaction before it is on-chain",
+  "transaction_xdr": "AAAAAgAAA…",
+  "network_passphrase": "Public Global Stellar Network ; September 2015",
+  "anchor": { "credentialId": 42, "verified": false }
+}
 ```
 
 ### Verification
@@ -627,14 +685,19 @@ Errors: `400 Invalid slice ID`, `404 Slice not found`.
 Errors: `400` invalid Stellar address.
 
 #### `POST /api/attestor/batch-attest`
-`200 OK`
+`202 Accepted`
 ```json
 {
+  "total": 2,
+  "succeeded": 0,
+  "failed": 0,
+  "pending": 2,
+  "transaction_xdr": "AAAAAgAAA…",
+  "network_passphrase": "Public Global Stellar Network ; September 2015",
   "results": [
-    { "credential_id": "42", "status": "attested", "tx_hash": "b7e1…9a0c" },
-    { "credential_id": "43", "status": "failed", "error": "AlreadyAttested" }
-  ],
-  "summary": { "total": 2, "succeeded": 1, "failed": 1 }
+    { "credential_id": "42", "status": "pending_signature" },
+    { "credential_id": "43", "status": "pending_signature" }
+  ]
 }
 ```
 

@@ -60,6 +60,12 @@ rand = { version = "0.8", optional = true, default-features = false, features = 
 # Property-based testing for unlinkability & correctness
 proptest = { version = "1.0", default-features = false, features = ["alloc", "std"] }
 
+# Custom harness: the benchmark prints its own results and CI greps them, so
+# libtest's harness (which would silently run an empty `fn main` stub) is off.
+[[bench]]
+name = "bbs_plus_benchmarks"
+harness = false
+
 [features]
 default = ["std"]
 # NOTE: bls12_381 0.8 has no `std` feature of its own (only `alloc`); it's

@@ -20,6 +20,9 @@ on:
       - "api-server/migrations/**"
       - "api-server/src/migrations/**"
 
+permissions:
+  contents: read
+
 jobs:
   test-migrations:
     runs-on: ubuntu-latest

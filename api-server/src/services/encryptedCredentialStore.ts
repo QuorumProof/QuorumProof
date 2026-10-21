@@ -1,5 +1,6 @@
 import { getPool } from '../db.js';
 import type { EncryptedData, ThresholdKeyShare } from '../crypto/thresholdEncryption.js';
+import { logger } from './logger.js';
 
 /**
  * Encrypted Credential Store
@@ -24,6 +25,118 @@ export interface DecryptionAuthorization {
   expires_at: number;
   reason: string;
   approved_by: string[];
+}
+
+function invalidRecord(field: string): Error {
+  return new Error(`Invalid encrypted credential record: ${field}`);
+}
+
+function isInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value);
+}
+
+function parseJsonField(value: unknown, field: string): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw invalidRecord(`${field} contains malformed JSON`);
+  }
+}
+
+function asRecord(value: unknown, field: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw invalidRecord(`${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseEncryptedData(value: unknown): EncryptedData {
+  const data = asRecord(parseJsonField(value, 'encrypted_data'), 'encrypted_data');
+  const metadata = data['share_metadata'];
+  if (
+    typeof data['ciphertext'] !== 'string' ||
+    typeof data['iv'] !== 'string' ||
+    typeof data['tag'] !== 'string' ||
+    !isInteger(data['threshold']) ||
+    data['threshold'] < 1 ||
+    !isInteger(data['shares_count']) ||
+    data['shares_count'] < data['threshold'] ||
+    data['shares_count'] > 255 ||
+    !Array.isArray(metadata) ||
+    metadata.some((entry) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return true;
+      const item = entry as Record<string, unknown>;
+      return (
+        !isInteger(item['share_id']) ||
+        item['share_id'] < 1 ||
+        item['share_id'] > Number(data['shares_count']) ||
+        typeof item['commitment'] !== 'string'
+      );
+    })
+  ) {
+    throw invalidRecord('encrypted_data has an invalid shape');
+  }
+  const metadataIds = metadata.map((entry) => (entry as Record<string, unknown>)['share_id']);
+  if (new Set(metadataIds).size !== metadataIds.length || metadataIds.length !== data['shares_count']) {
+    throw invalidRecord('encrypted_data share_metadata does not match shares_count');
+  }
+  return data as unknown as EncryptedData;
+}
+
+function parseKeyShares(value: unknown, sharesCount: number): ThresholdKeyShare[] {
+  const shares = parseJsonField(value, 'key_shares');
+  if (
+    !Array.isArray(shares) ||
+    shares.length !== sharesCount ||
+    shares.some((share) => {
+      if (share === null || typeof share !== 'object' || Array.isArray(share)) return true;
+      const item = share as Record<string, unknown>;
+      return (
+        !isInteger(item['share_id']) ||
+        item['share_id'] < 1 ||
+        item['share_id'] > sharesCount ||
+        typeof item['share_value'] !== 'string' ||
+        typeof item['commitment'] !== 'string'
+      );
+    })
+  ) {
+    throw invalidRecord('key_shares has an invalid shape');
+  }
+  const shareIds = shares.map((share) => (share as Record<string, unknown>)['share_id']);
+  if (new Set(shareIds).size !== shareIds.length) {
+    throw invalidRecord('key_shares contains duplicate share IDs');
+  }
+  return shares as ThresholdKeyShare[];
+}
+
+function parseStringArray(value: unknown, field: string): string[] {
+  const parsed = parseJsonField(value, field);
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+    throw invalidRecord(`${field} must be an array of strings`);
+  }
+  return parsed;
+}
+
+function parseCredentialId(value: unknown): bigint {
+  if (typeof value === 'bigint') {
+    if (value < 0n) throw invalidRecord('credential_id must be a non-negative integer');
+    return value;
+  }
+  if (typeof value !== 'string' && (typeof value !== 'number' || !Number.isSafeInteger(value))) {
+    throw invalidRecord('credential_id must be an integer');
+  }
+  const raw = String(value);
+  if (!/^\d+$/.test(raw)) throw invalidRecord('credential_id must be a non-negative integer');
+  return BigInt(raw);
+}
+
+function parseTimestamp(value: unknown, field: string): number {
+  const timestamp = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+    throw invalidRecord(`${field} must be a non-negative integer timestamp`);
+  }
+  return timestamp;
 }
 
 export class EncryptedCredentialStore {
@@ -57,7 +170,7 @@ export class EncryptedCredentialStore {
       RETURNING *;
     `;
 
-    const result = await pool.query<EncryptedCredentialRecord>(query, [
+    const result = await pool.query<Record<string, unknown>>(query, [
       credentialId,
       JSON.stringify(encryptedData),
       JSON.stringify(keyShares),
@@ -67,7 +180,15 @@ export class EncryptedCredentialStore {
       now,
     ]);
 
-    return this.parseRecord(result.rows[0]);
+    try {
+      return this.parseRecord(result.rows[0]);
+    } catch (error) {
+      logger.error('Failed to parse encrypted credential returned from database', 'encrypted-credential-store', {
+        credentialId: credentialId.toString(),
+        error: String(error),
+      });
+      throw error;
+    }
   }
 
   /**
@@ -82,7 +203,7 @@ export class EncryptedCredentialStore {
       WHERE credential_id = $1;
     `;
 
-    const result = await pool.query<EncryptedCredentialRecord>(query, [credentialId]);
+    const result = await pool.query<Record<string, unknown>>(query, [credentialId]);
 
     return result.rows.length > 0 ? this.parseRecord(result.rows[0]) : null;
   }
@@ -206,13 +327,13 @@ export class EncryptedCredentialStore {
       WHERE credential_id = $1;
     `;
 
-    const result = await pool.query<{ key_custodians: string }>(query, [credentialId]);
+    const result = await pool.query<{ key_custodians: unknown }>(query, [credentialId]);
 
     if (result.rows.length === 0) {
       return [];
     }
 
-    return JSON.parse(result.rows[0].key_custodians);
+    return parseStringArray(result.rows[0].key_custodians, 'key_custodians');
   }
 
   /**
@@ -266,18 +387,36 @@ export class EncryptedCredentialStore {
   /**
    * Parse a record from database query result
    */
-  private parseRecord(row: EncryptedCredentialRecord): EncryptedCredentialRecord {
+  private parseRecord(row: unknown): EncryptedCredentialRecord {
+    const record = asRecord(row, 'row');
+    const encryptedData = parseEncryptedData(record['encrypted_data']);
+    const keyShares = parseKeyShares(record['key_shares'], encryptedData.shares_count);
+    const threshold = record['threshold'];
+    const id = record['id'];
+    if (
+      !isInteger(id) ||
+      id < 1 ||
+      !isInteger(threshold) ||
+      threshold !== encryptedData.threshold
+    ) {
+      throw invalidRecord('id or threshold is invalid');
+    }
+    const commitments = new Map(
+      encryptedData.share_metadata.map(({ share_id, commitment }) => [share_id, commitment]),
+    );
+    if (keyShares.some((share) => commitments.get(share.share_id) !== share.commitment)) {
+      throw invalidRecord('key_shares commitments do not match encrypted_data');
+    }
+
     return {
-      ...row,
-      encrypted_data: typeof row.encrypted_data === 'string'
-        ? JSON.parse(row.encrypted_data)
-        : row.encrypted_data,
-      key_shares: typeof row.key_shares === 'string'
-        ? JSON.parse(row.key_shares)
-        : row.key_shares,
-      key_custodians: typeof row.key_custodians === 'string'
-        ? JSON.parse(row.key_custodians)
-        : row.key_custodians,
+      id,
+      credential_id: parseCredentialId(record['credential_id']),
+      encrypted_data: encryptedData,
+      key_shares: keyShares,
+      key_custodians: parseStringArray(record['key_custodians'], 'key_custodians'),
+      threshold,
+      created_at: parseTimestamp(record['created_at'], 'created_at'),
+      updated_at: parseTimestamp(record['updated_at'], 'updated_at'),
     };
   }
 }

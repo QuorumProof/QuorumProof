@@ -22,6 +22,17 @@ vi.mock('../src/soroban.js', () => ({
   addressVal: (value: string) => value,
 }));
 
+vi.mock('../src/soroban.js', () => ({
+  prepareCall: vi.fn(async () => ({
+    transaction_xdr: 'prepared-xdr',
+    network_passphrase: 'Test SDF Network ; September 2015',
+  })),
+  simulateCall: vi.fn(),
+  u64Val: (n: number | bigint) => n,
+  u32Val: (n: number) => n,
+  addressVal: (address: string) => address,
+}));
+
 function loadFixture(name: string) {
   return JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/headers', `${name}.json`), 'utf8'));
 }
@@ -107,7 +118,7 @@ describe('POST /api/bridge/headers', () => {
 });
 
 describe('POST /api/bridge/anchors', () => {
-  it('returns authorization data without treating a simulated anchor ID as registered', async () => {
+  it('prepares an anchor transaction without reporting it as registered on-chain', async () => {
     const res = await request(app)
       .post('/api/bridge/anchors')
       .send({
@@ -120,36 +131,11 @@ describe('POST /api/bridge/anchors', () => {
         contract_address: '0x' + 'ef'.repeat(20),
         admin: 'GADMIN',
       });
-    expect(res.status).toBe(428);
-    expect(res.body.transaction_xdr).toBe('unsigned-anchor-xdr');
-    expect(res.body.anchor_id).toBeUndefined();
-  });
-
-  it('registers the anchor only after its transaction is confirmed', async () => {
-    submitCall.mockResolvedValueOnce({
-      status: 'confirmed',
-      transaction_hash: 'confirmed-anchor-hash',
-      result: 8n,
-    });
-
-    const res = await request(app)
-      .post('/api/bridge/anchors')
-      .send({
-        credential_id: 1,
-        chain_id: 1,
-        tx_hash: '0x' + 'cd'.repeat(32),
-        block_number: 100,
-        block_hash: '0x' + 'ef'.repeat(32),
-        block_timestamp: 1700000000,
-        contract_address: '0x' + '12'.repeat(20),
-        admin: 'GADMIN',
-        signed_transaction_xdr: 'signed-anchor-xdr',
-      });
-
-    expect(res.status).toBe(201);
-    expect(res.body.anchor_id).toBe(8);
-    expect(res.body.transaction_hash).toBe('confirmed-anchor-hash');
-    expect(getAllAnchors().some((anchor) => anchor.anchorId === 8)).toBe(true);
+    expect(res.status).toBe(202);
+      expect(res.body.status).toBe('pending_signature');
+      expect(res.body.transaction_xdr).toBe('prepared-xdr');
+      expect(res.body.anchor.verified).toBe(false);
+      expect(res.body.anchor_id).toBeUndefined();
   });
 
   it('returns 400 for an unsupported chain', async () => {
@@ -171,7 +157,7 @@ describe('POST /api/bridge/anchors', () => {
   it('returns 400 when required fields are missing', async () => {
     const res = await request(app).post('/api/bridge/anchors').send({ credential_id: 1 });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Missing required fields/);
+    expect(res.body.error).toBe('Validation failed');
   });
 });
 

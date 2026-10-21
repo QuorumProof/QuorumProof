@@ -67,9 +67,11 @@ spec:
 
       containers:
         - name: api-server
-          # Replace with your registry image after building from api-server/Dockerfile.
-          image: quorumproof/api-server:latest
-          imagePullPolicy: IfNotPresent
+          # Image tag is substituted at deploy time by the blue-green-deploy
+          # workflow (scripts/blue_green_deploy.sh). Do not set :latest here.
+          # See issue #1825.
+          image: quorumproof/api-server:IMAGE_TAG
+          imagePullPolicy: Always
 
           ports:
             - name: http

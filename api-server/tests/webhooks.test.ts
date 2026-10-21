@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+const dnsMock = vi.hoisted(() => ({ lookup: vi.fn() }));
+vi.mock('node:dns/promises', () => ({ lookup: dnsMock.lookup }));
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -17,9 +19,15 @@ import {
 } from '../src/services/webhooks.js';
 import { WebhookStore } from '../src/services/webhookStore.js';
 import { WebhookCircuitBreaker, type CircuitBreakerConfig } from '../src/services/webhookCircuitBreaker.js';
+import { SessionManager, _setDefaultSessionManagerForTest } from '../src/services/sessionManager.js';
 
 const app = express();
 app.use(express.json());
+let authToken = '';
+app.use('/api/webhooks', (req, _res, next) => {
+  if (req.header('x-anonymous') !== 'true') req.headers.authorization = `Bearer ${authToken}`;
+  next();
+});
 app.use('/api/webhooks', webhooksRouter);
 
 /** Point the module-level webhook service at a fresh temp-dir-backed store/breaker — real isolation, real durability. */
@@ -38,12 +46,30 @@ function freshService(opts: { maxRetries?: number; retryDelaysMs?: number[]; bre
 
 beforeEach(() => {
   vi.restoreAllMocks();
-  freshService();
+  dnsMock.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+  const { dataDir } = freshService();
+  const sessionManager = new SessionManager({ dataDir: path.join(dataDir, 'sessions') });
+  _setDefaultSessionManagerForTest(sessionManager);
+  authToken = sessionManager.createSession('webhook-test-user').accessToken;
 });
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
 describe('POST /api/webhooks', () => {
+  it('requires authentication for every webhook management endpoint', async () => {
+    const unauthenticated = await Promise.all([
+      request(app).post('/api/webhooks').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks/deliveries/log').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks/dead-letters').set('x-anonymous', 'true'),
+      request(app).post('/api/webhooks/dead-letters/dlv_1/replay').set('x-anonymous', 'true'),
+      request(app).get('/api/webhooks/wh_1').set('x-anonymous', 'true'),
+      request(app).delete('/api/webhooks/wh_1').set('x-anonymous', 'true'),
+    ]);
+
+    expect(unauthenticated.map((response) => response.status)).toEqual(Array(7).fill(401));
+  });
+
   it('registers a webhook and returns 201', async () => {
     const res = await request(app)
       .post('/api/webhooks')
@@ -60,6 +86,16 @@ describe('POST /api/webhooks', () => {
       .post('/api/webhooks')
       .send({ events: ['credential_issued'] });
     expect(res.status).toBe(400);
+  });
+
+  it('rejects loopback and private webhook targets', async () => {
+    for (const url of ['http://127.0.0.1/hook', 'http://10.0.0.1/hook', 'http://169.254.169.254/latest/meta-data/']) {
+      const res = await request(app)
+        .post('/api/webhooks')
+        .send({ url, events: ['credential_issued'] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/publicly routable|private, loopback, link-local/);
+    }
   });
 
   it('returns 400 when events array is empty', async () => {
@@ -155,7 +191,7 @@ describe('dispatchWebhookEvent', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
 
-    registerWebhook('https://hook.test', ['credential_issued']);
+    registerWebhook('https://hook.example.com', ['credential_issued']);
 
     dispatchWebhookEvent({
       event: 'credential_issued',
@@ -167,7 +203,7 @@ describe('dispatchWebhookEvent', () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, opts] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://hook.test');
+    expect(url).toBe('https://hook.example.com');
     expect(opts.method).toBe('POST');
     const body = JSON.parse(opts.body);
     expect(body.event).toBe('credential_issued');
@@ -178,7 +214,7 @@ describe('dispatchWebhookEvent', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
 
-    registerWebhook('https://hook.test', ['credential_revoked']);
+    registerWebhook('https://hook.example.com', ['credential_revoked']);
 
     dispatchWebhookEvent({
       event: 'credential_issued',
@@ -239,7 +275,7 @@ describe('dead-letter queue', () => {
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 1, timestamp: 't' });
     await _drainForTest();
 
-    expect(listDeadLetters()).toHaveLength(1);
+    expect(await listDeadLetters()).toHaveLength(1);
 
     const res = await request(app).get('/api/webhooks/dead-letters');
     expect(res.status).toBe(200);
@@ -255,7 +291,7 @@ describe('dead-letter queue', () => {
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 1, timestamp: 't' });
     await _drainForTest();
 
-    const dead = getDeliveryLog()[0];
+    const dead = (await getDeliveryLog())[0];
     expect(dead.status).toBe('dead_letter');
 
     fetchMock.mockResolvedValue({ ok: true });
@@ -275,7 +311,7 @@ describe('dead-letter queue', () => {
   it('returns 404 replaying a delivery that is not dead-lettered', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
-    registerWebhook('https://hook.test', ['credential_issued']);
+    registerWebhook('https://hook.example.com', ['credential_issued']);
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 1, timestamp: 't' });
     await _drainForTest();
 
@@ -299,7 +335,7 @@ describe('idempotent redelivery', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    registerWebhook('https://hook.test', ['credential_issued']);
+    registerWebhook('https://hook.example.com', ['credential_issued']);
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 1, timestamp: 't' });
     await _drainForTest();
 
@@ -313,7 +349,7 @@ describe('idempotent redelivery', () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error('down'));
     vi.stubGlobal('fetch', fetchMock);
 
-    registerWebhook('https://hook.test', ['credential_issued']);
+    registerWebhook('https://hook.example.com', ['credential_issued']);
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 1, timestamp: 't' });
     await _drainForTest();
 
@@ -346,7 +382,7 @@ describe('per-credential delivery ordering', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    registerWebhook('https://hook.test', ['credential_issued', 'credential_attested']);
+    registerWebhook('https://hook.example.com', ['credential_issued', 'credential_attested']);
 
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 42, timestamp: 't1' });
     dispatchWebhookEvent({ event: 'credential_attested', credential_id: 42, timestamp: 't2' });
@@ -368,7 +404,7 @@ describe('per-credential delivery ordering', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    registerWebhook('https://hook.test', ['credential_issued']);
+    registerWebhook('https://hook.example.com', ['credential_issued']);
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 1, timestamp: 't1' });
     dispatchWebhookEvent({ event: 'credential_issued', credential_id: 2, timestamp: 't2' });
 
@@ -637,7 +673,7 @@ describe('restart durability', () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webhooks-restart-'));
     const store1 = new WebhookStore({ dataDir });
 
-    const reg = store1.registerWebhook('https://recovers.test', ['credential_issued']);
+    const reg = store1.registerWebhook('https://recovers.example.com', ['credential_issued']);
     const delivery = store1.createDelivery(reg.id, 55, 'credential_issued', {
       event: 'credential_issued',
       credential_id: 55,
@@ -676,7 +712,7 @@ describe('restart durability', () => {
   it('registrations survive a restart independent of delivery state', () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webhooks-restart-reg-'));
     const store1 = new WebhookStore({ dataDir });
-    const reg = store1.registerWebhook('https://a.test', ['credential_revoked'], 'shh');
+    const reg = store1.registerWebhook('https://a.example.com', ['credential_revoked'], 'shh');
 
     const store2 = new WebhookStore({ dataDir });
     const reloaded = store2.getWebhook(reg.id);

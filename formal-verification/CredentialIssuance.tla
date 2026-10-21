@@ -115,10 +115,23 @@ IssueCredential(req) ==
                      revoked |-> FALSE,
                      exists  |-> TRUE]
      IN
-     /\ credentials'      = [credentials EXCEPT ![new_id] = new_rec]
+     \* EXCEPT cannot grow a function's domain (TLC treats `![new_id]` on a
+     \* missing key as a no-op), so extend the domain explicitly.
+     /\ credentials'      = [id \in DOMAIN credentials \cup {new_id} |->
+                               IF id = new_id THEN new_rec ELSE credentials[id]]
      /\ credential_count' = new_id
      /\ pending_issues'   = pending_issues \ {req}
      /\ UNCHANGED paused
+
+\* A pending request whose (subject, issuer, ctype) triple is already active is
+\* rejected by the contract, so the request leaves the queue instead of
+\* blocking forever.
+RejectDuplicate(req) ==
+  /\ ~paused
+  /\ req \in pending_issues
+  /\ ActiveTripleExists(req.subject, req.issuer, req.ctype)
+  /\ pending_issues' = pending_issues \ {req}
+  /\ UNCHANGED <<credentials, credential_count, paused>>
 
 \* Revoke a credential: only the original issuer may revoke.
 RevokeCredential(id) ==
@@ -137,6 +150,7 @@ UnpauseContract == /\ paused  /\ paused' = FALSE /\ UNCHANGED <<credentials, cre
 Next ==
   \/ \E req \in IssueRequest : SubmitIssueRequest(req)
   \/ \E req \in pending_issues : IssueCredential(req)
+  \/ \E req \in pending_issues : RejectDuplicate(req)
   \/ \E id \in IssuedIds : RevokeCredential(id)
   \/ PauseContract
   \/ UnpauseContract
@@ -144,11 +158,26 @@ Next ==
 -----------------------------------------------------------------------------
 (* Fairness — needed for liveness properties *)
 
+\* Strong fairness on issue/reject: a request that is enabled infinitely often
+\* (e.g. between pause/unpause cycles) must eventually be processed. Weak
+\* fairness is not enough, since it does not constrain intermittently enabled
+\* actions. Unpausing is weakly fair so the contract cannot stay paused forever.
 Fairness ==
-  \A req \in IssueRequest :
-    WF_vars(IssueCredential(req))
+  /\ WF_vars(UnpauseContract)
+  /\ \A req \in IssueRequest :
+       /\ SF_vars(IssueCredential(req))
+       /\ SF_vars(RejectDuplicate(req))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
+
+-----------------------------------------------------------------------------
+(* MODEL BOUND *)
+
+\* Model-checking constraint, not part of the protocol. Credential ids are
+\* unbounded in the Rust contract (u64); TLC needs a finite state space, so the
+\* config caps the number of issued ids via CONSTRAINT ModelBound.
+MaxModelCredentialId == 2
+ModelBound == credential_count <= MaxModelCredentialId
 
 -----------------------------------------------------------------------------
 (* INVARIANTS *)

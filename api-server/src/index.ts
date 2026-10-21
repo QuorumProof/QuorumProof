@@ -34,7 +34,9 @@ import { createEventsRouter } from './routes/events.js';
 // #1309: Auto-generated OpenAPI docs (Swagger UI / ReDoc)
 import docsRouter from './routes/docs.js';
 import { createDashboardRouter } from './routes/dashboard.js';
+import { requireAuth } from './middleware/auth.js';
 import { cacheControl } from './middleware/cacheControl.js';
+import walletLinkRouter from './routes/walletLink.js';
 // #1303: CORS middleware
 import { createCorsFromEnv } from './middleware/cors.js';
 // #1304: Adaptive rate limiter
@@ -49,6 +51,7 @@ import v2Router from './routes/v2/index.js';
 import { createRequestDeduplication } from './middleware/requestDeduplication.js';
 import { apiMeteringMiddleware, getApiMeteringPrometheus, getApiMeteringReport } from './middleware/apiMetering.js';
 import { rbac } from './middleware/rbac.js';
+import { requireAuth } from './middleware/auth.js';
 import { createDDoSProtection } from './middleware/ddosProtection.js';
 import { createRequestSigning } from './middleware/requestSigning.js';
 import { apiKeyRateLimiter } from './middleware/apiKeyRateLimit.js';
@@ -68,6 +71,7 @@ import { getDefaultCriticalEventListener } from './services/criticalEventListene
 import { broadcastEvent as _wsServerBroadcastEvent, getConnectionCount, closeWsServer } from './ws/server.js';
 import { dispatchWebhookEvent } from './services/webhooks.js';
 import { createGracefulShutdown } from './services/gracefulShutdown.js';
+import { logger } from './services/logger.js';
 // #1559: Connection pooling for the API server.
 import { createConnectionPool, createConnectionPoolMiddleware } from './services/connectionPool.js';
 import * as Soroban from './soroban.js';
@@ -78,6 +82,13 @@ import { initTierRedemptionEvents } from './services/tierRedemptionEvents.js';
 import { pluginRegistry, loadPluginsFromEnv } from './plugins/index.js';
 
 const app = express();
+const trustProxyHops = process.env.TRUST_PROXY_HOPS === undefined
+  ? 1
+  : Number(process.env.TRUST_PROXY_HOPS);
+if (!Number.isSafeInteger(trustProxyHops) || trustProxyHops < 0) {
+  throw new Error('TRUST_PROXY_HOPS must be a non-negative integer');
+}
+app.set('trust proxy', trustProxyHops);
 
 // #1311: Create the HTTP server early so the graceful shutdown service can
 // reference it before httpServer.listen() is called.
@@ -218,12 +229,12 @@ app.use('/api/verify', verifyRouter);
 app.use('/api/graphql', createGraphqlRouter(sorobanClient)); // #1614 GraphQL query/subscription surface
 app.use('/api/credentials', shareLinksRouter); // #877 share links
 app.use('/api/credentials', consentRouter); // #881 consent management
+app.use('/api/auth/wallet/link', walletLinkRouter); // Bind verified wallets to authenticated accounts
 app.use('/api/credentials', createCredentialTiersRouter()); // #1602 credential tiering
 app.use('/api/credentials', createCredentialRedemptionRouter()); // #1603 credential redemption
-app.use('/api/verify', verifyRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/analytics', analyticsRouter);
-app.use('/api/analytics', issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes)
+app.use('/api/analytics', requireAuth, issuerAnalyticsRouter); // #1001 issuer analytics (credentials/verifications/disputes) — #1748 requires auth
 app.use('/api/attestor', attestorRouter);
 app.use('/api/attestors', createAttestorsRouter()); // #875 attestor availability status
 app.use('/api/issuer', issuerRouter);
@@ -236,7 +247,7 @@ app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 app.use('/api/plugins', pluginRegistry.router); // #1647 plugin routes (/api/plugins/<name>/...)
 
 // #997 Credential Holder Dashboard API
-app.use('/api/me', createDashboardRouter(sorobanClient));
+app.use('/api/me', requireAuth, createDashboardRouter(sorobanClient));
 
 // #1650: Multi-region failover status (mounted before /health so it is not
 // shadowed by the generic health router).
@@ -396,7 +407,7 @@ async function runStartupMigrations(): Promise<void> {
   const pool = await initPool(process.env.DATABASE_URL);
   const applied = await runMigrations(pool);
   if (applied.length > 0) {
-    console.log(`Applied ${applied.length} database migration(s): ${applied.join(', ')}`);
+    logger.info('Applied database migrations', 'startup', { count: applied.length, migrations: applied });
   }
   // Note: do NOT call pool.end() here — the pool lives for the full server
   // lifetime.  closePool() is called on graceful shutdown below.
@@ -406,7 +417,7 @@ async function runStartupMigrations(): Promise<void> {
   try {
     await runStartupMigrations();
   } catch (err) {
-    console.error('Startup migration failed, refusing to start:', err);
+    logger.error('Startup migration failed; refusing to start', 'startup', { error: String(err) });
     process.exit(1);
     return;
   }
@@ -415,12 +426,12 @@ async function runStartupMigrations(): Promise<void> {
   try {
     await loadPluginsFromEnv();
   } catch (err) {
-    console.error('Plugin loading failed, refusing to start:', err);
+    logger.error('Plugin loading failed; refusing to start', 'startup', { error: String(err) });
     process.exit(1);
     return;
   }
   httpServer.listen(PORT, () =>
-    console.log(`QuorumProof API server listening on port ${PORT} (WS at /ws)`)
+    logger.info('API server listening', 'startup', { port: PORT, websocketPath: '/ws' })
   );
   // #1650: no-op unless PEER_REGION_HEALTH_URL is set.
   regionFailoverDetector.start();
@@ -428,7 +439,7 @@ async function runStartupMigrations(): Promise<void> {
   // Issue #870: Graceful shutdown — drain the connection pool so in-flight
   // queries finish cleanly before the process exits.
   async function shutdown(signal: string): Promise<void> {
-    console.log(`Received ${signal}, shutting down gracefully…`);
+    logger.info('Shutdown signal received', 'startup', { signal });
     httpServer.close(async () => {
       try {
         const { closePool } = await import('./db.js');

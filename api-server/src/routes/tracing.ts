@@ -1,8 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { distributedTracer } from '../services/distributedTracing.js';
 import { logger } from '../services/logger.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 const router = Router();
+
+// Span data reveals internal service topology and request metadata, so every
+// tracing route is admin-only (#1745).
+router.use(requireAdmin);
 
 // GET /api/tracing/trace/:traceId - Get trace by ID
 router.get('/trace/:traceId', (req: Request, res: Response) => {

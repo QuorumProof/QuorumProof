@@ -11,8 +11,9 @@
  *   POST   /api/credentials/:id/consent/access               — record an access event (bridge use)
  */
 import { Router, Request, Response } from 'express';
-import { simulateCall, submitCall, u64Val, u32Val, addressVal } from '../soroban.js';
-import { respondIfNotConfirmed } from './sorobanSubmission.js';
+import { prepareCall, simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { requireAuth } from '../middleware/auth.js';
+import { requireLinkedWallet } from '../middleware/walletAuth.js';
 
 const router = Router({ mergeParams: true });
 
@@ -147,7 +148,7 @@ router.get('/:id/consent/access-log', async (req: Request, res: Response) => {
 //   verifier   string  Stellar address to grant consent to        (required)
 //   expires_at number  Unix timestamp (0 = no expiry)             (optional, default 0)
 // ---------------------------------------------------------------------------
-router.post('/:id/consent/grants', async (req: Request, res: Response) => {
+router.post('/:id/consent/grants', requireAuth, requireLinkedWallet((req) => req.body?.holder), async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -175,7 +176,7 @@ router.post('/:id/consent/grants', async (req: Request, res: Response) => {
   const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
 
   try {
-    const submission = await submitCall('grant_verifier_consent', [
+    const transaction = await prepareCall(holder, 'grant_verifier_consent', [
       addressVal(holder),
       addressVal(String(verifier)),
       u64Val(credentialId),
@@ -183,14 +184,14 @@ router.post('/:id/consent/grants', async (req: Request, res: Response) => {
     ], signedTransactionXdr);
     if (respondIfNotConfirmed(res, submission)) return;
 
-    res.status(201).json({
+    res.status(202).json({
+      status: 'pending_signature',
+      message: 'Consent grant is prepared; the holder must sign and submit the transaction before access is granted',
+      ...transaction,
       credential_id: credentialId,
       holder,
       verifier,
       expires_at: expiresAtNum,
-      granted: true,
-      transaction_hash: submission.transaction_hash,
-      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -211,7 +212,7 @@ router.post('/:id/consent/grants', async (req: Request, res: Response) => {
 //
 // Body: { holder: string }
 // ---------------------------------------------------------------------------
-router.delete('/:id/consent/grants/:verifier', async (req: Request, res: Response) => {
+router.delete('/:id/consent/grants/:verifier', requireAuth, requireLinkedWallet((req) => req.body?.holder), async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -231,19 +232,19 @@ router.delete('/:id/consent/grants/:verifier', async (req: Request, res: Respons
   const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
 
   try {
-    const submission = await submitCall('revoke_verifier_consent', [
+    const transaction = await prepareCall(holder, 'revoke_verifier_consent', [
       addressVal(holder),
       addressVal(String(verifier)),
       u64Val(credentialId),
     ], signedTransactionXdr);
     if (respondIfNotConfirmed(res, submission)) return;
 
-    res.json({
+    res.status(202).json({
+      status: 'pending_signature',
+      message: 'Consent revocation is prepared; the holder must sign and submit the transaction before access is revoked',
+      ...transaction,
       credential_id: credentialId,
       verifier,
-      revoked: true,
-      transaction_hash: submission.transaction_hash,
-      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -320,7 +321,7 @@ router.get('/:id/consent/grants/:verifier/status', async (req: Request, res: Res
 //   verifier    string  verifier address   (required)
 //   access_type number  1=share_link | 2=delegation | 3=proof_request (required)
 // ---------------------------------------------------------------------------
-router.post('/:id/consent/access', async (req: Request, res: Response) => {
+router.post('/:id/consent/access', requireAuth, requireLinkedWallet((req) => req.body?.holder), async (req: Request, res: Response) => {
   const credentialId = resolveCredentialId(req, res);
   if (credentialId === null) return;
 
@@ -352,7 +353,7 @@ router.post('/:id/consent/access', async (req: Request, res: Response) => {
   const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
 
   try {
-    const submission = await submitCall('record_verifier_access', [
+    const transaction = await prepareCall(holder, 'record_verifier_access', [
       addressVal(holder),
       u64Val(credentialId),
       addressVal(String(verifier)),
@@ -360,14 +361,14 @@ router.post('/:id/consent/access', async (req: Request, res: Response) => {
     ], signedTransactionXdr);
     if (respondIfNotConfirmed(res, submission)) return;
 
-    res.status(201).json({
+    res.status(202).json({
+      status: 'pending_signature',
+      message: 'Access logging is prepared; the holder must sign and submit the transaction before the event is recorded',
+      ...transaction,
       credential_id: credentialId,
       verifier,
       access_type: accessTypeNum,
       access_type_label: ACCESS_TYPE_LABELS[accessTypeNum],
-      recorded: true,
-      transaction_hash: submission.transaction_hash,
-      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

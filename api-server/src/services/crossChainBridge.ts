@@ -33,9 +33,8 @@
  *   137 – Polygon Mainnet
  *   80001 – Polygon Mumbai (testnet, deprecated)
  *
- * NOTE: Read paths simulate contract calls. Write operations (register /
- * verify anchor) are prepared by the API, authorized by the caller, then
- * signed and submitted by the configured funded transaction-source account.
+ * NOTE: Contract reads use simulation. Write operations are returned as
+ * unsigned transaction envelopes for an Admin wallet to sign and submit.
  *
  * TRUST MODEL: step 3 (`verifyAnchorReceiptProof`) is what makes an anchor
  * `verified`, and it is backed by cryptographic MPT proof verification

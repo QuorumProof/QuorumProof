@@ -12,6 +12,9 @@ on:
     paths:
       - 'examples/multi-language/**'
 
+permissions:
+  contents: read
+
 jobs:
   examples:
     runs-on: ubuntu-latest

@@ -10,7 +10,8 @@ import { signMessage } from '@stellar/freighter-api';
  */
 export function generateChallenge(): string {
   const timestamp = new Date().toISOString();
-  const random = Math.random().toString(36).substring(2, 15);
+  const randomBytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const random = Array.from(randomBytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return `${timestamp}:${random}`;
 }
 

@@ -18,15 +18,27 @@ import {
   GasCostTracker,
   _setDefaultGasCostTrackerForTest,
 } from '../src/services/gasCostTracker.js';
+import {
+  SessionManager,
+  getDefaultSessionManager,
+  _setDefaultSessionManagerForTest,
+  _resetDefaultSessionManagerForTest,
+} from '../src/services/sessionManager.js';
 
 describe('Gas Cost Routes (/api/costs)', () => {
   let app: express.Express;
   let tempDir: string;
   let tracker: GasCostTracker;
+  let adminAuth: string;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'costs-test-'));
     process.env.XLM_USD_PRICE = '0.15';
+    process.env.JWT_SECRET = 'test-secret-costs-1747';
+
+    const sessions = new SessionManager({ dataDir: tempDir });
+    _setDefaultSessionManagerForTest(sessions);
+    adminAuth = `Bearer ${sessions.createSession('GADMIN_COSTS', { role: 'admin', mfaVerified: true }).accessToken}`;
 
     tracker = new GasCostTracker(tempDir);
     _setDefaultGasCostTrackerForTest(tracker);
@@ -45,7 +57,9 @@ describe('Gas Cost Routes (/api/costs)', () => {
       // Best-effort cleanup
     }
     _setDefaultGasCostTrackerForTest(undefined);
+    _resetDefaultSessionManagerForTest();
     delete process.env.XLM_USD_PRICE;
+    delete process.env.JWT_SECRET;
   });
 
   // ---------------------------------------------------------------------------
@@ -53,7 +67,7 @@ describe('Gas Cost Routes (/api/costs)', () => {
   // ---------------------------------------------------------------------------
   describe('GET /api/costs/report', () => {
     it('returns default empty report when no operations have been recorded', async () => {
-      const res = await request(app).get('/api/costs/report');
+      const res = await request(app).get('/api/costs/report').set('Authorization', adminAuth);
 
       expect(res.status).toBe(200);
       expect(res.body.generatedAt).toBeDefined();
@@ -72,7 +86,7 @@ describe('Gas Cost Routes (/api/costs)', () => {
       tracker.record('issue_credential', '100000000'); // 100,000,000 stroops = 10 XLM
       tracker.record('revoke_credential', '20000000'); // 20,000,000 stroops = 2 XLM
 
-      const res = await request(app).get('/api/costs/report');
+      const res = await request(app).get('/api/costs/report').set('Authorization', adminAuth);
 
       expect(res.status).toBe(200);
       expect(res.body.totalCalls).toBe(4);
@@ -104,7 +118,7 @@ describe('Gas Cost Routes (/api/costs)', () => {
   // ---------------------------------------------------------------------------
   describe('GET /api/costs/optimizations', () => {
     it('returns empty recommendations when no operations are recorded', async () => {
-      const res = await request(app).get('/api/costs/optimizations');
+      const res = await request(app).get('/api/costs/optimizations').set('Authorization', adminAuth);
 
       expect(res.status).toBe(200);
       expect(res.body.recommendations).toEqual([]);
@@ -115,7 +129,7 @@ describe('Gas Cost Routes (/api/costs)', () => {
       tracker.record('issue_credential', '100000000');
       tracker.record('is_attested', '10000000');
 
-      const res = await request(app).get('/api/costs/optimizations?top=2');
+      const res = await request(app).get('/api/costs/optimizations?top=2').set('Authorization', adminAuth);
 
       expect(res.status).toBe(200);
       expect(res.body.recommendations).toHaveLength(2);
@@ -129,7 +143,7 @@ describe('Gas Cost Routes (/api/costs)', () => {
       tracker.record('op1', '10000000');
       tracker.record('op2', '20000000');
 
-      const res = await request(app).get('/api/costs/optimizations?top=invalid-value');
+      const res = await request(app).get('/api/costs/optimizations?top=invalid-value').set('Authorization', adminAuth);
 
       expect(res.status).toBe(200);
       expect(res.body.recommendations).toBeInstanceOf(Array);
@@ -142,32 +156,32 @@ describe('Gas Cost Routes (/api/costs)', () => {
   // ---------------------------------------------------------------------------
   describe('GET /api/costs/projection', () => {
     it('returns 400 when operation query parameter is missing', async () => {
-      const res = await request(app).get('/api/costs/projection?callsPerDay=1000&days=30');
+      const res = await request(app).get('/api/costs/projection?callsPerDay=1000&days=30').set('Authorization', adminAuth);
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('operation query param is required');
     });
 
     it('returns 400 when callsPerDay is missing or not a positive number', async () => {
-      const missingCalls = await request(app).get('/api/costs/projection?operation=is_attested');
+      const missingCalls = await request(app).get('/api/costs/projection?operation=is_attested').set('Authorization', adminAuth);
       expect(missingCalls.status).toBe(400);
       expect(missingCalls.body.error).toBe('callsPerDay must be a positive number');
 
-      const zeroCalls = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=0');
+      const zeroCalls = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=0').set('Authorization', adminAuth);
       expect(zeroCalls.status).toBe(400);
       expect(zeroCalls.body.error).toBe('callsPerDay must be a positive number');
 
-      const negativeCalls = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=-50');
+      const negativeCalls = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=-50').set('Authorization', adminAuth);
       expect(negativeCalls.status).toBe(400);
       expect(negativeCalls.body.error).toBe('callsPerDay must be a positive number');
 
-      const nonNumericCalls = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=abc');
+      const nonNumericCalls = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=abc').set('Authorization', adminAuth);
       expect(nonNumericCalls.status).toBe(400);
       expect(nonNumericCalls.body.error).toBe('callsPerDay must be a positive number');
     });
 
     it('returns 404 when operation has no recorded cost data', async () => {
-      const res = await request(app).get('/api/costs/projection?operation=non_existent_op&callsPerDay=1000&days=30');
+      const res = await request(app).get('/api/costs/projection?operation=non_existent_op&callsPerDay=1000&days=30').set('Authorization', adminAuth);
 
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('No recorded cost data for operation "non_existent_op" yet');
@@ -180,7 +194,7 @@ describe('Gas Cost Routes (/api/costs)', () => {
       // 1,000 calls/day * 30 days = 30,000 calls
       // 30,000 calls * 10,000,000 stroops = 300,000,000,000 stroops = 30,000 XLM
       // 30,000 XLM * $0.15 = $4,500 USD
-      const res = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=1000&days=30');
+      const res = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=1000&days=30').set('Authorization', adminAuth);
 
       expect(res.status).toBe(200);
       expect(res.body.operation).toBe('is_attested');
@@ -195,11 +209,53 @@ describe('Gas Cost Routes (/api/costs)', () => {
     it('defaults days to 30 when days parameter is omitted', async () => {
       tracker.record('is_attested', '10000000');
 
-      const res = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=500');
+      const res = await request(app).get('/api/costs/projection?operation=is_attested&callsPerDay=500').set('Authorization', adminAuth);
 
       expect(res.status).toBe(200);
       expect(res.body.days).toBe(30);
       expect(res.body.projectedXlm).toBe(15000);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Authentication and role restriction (#1747)
+  // ---------------------------------------------------------------------------
+  describe('access control (#1747)', () => {
+    const routes = [
+      '/api/costs/report',
+      '/api/costs/optimizations',
+      '/api/costs/projection?operation=is_attested&callsPerDay=1000',
+    ];
+
+    it.each(routes)('rejects unauthenticated requests to %s with 401', async (route) => {
+      const res = await request(app).get(route);
+      expect(res.status).toBe(401);
+    });
+
+    it.each(routes)('rejects non-admin roles on %s with 403', async (route) => {
+      for (const role of ['issuer', 'attestor', 'verifier']) {
+        const token = getDefaultSessionManager().createSession('GUSER_COSTS', {
+          role,
+          mfaVerified: true,
+        }).accessToken;
+        const res = await request(app).get(route).set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(403);
+      }
+    });
+
+    it('does not grant access from an x-role header alone', async () => {
+      const res = await request(app).get('/api/costs/report').set('x-role', 'admin');
+      expect(res.status).toBe(401);
+    });
+
+    it('report contains only operation-level aggregates, no account identifiers', async () => {
+      tracker.record('is_attested', '10000000');
+      tracker.record('issue_credential', '100000000');
+
+      const res = await request(app).get('/api/costs/report').set('Authorization', adminAuth);
+      expect(res.status).toBe(200);
+      // Stellar account IDs are 56-char strings starting with G.
+      expect(JSON.stringify(res.body)).not.toMatch(/G[A-Z2-7]{55}/);
     });
   });
 });

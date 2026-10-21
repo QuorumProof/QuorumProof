@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import { rbac } from '../middleware/rbac.js';
+import { logger } from '../services/logger.js';
 import {
   getWhitelist,
   addToWhitelist,
@@ -23,7 +24,7 @@ const router = express.Router();
  * GET /api/admin/ip-whitelist
  * Get current IP whitelist
  */
-router.get('/ip-whitelist', rbac.requirePermission('admin:all'), (_req: Request, res: Response) => {
+router.get('/ip-whitelist', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
   try {
     const whitelist = getWhitelist();
     res.json({
@@ -31,7 +32,7 @@ router.get('/ip-whitelist', rbac.requirePermission('admin:all'), (_req: Request,
       count: whitelist.length,
     });
   } catch (error) {
-    console.error('[Admin] Error fetching whitelist:', error);
+    logger.error('Error fetching whitelist', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to fetch whitelist' });
   }
 });
@@ -49,14 +50,14 @@ router.post('/ip-whitelist', rbac.requirePermission('admin:all'), (req: Request,
       return res.status(400).json({ error: 'IP address is required' });
     }
 
-    addToWhitelist(ip);
+    addToWhitelist(ip, req.requestId);
     res.json({
       success: true,
       message: `IP ${ip} added to whitelist`,
       ip,
     });
   } catch (error) {
-    console.error('[Admin] Error adding to whitelist:', error);
+    logger.error('Error adding to whitelist', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to add IP to whitelist' });
   }
 });
@@ -73,7 +74,7 @@ router.delete('/ip-whitelist/:ip', rbac.requirePermission('admin:all'), (req: Re
       return res.status(400).json({ error: 'IP address is required' });
     }
 
-    const wasRemoved = removeFromWhitelist(decodeURIComponent(ip));
+    const wasRemoved = removeFromWhitelist(decodeURIComponent(ip), req.requestId);
 
     if (!wasRemoved) {
       return res.status(404).json({ error: 'IP not found in whitelist' });
@@ -85,7 +86,7 @@ router.delete('/ip-whitelist/:ip', rbac.requirePermission('admin:all'), (req: Re
       ip,
     });
   } catch (error) {
-    console.error('[Admin] Error removing from whitelist:', error);
+    logger.error('Error removing from whitelist', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to remove IP from whitelist' });
   }
 });
@@ -94,15 +95,15 @@ router.delete('/ip-whitelist/:ip', rbac.requirePermission('admin:all'), (req: Re
  * DELETE /api/admin/ip-whitelist
  * Clear entire whitelist
  */
-router.delete('/ip-whitelist', rbac.requirePermission('admin:all'), (_req: Request, res: Response) => {
+router.delete('/ip-whitelist', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
   try {
-    clearWhitelist();
+    clearWhitelist(req.requestId);
     res.json({
       success: true,
       message: 'Whitelist cleared',
     });
   } catch (error) {
-    console.error('[Admin] Error clearing whitelist:', error);
+    logger.error('Error clearing whitelist', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to clear whitelist' });
   }
 });
@@ -111,12 +112,12 @@ router.delete('/ip-whitelist', rbac.requirePermission('admin:all'), (_req: Reque
  * GET /api/admin/ip-acl/config
  * Get IP ACL configuration status
  */
-router.get('/ip-acl/config', rbac.requirePermission('admin:all'), (_req: Request, res: Response) => {
+router.get('/ip-acl/config', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
   try {
     const status = getConfigStatus();
     res.json(status);
   } catch (error) {
-    console.error('[Admin] Error fetching config:', error);
+    logger.error('Error fetching config', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to fetch configuration' });
   }
 });
@@ -149,7 +150,7 @@ router.get('/ip-acl/access-log', rbac.requirePermission('admin:all'), (req: Requ
       logs,
     });
   } catch (error) {
-    console.error('[Admin] Error fetching access log:', error);
+    logger.error('Error fetching access log', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to fetch access log' });
   }
 });
@@ -158,15 +159,15 @@ router.get('/ip-acl/access-log', rbac.requirePermission('admin:all'), (req: Requ
  * DELETE /api/admin/ip-acl/access-log
  * Clear access log
  */
-router.delete('/ip-acl/access-log', rbac.requirePermission('admin:all'), (_req: Request, res: Response) => {
+router.delete('/ip-acl/access-log', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
   try {
-    clearAccessLog();
+    clearAccessLog(req.requestId);
     res.json({
       success: true,
       message: 'Access log cleared',
     });
   } catch (error) {
-    console.error('[Admin] Error clearing access log:', error);
+    logger.error('Error clearing access log', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to clear access log' });
   }
 });
@@ -175,12 +176,12 @@ router.delete('/ip-acl/access-log', rbac.requirePermission('admin:all'), (_req: 
  * GET /api/admin/ip-acl/stats
  * Get access statistics and denial summary
  */
-router.get('/ip-acl/stats', rbac.requirePermission('admin:all'), (_req: Request, res: Response) => {
+router.get('/ip-acl/stats', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
   try {
     const stats = getAccessStats();
     res.json(stats);
   } catch (error) {
-    console.error('[Admin] Error fetching stats:', error);
+    logger.error('Error fetching stats', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to fetch statistics' });
   }
 });
@@ -202,14 +203,14 @@ router.post('/ip-acl/protected-endpoints', rbac.requirePermission('admin:all'), 
       return res.status(400).json({ error: 'all endpoints must be strings' });
     }
 
-    setProtectedEndpoints(endpoints);
+    setProtectedEndpoints(endpoints, req.requestId);
     res.json({
       success: true,
       message: 'Protected endpoints updated',
       endpoints,
     });
   } catch (error) {
-    console.error('[Admin] Error updating protected endpoints:', error);
+    logger.error('Error updating protected endpoints', 'admin', { requestId: req.requestId, error: String(error) });
     res.status(500).json({ error: 'Failed to update protected endpoints' });
   }
 });

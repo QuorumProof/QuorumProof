@@ -19,6 +19,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   e2e-testnet:
     runs-on: ubuntu-latest

@@ -1,10 +1,12 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { getPool } from '../db.js';
+import { GraphQLResolvers } from '../services/graphqlResolvers.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
   u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
+  u32Val: (n: number) => ReturnType<typeof SimulateCallType>;
   addressVal: (a: string) => ReturnType<typeof SimulateCallType>;
 };
 
@@ -48,79 +50,16 @@ const SCHEMA_DESCRIPTION = {
 };
 
 type GraphQLVariables = Record<string, unknown>;
+const subscriptions = new Map<string, {
+  id: string;
+  query: string;
+  variables: GraphQLVariables;
+  created_at: string;
+}>();
 
-
-async function resolveCredentialTier(
-  args: GraphQLVariables,
-  _ctx: ResolverContext,
-): Promise<unknown> {
-  const id = args['id'];
-  if (!id) throw new Error('credentialTier requires id argument');
-
-  try {
-    const pool = getPool();
-    const result = await pool.query(
-      `SELECT credential_id, tier, tier_points, tier_acquired_at
-       FROM credential_tiers WHERE credential_id = $1`,
-      [id]
-    );
-
-    if (result.rows.length === 0) return null;
-
-    const tierRow = result.rows[0];
-    const benefitsResult = await pool.query(
-      `SELECT benefit_name, benefit_value FROM tier_benefits WHERE tier = $1`,
-      [tierRow.tier]
-    );
-
-    const benefits: Record<string, string> = {};
-    for (const benefit of benefitsResult.rows) {
-      benefits[benefit.benefit_name] = benefit.benefit_value;
-    }
-
-    return {
-      credential_id: tierRow.credential_id,
-      tier: tierRow.tier,
-      tier_points: tierRow.tier_points,
-      tier_acquired_at: tierRow.tier_acquired_at,
-      benefits,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function resolveCredentialRewards(
-  args: GraphQLVariables,
-  _ctx: ResolverContext,
-): Promise<unknown> {
-  const id = args['id'];
-  if (!id) throw new Error('credentialRewards requires id argument');
-
-  try {
-    const pool = getPool();
-    const result = await pool.query(
-      `SELECT credential_id, reward_points, accumulated_value
-       FROM credential_rewards WHERE credential_id = $1`,
-      [id]
-    );
-
-    if (result.rows.length === 0) return null;
-
-    const row = result.rows[0];
-    return {
-      credential_id: row.credential_id,
-      reward_points: row.reward_points,
-      accumulated_value: row.accumulated_value,
-    };
-  } catch {
-    return null;
-  }
-}
 
 async function resolveTierRequirements(
   _args: GraphQLVariables,
-  _ctx: ResolverContext,
 ): Promise<unknown[]> {
   try {
     const pool = getPool();
@@ -136,7 +75,6 @@ async function resolveTierRequirements(
 
 async function resolveRedemptionRequests(
   args: GraphQLVariables,
-  _ctx: ResolverContext,
 ): Promise<unknown[]> {
   const id = args['id'];
   if (!id) throw new Error('redemptionRequests requires id argument');
@@ -343,17 +281,11 @@ export function createGraphqlRouter(soroban: SorobanClient) {
             case 'tierStats':
               data[key] = await resolvers.resolveTierStats();
               break;
-            case 'credentialTier':
-              data[key] = await resolveCredentialTier(resolvedArgs, ctx);
-              break;
-            case 'credentialRewards':
-              data[key] = await resolveCredentialRewards(resolvedArgs, ctx);
-              break;
             case 'tierRequirements':
-              data[key] = await resolveTierRequirements(resolvedArgs, ctx);
+              data[key] = await resolveTierRequirements(resolvedArgs);
               break;
             case 'redemptionRequests':
-              data[key] = await resolveRedemptionRequests(resolvedArgs, ctx);
+              data[key] = await resolveRedemptionRequests(resolvedArgs);
               break;
             default:
               errors.push({ message: `Unknown field: ${field}`, path: key });
@@ -403,7 +335,8 @@ export function createGraphqlRouter(soroban: SorobanClient) {
   });
 
   router.delete('/subscriptions/:id', (req: Request, res: Response) => {
-    const deleted = subscriptions.delete(req.params.id);
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const deleted = subscriptions.delete(id);
     res.status(deleted ? 204 : 404).send(deleted ? undefined : { error: 'subscription not found' });
   });
 

@@ -17,11 +17,12 @@ describe('gdprSigning utilities', () => {
 
   describe('generateChallenge', () => {
     it('should generate a challenge with timestamp and random suffix', () => {
+      const getRandomValues = vi.spyOn(globalThis.crypto, 'getRandomValues');
       const challenge = generateChallenge();
       expect(challenge).toMatch(/^\d{4}-\d{2}-\d{2}T/); // ISO timestamp
-      expect(challenge).toContain(':');
-      const parts = challenge.split(':');
-      expect(parts.length).toBeGreaterThanOrEqual(2);
+      expect(challenge).toMatch(/:[a-f\d]{32}$/);
+      expect(getRandomValues).toHaveBeenCalledWith(expect.any(Uint8Array));
+      getRandomValues.mockRestore();
     });
 
     it('should generate unique challenges', () => {

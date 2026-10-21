@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { simulateCall, submitCall, u64Val, addressVal } from '../soroban.js';
+import { prepareCalls, simulateCall, u64Val, addressVal } from '../soroban.js';
 import { metricsStore } from '../services/metrics.js';
 
 const router = Router();
@@ -13,6 +13,19 @@ function serializeBigInt(value: unknown): unknown {
     );
   }
   return value;
+}
+
+function positiveU64(value: unknown, label: string): bigint {
+  let parsed: bigint;
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    parsed = BigInt(value);
+  } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    parsed = BigInt(value);
+  } else {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  if (parsed <= 0n) throw new Error(`${label} must be a positive integer`);
+  return parsed;
 }
 
 // GET /api/attestor/pending?address=<addr>
@@ -106,7 +119,8 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
 router.post('/batch-attest', async (req: Request, res: Response) => {
   const { attestor, credential_ids, slice_id, signed_transactions } = req.body;
 
-  if (!attestor || !Array.isArray(credential_ids) || credential_ids.length === 0 || !slice_id) {
+  if (typeof attestor !== 'string' || attestor.length === 0 ||
+      !Array.isArray(credential_ids) || credential_ids.length === 0 || slice_id === undefined || slice_id === null) {
     res.status(400).json({ error: 'attestor, credential_ids (array), and slice_id are required' });
     return;
   }
@@ -116,84 +130,41 @@ router.post('/batch-attest', async (req: Request, res: Response) => {
     return;
   }
 
-  if (
-    signed_transactions !== undefined &&
-    (!signed_transactions || typeof signed_transactions !== 'object' || Array.isArray(signed_transactions))
-  ) {
-    res.status(400).json({ error: 'signed_transactions must map credential IDs to signed transaction XDR' });
+  let credentialIds: bigint[];
+  let sliceId: bigint;
+  try {
+    credentialIds = credential_ids.map((id: unknown, index: number) => positiveU64(id, `credential_ids[${index}]`));
+    sliceId = positiveU64(slice_id, 'slice_id');
+  } catch (err: unknown) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     return;
   }
 
-  const transactions = signed_transactions as Record<string, unknown> | undefined;
-  const results: Array<{
-    credential_id: string;
-    success: boolean;
-    status?: 'authorization_required' | 'pending' | 'confirmed';
-    transaction_hash?: string;
-    transaction_xdr?: string;
-    authorization_entries_xdr?: string[];
-    error?: string;
-  }> = [];
-
-  for (const credId of credential_ids) {
-    try {
-      const transactionXdr = transactions?.[String(credId)];
-      if (transactionXdr !== undefined && typeof transactionXdr !== 'string') {
-        throw new Error(`Signed transaction for credential ${credId} must be an XDR string`);
-      }
-      const signedTransactionXdr = typeof transactionXdr === 'string' ? transactionXdr : undefined;
-      const submission = await submitCall('attest_credential', [
-        u64Val(BigInt(credId)),
-        u64Val(BigInt(slice_id)),
+  try {
+    const transaction = await prepareCalls(attestor, credentialIds.map((credentialId) => ({
+      method: 'attest_credential',
+      args: [
+        u64Val(credentialId),
+        u64Val(sliceId),
         addressVal(attestor),
-      ], signedTransactionXdr);
-      if (submission.status === 'prepared') {
-        results.push({
-          credential_id: credId,
-          success: false,
-          status: 'authorization_required',
-          transaction_xdr: submission.transaction_xdr,
-          authorization_entries_xdr: submission.authorization_entries_xdr,
-        });
-        continue;
-      }
-      if (submission.status === 'pending') {
-        results.push({
-          credential_id: credId,
-          success: false,
-          status: 'pending',
-          transaction_hash: submission.transaction_hash,
-        });
-        continue;
-      }
-      results.push({
-        credential_id: credId,
-        success: true,
-        status: 'confirmed',
-        transaction_hash: submission.transaction_hash,
-      });
+      ],
+    })));
 
-      metricsStore.recordEvent({
-        type: 'attested',
-        credential_id: credId,
-        timestamp: new Date().toISOString(),
-        attestor,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Attestation failed';
-      results.push({ credential_id: credId, success: false, error: msg });
-    }
+    res.status(202).json({
+      total: credentialIds.length,
+      succeeded: 0,
+      failed: 0,
+      pending: credentialIds.length,
+      ...transaction,
+      results: credentialIds.map((credentialId) => ({
+        credential_id: credentialId.toString(),
+        status: 'pending_signature',
+      })),
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
   }
-
-  const succeeded = results.filter((r) => r.success).length;
-  const authorizationRequired = results.some((r) => r.status === 'authorization_required');
-  const pending = results.some((r) => r.status === 'pending');
-  res.status(authorizationRequired ? 428 : pending ? 202 : 200).json({
-    total: credential_ids.length,
-    succeeded,
-    failed: results.filter((r) => r.error !== undefined).length,
-    results,
-  });
 });
 
 export default router;

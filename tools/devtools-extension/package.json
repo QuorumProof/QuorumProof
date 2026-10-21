@@ -1,0 +1,13 @@
+{
+  "name": "quorumproof-devtools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QuorumProof Chrome DevTools extension skeleton (#1674)",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

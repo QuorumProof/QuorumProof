@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { logger } from './logger.js';
 
 interface TraceSpan {
@@ -26,11 +27,11 @@ class DistributedTracer {
   private readonly MAX_SPANS = 10000;
 
   generateTraceId(): string {
-    return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    return randomBytes(16).toString('hex');
   }
 
   generateSpanId(): string {
-    return Math.random().toString(36).slice(2, 11);
+    return randomBytes(8).toString('hex');
   }
 
   startSpan(

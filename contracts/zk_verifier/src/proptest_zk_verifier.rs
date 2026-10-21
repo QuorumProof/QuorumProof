@@ -19,6 +19,7 @@
 /// the test suite is designed to catch an incomplete migration.
 #[cfg(test)]
 mod proptest_zk_verifier {
+    extern crate std;
     use crate::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
     use proptest::prelude::*;
     use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env};

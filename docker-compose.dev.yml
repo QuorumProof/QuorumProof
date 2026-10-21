@@ -21,8 +21,11 @@
 #     Dockerfile) and mounts ./api-server/src for live reload via nodemon.
 #     Ensure your api-server package.json has a "dev" script that uses nodemon
 #     or tsx watch, e.g.: "dev": "nodemon --exec tsx src/index.ts"
-#   - Never commit real secrets into this file.  Credentials here (POSTGRES_PASSWORD,
-#     etc.) are intentionally weak dev-only values.
+#   - Never commit real secrets into this file.  The Postgres password is read
+#     from the git-ignored .env file (POSTGRES_PASSWORD).  Generate a random
+#     value on first run, e.g.:
+#       echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> .env
+#     The compose file fails fast if POSTGRES_PASSWORD is not set.
 
 version: "3.8"
 
@@ -62,7 +65,7 @@ services:
     environment:
       POSTGRES_DB: quorumproof
       POSTGRES_USER: qp
-      POSTGRES_PASSWORD: devpassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -95,7 +98,7 @@ services:
       STELLAR_NETWORK: standalone
       STELLAR_RPC_URL: http://stellar-standalone:8000/soroban/rpc
       # Point at the local Postgres instance
-      DATABASE_URL: postgres://qp:devpassword@postgres:5432/quorumproof
+      DATABASE_URL: postgres://qp:${POSTGRES_PASSWORD}@postgres:5432/quorumproof
     volumes:
       # Mount source for live reload (works with nodemon / tsx watch)
       - ./api-server/src:/app/src

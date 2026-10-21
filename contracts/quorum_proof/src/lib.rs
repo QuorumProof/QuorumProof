@@ -966,13 +966,6 @@ pub enum DataKey {
     SuspensionReason(u64),
     /// Number of migrations still pending, surfaced by the health check.
     PendingMigrationCount,
-    /// Issue #1389: Total number of verification calls made (across all
-    /// verification entry points), regardless of outcome.
-    TotalVerificationCount,
-    /// Issue #1389: Number of verification calls that succeeded.
-    SuccessfulVerificationCount,
-    /// Issue #1389: Number of verification calls that failed.
-    FailedVerificationCount,
     /// Issue #1511: Stored SBT registry contract address for governance repointing.
     SbtRegistryId,
     /// Issue #1511: Stored ZK verifier contract address for governance repointing.
@@ -1128,6 +1121,10 @@ pub enum DataKey10 {
     AttestationRequest(u64),
     /// Issue #666: Count of attestation requests
     AttestationRequestCount,
+    /// Issue #1730: Set once a multi-sig attestation request for a credential has been
+    /// executed with an approving value. Required by `is_attested` when the credential's
+    /// type has an `AttestationPolicy`.
+    MultisigAttestationApproved(u64),
     /// Issue #895: Slice modification audit trail (slice_id -> Vec<SliceModification>)
     SliceModificationTrail(u64),
     /// Issue #896: Slice delegation tracking (slice_id, delegator -> delegate)
@@ -1427,6 +1424,20 @@ pub enum DataKey11 {
     BbsDisclosureProof(u64),
     /// Flag indicating a credential was issued with BBS+ selective disclosure
     BbsCredentialFlag(u64),
+}
+
+/// Issue #1389 counters, split out of `DataKey` to stay under Soroban's
+/// 50-variant limit for `#[contracttype]` enums.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey13 {
+    /// Issue #1389: Total number of verification calls made (across all
+    /// verification entry points), regardless of outcome.
+    TotalVerificationCount,
+    /// Issue #1389: Number of verification calls that succeeded.
+    SuccessfulVerificationCount,
+    /// Issue #1389: Number of verification calls that failed.
+    FailedVerificationCount,
 }
 
 /// Storage keys for issues #1590-1593: Slice Templates, Performance Scoring, Derivatives, and Staking
@@ -3487,6 +3498,7 @@ impl QuorumProofContract {
             !env.storage().instance().has(&DataKey::Admin),
             "already initialized"
         );
+        admin.require_auth();
         Self::require_valid_address(&env, &admin);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -4582,16 +4594,24 @@ impl QuorumProofContract {
             })
     }
 
-    /// Record a global call event and — if a `CongestionConfig` is present —
+    /// Record a call event and — if a `CongestionConfig` is present —
     /// automatically adjust the global rate-limit `max_calls` based on the
     /// current load level.
     ///
-    /// Call this from any high-frequency entry point (e.g. `issue_credential`,
-    /// `attest`) *after* the main business logic so that the adjustment takes
-    /// effect on the *next* call.
+    /// Admin only. This function changes the global rate limit for every
+    /// address, so it is not permissionless: anyone able to call it could
+    /// otherwise move the limit by paying only the call cost. The intended
+    /// caller is the admin or an off-chain keeper acting for the admin, run on
+    /// a schedule.
+    ///
+    /// The new `max_calls` is always clamped to
+    /// `[min_max_calls, max_max_calls]` from `CongestionConfig`.
     ///
     /// Returns the newly determined `CongestionLevel`.
-    pub fn update_congestion_and_adjust(env: Env) -> CongestionLevel {
+    pub fn update_congestion_and_adjust(env: Env, admin: Address) -> CongestionLevel {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+
         let now = env.ledger().timestamp();
         let cfg: CongestionConfig = env
             .storage()
@@ -11510,10 +11530,32 @@ impl QuorumProofContract {
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     }
 
-    /// Stub for multisig approval check.
-    /// Returns true to preserve backward compatibility until full multisig is implemented.
-    fn is_multisig_approved(_env: &Env, _credential_id: u64) -> bool {
-        true
+    /// Issue #1730: Multi-sig gate used by `is_attested`.
+    ///
+    /// Credentials whose type has no `AttestationPolicy` are not gated (returns true).
+    /// Credentials whose type has a policy are attested only after a multi-sig attestation
+    /// request for them has executed with an approving value. Fails closed if the
+    /// credential does not exist.
+    fn is_multisig_approved(env: &Env, credential_id: u64) -> bool {
+        let credential: Credential = match env
+            .storage()
+            .instance()
+            .get(&DataKey::Credential(credential_id))
+        {
+            Some(credential) => credential,
+            None => return false,
+        };
+        let policy_required = env
+            .storage()
+            .instance()
+            .has(&DataKey10::AttestationPolicy(credential.credential_type));
+        if !policy_required {
+            return true;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey10::MultisigAttestationApproved(credential_id))
+            .unwrap_or(false)
     }
 
     // ── Issuance Multi-Sig ────────────────────────────────────────────────────
@@ -11938,6 +11980,11 @@ impl QuorumProofContract {
             };
             records.push_back(record);
             env.storage().instance().set(&DataKey::Attestors(request.credential_id), &records);
+            if request.attestation_value {
+                env.storage()
+                    .instance()
+                    .set(&DataKey10::MultisigAttestationApproved(request.credential_id), &true);
+            }
             env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
 
             let attest_event = AttestationEventData {
@@ -17437,17 +17484,17 @@ impl QuorumProofContract {
     fn record_verification(env: &Env, success: bool) {
         let storage = env.storage().instance();
 
-        let total: u64 = storage.get(&DataKey::TotalVerificationCount).unwrap_or(0);
-        storage.set(&DataKey::TotalVerificationCount, &(total + 1));
+        let total: u64 = storage.get(&DataKey13::TotalVerificationCount).unwrap_or(0);
+        storage.set(&DataKey13::TotalVerificationCount, &(total + 1));
 
         if success {
             let successful: u64 = storage
-                .get(&DataKey::SuccessfulVerificationCount)
+                .get(&DataKey13::SuccessfulVerificationCount)
                 .unwrap_or(0);
-            storage.set(&DataKey::SuccessfulVerificationCount, &(successful + 1));
+            storage.set(&DataKey13::SuccessfulVerificationCount, &(successful + 1));
         } else {
-            let failed: u64 = storage.get(&DataKey::FailedVerificationCount).unwrap_or(0);
-            storage.set(&DataKey::FailedVerificationCount, &(failed + 1));
+            let failed: u64 = storage.get(&DataKey13::FailedVerificationCount).unwrap_or(0);
+            storage.set(&DataKey13::FailedVerificationCount, &(failed + 1));
         }
     }
 
@@ -17457,11 +17504,11 @@ impl QuorumProofContract {
     pub fn get_verification_stats(env: Env) -> VerificationStats {
         let storage = env.storage().instance();
         VerificationStats {
-            total_verifications: storage.get(&DataKey::TotalVerificationCount).unwrap_or(0),
+            total_verifications: storage.get(&DataKey13::TotalVerificationCount).unwrap_or(0),
             successful_verifications: storage
-                .get(&DataKey::SuccessfulVerificationCount)
+                .get(&DataKey13::SuccessfulVerificationCount)
                 .unwrap_or(0),
-            failed_verifications: storage.get(&DataKey::FailedVerificationCount).unwrap_or(0),
+            failed_verifications: storage.get(&DataKey13::FailedVerificationCount).unwrap_or(0),
         }
     }
 
@@ -22819,6 +22866,26 @@ mod tests {
         client.initialize(&admin);
     }
 
+    /// Issue #1723: `initialize` must require the admin's authorization, so a
+    /// caller cannot install an admin address that never signed.
+    #[test]
+    fn test_initialize_rejects_unsigned_admin() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // No mock_all_auths and no auth for `admin`: the call must fail.
+        let result = client.try_initialize(&admin);
+        assert!(result.is_err(), "initialize without admin signature must fail");
+
+        // A failed initialization must not leave an admin behind, so a
+        // properly authorized initialize still succeeds.
+        env.mock_all_auths();
+        client.initialize(&admin);
+        assert!(!client.is_paused());
+    }
+
     fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -26369,6 +26436,29 @@ mod tests {
 
         // Try to add third attestor (should fail - exceeds limit of 2)
         // This will panic in the current implementation
+    }
+
+    #[test]
+    fn test_update_congestion_admin_only_and_clamped_to_bounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        client.set_rate_limit_config(&admin, &1000u32, &86400u64);
+        // One call is below low_load_threshold (999) → Low. The increase would
+        // give 1000 * 1.2 = 1200, but max_max_calls caps it at 1100.
+        client.set_congestion_config(
+            &admin, &10000u64, &999u64, &5000u32, &12000u32, &50u32, &1100u32,
+        );
+
+        // A non-admin cannot trigger the adjustment, and the limit is untouched
+        let attacker = Address::generate(&env);
+        assert!(client.try_update_congestion_and_adjust(&attacker).is_err());
+        assert_eq!(client.get_rate_limit_config_pub().max_calls, 1000u32);
+
+        // The admin can, and the result is clamped to [min, max]
+        client.update_congestion_and_adjust(&admin);
+        assert_eq!(client.get_rate_limit_config_pub().max_calls, 1100u32);
     }
 }
 
@@ -30925,7 +31015,7 @@ mod doc_tests {
             &admin, &5u64, &1u64, &5000u32, &12000u32, &50u32, &5000u32,
         );
         // First call → 1 in window; 1 is NOT < 1, so Normal
-        let level = client.update_congestion_and_adjust();
+        let level = client.update_congestion_and_adjust(&admin);
         assert_eq!(level, CongestionLevel::Normal);
     }
 
@@ -30941,9 +31031,9 @@ mod doc_tests {
             &admin, &2u64, &0u64, &5000u32, &12000u32, &50u32, &5000u32,
         );
 
-        client.update_congestion_and_adjust(); // 1 in window → Normal
-        client.update_congestion_and_adjust(); // 2 in window → Normal (not > 2)
-        client.update_congestion_and_adjust(); // 3 in window → High → halve
+        client.update_congestion_and_adjust(&admin); // 1 in window → Normal
+        client.update_congestion_and_adjust(&admin); // 2 in window → Normal (not > 2)
+        client.update_congestion_and_adjust(&admin); // 3 in window → High → halve
 
         let cfg = client.get_rate_limit_config_pub();
         assert_eq!(cfg.max_calls, 500);
@@ -30961,7 +31051,7 @@ mod doc_tests {
             &admin, &10000u64, &999u64, &5000u32, &12000u32, &50u32, &5000u32,
         );
 
-        client.update_congestion_and_adjust(); // 1 < 999 → Low → 1200
+        client.update_congestion_and_adjust(&admin); // 1 < 999 → Low → 1200
 
         let cfg = client.get_rate_limit_config_pub();
         assert_eq!(cfg.max_calls, 1200);
@@ -30977,7 +31067,7 @@ mod doc_tests {
         );
 
         assert!(client.get_congestion_metrics().is_none());
-        client.update_congestion_and_adjust();
+        client.update_congestion_and_adjust(&admin);
         let m = client.get_congestion_metrics().unwrap();
         assert_eq!(m.calls_in_window, 1);
     }
@@ -31231,7 +31321,7 @@ mod doc_tests {
         client.set_congestion_config(
             &admin, &800u64, &200u64, &5000u32, &12000u32, &50u32, &10000u32,
         );
-        client.update_congestion_and_adjust();
+        client.update_congestion_and_adjust(&admin);
 
         let report = client.validate_contract_state();
         assert!(report.congestion_level > 0);
@@ -31299,7 +31389,7 @@ mod doc_tests {
         client.set_congestion_config(
             &admin, &0u64, &0u64, &5000u32, &12000u32, &50u32, &10000u32,
         );
-        client.update_congestion_and_adjust(); // 1 > 0 → High
+        client.update_congestion_and_adjust(&admin); // 1 > 0 → High
 
         let report = client.validate_contract_state();
         let has_1010 = report.findings.iter().any(|f| f.code == 1010u32);
@@ -31828,6 +31918,7 @@ mod doc_tests {
 
     /// Helper: create an initialised client + admin.
     fn new_client(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(env, &contract_id);
         let admin = Address::generate(env);
@@ -32102,6 +32193,39 @@ mod doc_tests {
 
     #[test]
     fn test_issue_credential_derivative() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let holder = Address::generate(&env);
+        let metadata = Bytes::from_slice(&env, b"test_metadata_hash_derivative");
+        let credential_id = client.issue_credential(&issuer, &subject, &1u32, &metadata, &None, &0u64);
+
+        let now = env.ledger().timestamp();
+        let expiration = now + 86400u64; // 1 day from now
+
+        let derivative_id = client.issue_credential_derivative(
+            &issuer,
+            &holder,
+            &credential_id,
+            &0u32, // Call option
+            &1000u64,
+            &expiration,
+            &100u64,
+        );
+
+        assert!(derivative_id > 0, "derivative should have been issued");
+
+        let derivative = client.get_credential_derivative(derivative_id);
+        assert!(derivative.is_some(), "derivative should be retrievable");
+
+        let deriv = derivative.unwrap();
+        assert_eq!(deriv.underlying_credential, credential_id);
+        assert!(!deriv.is_exercised, "derivative should not be exercised initially");
+    }
+
     // ===== Tests for Issue #1599: Batch Credential Amendments =====
 
     #[test]
@@ -32654,6 +32778,14 @@ mod tests_issue_1596;
 #[cfg(test)]
 #[path = "tests_issue_1597.rs"]
 mod tests_issue_1597;
+
+#[cfg(test)]
+#[path = "tests_issue_1730.rs"]
+mod tests_issue_1730;
+
+#[cfg(test)]
+#[path = "tests_issue_1731.rs"]
+mod tests_issue_1731;
 
 mod circuit_breaker;
 mod migration;

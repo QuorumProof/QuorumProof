@@ -9,6 +9,7 @@ groups:
         annotations:
           summary: "High error rate on QuorumProof API"
           description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#high-error-rate"
 
       - alert: APIDown
         expr: up{job="quorumproof-exporter"} == 0
@@ -18,6 +19,7 @@ groups:
         annotations:
           summary: "QuorumProof exporter is down"
           description: "The quorumproof-exporter has been unreachable for more than 1 minute."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#api-down"
 
       - alert: ContractPaused
         expr: quorumproof_contract_paused == 1
@@ -27,6 +29,7 @@ groups:
         annotations:
           summary: "QuorumProof contract is paused"
           description: "The contract has been paused by an admin. Investigate before unpausing."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#contract-paused"
 
       - alert: LowAttestationRate
         expr: quorumproof_attestation_success_rate < 0.5
@@ -36,6 +39,7 @@ groups:
         annotations:
           summary: "Low attestation success rate"
           description: "Attestation success rate is {{ $value | humanizePercentage }}, below 50%."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#low-attestation-rate"
 
       - alert: RateLimitSpike
         expr: rate(quorumproof_rate_limit_hits_total[5m]) > 5
@@ -45,6 +49,7 @@ groups:
         annotations:
           summary: "Unusual rate-limit activity"
           description: "Rate limit exceeded {{ $value }} times/s over the last 5 minutes."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#rate-limit-spike"
 
       # #587 — Contract health dashboard alerts
       - alert: ContractErrorBurst
@@ -55,6 +60,7 @@ groups:
         annotations:
           summary: "Burst of contract errors"
           description: "{{ $value }} errors in the last 10 minutes."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#contract-error-burst"
 
       # #599 — Backup verification alerts
       - alert: BackupMissing
@@ -65,6 +71,7 @@ groups:
         annotations:
           summary: "No successful backup in 25 hours"
           description: "Last successful backup was {{ $value | humanizeDuration }} ago. Expected every 24h."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#backup-missing"
 
       - alert: BackupVerificationFailed
         expr: quorumproof_backup_verification_status == 0
@@ -74,6 +81,7 @@ groups:
         annotations:
           summary: "Backup integrity verification failed"
           description: "The most recent backup failed integrity checks. Restore may not be possible."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#backup-verification-failed"
 
       # #846 — Automated performance regression detection
       - alert: QuerySLABreach
@@ -85,6 +93,7 @@ groups:
         annotations:
           summary: "Query latency exceeded SLA on {{ $labels.operation }}"
           description: "Operation {{ $labels.operation }} is producing SLA violations at {{ $value | humanize }} violations/s."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#query-sla-breach"
 
       - alert: PerformanceRegressionDetected
         expr: quorumproof_performance_regression_detected == 1
@@ -94,6 +103,7 @@ groups:
         annotations:
           summary: "Performance regression on {{ $labels.operation }}"
           description: "p95 latency for {{ $labels.operation }} is ≥20% above recorded baseline. Investigate recent deployments."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#performance-regression-detected"
 
       - alert: HighP95Latency
         expr: >
@@ -106,6 +116,7 @@ groups:
         annotations:
           summary: "p95 latency for {{ $labels.operation }} exceeds SLA"
           description: "p95={{ $value | humanizeDuration }} exceeds the configured SLA ceiling for {{ $labels.operation }}."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#high-p95-latency"
 
       # Operator health snapshot (get_state_metrics) — docs/operator-health-metrics.md
       - alert: StorageGrowthAnomaly
@@ -117,6 +128,7 @@ groups:
         annotations:
           summary: "Unusually fast storage growth"
           description: "Storage entries estimate is growing at {{ $value | humanize }} entries/s over the last hour, well above normal issuance rates. Check for abuse or a runaway integration."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#storage-growth-anomaly"
 
       - alert: HighCredentialRevocationRate
         expr: >
@@ -129,6 +141,7 @@ groups:
         annotations:
           summary: "High credential revocation rate"
           description: "Over 30% of recent credential activity has been revocations in the last hour. Investigate issuer behavior or a possible compromise."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#high-credential-revocation-rate"
 
       - alert: StateVersionMismatch
         expr: >
@@ -139,6 +152,7 @@ groups:
         annotations:
           summary: "Multiple contract state versions observed"
           description: "More than one distinct quorumproof_state_version value is being reported. This usually means an upgrade partially rolled out or a stale exporter is scraping an old deployment."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#state-version-mismatch"
 
       # Paginated/chunked migration protocol (docs/contract-upgrade-strategy.md)
       - alert: MigrationStalled
@@ -151,6 +165,7 @@ groups:
         annotations:
           summary: "Migration job {{ $labels.migration_id }} has not advanced in 30+ minutes"
           description: "Job {{ $labels.migration_id }} is still InProgress but its cursor hasn't moved since {{ $value | humanizeTimestamp }}. Check whether scripts/migration_orchestrator.py is still running."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#migration-stalled"
 
       # #3 — Critical contract event monitoring (revocations, disputes, upgrades).
       # Counters emitted by api-server/src/services/criticalEventListener.ts;
@@ -165,6 +180,7 @@ groups:
         annotations:
           summary: "Unusual burst of credential/delegation revocations"
           description: "{{ $value }} revocation-shaped events observed in the last 15 minutes — verify this matches expected issuer/attestor activity."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#revocation-spike"
 
       - alert: DisputeRaised
         expr: increase(quorumproof_critical_events_total{category="dispute"}[5m]) > 0
@@ -174,6 +190,7 @@ groups:
         annotations:
           summary: "A credential dispute was raised on-chain"
           description: "{{ $value }} dispute event(s) in the last 5 minutes. See GET /events/critical/recent for details (topic, ledger, tx hash)."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#dispute-raised"
 
       - alert: ContractUpgradeDetected
         expr: increase(quorumproof_critical_events_total{category="upgrade"}[5m]) > 0
@@ -183,6 +200,7 @@ groups:
         annotations:
           summary: "Contract upgrade or migration event detected"
           description: "{{ $value }} upgrade/migration event(s) in the last 5 minutes. Confirm this corresponds to a planned, authorized upgrade — see docs/contract-upgrade-strategy.md."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#contract-upgrade-detected"
 
       - alert: CriticalEventAlertingDegraded
         expr: increase(quorumproof_critical_event_alert_failures_total[15m]) > 0
@@ -192,6 +210,7 @@ groups:
         annotations:
           summary: "Critical event alert dispatch is failing"
           description: "{{ $value }} critical-event alert(s) failed to reach every configured channel in the last 15 minutes — check Slack/PagerDuty credentials and connectivity; do not assume the absence of other alerts means no critical events occurred."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#critical-event-alerting-degraded"
 
       # #1434 — Sustained WebSocket message drop alerting
       - alert: SustainedWsMessageDrops
@@ -202,6 +221,7 @@ groups:
         annotations:
           summary: "Sustained WebSocket message drops detected"
           description: "WebSocket messages are being dropped at {{ $value | humanize }} drops/s over the last 5 minutes. A client (or multiple) is falling far behind the send queue. Check for slow consumers or systemic network issues. See docs/operational-runbook.md#ws-message-drops."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#ws-message-drops"
 
       # #1650 — Multi-region failover
       - alert: RegionFailoverActive
@@ -212,6 +232,7 @@ groups:
         annotations:
           summary: "Secondary region {{ $labels.region }} is serving — primary is down"
           description: "The failover detector in {{ $labels.region }} reports the primary region unreachable. Route 53 should have moved traffic here. Decide whether to promote the Aurora secondary with scripts/region_failover.sh unplanned — see docs/multi-region-failover.md."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#region-failover-active"
 
       - alert: RegionPeerUnreachable
         expr: quorumproof_region_peer_up == 0
@@ -221,6 +242,7 @@ groups:
         annotations:
           summary: "Region {{ $labels.region }} cannot reach its peer region"
           description: "{{ $labels.region }} ({{ $labels.role }}) has seen its peer region as unhealthy for 5 minutes. If this is the primary, failover capacity is lost."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#region-peer-unreachable"
 
   # Issue #1646: performance alerts. Thresholds and the tuning response to
   # each are documented in docs/performance-tuning-guide.md (section 4).
@@ -234,6 +256,7 @@ groups:
         annotations:
           summary: "API p95 latency above 500ms"
           description: "p95 is {{ $value | humanizeDuration }}. See docs/performance-tuning-guide.md section 4.2."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#api-latency-p95-high"
 
       - alert: ApiLatencyP99Critical
         expr: histogram_quantile(0.99, sum by (le) (rate(quorumproof_api_request_duration_seconds_bucket[5m]))) > 2
@@ -243,6 +266,7 @@ groups:
         annotations:
           summary: "API p99 latency above 2s"
           description: "p99 is {{ $value | humanizeDuration }}. Check RPC breaker and concurrency queue first."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#api-latency-p99-critical"
 
       - alert: RpcCircuitBreakerOpen
         expr: quorumproof_rpc_circuit_breaker_state == 2
@@ -252,6 +276,7 @@ groups:
         annotations:
           summary: "Soroban RPC circuit breaker is open"
           description: "Verification is being served from cache or failing fast. See docs/performance-tuning-guide.md section 4.2."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#rpc-circuit-breaker-open"
 
       - alert: DbPoolSaturated
         expr: quorumproof_db_pool_utilization_pct > 90 or quorumproof_db_pool_waiting > 0
@@ -261,6 +286,7 @@ groups:
         annotations:
           summary: "Database connection pool saturated"
           description: "Pool utilisation {{ $value }}. See docs/performance-tuning-guide.md section 4.2."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#db-pool-saturated"
 
       - alert: WsMessagesDropping
         expr: rate(quorumproof_ws_messages_dropped_total[5m]) > 1
@@ -270,6 +296,7 @@ groups:
         annotations:
           summary: "WebSocket messages are being dropped"
           description: "Slow consumers are overflowing send queues. See docs/performance-tuning-guide.md section 4.2."
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#ws-messages-dropping"
 
   # Issue #1661: Cost Alert Thresholds
   # Thresholds, routing, and tuning instructions are in
@@ -311,6 +338,7 @@ groups:
             the configured daily budget. Review top-spending operations at
             GET /api/costs/optimizations and consider applying the tuning steps in
             docs/cost-alert-thresholds.md §Reducing Cost.
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#cost-budget-warning"
 
       # ── Critical: 100 % of daily budget consumed ─────────────────────────────
       # Pages on-call via PagerDuty. Cost overruns at this level may indicate
@@ -331,6 +359,7 @@ groups:
             for the top spenders and GET /api/costs/optimizations for quick wins.
             Consider throttling high-volume callers or enabling DISABLE_BACKGROUND_JOBS.
             See docs/cost-alert-thresholds.md §Emergency Response.
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#cost-budget-critical"
 
       # ── Single-operation spike alert ─────────────────────────────────────────
       # Fires when one operation consumes more than 50 % of the hourly budget
@@ -352,3 +381,4 @@ groups:
             the last hour, more than half of the expected hourly budget allocation.
             Investigate at GET /api/costs/projection?operation={{ $labels.operation }}&callsPerDay=...
             and apply the tuning guidance in docs/cost-alert-thresholds.md §Per-Operation Tuning.
+          runbook_url: "https://github.com/cryptonautt/QuorumProof/blob/main/docs/operational-runbook.md#cost-operation-spike"

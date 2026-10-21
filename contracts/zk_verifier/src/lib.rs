@@ -1,4 +1,11 @@
 #![no_std]
+// Test builds use `std::` paths (formatting, catch_unwind, Vec); the crate itself stays no_std.
+#[cfg(test)]
+extern crate std;
+
+/// Topic for admin-transfer events emitted by [`ZkVerifierContract::update_admin`].
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
+
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Vec};
 use soroban_sdk::xdr::ToXdr;
 
@@ -48,6 +55,11 @@ const MAX_GROTH16_PUBLIC_INPUTS: usize = groth16::MAX_PUBLIC_INPUTS;
 /// why per-proof pairing work can't be pre-batched further without a global
 /// allocator).
 const MAX_GROTH16_AGGREGATE_BATCH: usize = 16;
+
+/// Issue #1732: Upper bound on the number of entries accepted by
+/// `verify_batch_proofs` in a single call. Oversized batches are rejected up
+/// front instead of failing at the per-transaction resource limit.
+pub const MAX_VERIFY_BATCH: u32 = 16;
 
 /// Key rotation audit entry
 #[contracttype]
@@ -690,6 +702,10 @@ pub const EVENT_SET_GROTH16_VK: &str = "zk:set_groth16_verifying_key";
 /// when circuit parameters are first registered.
 pub const EVENT_SET_CIRCUIT_PARAMS: &str = "zk:set_circuit_parameters";
 
+/// Event topic emitted by [`ZkVerifierContract::store_proof_timestamp`] when a
+/// write is rejected because a submission timestamp is already recorded.
+pub const EVENT_PROOF_TIMESTAMP_REJECTED: &str = "zk:proof_timestamp_rejected";
+
 #[contract]
 /// Design rationale: docs/adr/adr-003-zk-verification.md, docs/adr/adr-010-three-contract-architecture.md
 pub struct ZkVerifierContract;
@@ -697,17 +713,23 @@ pub struct ZkVerifierContract;
 #[contractimpl]
 impl ZkVerifierContract {
     /// Generate a proof request for a given credential and claim type.
+    ///
+    /// The nonce comes from a stored, strictly increasing counter (Issue #1733), not
+    /// the ledger sequence, so requests in the same ledger never share a nonce. The
+    /// issued request is recorded under its nonce; see `get_issued_proof_request`.
     pub fn generate_proof_request(
         env: Env,
         credential_id: u64,
         claim_type: ClaimType,
     ) -> ProofRequest {
-        let nonce = env.ledger().sequence() as u64;
-        ProofRequest {
-            credential_id,
-            claim_type,
-            nonce,
-        }
+        Self::issue_proof_request(&env, credential_id, claim_type)
+    }
+
+    /// Issue #1733: Look up the proof request recorded under `nonce`, if one was issued.
+    pub fn get_issued_proof_request(env: Env, nonce: u64) -> Option<ProofRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey::IssuedProofRequest(nonce))
     }
 
     /// Generate an anonymous proof request using a holder commitment instead of an address.
@@ -720,13 +742,49 @@ impl ZkVerifierContract {
         holder_commitment: Bytes,
     ) -> AnonymousProofRequest {
         assert!(!holder_commitment.is_empty(), "holder_commitment cannot be empty");
-        let nonce = env.ledger().sequence() as u64;
+        let nonce = Self::next_proof_nonce(&env, credential_id, claim_type);
         AnonymousProofRequest {
             credential_id,
             claim_type,
             nonce,
             holder_commitment,
         }
+    }
+
+    /// Issue #1733: Build and record a proof request under a freshly allocated nonce.
+    fn issue_proof_request(env: &Env, credential_id: u64, claim_type: ClaimType) -> ProofRequest {
+        let nonce = Self::next_proof_nonce(env, credential_id, claim_type);
+        ProofRequest {
+            credential_id,
+            claim_type,
+            nonce,
+        }
+    }
+
+    /// Issue #1733: Allocate the next proof-request nonce from the stored counter and
+    /// record the (credential, claim) it was issued for under that nonce.
+    fn next_proof_nonce(env: &Env, credential_id: u64, claim_type: ClaimType) -> u64 {
+        let last: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProofRequestNonceCounter)
+            .unwrap_or(0u64);
+        let nonce = last
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("proof request nonce space exhausted"));
+        env.storage()
+            .instance()
+            .set(&DataKey::ProofRequestNonceCounter, &nonce);
+        env.storage().instance().set(
+            &DataKey::IssuedProofRequest(nonce),
+            &ProofRequest {
+                credential_id,
+                claim_type,
+                nonce,
+            },
+        );
+        env.storage().instance().extend_ttl(16_384, 524_288);
+        nonce
     }
 
     /// Register the SHA-256 hash of the off-chain Groth16 verifying key.
@@ -1034,7 +1092,7 @@ impl ZkVerifierContract {
         claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1077,8 +1135,21 @@ impl ZkVerifierContract {
     }
 
     /// Set the admin address once after deployment.
+    /// Set the contract admin. Can only succeed once per deployment.
+    ///
+    /// Issue #1721: the new admin must authorize this call. Without
+    /// `require_auth`, whoever submitted the first transaction after deployment
+    /// could claim the admin role.
+    ///
+    /// # Parameters
+    /// - `admin`: The address to become admin (must authorize).
+    ///
+    /// # Panics
+    /// - If the contract is already initialized.
+    /// - If `admin` has not authorized the call.
     pub fn initialize(env: Env, admin: Address) {
         assert!(!env.storage().instance().has(&DataKey::Admin), "already initialized");
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
@@ -1115,92 +1186,6 @@ impl ZkVerifierContract {
         let mut topics: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
         topics.push_back(topic);
         env.events().publish(topics, event_data);
-    }
-
-    /// Verify a ZK proof with caching and TTL support.
-    ///
-    /// This function first checks if the proof has been verified before by 
-    /// looking up the cache. If found and not expired, it returns the cached result.
-    /// Otherwise, it verifies the proof and caches the result with the specified TTL.
-    /// 
-    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
-    /// Cache entries expire after `ttl` ledgers.
-    ///
-    /// **Test-only**: like [`groth16_verify`], this verifies via the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_proof_cached(
-        env: Env,
-        admin: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
-        proof: Bytes,
-        ttl: u32,
-    ) -> bool {
-        // Admin gate
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
-
-        // Generate cache key from proof bytes, credential_id, and claim_type
-        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
-
-        // Check cache first
-        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
-            // Check if cache entry has expired
-            let current_ledger = env.ledger().sequence();
-            if current_ledger <= entry.cached_at_ledger + entry.ttl {
-                // Cache hit: increment hit counter
-                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
-                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
-                return entry.result;
-            }
-        }
-
-        // Not in cache or expired, perform Groth16 verification
-        // Cache miss: increment miss counter
-        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
-        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
-        let vk_hash: BytesN<32> = env.storage().instance()
-            .get(&DataKey::VerifyingKeyHash)
-            .expect("verifying key not set");
-        let result = groth16_verify(&env, &vk_hash, &proof);
-
-        // Cache the result with TTL
-        let entry = CacheEntry {
-            result,
-            cached_at_ledger: env.ledger().sequence(),
-            ttl,
-        };
-        env.storage().temporary().set(&cache_key, &entry);
-
-        result
-    }
-
-    /// Verify a ZK proof for a claim with caching.
-    ///
-    /// This function first checks if the proof has been verified before by 
-    /// looking up the cache. If found, it returns the cached result immediately.
-    /// Otherwise, it verifies the proof and caches the result for future calls.
-    /// 
-    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
-    /// Cache entries are stored indefinitely until explicitly cleared.
-    ///
-    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_claim_with_cache(
-        env: Env,
-        admin: Address,
-        quorum_proof_id: Address,
-        credential_id: u64,
-        claim_type: ClaimType,
-        proof: Bytes,
-    ) -> bool {
-        // Use default TTL of 1000 ledgers (approximately 1 day)
-        Self::verify_proof_cached(env, admin, credential_id, claim_type, proof, 1000)
     }
 
     /// Internal helper to generate cache key from proof components.
@@ -1361,23 +1346,65 @@ impl ZkVerifierContract {
     // ===== Issue #381: Metadata Encryption =====
 
     /// Store proof metadata with optional encryption.
+    ///
+    /// Issue #1724: `caller` must authorize the write and must be the admin or
+    /// a registrar (authorized issuer). Replacing an existing entry is allowed
+    /// only for the admin or the address that wrote the entry.
     pub fn store_proof_metadata(
         env: Env,
+        caller: Address,
         credential_id: u64,
         claim_type: ClaimType,
         proof_hash: Bytes,
         description: String,
     ) {
+        caller.require_auth();
+        require_registrar_or_admin(&env, &caller);
+
+        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
+        let writer_key = DataKey::ProofMetadataWriter(credential_id, claim_type.clone());
+        if env.storage().instance().has(&key) {
+            let is_admin = stored_admin(&env).is_some_and(|admin| admin == caller);
+            let is_writer = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&writer_key)
+                .is_some_and(|writer| writer == caller);
+            assert!(is_admin || is_writer, "unauthorized overwrite");
+        }
+
         let metadata = ProofMetadata {
             credential_id,
-            claim_type: claim_type.clone(),
+            claim_type,
             proof_hash,
             description,
             encrypted: false,
             compressed: false,
         };
-        let key = DataKey::ProofMetadata(credential_id, claim_type);
         env.storage().instance().set(&key, &metadata);
+        env.storage().instance().set(&writer_key, &caller);
+    }
+
+    /// Grant or revoke the registrar (authorized issuer) role. Only the admin may call this.
+    pub fn set_registrar(env: Env, admin: Address, registrar: Address, enabled: bool) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey::Registrar(registrar), &enabled);
+    }
+
+    /// Returns true if `addr` holds the registrar role.
+    pub fn is_registrar(env: Env, addr: Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Registrar(addr))
+            .unwrap_or(false)
     }
 
     /// Retrieve proof metadata.
@@ -1558,32 +1585,6 @@ impl ZkVerifierContract {
 
     // ===== Anonymous Verification =====
 
-    /// Verify a Groth16 ZK proof anonymously using a holder commitment.
-    /// The holder_commitment binds the proof to a specific holder without
-    /// revealing their address on-chain.
-    ///
-    /// **Test-only**: like [`groth16_verify`], this verifies via the
-    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn verify_claim_anonymous(
-        env: Env,
-        _credential_id: u64,
-        _claim_type: ClaimType,
-        holder_commitment: Bytes,
-        proof: Bytes,
-    ) -> bool {
-        if holder_commitment.is_empty() {
-            return false;
-        }
-        let vk_hash: BytesN<32> = match env.storage().instance()
-            .get(&DataKey::VerifyingKeyHash)
-        {
-            Some(h) => h,
-            None => return false,
-        };
-        groth16_verify(&env, &vk_hash, &proof)
-    }
-
     /// Verify a Groth16 proof with explicit verifying-key hash and public inputs.
     ///
     /// This is the primary production entry point for Groth16 verification.
@@ -1628,10 +1629,16 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
+    }
+
+    /// Maximum number of entries `verify_batch_proofs` accepts in one call.
+    /// Clients should chunk larger batches to this size.
+    pub fn get_max_verify_batch(_env: Env) -> u32 {
+        MAX_VERIFY_BATCH
     }
 
     /// Verify a batch of Groth16 proofs in a single call.
@@ -1640,7 +1647,9 @@ impl ZkVerifierContract {
     /// is verified independently using the same logic as `verify_groth16_proof`.
     /// The returned `Vec<bool>` preserves the input order.
     ///
-    /// All three vectors must have the same length; panics otherwise.
+    /// All three vectors must have the same length, and no more than
+    /// [`MAX_VERIFY_BATCH`] entries; panics otherwise. Use
+    /// [`ZkVerifierContract::get_max_verify_batch`] to chunk larger workloads.
     pub fn verify_batch_proofs(
         env: Env,
         proofs: soroban_sdk::Vec<Bytes>,
@@ -1648,6 +1657,10 @@ impl ZkVerifierContract {
         vk_hashes: soroban_sdk::Vec<BytesN<32>>,
     ) -> soroban_sdk::Vec<bool> {
         let len = proofs.len();
+        assert!(
+            len <= MAX_VERIFY_BATCH,
+            "batch size exceeds MAX_VERIFY_BATCH"
+        );
         assert!(
             public_inputs.len() == len && vk_hashes.len() == len,
             "proofs, public_inputs, and vk_hashes must have the same length"
@@ -1965,7 +1978,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -2285,23 +2298,41 @@ impl ZkVerifierContract {
             .unwrap_or(ProtocolConfig { proof_ttl_seconds: 2_592_000 })
     }
 
-    /// Record the Unix-epoch timestamp at which a proof was first submitted
-    /// for a given `(credential_id, claim_type)` pair.
+    /// Record the submission time of a proof for a `(credential_id, claim_type)`
+    /// pair. Admin only.
     ///
-    /// Calling this more than once for the same pair is a no-op — the original
-    /// submission timestamp is preserved so that TTL is measured from first
-    /// submission, not from the most-recent call.
+    /// The timestamp is taken from the ledger, never from the caller, so a
+    /// submitter cannot backdate or pre-fix the time that later verifiers read.
+    ///
+    /// The first recorded value is kept. A later call for the same pair does
+    /// not overwrite it: it emits an [`EVENT_PROOF_TIMESTAMP_REJECTED`] event
+    /// and returns `false`. The event is emitted without panicking because a
+    /// panic would roll the event back.
+    ///
+    /// Returns `true` when this call recorded the timestamp.
     pub fn store_proof_timestamp(
         env: Env,
+        admin: Address,
         credential_id: u64,
         claim_type: ClaimType,
-        submitted_at: u64,
-    ) {
+    ) -> bool {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
         let key = DataKey::ProofTimestamp(credential_id, claim_type);
-        // Preserve the original submission time; ignore if already set.
-        if !env.storage().instance().has(&key) {
-            env.storage().instance().set(&key, &submitted_at);
+        if let Some(existing) = env.storage().instance().get::<_, u64>(&key) {
+            env.events().publish(
+                (String::from_str(&env, EVENT_PROOF_TIMESTAMP_REJECTED), credential_id),
+                existing,
+            );
+            return false;
         }
+
+        env.storage().instance().set(&key, &env.ledger().timestamp());
+        true
     }
 
     /// Return the age (in seconds) of the stored proof for
@@ -2351,6 +2382,25 @@ impl ZkVerifierContract {
             None => false,
         }
     }
+}
+
+/// Largest page `get_proof_hash_registry` returns in one call (issue #1725).
+const MAX_PROOF_HASH_PAGE: u32 = 100;
+
+/// Returns the stored admin address, if the contract has been initialized.
+fn stored_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Admin)
+}
+
+/// Panics unless `caller` is the admin or a registrar (issues #1724, #1725).
+fn require_registrar_or_admin(env: &Env, caller: &Address) {
+    let is_admin = stored_admin(env).is_some_and(|admin| admin == *caller);
+    let is_registrar = env
+        .storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Registrar(caller.clone()))
+        .unwrap_or(false);
+    assert!(is_admin || is_registrar, "unauthorized");
 }
 
 #[contracttype]
@@ -2413,8 +2463,14 @@ pub enum DataKey {
     /// A registered constraint system, keyed by its id.
     ConstraintSystem(u64),
     // ===== Proof-hash registry and revocation =====
-    /// Every registered proof hash, in registration order.
-    ProofHashRegistry,
+    /// Registrar role flag (authorized issuer). The admin is always authorized.
+    Registrar(Address),
+    /// Address that wrote the current `ProofMetadata` entry for a key.
+    ProofMetadataWriter(u64, ClaimType),
+    /// Number of entries in the proof-hash registry (persistent storage).
+    ProofHashCount,
+    /// Proof hash at a registry index, in registration order (persistent storage).
+    ProofHashAt(u32),
     /// Whether a given proof hash has been revoked.
     ProofRevocationStatus(BytesN<32>),
     /// The revocation record for a revoked proof hash.
@@ -2430,6 +2486,15 @@ pub enum DataKey {
     MpcContribution(BytesN<32>, BytesN<32>),
     /// Number of contributions received for a session.
     MpcContributionCount(BytesN<32>),
+    /// Verifier addresses admitted to take part in MPC sessions.
+    MpcVerifierRegistry,
+    // ===== Issue #1733: Proof request nonces =====
+    /// Last proof-request nonce handed out. Nonces are drawn from this counter, so
+    /// two requests in the same ledger never share a nonce.
+    ProofRequestNonceCounter,
+    /// The proof request issued under a nonce. Written once per nonce, so each
+    /// nonce binds to exactly one request.
+    IssuedProofRequest(u64),
 }
 
 // ===== Issue #994: ProtocolConfig =====
@@ -2649,19 +2714,61 @@ impl ZkVerifierContract {
 
     /// Register a proof hash in the revocation registry.
     ///
-    /// This records the hash on-chain so it can later be revoked. All
-    /// callers may register a proof hash; revocation itself is admin-only.
-    pub fn register_proof_hash(env: Env, proof_hash: BytesN<32>) {
+    /// Issue #1725: `caller` must authorize the call and must be the admin or
+    /// a registrar. A hash can be registered only once: re-registering is
+    /// rejected, so an existing revocation status is never reset. The registry
+    /// lives in persistent storage, one entry per index; read it back with
+    /// `get_proof_hash_registry`.
+    pub fn register_proof_hash(env: Env, caller: Address, proof_hash: BytesN<32>) {
+        caller.require_auth();
+        require_registrar_or_admin(&env, &caller);
+
+        assert!(
+            !env.storage().instance()
+                .has(&DataKey::ProofRevocationStatus(proof_hash.clone())),
+            "proof hash already registered"
+        );
+
         // Record as not-yet-revoked
         env.storage().instance()
             .set(&DataKey::ProofRevocationStatus(proof_hash.clone()), &false);
 
-        // Append to the global registry list
-        let mut registry: Vec<BytesN<32>> = env.storage().instance()
-            .get(&DataKey::ProofHashRegistry)
-            .unwrap_or_else(|| Vec::new(&env));
-        registry.push_back(proof_hash);
-        env.storage().instance().set(&DataKey::ProofHashRegistry, &registry);
+        // Append to the registry: one persistent entry per index.
+        let count: u32 = env.storage().persistent()
+            .get(&DataKey::ProofHashCount)
+            .unwrap_or(0);
+        let index_key = DataKey::ProofHashAt(count);
+        env.storage().persistent().set(&index_key, &proof_hash);
+        env.storage().persistent().extend_ttl(&index_key, 16_384, 524_288);
+        env.storage().persistent().set(&DataKey::ProofHashCount, &(count + 1));
+        env.storage().persistent()
+            .extend_ttl(&DataKey::ProofHashCount, 16_384, 524_288);
+    }
+
+    /// Number of proof hashes in the registry.
+    pub fn get_proof_hash_count(env: Env) -> u32 {
+        env.storage().persistent()
+            .get(&DataKey::ProofHashCount)
+            .unwrap_or(0)
+    }
+
+    /// Return up to `limit` registered proof hashes starting at `offset`,
+    /// in registration order. `limit` is capped at `MAX_PROOF_HASH_PAGE`.
+    pub fn get_proof_hash_registry(env: Env, offset: u32, limit: u32) -> Vec<BytesN<32>> {
+        let count: u32 = env.storage().persistent()
+            .get(&DataKey::ProofHashCount)
+            .unwrap_or(0);
+        let end = offset.saturating_add(limit.min(MAX_PROOF_HASH_PAGE)).min(count);
+
+        let mut page = Vec::new(&env);
+        for index in offset..end {
+            if let Some(hash) = env.storage().persistent()
+                .get::<_, BytesN<32>>(&DataKey::ProofHashAt(index))
+            {
+                page.push_back(hash);
+            }
+        }
+        page
     }
 
     /// Revoke a previously registered proof hash.
@@ -2737,18 +2844,29 @@ impl ZkVerifierContract {
 
     // ─── Issue #1281: Proof Expiry and Time-Bound Verification ────────────
 
-    /// Submit a proof with a timestamp for time-bound verification.
+    /// Submit a proof for time-bound verification.
     ///
-    /// Records the `submitted_at` Unix timestamp alongside the proof hash so
-    /// that `verify_proof_with_time_bounds` can check freshness later.
-    pub fn submit_time_bound_proof(env: Env, proof: Bytes, submitted_at: u64) -> TimeBoundProof {
+    /// The submission time is the ledger timestamp at the moment of the first
+    /// submission, stored alongside the proof hash so that
+    /// `verify_proof_with_time_bounds` can check freshness later. The caller
+    /// cannot supply or backdate it.
+    ///
+    /// Re-submitting the same proof keeps the original submission time, so a
+    /// caller cannot refresh a stale proof's freshness window by resubmitting.
+    pub fn submit_time_bound_proof(env: Env, proof: Bytes) -> TimeBoundProof {
         assert!(!proof.is_empty(), "proof cannot be empty");
 
         let proof_hash: BytesN<32> = env.crypto().sha256(&proof).into();
+        let key = DataKey::ProofSubmissionTimestamp(proof_hash.clone());
 
-        // Store the submission timestamp keyed by proof hash
-        env.storage().instance()
-            .set(&DataKey::ProofSubmissionTimestamp(proof_hash.clone()), &submitted_at);
+        let submitted_at: u64 = match env.storage().instance().get::<_, u64>(&key) {
+            Some(first_submitted_at) => first_submitted_at,
+            None => {
+                let now = env.ledger().timestamp();
+                env.storage().instance().set(&key, &now);
+                now
+            }
+        };
 
         TimeBoundProof {
             proof,
@@ -2808,19 +2926,61 @@ impl ZkVerifierContract {
 
     // ─── Issue #1282: Multi-Party Computation Support ─────────────────────
 
-    /// Create a new MPC threshold verification session.
+    /// Admit a verifier address to MPC sessions. Admin only.
+    ///
+    /// Registering an address that is already present is a no-op.
+    pub fn register_mpc_verifier(env: Env, admin: Address, verifier: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        let mut registry: Vec<Address> = env.storage().instance()
+            .get(&DataKey::MpcVerifierRegistry)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !registry.iter().any(|v| v == verifier) {
+            registry.push_back(verifier);
+            env.storage().instance().set(&DataKey::MpcVerifierRegistry, &registry);
+        }
+    }
+
+    /// Return how many verifiers are registered for MPC sessions.
+    pub fn get_mpc_verifier_count(env: Env) -> u32 {
+        env.storage().instance()
+            .get::<_, Vec<Address>>(&DataKey::MpcVerifierRegistry)
+            .map(|registry| registry.len())
+            .unwrap_or(0)
+    }
+
+    /// Create a new MPC threshold verification session. Admin only.
     ///
     /// The `session_id` is caller-supplied and should be a unique value
     /// derived off-chain (e.g. SHA-256(credential_id ‖ claim_type ‖ nonce)).
-    /// `threshold` must be ≥ 1 and ≤ `total_verifiers`.
+    /// `threshold` must be ≥ 1 and ≤ `total_verifiers`, and `total_verifiers`
+    /// must not exceed the number of registered verifiers.
     pub fn create_mpc_session(
         env: Env,
+        admin: Address,
         session_id: BytesN<32>,
         threshold: u32,
         total_verifiers: u32,
     ) -> MpcSession {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
         assert!(threshold >= 1, "threshold must be at least 1");
         assert!(total_verifiers >= threshold, "total_verifiers must be >= threshold");
+
+        // The verifier set a session draws on must already be registered
+        let registered = Self::get_mpc_verifier_count(env.clone());
+        assert!(
+            total_verifiers <= registered,
+            "total_verifiers exceeds registered verifiers"
+        );
 
         // Prevent duplicate sessions
         let existing: Option<MpcSession> = env.storage().instance()
@@ -2943,13 +3103,134 @@ impl ZkVerifierContract {
     }
 }
 
+// Test-only entry points. They live in their own gated `#[contractimpl]` block
+// because the macro emits dispatch glue for every fn in a block regardless of
+// `#[cfg]`, so gated fns must sit inside a block that is itself gated. Keeping
+// them out of production builds also keeps the heuristic verifier out of wasm.
+#[cfg(any(test, feature = "testutils"))]
+#[contractimpl]
+impl ZkVerifierContract {
+    /// Verify a ZK proof with caching and TTL support.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found and not expired, it returns the cached result.
+    /// Otherwise, it verifies the proof and caches the result with the specified TTL.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries expire after `ttl` ledgers.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_proof_cached(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+        ttl: u32,
+    ) -> bool {
+        // Admin gate
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Generate cache key from proof bytes, credential_id, and claim_type
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+
+        // Check cache first
+        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
+            // Check if cache entry has expired
+            let current_ledger = env.ledger().sequence();
+            if current_ledger <= entry.cached_at_ledger + entry.ttl {
+                // Cache hit: increment hit counter
+                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
+                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
+                return entry.result;
+            }
+        }
+
+        // Not in cache or expired, perform Groth16 verification
+        // Cache miss: increment miss counter
+        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
+        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
+        let vk_hash: BytesN<32> = env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+            .expect("verifying key not set");
+        let result = groth16_verify(&env, &vk_hash, &proof);
+
+        // Cache the result with TTL
+        let entry = CacheEntry {
+            result,
+            cached_at_ledger: env.ledger().sequence(),
+            ttl,
+        };
+        env.storage().temporary().set(&cache_key, &entry);
+
+        result
+    }
+
+    /// Verify a ZK proof for a claim with caching.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found, it returns the cached result immediately.
+    /// Otherwise, it verifies the proof and caches the result for future calls.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries are stored indefinitely until explicitly cleared.
+    ///
+    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_with_cache(
+        env: Env,
+        admin: Address,
+        quorum_proof_id: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) -> bool {
+        // Use default TTL of 1000 ledgers (approximately 1 day)
+        Self::verify_proof_cached(env, admin, credential_id, claim_type, proof, 1000)
+    }
+
+    /// Verify a Groth16 ZK proof anonymously using a holder commitment.
+    /// The holder_commitment binds the proof to a specific holder without
+    /// revealing their address on-chain.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_anonymous(
+        env: Env,
+        _credential_id: u64,
+        _claim_type: ClaimType,
+        holder_commitment: Bytes,
+        proof: Bytes,
+    ) -> bool {
+        if holder_commitment.is_empty() {
+            return false;
+        }
+        let vk_hash: BytesN<32> = match env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+        {
+            Some(h) => h,
+            None => return false,
+        };
+        groth16_verify(&env, &vk_hash, &proof)
+    }
+}
+
 #[cfg(test)]
 mod proptest_zk_verifier;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use sha2::{Digest, Sha256};
     use soroban_sdk::{Bytes, Env};
     use crate::plonk_test_prover;
     use crate::groth16_test_prover;
@@ -3264,13 +3545,13 @@ mod tests {
     #[test]
     fn test_store_and_get_proof_metadata() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
         let proof_hash = Bytes::from_slice(&env, b"sha256:abc123");
         let description = String::from_str(&env, "Degree proof for MIT 2020");
 
-        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &proof_hash, &description);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &proof_hash, &description);
 
         let meta = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
         assert_eq!(meta.credential_id, 1);
@@ -3282,16 +3563,16 @@ mod tests {
     #[test]
     fn test_metadata_isolated_per_claim_type() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
         let hash_degree = Bytes::from_slice(&env, b"hash-degree");
         let hash_license = Bytes::from_slice(&env, b"hash-license");
         let desc_degree = String::from_str(&env, "degree desc");
         let desc_license = String::from_str(&env, "license desc");
 
-        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash_degree, &desc_degree);
-        client.store_proof_metadata(&1u64, &ClaimType::HasLicense, &hash_license, &desc_license);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &hash_degree, &desc_degree);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasLicense, &hash_license, &desc_license);
 
         let meta_d = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
         let meta_l = client.get_proof_metadata(&1u64, &ClaimType::HasLicense);
@@ -3303,15 +3584,15 @@ mod tests {
     #[test]
     fn test_metadata_isolated_per_credential() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
         let hash1 = Bytes::from_slice(&env, b"hash-cred-1");
         let hash2 = Bytes::from_slice(&env, b"hash-cred-2");
         let desc = String::from_str(&env, "desc");
 
-        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash1, &desc);
-        client.store_proof_metadata(&2u64, &ClaimType::HasDegree, &hash2, &desc);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &hash1, &desc);
+        client.store_proof_metadata(&admin, &2u64, &ClaimType::HasDegree, &hash2, &desc);
 
         assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash1);
         assert_eq!(client.get_proof_metadata(&2u64, &ClaimType::HasDegree).proof_hash, hash2);
@@ -4011,7 +4292,110 @@ mod tests {
         assert!(client.verify_claim(&admin, &qp_id, &5u64, &ClaimType::HasDegree, &proof));
     }
 
+    // --- Issue #1733: proof request nonces ---
+
+    #[test]
+    fn test_two_proof_requests_in_same_ledger_get_different_nonces() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        // Same ledger sequence for both calls: the old ledger-sequence nonce collided here.
+        let first = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        let second = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        assert_ne!(first.nonce, second.nonce);
+        assert!(second.nonce > first.nonce);
+    }
+
+    #[test]
+    fn test_anonymous_and_plain_requests_share_nonce_space() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let plain = client.generate_proof_request(&1u64, &ClaimType::HasDegree);
+        let anon = client.generate_anonymous_proof_request(
+            &2u64,
+            &ClaimType::HasLicense,
+            &Bytes::from_slice(&env, b"commitment"),
+        );
+        assert_ne!(plain.nonce, anon.nonce);
+        assert!(client.get_issued_proof_request(&anon.nonce).is_some());
+    }
+
+    #[test]
+    fn test_issued_nonce_is_bound_to_its_request() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let req_a = client.generate_proof_request(&10u64, &ClaimType::HasDegree);
+        let req_b = client.generate_proof_request(&20u64, &ClaimType::HasLicense);
+
+        let recorded_a = client.get_issued_proof_request(&req_a.nonce).unwrap();
+        assert_eq!(recorded_a.credential_id, 10u64);
+        assert_eq!(recorded_a.claim_type, ClaimType::HasDegree);
+        let recorded_b = client.get_issued_proof_request(&req_b.nonce).unwrap();
+        assert_eq!(recorded_b.credential_id, 20u64);
+        assert_eq!(recorded_b.claim_type, ClaimType::HasLicense);
+    }
+
+    #[test]
+    fn test_unissued_nonce_has_no_request() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        assert!(client.get_issued_proof_request(&999u64).is_none());
+    }
+
     // --- verify_batch_proofs tests ---
+
+    /// Issue #1732: a batch of exactly MAX_VERIFY_BATCH entries is accepted.
+    #[test]
+    fn test_verify_batch_proofs_at_max_batch_size_accepted() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let max = client.get_max_verify_batch();
+        assert_eq!(max, MAX_VERIFY_BATCH);
+
+        let invalid = Bytes::from_slice(&env, b"bad");
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        let mut vks = soroban_sdk::Vec::new(&env);
+        let vk_hash = BytesN::from_array(&env, &[0u8; 32]);
+        for _ in 0..max {
+            proofs.push_back(invalid.clone());
+            pis.push_back(invalid.clone());
+            vks.push_back(vk_hash.clone());
+        }
+
+        let results = client.verify_batch_proofs(&proofs, &pis, &vks);
+        assert_eq!(results.len(), max);
+    }
+
+    /// Issue #1732: one entry above MAX_VERIFY_BATCH is rejected before any verification.
+    #[test]
+    #[should_panic(expected = "batch size exceeds MAX_VERIFY_BATCH")]
+    fn test_verify_batch_proofs_one_above_max_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+
+        let invalid = Bytes::from_slice(&env, b"bad");
+        let mut proofs = soroban_sdk::Vec::new(&env);
+        let mut pis = soroban_sdk::Vec::new(&env);
+        let mut vks = soroban_sdk::Vec::new(&env);
+        let vk_hash = BytesN::from_array(&env, &[0u8; 32]);
+        for _ in 0..(MAX_VERIFY_BATCH + 1) {
+            proofs.push_back(invalid.clone());
+            pis.push_back(invalid.clone());
+            vks.push_back(vk_hash.clone());
+        }
+
+        client.verify_batch_proofs(&proofs, &pis, &vks);
+    }
 
     #[test]
     fn test_verify_batch_proofs_all_valid() {
@@ -4342,13 +4726,14 @@ mod tests {
     fn test_store_proof_timestamp_and_get_age() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 1u64;
         let claim_type = ClaimType::HasDegree;
         let submitted_at = 1_000_000u64;
 
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // Age at submitted_at + 3600 should be 3600 seconds
         let age = client.get_proof_age(&credential_id, &claim_type, &(submitted_at + 3600));
@@ -4369,19 +4754,69 @@ mod tests {
     fn test_store_proof_timestamp_is_idempotent() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 2u64;
         let claim_type = ClaimType::HasCertification;
         let first_ts = 1_000_000u64;
-        let second_ts = 1_100_000u64; // later timestamp should be ignored
+        let second_ts = 1_100_000u64;
 
-        client.store_proof_timestamp(&credential_id, &claim_type, &first_ts);
-        client.store_proof_timestamp(&credential_id, &claim_type, &second_ts);
+        env.ledger().set_timestamp(first_ts);
+        assert!(client.store_proof_timestamp(&admin, &credential_id, &claim_type));
+
+        // A later write is rejected: it returns false and keeps first_ts
+        env.ledger().set_timestamp(second_ts);
+        assert!(!client.store_proof_timestamp(&admin, &credential_id, &claim_type));
 
         // Age must still be based on first_ts
         let age = client.get_proof_age(&credential_id, &claim_type, &(first_ts + 500));
         assert_eq!(age, Some(500u64));
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_rejected_write_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let credential_id = 3u64;
+        let claim_type = ClaimType::HasDegree;
+
+        env.ledger().set_timestamp(1_000);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
+        let events_before = env.events().all().len();
+
+        env.ledger().set_timestamp(2_000);
+        assert!(!client.store_proof_timestamp(&admin, &credential_id, &claim_type));
+
+        // The rejected write must leave a visible audit event behind
+        assert!(env.events().all().len() > events_before);
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_non_admin_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attacker = Address::generate(&env);
+        env.ledger().set_timestamp(1_000);
+
+        // Non-admin cannot write, so the first-write slot stays free
+        let result = client.try_store_proof_timestamp(&attacker, &4u64, &ClaimType::HasLicense);
+        assert!(result.is_err());
+        assert_eq!(client.get_proof_age(&4u64, &ClaimType::HasLicense, &2_000u64), None);
+    }
+
+    #[test]
+    fn test_store_proof_timestamp_uses_ledger_time_not_caller_input() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        env.ledger().set_timestamp(7_777);
+        assert!(client.store_proof_timestamp(&admin, &5u64, &ClaimType::HasDegree));
+        assert_eq!(client.get_proof_age(&5u64, &ClaimType::HasDegree, &7_777u64), Some(0u64));
     }
 
     #[test]
@@ -4396,7 +4831,8 @@ mod tests {
 
         // TTL = 1 day
         client.set_protocol_config(&admin, &ProtocolConfig { proof_ttl_seconds: 86_400 });
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // Check at 1 hour — well within TTL
         let expired = client.is_proof_expired(&credential_id, &claim_type, &3_600u64);
@@ -4415,7 +4851,8 @@ mod tests {
 
         // TTL = 1 day
         client.set_protocol_config(&admin, &ProtocolConfig { proof_ttl_seconds: 86_400 });
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // Check at 2 days — past TTL
         let expired = client.is_proof_expired(&credential_id, &claim_type, &172_801u64);
@@ -4426,13 +4863,14 @@ mod tests {
     fn test_proof_expired_default_ttl_30_days() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 12u64;
         let claim_type = ClaimType::HasEmploymentHistory;
         let submitted_at = 0u64;
 
-        client.store_proof_timestamp(&credential_id, &claim_type, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         // 31 days in seconds > 30-day default TTL
         let expired = client.is_proof_expired(&credential_id, &claim_type, &2_678_401u64);
@@ -4458,12 +4896,13 @@ mod tests {
     fn test_proof_age_saturates_at_zero_for_future_timestamp() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let credential_id = 20u64;
         let claim_type = ClaimType::HasDegree;
         // stored timestamp is in the future relative to now_seconds
-        client.store_proof_timestamp(&credential_id, &claim_type, &5_000_000u64);
+        env.ledger().set_timestamp(5_000_000u64);
+        client.store_proof_timestamp(&admin, &credential_id, &claim_type);
 
         let age = client.get_proof_age(&credential_id, &claim_type, &1_000_000u64);
         // saturating_sub should give 0
@@ -4836,10 +5275,10 @@ mod tests {
     fn test_register_proof_hash_not_revoked() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let proof_hash = BytesN::from_array(&env, &[0x12u8; 32]);
-        client.register_proof_hash(&proof_hash);
+        client.register_proof_hash(&admin, &proof_hash);
 
         let is_revoked = client.check_proof_revocation(&proof_hash);
         assert!(!is_revoked, "freshly registered proof should not be revoked");
@@ -4852,7 +5291,7 @@ mod tests {
         let (client, admin) = setup(&env);
 
         let proof_hash = BytesN::from_array(&env, &[0x34u8; 32]);
-        client.register_proof_hash(&proof_hash);
+        client.register_proof_hash(&admin, &proof_hash);
 
         let reason = Bytes::from_slice(&env, b"underlying credential revoked");
         client.revoke_proof_by_hash(&admin, &proof_hash, &reason);
@@ -4871,7 +5310,7 @@ mod tests {
 
         let proof_hash = BytesN::from_array(&env, &[0x56u8; 32]);
         let reason = Bytes::from_slice(&env, b"test revocation");
-        client.register_proof_hash(&proof_hash);
+        client.register_proof_hash(&admin, &proof_hash);
         client.revoke_proof_by_hash(&admin, &proof_hash, &reason);
 
         let record = client.get_revocation_record(&proof_hash);
@@ -4889,8 +5328,8 @@ mod tests {
         let hash2 = BytesN::from_array(&env, &[0x02u8; 32]);
         let reason = Bytes::from_slice(&env, b"reason");
 
-        client.register_proof_hash(&hash1);
-        client.register_proof_hash(&hash2);
+        client.register_proof_hash(&admin, &hash1);
+        client.register_proof_hash(&admin, &hash2);
         client.revoke_proof_by_hash(&admin, &hash1, &reason);
         client.revoke_proof_by_hash(&admin, &hash2, &reason);
 
@@ -4920,10 +5359,228 @@ mod tests {
 
         let hash = BytesN::from_array(&env, &[0xAAu8; 32]);
         let reason = Bytes::from_slice(&env, b"reason");
-        client.register_proof_hash(&hash);
+        client.register_proof_hash(&admin, &hash);
         client.revoke_proof_by_hash(&admin, &hash, &reason);
         // Second revocation should panic
         client.revoke_proof_by_hash(&admin, &hash, &reason);
+    }
+
+    // =========================================================================
+    // Issue #1724: store_proof_metadata authorization tests
+    // =========================================================================
+
+    #[test]
+    fn test_store_metadata_rejects_unauthorized_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let stranger = Address::generate(&env);
+        let hash = Bytes::from_slice(&env, b"hash");
+        let desc = String::from_str(&env, "desc");
+
+        let result = client.try_store_proof_metadata(&stranger, &1u64, &ClaimType::HasDegree, &hash, &desc);
+        assert!(result.is_err(), "caller without admin or registrar role must be rejected");
+        assert!(client.try_get_proof_metadata(&1u64, &ClaimType::HasDegree).is_err());
+    }
+
+    #[test]
+    fn test_store_metadata_registrar_can_write() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+        assert!(client.is_registrar(&registrar));
+
+        let hash = Bytes::from_slice(&env, b"hash");
+        let desc = String::from_str(&env, "desc");
+        client.store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash, &desc);
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash);
+    }
+
+    #[test]
+    fn test_store_metadata_rejects_overwrite_by_other_registrar() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar_a = Address::generate(&env);
+        let registrar_b = Address::generate(&env);
+        client.set_registrar(&admin, &registrar_a, &true);
+        client.set_registrar(&admin, &registrar_b, &true);
+
+        let hash_a = Bytes::from_slice(&env, b"hash-a");
+        let hash_b = Bytes::from_slice(&env, b"hash-b");
+        let desc = String::from_str(&env, "desc");
+        client.store_proof_metadata(&registrar_a, &1u64, &ClaimType::HasDegree, &hash_a, &desc);
+
+        let result = client.try_store_proof_metadata(&registrar_b, &1u64, &ClaimType::HasDegree, &hash_b, &desc);
+        assert!(result.is_err(), "another registrar must not overwrite the entry");
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash_a);
+    }
+
+    #[test]
+    fn test_store_metadata_writer_and_admin_can_replace() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+
+        let desc = String::from_str(&env, "desc");
+        let hash_1 = Bytes::from_slice(&env, b"hash-1");
+        let hash_2 = Bytes::from_slice(&env, b"hash-2");
+        let hash_3 = Bytes::from_slice(&env, b"hash-3");
+        client.store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash_1, &desc);
+
+        // The original writer may replace its own entry.
+        client.store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash_2, &desc);
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash_2);
+
+        // The admin may replace any entry.
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &hash_3, &desc);
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash_3);
+    }
+
+    #[test]
+    fn test_revoked_registrar_cannot_store_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+        client.set_registrar(&admin, &registrar, &false);
+        assert!(!client.is_registrar(&registrar));
+
+        let hash = Bytes::from_slice(&env, b"hash");
+        let desc = String::from_str(&env, "desc");
+        let result = client.try_store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash, &desc);
+        assert!(result.is_err(), "revoked registrar must be rejected");
+    }
+
+    #[test]
+    fn test_set_registrar_admin_only() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let stranger = Address::generate(&env);
+        let target = Address::generate(&env);
+        let result = client.try_set_registrar(&stranger, &target, &true);
+        assert!(result.is_err(), "only the admin may grant the registrar role");
+        assert!(!client.is_registrar(&target));
+    }
+
+    // =========================================================================
+    // Issue #1725: register_proof_hash authorization, dedup and pagination
+    // =========================================================================
+
+    #[test]
+    fn test_register_proof_hash_rejects_unauthorized_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let stranger = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[0x21u8; 32]);
+        let result = client.try_register_proof_hash(&stranger, &hash);
+        assert!(result.is_err(), "caller without admin or registrar role must be rejected");
+        assert_eq!(client.get_proof_hash_count(), 0);
+    }
+
+    #[test]
+    fn test_registrar_can_register_proof_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+
+        let hash = BytesN::from_array(&env, &[0x22u8; 32]);
+        client.register_proof_hash(&registrar, &hash);
+        assert!(!client.check_proof_revocation(&hash));
+        assert_eq!(client.get_proof_hash_count(), 1);
+    }
+
+    #[test]
+    fn test_revoked_proof_stays_revoked_after_reregistration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = BytesN::from_array(&env, &[0x23u8; 32]);
+        let reason = Bytes::from_slice(&env, b"underlying credential revoked");
+        client.register_proof_hash(&admin, &hash);
+        client.revoke_proof_by_hash(&admin, &hash, &reason);
+
+        let result = client.try_register_proof_hash(&admin, &hash);
+        assert!(result.is_err(), "re-registering a revoked hash must be rejected");
+        assert!(client.check_proof_revocation(&hash), "revocation must survive re-registration");
+        assert_eq!(client.get_proof_hash_count(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_proof_hash_registration_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = BytesN::from_array(&env, &[0x24u8; 32]);
+        client.register_proof_hash(&admin, &hash);
+        let result = client.try_register_proof_hash(&admin, &hash);
+        assert!(result.is_err(), "duplicate registration must be rejected");
+        assert_eq!(client.get_proof_hash_count(), 1);
+    }
+
+    #[test]
+    fn test_proof_hash_registry_is_paginated() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hashes: std::vec::Vec<BytesN<32>> = (0u8..5)
+            .map(|i| BytesN::from_array(&env, &[i + 1; 32]))
+            .collect();
+        for hash in &hashes {
+            client.register_proof_hash(&admin, hash);
+        }
+        assert_eq!(client.get_proof_hash_count(), 5);
+
+        let first = client.get_proof_hash_registry(&0u32, &2u32);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.get(0), Some(hashes[0].clone()));
+        assert_eq!(first.get(1), Some(hashes[1].clone()));
+
+        let rest = client.get_proof_hash_registry(&2u32, &10u32);
+        assert_eq!(rest.len(), 3);
+        assert_eq!(rest.get(0), Some(hashes[2].clone()));
+        assert_eq!(rest.get(2), Some(hashes[4].clone()));
+
+        assert_eq!(client.get_proof_hash_registry(&5u32, &3u32).len(), 0);
+        assert_eq!(client.get_proof_hash_registry(&0u32, &0u32).len(), 0);
+    }
+
+    #[test]
+    fn test_proof_hash_registry_page_is_capped() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        for i in 0u32..(MAX_PROOF_HASH_PAGE + 1) {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&i.to_be_bytes());
+            client.register_proof_hash(&admin, &BytesN::from_array(&env, &bytes));
+        }
+        assert_eq!(client.get_proof_hash_count(), MAX_PROOF_HASH_PAGE + 1);
+        assert_eq!(
+            client.get_proof_hash_registry(&0u32, &u32::MAX).len(),
+            MAX_PROOF_HASH_PAGE
+        );
     }
 
     #[test]
@@ -4949,7 +5606,8 @@ mod tests {
 
         let proof = Bytes::from_slice(&env, &[0xABu8; 64]);
         let submitted_at = 5_000u64;
-        let tb = client.submit_time_bound_proof(&proof, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        let tb = client.submit_time_bound_proof(&proof);
 
         assert_eq!(tb.submitted_at, submitted_at);
         assert_eq!(tb.proof, proof);
@@ -4963,10 +5621,45 @@ mod tests {
 
         let proof = Bytes::from_slice(&env, &[0xCDu8; 64]);
         let submitted_at = 9_999u64;
-        let tb = client.submit_time_bound_proof(&proof, &submitted_at);
+        env.ledger().set_timestamp(submitted_at);
+        let tb = client.submit_time_bound_proof(&proof);
 
         let stored = client.get_proof_timestamp_by_hash(&tb.proof_hash);
         assert_eq!(stored, Some(submitted_at));
+    }
+
+    #[test]
+    fn test_submit_time_bound_proof_records_ledger_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        // The submission time is the ledger time, not anything the caller passes
+        let proof = Bytes::from_slice(&env, &[0xEEu8; 64]);
+        env.ledger().set_timestamp(42_000);
+        let tb = client.submit_time_bound_proof(&proof);
+
+        assert_eq!(tb.submitted_at, 42_000u64);
+        assert_eq!(client.get_proof_timestamp_by_hash(&tb.proof_hash), Some(42_000u64));
+    }
+
+    #[test]
+    fn test_resubmit_time_bound_proof_does_not_refresh_submission_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let proof = Bytes::from_slice(&env, &[0xEFu8; 64]);
+        env.ledger().set_timestamp(1_000);
+        client.submit_time_bound_proof(&proof);
+
+        // Resubmitting much later must not reset the freshness window
+        env.ledger().set_timestamp(100_000);
+        let tb = client.submit_time_bound_proof(&proof);
+        assert_eq!(tb.submitted_at, 1_000u64);
+
+        // The original submission is now old, so a 3600s freshness window rejects it
+        assert!(!client.verify_proof_with_time_bounds(&proof, &0u64, &3_600u64));
     }
 
     #[test]
@@ -4977,7 +5670,7 @@ mod tests {
 
         // Submit proof at ledger timestamp 0 (Env::default starts at 0)
         let proof = Bytes::from_slice(&env, &[0x11u8; 64]);
-        client.submit_time_bound_proof(&proof, &0u64);
+        client.submit_time_bound_proof(&proof);
 
         // Ledger timestamp is 0; age = 0; min_age=0, max_age=3600 → should pass
         let result = client.verify_proof_with_time_bounds(&proof, &0u64, &3600u64);
@@ -5014,7 +5707,7 @@ mod tests {
         let (client, _admin) = setup(&env);
 
         let proof = Bytes::from_slice(&env, &[0x22u8; 64]);
-        client.submit_time_bound_proof(&proof, &0u64);
+        client.submit_time_bound_proof(&proof);
 
         // min_age > max_age — invalid window
         let result = client.verify_proof_with_time_bounds(&proof, &3600u64, &1u64);
@@ -5029,14 +5722,22 @@ mod tests {
         BytesN::from_array(env, &[seed; 32])
     }
 
+    /// Register `n` fresh verifier addresses so MPC sessions can draw on them.
+    fn register_mpc_verifiers(env: &Env, client: &ZkVerifierContractClient, admin: &Address, n: u32) {
+        for _ in 0..n {
+            client.register_mpc_verifier(admin, &Address::generate(env));
+        }
+    }
+
     #[test]
     fn test_create_mpc_session_returns_pending() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x01);
-        let session = client.create_mpc_session(&session_id, &2u32, &3u32);
+        let session = client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         assert_eq!(session.session_id, session_id);
         assert_eq!(session.threshold, 2u32);
@@ -5048,10 +5749,11 @@ mod tests {
     fn test_get_mpc_session_returns_stored() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x02);
-        client.create_mpc_session(&session_id, &1u32, &2u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &2u32);
 
         let retrieved = client.get_mpc_session(&session_id);
         assert_eq!(retrieved.threshold, 1u32);
@@ -5061,10 +5763,11 @@ mod tests {
     fn test_mpc_single_verifier_threshold_1_approves() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x03);
-        client.create_mpc_session(&session_id, &1u32, &1u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &1u32);
 
         let verifier = Address::generate(&env);
         let session = client.submit_mpc_contribution(&verifier, &session_id, &true);
@@ -5077,10 +5780,11 @@ mod tests {
     fn test_mpc_threshold_2_of_3_not_approved_after_one_vote() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x04);
-        client.create_mpc_session(&session_id, &2u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         let v1 = Address::generate(&env);
         let session = client.submit_mpc_contribution(&v1, &session_id, &true);
@@ -5093,10 +5797,11 @@ mod tests {
     fn test_mpc_threshold_2_of_3_approved_after_two_votes() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x05);
-        client.create_mpc_session(&session_id, &2u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
@@ -5111,11 +5816,12 @@ mod tests {
     fn test_mpc_disapproval_does_not_count_toward_threshold() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x06);
         // threshold=2, but two "no" votes should not approve
-        client.create_mpc_session(&session_id, &2u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &3u32);
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
@@ -5130,10 +5836,11 @@ mod tests {
     fn test_mpc_contribution_count_tracks_all_votes() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x07);
-        client.create_mpc_session(&session_id, &3u32, &3u32);
+        client.create_mpc_session(&admin, &session_id, &3u32, &3u32);
 
         for _ in 0..3 {
             let v = Address::generate(&env);
@@ -5149,10 +5856,11 @@ mod tests {
     fn test_mpc_double_vote_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x08);
-        client.create_mpc_session(&session_id, &2u32, &2u32);
+        client.create_mpc_session(&admin, &session_id, &2u32, &2u32);
 
         let v = Address::generate(&env);
         client.submit_mpc_contribution(&v, &session_id, &true);
@@ -5165,9 +5873,10 @@ mod tests {
     fn test_mpc_zero_threshold_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
-        client.create_mpc_session(&make_session_id(&env, 0x09), &0u32, &3u32);
+        client.create_mpc_session(&admin, &make_session_id(&env, 0x09), &0u32, &3u32);
     }
 
     #[test]
@@ -5175,9 +5884,10 @@ mod tests {
     fn test_mpc_threshold_exceeds_total_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
-        client.create_mpc_session(&make_session_id(&env, 0x0A), &5u32, &3u32);
+        client.create_mpc_session(&admin, &make_session_id(&env, 0x0A), &5u32, &3u32);
     }
 
     #[test]
@@ -5185,15 +5895,66 @@ mod tests {
     fn test_mpc_duplicate_session_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 5);
 
         let session_id = make_session_id(&env, 0x0B);
-        client.create_mpc_session(&session_id, &1u32, &1u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &1u32);
         // Creating the same session again must panic
-        client.create_mpc_session(&session_id, &1u32, &1u32);
+        client.create_mpc_session(&admin, &session_id, &1u32, &1u32);
     }
 
     #[test]
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_mpc_create_session_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 3);
+
+        let attacker = Address::generate(&env);
+        client.create_mpc_session(&attacker, &make_session_id(&env, 0x0C), &1u32, &1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "total_verifiers exceeds registered verifiers")]
+    fn test_mpc_session_unregistered_verifier_set_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        register_mpc_verifiers(&env, &client, &admin, 2);
+
+        // Only 2 verifiers are registered, so a 3-verifier session is rejected
+        client.create_mpc_session(&admin, &make_session_id(&env, 0x0D), &2u32, &3u32);
+    }
+
+    #[test]
+    fn test_mpc_register_verifier_is_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let verifier = Address::generate(&env);
+        client.register_mpc_verifier(&admin, &verifier);
+        client.register_mpc_verifier(&admin, &verifier);
+
+        assert_eq!(client.get_mpc_verifier_count(), 1u32);
+    }
+
+    #[test]
+    fn test_mpc_register_verifier_non_admin_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let attacker = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let result = client.try_register_mpc_verifier(&attacker, &verifier);
+        assert!(result.is_err());
+        assert_eq!(client.get_mpc_verifier_count(), 0u32);
+    }
+
     fn test_mpc_nonexistent_session_not_approved() {
         let env = Env::default();
         let contract_id = env.register_contract(None, ZkVerifierContract);
@@ -5387,6 +6148,7 @@ mod tests {
 /// in the zk_verifier contract.
 #[cfg(test)]
 mod tests_governance_1511 {
+    extern crate std;
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::{Address, Env};
@@ -5474,5 +6236,126 @@ mod tests_governance_1511 {
         let admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
         client.update_admin(&admin, &new_admin);
+    }
+}
+
+// ===== Test-only verifiers =====
+// Heuristic verifiers that do not perform real pairing checks. They are compiled only
+// for tests and the `testutils` feature, so they never ship in a production build.
+// Kept in their own impl block because `#[contractimpl]` does not honour `cfg` on
+// individual functions.
+#[cfg(any(test, feature = "testutils"))]
+#[contractimpl]
+impl ZkVerifierContract {
+    /// Verify a ZK proof with caching and TTL support.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found and not expired, it returns the cached result.
+    /// Otherwise, it verifies the proof and caches the result with the specified TTL.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries expire after `ttl` ledgers.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_proof_cached(
+        env: Env,
+        admin: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+        ttl: u32,
+    ) -> bool {
+        // Admin gate
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+
+        // Generate cache key from proof bytes, credential_id, and claim_type
+        let cache_key = Self::proof_cache_key(&env, &credential_id, &claim_type, &proof);
+
+        // Check cache first
+        if let Some(entry) = env.storage().temporary().get::<_, CacheEntry>(&cache_key) {
+            // Check if cache entry has expired
+            let current_ledger = env.ledger().sequence();
+            if current_ledger <= entry.cached_at_ledger + entry.ttl {
+                // Cache hit: increment hit counter
+                let hits: u32 = env.storage().instance().get(&DataKey::CacheHits).unwrap_or(0);
+                env.storage().instance().set(&DataKey::CacheHits, &(hits + 1));
+                return entry.result;
+            }
+        }
+
+        // Not in cache or expired, perform Groth16 verification
+        // Cache miss: increment miss counter
+        let misses: u32 = env.storage().instance().get(&DataKey::CacheMisses).unwrap_or(0);
+        env.storage().instance().set(&DataKey::CacheMisses, &(misses + 1));
+        let vk_hash: BytesN<32> = env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+            .expect("verifying key not set");
+        let result = groth16_verify(&env, &vk_hash, &proof);
+
+        // Cache the result with TTL
+        let entry = CacheEntry {
+            result,
+            cached_at_ledger: env.ledger().sequence(),
+            ttl,
+        };
+        env.storage().temporary().set(&cache_key, &entry);
+
+        result
+    }
+
+    /// Verify a ZK proof for a claim with caching.
+    ///
+    /// This function first checks if the proof has been verified before by 
+    /// looking up the cache. If found, it returns the cached result immediately.
+    /// Otherwise, it verifies the proof and caches the result for future calls.
+    /// 
+    /// Cache keys are derived from: (credential_id, claim_type, proof_hash).
+    /// Cache entries are stored indefinitely until explicitly cleared.
+    ///
+    /// **Test-only**: wraps [`Self::verify_proof_cached`], which uses the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_with_cache(
+        env: Env,
+        admin: Address,
+        quorum_proof_id: Address,
+        credential_id: u64,
+        claim_type: ClaimType,
+        proof: Bytes,
+    ) -> bool {
+        // Use default TTL of 1000 ledgers (approximately 1 day)
+        Self::verify_proof_cached(env, admin, credential_id, claim_type, proof, 1000)
+    }
+
+    /// Verify a Groth16 ZK proof anonymously using a holder commitment.
+    /// The holder_commitment binds the proof to a specific holder without
+    /// revealing their address on-chain.
+    ///
+    /// **Test-only**: like [`groth16_verify`], this verifies via the
+    /// structural/hash-binding heuristic, not real BLS12-381 pairing checks.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn verify_claim_anonymous(
+        env: Env,
+        _credential_id: u64,
+        _claim_type: ClaimType,
+        holder_commitment: Bytes,
+        proof: Bytes,
+    ) -> bool {
+        if holder_commitment.is_empty() {
+            return false;
+        }
+        let vk_hash: BytesN<32> = match env.storage().instance()
+            .get(&DataKey::VerifyingKeyHash)
+        {
+            Some(h) => h,
+            None => return false,
+        };
+        groth16_verify(&env, &vk_hash, &proof)
     }
 }
