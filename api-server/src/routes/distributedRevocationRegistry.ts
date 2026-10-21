@@ -7,6 +7,7 @@
 import { Router, Request, Response } from 'express';
 import { DistributedRevocationRegistry } from '../services/distributedRevocationRegistry.js';
 import { problemJson } from '../middleware/problemDetails.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 
@@ -24,7 +25,7 @@ function getRegistry(): DistributedRevocationRegistry {
  * POST /api/distributed-revocation/revoke
  * Adds a revocation entry to the distributed registry
  */
-router.post('/revoke', (req: Request, res: Response) => {
+router.post('/revoke', validate(schemas.distributedRevocationEntry), (req: Request, res: Response) => {
   try {
     const { credential_id, revoked_by, reason, locked_until } = req.body as Record<string, unknown>;
 
@@ -81,7 +82,7 @@ router.get('/status/:credential_id', (req: Request, res: Response) => {
  * POST /api/distributed-revocation/peer/register
  * Registers a peer node in the network
  */
-router.post('/peer/register', (req: Request, res: Response) => {
+router.post('/peer/register', validate(schemas.distributedRevocationPeer), (req: Request, res: Response) => {
   try {
     const { peer_id, peer_address } = req.body as Record<string, unknown>;
 
@@ -109,7 +110,7 @@ router.post('/peer/register', (req: Request, res: Response) => {
  * POST /api/distributed-revocation/peer/:peer_id/unreachable
  * Marks a peer as unreachable (network partition)
  */
-router.post('/peer/:peer_id/unreachable', (req: Request, res: Response) => {
+router.post('/peer/:peer_id/unreachable', validate(schemas.distributedRevocationPeerParams), (req: Request, res: Response) => {
   try {
     const peer_id = (req.params.peer_id || '') as string;
 
@@ -127,7 +128,7 @@ router.post('/peer/:peer_id/unreachable', (req: Request, res: Response) => {
  * POST /api/distributed-revocation/peer/:peer_id/reachable
  * Marks a peer as reachable again
  */
-router.post('/peer/:peer_id/reachable', (req: Request, res: Response) => {
+router.post('/peer/:peer_id/reachable', validate(schemas.distributedRevocationPeerParams), (req: Request, res: Response) => {
   try {
     const peer_id = (req.params.peer_id || '') as string;
 
@@ -145,7 +146,7 @@ router.post('/peer/:peer_id/reachable', (req: Request, res: Response) => {
  * POST /api/distributed-revocation/sync/:peer_id
  * Syncs with a peer node
  */
-router.post('/sync/:peer_id', (req: Request, res: Response) => {
+router.post('/sync/:peer_id', validate(schemas.distributedRevocationPeerParams), (req: Request, res: Response) => {
   try {
     const peer_id = (req.params.peer_id || '') as string;
 
@@ -223,7 +224,7 @@ router.get('/sync-log', (req: Request, res: Response) => {
  * POST /api/distributed-revocation/commit
  * Commits current state to permanent storage
  */
-router.post('/commit', (req: Request, res: Response) => {
+router.post('/commit', validate(schemas.distributedRevocationCommit), (req: Request, res: Response) => {
   try {
     const reg = getRegistry();
     reg.commitState();
