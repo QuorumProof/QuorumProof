@@ -135,7 +135,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     const accountIdx = accountIndexParam ?? 0;
 
     if (!walletToUse) {
-      window.open('https://freighter.app', '_blank');
+      window.open('https://freighter.app', '_blank', 'noopener,noreferrer');
       return;
     }
 

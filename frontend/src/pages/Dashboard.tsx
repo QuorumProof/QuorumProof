@@ -86,16 +86,10 @@ export default function Dashboard() {
     setSelectedIds(new Set());
   }
 
-  function handleBulkRevokeConfirm(ids: bigint[]) {
-    setCards((prev) =>
-      prev.map((card) =>
-        ids.some((id) => id === card.credential.id)
-          ? { ...card, credential: { ...card.credential, revoked: true } }
-          : card,
-      ),
+  async function handleBulkRevokeConfirm(): Promise<void> {
+    throw new Error(
+      'Bulk revocation is unavailable because this dashboard only supports read-only contract access. No credentials were changed.',
     );
-    setSelectedIds(new Set());
-    setShowBulkRevoke(false);
   }
 
   const fetchCredentials = useCallback(async (walletAddress: string) => {

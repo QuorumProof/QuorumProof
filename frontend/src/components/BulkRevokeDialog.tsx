@@ -4,22 +4,28 @@ import type { Credential } from '../lib/contracts/quorumProof';
 
 interface BulkRevokeDialogProps {
   credentials: Credential[];
-  onConfirm: (ids: bigint[]) => void;
+  onConfirm: (ids: bigint[]) => Promise<void>;
   onClose: () => void;
 }
 
 export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevokeDialogProps) {
   const [revoking, setRevoking] = useState(false);
   const [done, setDone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const revokable = credentials.filter((c) => !c.revoked);
 
   async function handleConfirm() {
     setRevoking(true);
-    await new Promise((r) => setTimeout(r, 600));
-    setRevoking(false);
-    setDone(true);
-    onConfirm(revokable.map((c) => c.id));
+    setError(null);
+    try {
+      await onConfirm(revokable.map((c) => c.id));
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke credentials.');
+    } finally {
+      setRevoking(false);
+    }
   }
 
   if (done) {
@@ -53,6 +59,11 @@ export function BulkRevokeDialog({ credentials, onConfirm, onClose }: BulkRevoke
         </div>
 
         <div className="modal-body">
+          {error && (
+            <p role="alert" style={{ color: 'var(--red)', marginBottom: '16px' }}>
+              {error}
+            </p>
+          )}
           <div
             style={{
               background: 'var(--red-subtle)',

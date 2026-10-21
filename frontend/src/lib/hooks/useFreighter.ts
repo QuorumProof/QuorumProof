@@ -103,7 +103,7 @@ export function useFreighter(): FreighterState {
 
   const connect = useCallback(async () => {
     if (!hasFreighter) {
-      window.open('https://freighter.app', '_blank');
+      window.open('https://freighter.app', '_blank', 'noopener,noreferrer');
       return;
     }
     try {

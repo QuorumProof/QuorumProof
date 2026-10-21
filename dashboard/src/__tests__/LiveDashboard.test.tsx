@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
-import { LiveDashboard, calcBackoff } from '../components/LiveDashboard'
+import { getWebSocketUrl, LiveDashboard, calcBackoff } from '../components/LiveDashboard'
 
 // ---------------------------------------------------------------------------
 // WebSocket mock
@@ -119,6 +119,18 @@ describe('LiveDashboard connection states', () => {
     render(<LiveDashboard />)
     act(() => ws().simulateOpen())
     expect(screen.getByText('connected')).toBeInTheDocument()
+  })
+
+  describe('getWebSocketUrl', () => {
+    it('uses the current origin when no URL is configured', () => {
+      expect(getWebSocketUrl(undefined, { protocol: 'https:', host: 'dashboard.example' }))
+        .toBe('wss://dashboard.example/ws')
+    })
+
+    it('prefers the configured URL', () => {
+      expect(getWebSocketUrl('wss://api.example/ws', { protocol: 'https:', host: 'dashboard.example' }))
+        .toBe('wss://api.example/ws')
+    })
   })
 
   it('sends subscribe_dashboard message on open', () => {
