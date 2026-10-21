@@ -6031,6 +6031,7 @@ mod tests {
 /// in the zk_verifier contract.
 #[cfg(test)]
 mod tests_governance_1511 {
+    extern crate std;
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::{Address, Env};

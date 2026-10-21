@@ -106,6 +106,7 @@ pub enum ContractError {
     UnauthorizedClawback = 27,
     /// Issue #1402: `entries` is empty or exceeds `MAX_BATCH_SIZE`.
     BatchTooLarge = 28,
+    /// No pending co-owner proposal exists for this SBT / candidate.
     CoOwnerProposalNotFound = 29,
 }
 
@@ -133,7 +134,6 @@ pub enum DataKey {
     NotificationHistory(Address),
     ReputationConfig,
     SbtWhitelist(u64),
-    BurnedTokens,
     CredentialAccessLog(u64),
     Blacklist(Address),
     SbtActivityLog(u64),
@@ -141,8 +141,6 @@ pub enum DataKey {
     CredentialCache(u64),
     /// Compressed metadata storage
     CompressedMetadata(u64),
-    /// Escrow record for pending SBT transfers, keyed by sbt_id
-    SBTEscrow(u64),
     /// Issue #1242: Revocation reason for an SBT
     RevocationReason(u64),
     /// Issue #1242: Appeal record for a revoked SBT, keyed by sbt_id
@@ -186,6 +184,8 @@ pub enum DataKey {
     /// The pending clawback id for an SBT, if any (sbt_id -> clawback_id).
     /// Enforces that only one clawback may be pending per SBT at a time.
     PendingClawbackBySbt(u64),
+    /// Issue #1413: Global index of pending clawback ids.
+    PendingClawbacks,
     /// A co-owner candidate proposed by an SBT's owner, awaiting the
     /// candidate's acceptance.
     CoOwnerProposal(u64),
