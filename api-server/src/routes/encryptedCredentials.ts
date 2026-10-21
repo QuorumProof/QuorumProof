@@ -1,6 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { ThresholdEncryption, type EncryptedData } from '../crypto/thresholdEncryption.js';
 import { EncryptedCredentialStore } from '../services/encryptedCredentialStore.js';
+import { StrKey } from '@stellar/stellar-sdk';
+import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import {
+  DecryptionChallengeStore,
+  buildDecryptionChallengeMessage,
+  collectValidApprovals,
+  verifyEd25519Signature,
+} from '../services/encryptedCredentialAuth.js';
 
 /**
  * Encrypted Credentials Routes
@@ -9,8 +17,9 @@ import { EncryptedCredentialStore } from '../services/encryptedCredentialStore.j
  * Endpoints:
  * POST /api/credentials/:id/encrypt - Encrypt sensitive fields
  * GET /api/credentials/:id/encrypted - Get encrypted credential data
- * POST /api/credentials/:id/decrypt/authorize - Request decryption authorization
- * POST /api/credentials/:id/decrypt - Decrypt with authorization
+ * POST /api/credentials/:id/decrypt/authorize - Request decryption authorization (JWT + custodian approvals)
+ * POST /api/credentials/:id/decrypt/challenge - Get a single-use challenge to sign
+ * POST /api/credentials/:id/decrypt - Decrypt with authorization and a signed challenge
  * GET /api/credentials/:id/decrypt/status - Check decryption authorization status
  */
 
@@ -18,6 +27,7 @@ export function createEncryptedCredentialsRouter() {
   const router = Router();
   const store = new EncryptedCredentialStore();
   const encryption = new ThresholdEncryption(3, 5); // 3-of-5 threshold encryption
+  const challenges = new DecryptionChallengeStore();
 
   // POST /api/credentials/:id/encrypt
   // Encrypt sensitive fields of a credential
@@ -111,12 +121,15 @@ export function createEncryptedCredentialsRouter() {
   });
 
   // POST /api/credentials/:id/decrypt/authorize
-  // Request decryption authorization
-  router.post('/:id/decrypt/authorize', async (req: Request, res: Response) => {
+  // Grant decryption authorization. Requires an authenticated caller and
+  // signed approvals from at least `threshold` of the credential's key custodians.
+  // Body: { requester_address, reason?, approvals: [{ custodian, issued_at, signature }] }
+  router.post('/:id/decrypt/authorize', requireAuth, async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-    const { requester_address, reason } = req.body as {
+    const { requester_address, reason, approvals } = req.body as {
       requester_address?: string;
       reason?: string;
+      approvals?: unknown;
     };
 
     if (!requester_address) {
@@ -127,8 +140,44 @@ export function createEncryptedCredentialsRouter() {
       return;
     }
 
+    if (!Array.isArray(approvals)) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'approvals array is required',
+      });
+      return;
+    }
+
     try {
       const credentialId = BigInt(id);
+
+      const encrypted = await store.getEncryptedCredential(credentialId);
+      if (!encrypted) {
+        res.status(404).json({
+          error: 'Not found',
+          message: 'No encrypted data found for this credential',
+        });
+        return;
+      }
+
+      const approvedBy = collectValidApprovals(
+        credentialId.toString(),
+        requester_address,
+        encrypted.key_custodians,
+        approvals,
+        Date.now(),
+      );
+      const required = encryption.getConfig().threshold;
+
+      if (approvedBy.length < required) {
+        res.status(403).json({
+          error: 'Insufficient approvals',
+          message: `At least ${required} valid approvals from key custodians are required`,
+          required,
+          valid_approvals: approvedBy.length,
+        });
+        return;
+      }
 
       // Authorize decryption for 1 hour by default
       const authorization = await store.authorizeDecryption(
@@ -136,7 +185,7 @@ export function createEncryptedCredentialsRouter() {
         requester_address,
         3600000,
         reason || 'Not specified',
-        [] // In production, require approval from multiple parties
+        approvedBy
       );
 
       res.json({
@@ -155,13 +204,50 @@ export function createEncryptedCredentialsRouter() {
     }
   });
 
+  // POST /api/credentials/:id/decrypt/challenge
+  // Issue a single-use challenge the requester signs with the Stellar key for
+  // `requester_address`. The signed challenge is required by POST /decrypt.
+  router.post('/:id/decrypt/challenge', (req: Request, res: Response) => {
+    const id = (req.params as Record<string, string>).id;
+    const { requester_address } = req.body as { requester_address?: string };
+
+    if (!requester_address || !StrKey.isValidEd25519PublicKey(requester_address)) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'requester_address must be a valid Stellar public key',
+      });
+      return;
+    }
+
+    let credentialId: bigint;
+    try {
+      credentialId = BigInt(id);
+    } catch {
+      res.status(400).json({ error: 'Invalid request', message: 'credential id must be an integer' });
+      return;
+    }
+
+    const challenge = challenges.issue(credentialId.toString(), requester_address);
+    res.json({
+      credential_id: id,
+      requester_address,
+      nonce: challenge.nonce,
+      message: buildDecryptionChallengeMessage(credentialId.toString(), requester_address, challenge.nonce),
+      expires_at: new Date(challenge.expiresAt).toISOString(),
+    });
+  });
+
   // POST /api/credentials/:id/decrypt
-  // Decrypt with key shares (requires authorization)
+  // Decrypt with key shares (requires authorization and a signed challenge).
+  // Body: { requester_address, key_shares, nonce, signature }
+  // `signature` is the hex-encoded ed25519 signature of the challenge message.
   router.post('/:id/decrypt', async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-    const { requester_address, key_shares } = req.body as {
+    const { requester_address, key_shares, nonce, signature } = req.body as {
       requester_address?: string;
       key_shares?: unknown[];
+      nonce?: unknown;
+      signature?: unknown;
     };
 
     if (!requester_address || !key_shares || !Array.isArray(key_shares)) {
@@ -172,8 +258,40 @@ export function createEncryptedCredentialsRouter() {
       return;
     }
 
+    if (typeof nonce !== 'string' || !signature) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'nonce and signature are required; request a challenge via POST /decrypt/challenge',
+      });
+      return;
+    }
+
     try {
       const credentialId = BigInt(id);
+
+      // Verify the requester controls requester_address. The nonce is consumed
+      // here, so a failed attempt cannot be retried with the same challenge.
+      const challenge = challenges.consume(nonce);
+      if (
+        !challenge ||
+        challenge.credentialId !== credentialId.toString() ||
+        challenge.requesterAddress !== requester_address
+      ) {
+        res.status(401).json({
+          error: 'Invalid challenge',
+          message: 'Challenge is unknown, expired, already used, or issued for a different request',
+        });
+        return;
+      }
+
+      const message = buildDecryptionChallengeMessage(credentialId.toString(), requester_address, nonce);
+      if (!verifyEd25519Signature(requester_address, message, signature)) {
+        res.status(401).json({
+          error: 'Invalid signature',
+          message: 'Signature does not match requester_address',
+        });
+        return;
+      }
 
       // Check authorization
       const isAuthorized = await store.isDecryptionAuthorized(credentialId, requester_address);
@@ -202,9 +320,11 @@ export function createEncryptedCredentialsRouter() {
           key_shares as any[]
         );
 
-        // Log successful decryption
+        // Log successful decryption with the identity verified by signature
         await store.logDecryptionAttempt(credentialId, requester_address, true, {
           shared_count: key_shares.length,
+          verified_identity: requester_address,
+          identity_method: 'ed25519-challenge',
         });
 
         res.json({
@@ -219,6 +339,8 @@ export function createEncryptedCredentialsRouter() {
         await store.logDecryptionAttempt(credentialId, requester_address, false, {
           error: decryptErr instanceof Error ? decryptErr.message : String(decryptErr),
           share_count: key_shares.length,
+          verified_identity: requester_address,
+          identity_method: 'ed25519-challenge',
         });
 
         res.status(400).json({
@@ -278,10 +400,8 @@ export function createEncryptedCredentialsRouter() {
 
   // GET /api/credentials/:id/decrypt/audit
   // Get decryption audit log (admin only)
-  router.get('/:id/decrypt/audit', async (req: Request, res: Response) => {
+  router.get('/:id/decrypt/audit', requireAdmin, async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-
-    // TODO: Add authorization check for admin-only access
 
     try {
       const credentialId = BigInt(id);
