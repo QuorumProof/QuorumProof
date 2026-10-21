@@ -26,6 +26,9 @@ on:
           - testnet
           - mainnet
 
+permissions:
+  contents: read
+
 jobs:
   backup:
     name: Backup ${{ matrix.network }}

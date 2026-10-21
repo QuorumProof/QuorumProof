@@ -29,6 +29,9 @@ on:
       - "contracts/**"
       - "benches/**"
 
+permissions:
+  contents: read
+
 jobs:
   scaling-report:
     name: Scaling benchmarks & complexity report

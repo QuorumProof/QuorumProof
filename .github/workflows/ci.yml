@@ -9,7 +9,18 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
+  workflow-security:
+    name: Validate workflow security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check workflow permissions and action refs
+        run: ./scripts/check_workflows.sh
+
   contracts:
     runs-on: ubuntu-latest
     steps:
@@ -228,7 +239,7 @@ jobs:
         run: cargo deny check
 
       - name: TruffleHog scan
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9 # v3.99.2
         with:
           extra_args: --results=verified,unknown
 

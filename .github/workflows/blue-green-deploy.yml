@@ -41,6 +41,9 @@ concurrency:
   group: blue-green-${{ github.event.inputs.environment }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   blue-green:
     name: ${{ github.event.inputs.action }} (${{ github.event.inputs.environment }})
