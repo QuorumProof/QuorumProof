@@ -8,6 +8,8 @@
  * - High-risk account alerting
  */
 
+import { randomBytes } from 'crypto';
+
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 
 export interface AccountActivity {
@@ -275,7 +277,7 @@ export class SybilDetectionService {
     description: string,
     evidence: Record<string, unknown>
   ): void {
-    const alertId = `alert_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const alertId = `alert_${Date.now()}_${randomBytes(16).toString('hex')}`;
 
     const alert: AnomalyAlert = {
       alert_id: alertId,

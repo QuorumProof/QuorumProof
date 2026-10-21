@@ -9,6 +9,7 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { randomBytes } from 'crypto';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { logger } from '../services/logger.js';
 
@@ -479,7 +480,7 @@ export function createDashboardRouter(soroban: SorobanClient) {
       }
 
       // Create dispute
-      const disputeId = `dispute_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const disputeId = `dispute_${Date.now()}_${randomBytes(16).toString('hex')}`;
       const newDispute: DisputeInfo = {
         dispute_id: disputeId,
         credential_id,

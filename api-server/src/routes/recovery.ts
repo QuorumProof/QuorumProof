@@ -1,10 +1,29 @@
 import { Router, Request, Response } from 'express';
-import { randomBytes } from 'crypto';
+import { createHmac, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import { getPool } from '../db.js';
 import { validate } from '../middleware/validate.js';
 import { logger } from '../services/logger.js';
 
 const router = Router();
+const recoveryOtpKey = getRecoveryOtpKey();
+
+function getRecoveryOtpKey(): string | Buffer {
+  const configuredKey = process.env.RECOVERY_OTP_SECRET ?? process.env.JWT_SECRET;
+  if (configuredKey) return configuredKey;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('RECOVERY_OTP_SECRET or JWT_SECRET must be configured in production');
+  }
+  return randomBytes(32);
+}
+
+function hashOtp(code: string): string {
+  return createHmac('sha256', recoveryOtpKey).update(code).digest('hex');
+}
+
+function verifyOtpHash(code: string, storedHash: string): boolean {
+  if (!/^[\da-f]{64}$/i.test(storedHash)) return false;
+  return timingSafeEqual(Buffer.from(storedHash, 'hex'), Buffer.from(hashOtp(code), 'hex'));
+}
 
 // ---- Postgres-backed store (Issue #1429) ----
 // Replaced the in-memory Map/array store with getPool()-backed queries so that
@@ -33,7 +52,7 @@ function generateId(): string {
 }
 
 function generateOtp(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(randomInt(100000, 1000000));
 }
 
 /** Delete expired OTP rows (best-effort; does not throw on failure). */
@@ -103,7 +122,7 @@ router.post('/request', validate({
     await pool.query(
       `INSERT INTO recovery_otps (request_id, code, expires_at, attempts)
        VALUES ($1, $2, $3, 0)`,
-      [id, otp, expiresAt],
+      [id, hashOtp(otp), expiresAt],
     );
   } catch (err) {
     logger.error('Database error creating recovery request', 'recovery', {
@@ -188,7 +207,7 @@ router.post('/verify-otp', validate({
       return;
     }
 
-    if (otp.code !== code.trim()) {
+    if (!verifyOtpHash(code.trim(), otp.code)) {
       await pool.query(
         'UPDATE recovery_otps SET attempts = $1 WHERE request_id = $2',
         [newAttempts, requestId],
@@ -261,7 +280,7 @@ router.post('/resend-otp', validate({
          SET code = EXCLUDED.code,
              expires_at = EXCLUDED.expires_at,
              attempts = 0`,
-      [requestId, otp, expiresAt],
+      [requestId, hashOtp(otp), expiresAt],
     );
 
     logger.info('Recovery OTP resent for delivery', 'recovery', {

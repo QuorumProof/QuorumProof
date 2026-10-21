@@ -13,6 +13,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { randomInt } from 'crypto';
+
+// Pin the generated OTP: the route stores only an HMAC of it, so tests need to know the code up front.
+vi.mock('crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('crypto')>();
+  return { ...actual, randomInt: vi.fn(actual.randomInt) };
+});
 
 // ---------------------------------------------------------------------------
 // Minimal in-process fake for pg.Pool
@@ -186,11 +193,6 @@ async function buildApp() {
   return app;
 }
 
-function getGeneratedOtp(requestId: string): string | undefined {
-  const row = fakeDb.tables.recovery_otps.find((item) => item['request_id'] === requestId);
-  return typeof row?.['code'] === 'string' ? row['code'] : undefined;
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -252,6 +254,7 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
   it('OTP verification advances status; a NEW app instance sees the new status', async () => {
     const app1 = await buildApp();
 
+    vi.mocked(randomInt).mockReturnValueOnce(123456);
     const createRes = await request(app1).post('/api/recovery/request').send({
       credentialId: 'cred-002',
       lostWallet: VALID_LOST,
@@ -262,8 +265,7 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     expect(createRes.status).toBe(201);
     const { requestId } = createRes.body as { requestId: string };
 
-    const otp = getGeneratedOtp(requestId);
-    expect(otp).toMatch(/^\d{6}$/);
+    const otp = '123456';
 
     // Verify OTP on app1
     const verifyRes = await request(app1).post('/api/recovery/verify-otp').send({ requestId, code: otp! });
@@ -281,6 +283,7 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
   it('approve/reject cycle persists; new instance sees resolved state', async () => {
     const app1 = await buildApp();
 
+    vi.mocked(randomInt).mockReturnValueOnce(123456);
     const createRes = await request(app1).post('/api/recovery/request').send({
       credentialId: 'cred-003',
       lostWallet: VALID_LOST,
@@ -290,8 +293,7 @@ describe('#1429 recovery state persists across "process restart" (shared DB)', (
     });
     const { requestId } = createRes.body as { requestId: string };
 
-    const otp = getGeneratedOtp(requestId);
-    expect(otp).toMatch(/^\d{6}$/);
+    const otp = '123456';
 
     // Advance to pending_approval
     await request(app1).post('/api/recovery/verify-otp').send({ requestId, code: otp! });

@@ -11,6 +11,8 @@
  * - Network partition resilience
  */
 
+import { randomBytes } from 'crypto';
+
 export type RevocationNodeRole = 'leader' | 'follower' | 'candidate';
 export type RevocationConsensusState = 'committed' | 'pending' | 'conflicted';
 
@@ -376,11 +378,11 @@ export class DistributedRevocationRegistry {
   }
 
   private generateNodeId(): string {
-    return 'node_' + Math.random().toString(36).substring(2, 11);
+    return 'node_' + randomBytes(16).toString('hex');
   }
 
   private generateMessageId(): string {
-    return 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+    return 'msg_' + Date.now() + '_' + randomBytes(16).toString('hex');
   }
 
   /**
