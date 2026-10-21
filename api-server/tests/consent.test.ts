@@ -14,11 +14,16 @@
  *  - Cross-check: consent revocation blocking subsequent bridge access recorded via POST .../consent/access
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import consentRouter from '../src/routes/consent.js';
 import * as soroban from '../src/soroban.js';
+import { SessionManager, _setDefaultSessionManagerForTest } from '../src/services/sessionManager.js';
+import { UserWalletStore, _setDefaultUserWalletStoreForTest } from '../src/services/userWalletStore.js';
 
 // Mock soroban module
 vi.mock('../src/soroban.js', () => ({
@@ -30,6 +35,8 @@ vi.mock('../src/soroban.js', () => ({
 
 describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
   let app: express.Express;
+  let tempDir: string;
+  let token: string;
   const mockSimulateCall = vi.mocked(soroban.simulateCall);
 
   const HOLDER_ADDR = 'GCLWGQBMKQL47Y6X7T3PBL43U6B6YTRQ54G42UGQ7WJ34N3C36Q4HOLDER';
@@ -38,9 +45,38 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-consent-auth-secret';
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'consent-auth-'));
+    const sessions = new SessionManager({ dataDir: path.join(tempDir, 'sessions') });
+    _setDefaultSessionManagerForTest(sessions);
+    token = sessions.createSession('consent-test-user').accessToken;
+    const wallets = new UserWalletStore({ dataDir: path.join(tempDir, 'wallets') });
+    wallets.link('consent-test-user', HOLDER_ADDR);
+    _setDefaultUserWalletStoreForTest(wallets);
     app = express();
     app.use(express.json());
+    app.use('/api/credentials', (req, _res, next) => {
+      if (req.header('x-anonymous') !== 'true') req.headers.authorization = `Bearer ${token}`;
+      next();
+    });
     app.use('/api/credentials', consentRouter);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    _setDefaultSessionManagerForTest(undefined);
+    _setDefaultUserWalletStoreForTest(undefined);
+  });
+
+  it('requires authentication for consent grants, revocation, and access recording', async () => {
+    const responses = await Promise.all([
+      request(app).post('/api/credentials/42/consent/grants').set('x-anonymous', 'true'),
+      request(app).delete(`/api/credentials/42/consent/grants/${VERIFIER_ADDR}`).set('x-anonymous', 'true'),
+      request(app).post('/api/credentials/42/consent/access').set('x-anonymous', 'true'),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([401, 401, 401]);
+    expect(mockSimulateCall).not.toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------------
@@ -141,9 +177,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
       expect(missingVerifier.body.error).toContain('verifier (Stellar address) is required');
     });
 
-    it('returns 403 when non-holder attempts to grant consent (UnauthorizedAction)', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('UnauthorizedAction: Caller is not the credential holder'));
-
+    it('returns 403 when an authenticated account claims another holder address', async () => {
       const res = await request(app)
         .post('/api/credentials/42/consent/grants')
         .send({
@@ -152,7 +186,8 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         });
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toBe('Only the credential holder may grant consent');
+      expect(res.body.error).toMatch(/does not match the authenticated account wallet/);
+      expect(mockSimulateCall).not.toHaveBeenCalled();
     });
 
     it('returns 404 when credential does not exist (CredentialNotFound)', async () => {
@@ -219,15 +254,14 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
       expect(res.body.error).toContain('holder (Stellar address) is required');
     });
 
-    it('returns 403 when non-holder attempts revocation (UnauthorizedAction)', async () => {
-      mockSimulateCall.mockRejectedValueOnce(new Error('UnauthorizedAction: Caller is not the credential holder'));
-
+    it('returns 403 when an authenticated account claims another holder address for revocation', async () => {
       const res = await request(app)
         .delete(`/api/credentials/42/consent/grants/${VERIFIER_ADDR}`)
         .send({ holder: OTHER_HOLDER_ADDR });
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toBe('Only the credential holder may revoke consent');
+      expect(res.body.error).toMatch(/does not match the authenticated account wallet/);
+      expect(mockSimulateCall).not.toHaveBeenCalled();
     });
 
     it('returns 404 when credential is not found during revocation', async () => {
@@ -371,6 +405,20 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('access_type must be 1 (share_link), 2 (delegation), or 3 (proof_request)');
+    });
+
+    it('does not allow an authenticated account to record access for another holder', async () => {
+      const res = await request(app)
+        .post('/api/credentials/42/consent/access')
+        .send({
+          holder: OTHER_HOLDER_ADDR,
+          verifier: VERIFIER_ADDR,
+          access_type: 1,
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/does not match the authenticated account wallet/);
+      expect(mockSimulateCall).not.toHaveBeenCalled();
     });
 
     it('retrieves and filters access log with human-readable labels', async () => {

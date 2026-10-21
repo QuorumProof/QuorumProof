@@ -42,6 +42,7 @@ export const consentPaths: PathsFragment = {
     post: {
       tags: ['Consent'],
       summary: 'Grant a verifier consent to access a credential',
+      security: [{ bearerAuth: [] }],
       parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } }],
       requestBody: {
         required: true,
@@ -57,6 +58,7 @@ export const consentPaths: PathsFragment = {
       },
       responses: {
         '201': { description: 'Granted.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '401': { description: 'Authentication required.' },
         '400': { description: 'Missing fields or invalid expires_at.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,
@@ -79,6 +81,7 @@ export const consentPaths: PathsFragment = {
     delete: {
       tags: ['Consent'],
       summary: 'Revoke a verifier consent grant',
+      security: [{ bearerAuth: [] }],
       parameters: [
         { name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } },
         { name: 'verifier', in: 'path', required: true, schema: { type: 'string' } },
@@ -89,6 +92,7 @@ export const consentPaths: PathsFragment = {
       },
       responses: {
         '200': { description: 'Revoked.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '401': { description: 'Authentication required.' },
         '400': { description: 'Missing holder.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,
@@ -112,7 +116,8 @@ export const consentPaths: PathsFragment = {
     post: {
       tags: ['Consent'],
       summary: 'Record a verifier access event',
-      description: 'Used by internal services / the bridge relay to log access.',
+      description: 'Used by internal services / the bridge relay to log access. Requires an authenticated account linked to the holder wallet.',
+      security: [{ bearerAuth: [] }],
       parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } }],
       requestBody: {
         required: true,
@@ -128,6 +133,7 @@ export const consentPaths: PathsFragment = {
       },
       responses: {
         '201': { description: 'Recorded.', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+        '401': { description: 'Authentication required.' },
         '400': { description: 'Missing/invalid fields.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': forbidden,
         '404': credentialNotFound,
