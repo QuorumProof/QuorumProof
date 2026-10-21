@@ -4583,16 +4583,24 @@ impl QuorumProofContract {
             })
     }
 
-    /// Record a global call event and — if a `CongestionConfig` is present —
+    /// Record a call event and — if a `CongestionConfig` is present —
     /// automatically adjust the global rate-limit `max_calls` based on the
     /// current load level.
     ///
-    /// Call this from any high-frequency entry point (e.g. `issue_credential`,
-    /// `attest`) *after* the main business logic so that the adjustment takes
-    /// effect on the *next* call.
+    /// Admin only. This function changes the global rate limit for every
+    /// address, so it is not permissionless: anyone able to call it could
+    /// otherwise move the limit by paying only the call cost. The intended
+    /// caller is the admin or an off-chain keeper acting for the admin, run on
+    /// a schedule.
+    ///
+    /// The new `max_calls` is always clamped to
+    /// `[min_max_calls, max_max_calls]` from `CongestionConfig`.
     ///
     /// Returns the newly determined `CongestionLevel`.
-    pub fn update_congestion_and_adjust(env: Env) -> CongestionLevel {
+    pub fn update_congestion_and_adjust(env: Env, admin: Address) -> CongestionLevel {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+
         let now = env.ledger().timestamp();
         let cfg: CongestionConfig = env
             .storage()
@@ -26391,6 +26399,29 @@ mod tests {
         // Try to add third attestor (should fail - exceeds limit of 2)
         // This will panic in the current implementation
     }
+
+    #[test]
+    fn test_update_congestion_admin_only_and_clamped_to_bounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        client.set_rate_limit_config(&admin, &1000u32, &86400u64);
+        // One call is below low_load_threshold (999) → Low. The increase would
+        // give 1000 * 1.2 = 1200, but max_max_calls caps it at 1100.
+        client.set_congestion_config(
+            &admin, &10000u64, &999u64, &5000u32, &12000u32, &50u32, &1100u32,
+        );
+
+        // A non-admin cannot trigger the adjustment, and the limit is untouched
+        let attacker = Address::generate(&env);
+        assert!(client.try_update_congestion_and_adjust(&attacker).is_err());
+        assert_eq!(client.get_rate_limit_config_pub().max_calls, 1000u32);
+
+        // The admin can, and the result is clamped to [min, max]
+        client.update_congestion_and_adjust(&admin);
+        assert_eq!(client.get_rate_limit_config_pub().max_calls, 1100u32);
+    }
 }
 
 // ── New feature tests ─────────────────────────────────────────────────────────
@@ -30946,7 +30977,7 @@ mod doc_tests {
             &admin, &5u64, &1u64, &5000u32, &12000u32, &50u32, &5000u32,
         );
         // First call → 1 in window; 1 is NOT < 1, so Normal
-        let level = client.update_congestion_and_adjust();
+        let level = client.update_congestion_and_adjust(&admin);
         assert_eq!(level, CongestionLevel::Normal);
     }
 
@@ -30962,9 +30993,9 @@ mod doc_tests {
             &admin, &2u64, &0u64, &5000u32, &12000u32, &50u32, &5000u32,
         );
 
-        client.update_congestion_and_adjust(); // 1 in window → Normal
-        client.update_congestion_and_adjust(); // 2 in window → Normal (not > 2)
-        client.update_congestion_and_adjust(); // 3 in window → High → halve
+        client.update_congestion_and_adjust(&admin); // 1 in window → Normal
+        client.update_congestion_and_adjust(&admin); // 2 in window → Normal (not > 2)
+        client.update_congestion_and_adjust(&admin); // 3 in window → High → halve
 
         let cfg = client.get_rate_limit_config_pub();
         assert_eq!(cfg.max_calls, 500);
@@ -30982,7 +31013,7 @@ mod doc_tests {
             &admin, &10000u64, &999u64, &5000u32, &12000u32, &50u32, &5000u32,
         );
 
-        client.update_congestion_and_adjust(); // 1 < 999 → Low → 1200
+        client.update_congestion_and_adjust(&admin); // 1 < 999 → Low → 1200
 
         let cfg = client.get_rate_limit_config_pub();
         assert_eq!(cfg.max_calls, 1200);
@@ -30998,7 +31029,7 @@ mod doc_tests {
         );
 
         assert!(client.get_congestion_metrics().is_none());
-        client.update_congestion_and_adjust();
+        client.update_congestion_and_adjust(&admin);
         let m = client.get_congestion_metrics().unwrap();
         assert_eq!(m.calls_in_window, 1);
     }
@@ -31252,7 +31283,7 @@ mod doc_tests {
         client.set_congestion_config(
             &admin, &800u64, &200u64, &5000u32, &12000u32, &50u32, &10000u32,
         );
-        client.update_congestion_and_adjust();
+        client.update_congestion_and_adjust(&admin);
 
         let report = client.validate_contract_state();
         assert!(report.congestion_level > 0);
@@ -31320,7 +31351,7 @@ mod doc_tests {
         client.set_congestion_config(
             &admin, &0u64, &0u64, &5000u32, &12000u32, &50u32, &10000u32,
         );
-        client.update_congestion_and_adjust(); // 1 > 0 → High
+        client.update_congestion_and_adjust(&admin); // 1 > 0 → High
 
         let report = client.validate_contract_state();
         let has_1010 = report.findings.iter().any(|f| f.code == 1010u32);
