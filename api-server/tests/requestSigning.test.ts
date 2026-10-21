@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { createRequestSigning } from '../src/middleware/requestSigning.js';
@@ -14,9 +14,9 @@ function createTestApp(signing: ReturnType<typeof createRequestSigning>) {
   return app;
 }
 
-function signPayload(method: string, path: string, timestamp: number, body: unknown, secret: string): string {
+function signPayload(method: string, path: string, timestamp: number, body: unknown, secret: string, nonce = 'test-nonce'): string {
   const { createHmac } = require('crypto');
-  const payload = `${method}\n${path}\n${timestamp}\n${JSON.stringify(body || {})}`;
+  const payload = `${method}\n${path}\n${timestamp}\n${nonce}\n${JSON.stringify(body || {})}`;
   return createHmac('sha256', secret).update(payload).digest('hex');
 }
 
@@ -46,6 +46,7 @@ describe('Request Signing Middleware', () => {
       .get('/api/test')
       .set('x-stellar-signature', 'test')
       .set('x-signature-timestamp', 'not-a-number')
+      .set('x-signature-nonce', 'test-nonce')
       .set('x-signature-digest', 'abc');
 
     expect(res.status).toBe(401);
@@ -60,6 +61,7 @@ describe('Request Signing Middleware', () => {
       .get('/api/test')
       .set('x-stellar-signature', 'test')
       .set('x-signature-timestamp', String(Date.now() - 5000))
+      .set('x-signature-nonce', 'test-nonce')
       .set('x-signature-digest', 'abc');
 
     expect(res.status).toBe(401);
@@ -74,6 +76,7 @@ describe('Request Signing Middleware', () => {
       .get('/api/test')
       .set('x-stellar-signature', 'test')
       .set('x-signature-timestamp', String(Date.now() + 60000))
+      .set('x-signature-nonce', 'test-nonce')
       .set('x-signature-digest', 'abc');
 
     expect(res.status).toBe(401);
@@ -88,6 +91,7 @@ describe('Request Signing Middleware', () => {
       .get('/api/test')
       .set('x-stellar-signature', 'test')
       .set('x-signature-timestamp', String(Date.now()))
+      .set('x-signature-nonce', 'test-nonce')
       .set('x-signature-digest', 'invalid-signature');
 
     expect(res.status).toBe(401);
@@ -105,6 +109,7 @@ describe('Request Signing Middleware', () => {
       .get('/api/test')
       .set('x-stellar-signature', 'test')
       .set('x-signature-timestamp', String(timestamp))
+      .set('x-signature-nonce', 'test-nonce')
       .set('x-signature-digest', sig);
 
     expect(res.status).toBe(200);
@@ -123,6 +128,7 @@ describe('Request Signing Middleware', () => {
       .send(body)
       .set('x-stellar-signature', 'test')
       .set('x-signature-timestamp', String(timestamp))
+      .set('x-signature-nonce', 'test-nonce')
       .set('x-signature-digest', sig);
 
     expect(res.status).toBe(200);
@@ -140,10 +146,39 @@ describe('Request Signing Middleware', () => {
       .send({ data: 'tampered' })
       .set('x-stellar-signature', 'test')
       .set('x-signature-timestamp', String(timestamp))
+      .set('x-signature-nonce', 'test-nonce')
       .set('x-signature-digest', sig);
 
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('Invalid signature');
+  });
+
+  it('rejects a signed request replayed with the same nonce', async () => {
+    const signing = createRequestSigning({ secret: SECRET, enabled: true });
+    const app = createTestApp(signing);
+    const timestamp = Date.now();
+    const sig = signPayload('GET', '/api/test', timestamp, {}, SECRET);
+    const signedRequest = () => request(app)
+      .get('/api/test')
+      .set('x-stellar-signature', 'test')
+      .set('x-signature-timestamp', String(timestamp))
+      .set('x-signature-nonce', 'test-nonce')
+      .set('x-signature-digest', sig);
+
+    expect((await signedRequest()).status).toBe(200);
+    const replay = await signedRequest();
+    expect(replay.status).toBe(401);
+    expect(replay.body.error).toBe('Replayed request');
+  });
+
+  it('requires a signing secret when initialized in production', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('HMAC_SIGNING_SECRET', '');
+    try {
+      expect(() => createRequestSigning()).toThrow(/HMAC_SIGNING_SECRET/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('uses timing-safe signature comparison', () => {

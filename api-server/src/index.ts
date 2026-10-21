@@ -80,6 +80,13 @@ import { initTierRedemptionEvents } from './services/tierRedemptionEvents.js';
 import { pluginRegistry, loadPluginsFromEnv } from './plugins/index.js';
 
 const app = express();
+const trustProxyHops = process.env.TRUST_PROXY_HOPS === undefined
+  ? 1
+  : Number(process.env.TRUST_PROXY_HOPS);
+if (!Number.isSafeInteger(trustProxyHops) || trustProxyHops < 0) {
+  throw new Error('TRUST_PROXY_HOPS must be a non-negative integer');
+}
+app.set('trust proxy', trustProxyHops);
 
 // #1311: Create the HTTP server early so the graceful shutdown service can
 // reference it before httpServer.listen() is called.
