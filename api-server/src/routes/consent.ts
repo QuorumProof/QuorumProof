@@ -168,6 +168,12 @@ router.post('/:id/consent/grants', requireAuth, requireLinkedWallet((req) => req
   }
 
   const expiresAtNum = typeof expires_at === 'number' ? expires_at : 0;
+  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+    return;
+  }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
 
   try {
     const transaction = await prepareCall(holder, 'grant_verifier_consent', [
@@ -175,7 +181,8 @@ router.post('/:id/consent/grants', requireAuth, requireLinkedWallet((req) => req
       addressVal(String(verifier)),
       u64Val(credentialId),
       u64Val(expiresAtNum),
-    ]);
+    ], signedTransactionXdr);
+    if (respondIfNotConfirmed(res, submission)) return;
 
     res.status(202).json({
       status: 'pending_signature',
@@ -217,12 +224,20 @@ router.delete('/:id/consent/grants/:verifier', requireAuth, requireLinkedWallet(
     return;
   }
 
+  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+    return;
+  }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
+
   try {
     const transaction = await prepareCall(holder, 'revoke_verifier_consent', [
       addressVal(holder),
       addressVal(String(verifier)),
       u64Val(credentialId),
-    ]);
+    ], signedTransactionXdr);
+    if (respondIfNotConfirmed(res, submission)) return;
 
     res.status(202).json({
       status: 'pending_signature',
@@ -330,13 +345,21 @@ router.post('/:id/consent/access', requireAuth, requireLinkedWallet((req) => req
     return;
   }
 
+  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
+  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
+    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
+    return;
+  }
+  const signedTransactionXdr = typeof signed_transaction_xdr === 'string' ? signed_transaction_xdr : undefined;
+
   try {
     const transaction = await prepareCall(holder, 'record_verifier_access', [
       addressVal(holder),
       u64Val(credentialId),
       addressVal(String(verifier)),
       u32Val(accessTypeNum),
-    ]);
+    ], signedTransactionXdr);
+    if (respondIfNotConfirmed(res, submission)) return;
 
     res.status(202).json({
       status: 'pending_signature',

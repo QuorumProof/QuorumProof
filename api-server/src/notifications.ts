@@ -1,7 +1,7 @@
 /**
  * Credential Notification System (#550)
  *
- * Provides email/SMS notification dispatch, configurable preferences per address,
+ * Provides SendGrid/Twilio email/SMS notification dispatch, configurable preferences per address,
  * a notification history store, and batching of events from the same issuer
  * within a configurable time window.
  *
@@ -126,23 +126,71 @@ function buildBatchMessage(
 }
 
 // ---------------------------------------------------------------------------
-// Mock send functions
+// Provider send functions
 // ---------------------------------------------------------------------------
 
-/**
- * Simulate sending an email notification.
- * Replace with a real provider (e.g. SendGrid, SES) in production.
- */
 async function sendEmail(to: string, message: string): Promise<void> {
-  console.log(`[EMAIL] To: ${to} | ${message}`);
+  const apiKey = process.env.SENDGRID_API_KEY;
+  const from = process.env.SENDGRID_FROM_EMAIL;
+  if (!apiKey || !from) {
+    throw new Error('Email delivery is not configured (SENDGRID_API_KEY and SENDGRID_FROM_EMAIL are required)');
+  }
+
+  const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: from },
+      subject: 'QuorumProof notification',
+      content: [{ type: 'text/plain', value: message }],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Email delivery failed with status ${response.status}`);
+  }
 }
 
-/**
- * Simulate sending an SMS notification.
- * Replace with a real provider (e.g. Twilio) in production.
- */
 async function sendSms(phone: string, message: string): Promise<void> {
-  console.log(`[SMS] To: ${phone} | ${message}`);
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const from = process.env.TWILIO_FROM_PHONE;
+  if (!accountSid || !authToken || !from) {
+    throw new Error(
+      'SMS delivery is not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_FROM_PHONE are required)',
+    );
+  }
+
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({ To: phone, From: from, Body: message }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`SMS delivery failed with status ${response.status}`);
+  }
+}
+
+/** Deliver a recovery code without writing the code or destination to logs. */
+export async function sendRecoveryCode(
+  channel: NotificationChannel,
+  destination: string,
+  code: string,
+): Promise<void> {
+  const message = `Your QuorumProof recovery verification code is ${code}. It expires in 10 minutes.`;
+  if (channel === 'email') {
+    await sendEmail(destination, message);
+  } else {
+    await sendSms(destination, message);
+  }
 }
 
 // ---------------------------------------------------------------------------

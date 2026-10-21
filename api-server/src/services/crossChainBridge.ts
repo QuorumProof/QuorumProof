@@ -150,6 +150,10 @@ export function confirmAnchor(txHash: string, anchorId: number, store: BridgeSto
   store.confirm(txHash, anchorId);
 }
 
+export function markAnchorVerified(anchorId: number, store: BridgeStore = getDefaultBridgeStore()): void {
+  store.markVerified(anchorId);
+}
+
 export interface VerifyAnchorInput {
   anchorId: number;
   logIndexInReceipt: number;
@@ -180,6 +184,7 @@ export async function verifyAnchorReceiptProof(
   input: VerifyAnchorInput,
   bridgeStore: BridgeStore = getDefaultBridgeStore(),
   headerStore: BlockHeaderStore = getDefaultBlockHeaderStore(),
+  options: { persistVerification?: boolean } = {},
 ): Promise<VerifyAnchorResult> {
   const anchor = bridgeStore.getById(input.anchorId);
   if (!anchor) throw new AnchorVerificationError(`Unknown anchor ${input.anchorId}`);
@@ -216,7 +221,7 @@ export async function verifyAnchorReceiptProof(
     );
   }
 
-  bridgeStore.markVerified(input.anchorId);
+  if (options.persistVerification !== false) bridgeStore.markVerified(input.anchorId);
   return { anchor: { ...anchor, verified: true }, decoded, header };
 }
 

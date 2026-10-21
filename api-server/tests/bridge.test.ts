@@ -7,6 +7,20 @@ import request from 'supertest';
 import bridgeRouter from '../src/routes/bridge.js';
 import { BridgeStore, _setDefaultBridgeStoreForTest } from '../src/services/bridgeStore.js';
 import { BlockHeaderStore, _setDefaultBlockHeaderStoreForTest } from '../src/services/blockHeaderStore.js';
+import { getAllAnchors } from '../src/services/crossChainBridge.js';
+
+const { submitCall, simulateCall } = vi.hoisted(() => ({
+  submitCall: vi.fn(),
+  simulateCall: vi.fn(),
+}));
+
+vi.mock('../src/soroban.js', () => ({
+  submitCall,
+  simulateCall,
+  u64Val: (value: number | bigint) => value,
+  u32Val: (value: number) => value,
+  addressVal: (value: string) => value,
+}));
 
 vi.mock('../src/soroban.js', () => ({
   prepareCall: vi.fn(async () => ({
@@ -33,6 +47,12 @@ beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-route-test-'));
   _setDefaultBridgeStoreForTest(new BridgeStore(dataDir));
   _setDefaultBlockHeaderStoreForTest(new BlockHeaderStore(dataDir));
+  submitCall.mockReset().mockResolvedValue({
+    status: 'prepared',
+    transaction_xdr: 'unsigned-anchor-xdr',
+    authorization_entries_xdr: ['unsigned-anchor-auth-xdr'],
+  });
+  simulateCall.mockReset();
 });
 
 afterEach(() => {
@@ -156,5 +176,7 @@ describe('POST /api/bridge/anchors/:id/verify', () => {
         receipt_proof: { claim: { txIndex: 0, txType: 0, status: 1, cumulativeGasUsed: '1', logsBloom: '0x' + '00'.repeat(256), logs: [] }, proofNodes: [] },
       });
     expect(res.status).toBe(404);
+    expect(simulateCall).toHaveBeenCalledWith('get_chain_anchor', [999], { cache: false });
+    expect(submitCall).not.toHaveBeenCalled();
   });
 });
