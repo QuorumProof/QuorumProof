@@ -1,4 +1,7 @@
 #![no_std]
+#[cfg(test)]
+extern crate std;
+
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Vec};
 use soroban_sdk::xdr::ToXdr;
 
@@ -40,6 +43,7 @@ pub const GROTH16_BLS_PROOF_LEN: u32 = groth16::PROOF_LEN;
 
 /// Maximum public-input field elements accepted by
 /// [`ZkVerifierContract::verify_groth16_proof`] / `verify_aggregated_proofs`.
+const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
 const MAX_GROTH16_PUBLIC_INPUTS: usize = groth16::MAX_PUBLIC_INPUTS;
 
 /// Maximum number of proofs verifiable in a single `verify_aggregated_proofs`
@@ -1034,7 +1038,7 @@ impl ZkVerifierContract {
         claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1374,23 +1378,65 @@ impl ZkVerifierContract {
     // ===== Issue #381: Metadata Encryption =====
 
     /// Store proof metadata with optional encryption.
+    ///
+    /// Issue #1724: `caller` must authorize the write and must be the admin or
+    /// a registrar (authorized issuer). Replacing an existing entry is allowed
+    /// only for the admin or the address that wrote the entry.
     pub fn store_proof_metadata(
         env: Env,
+        caller: Address,
         credential_id: u64,
         claim_type: ClaimType,
         proof_hash: Bytes,
         description: String,
     ) {
+        caller.require_auth();
+        require_registrar_or_admin(&env, &caller);
+
+        let key = DataKey::ProofMetadata(credential_id, claim_type.clone());
+        let writer_key = DataKey::ProofMetadataWriter(credential_id, claim_type.clone());
+        if env.storage().instance().has(&key) {
+            let is_admin = stored_admin(&env).is_some_and(|admin| admin == caller);
+            let is_writer = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&writer_key)
+                .is_some_and(|writer| writer == caller);
+            assert!(is_admin || is_writer, "unauthorized overwrite");
+        }
+
         let metadata = ProofMetadata {
             credential_id,
-            claim_type: claim_type.clone(),
+            claim_type,
             proof_hash,
             description,
             encrypted: false,
             compressed: false,
         };
-        let key = DataKey::ProofMetadata(credential_id, claim_type);
         env.storage().instance().set(&key, &metadata);
+        env.storage().instance().set(&writer_key, &caller);
+    }
+
+    /// Grant or revoke the registrar (authorized issuer) role. Only the admin may call this.
+    pub fn set_registrar(env: Env, admin: Address, registrar: Address, enabled: bool) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        assert!(stored_admin == admin, "unauthorized");
+        env.storage()
+            .instance()
+            .set(&DataKey::Registrar(registrar), &enabled);
+    }
+
+    /// Returns true if `addr` holds the registrar role.
+    pub fn is_registrar(env: Env, addr: Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Registrar(addr))
+            .unwrap_or(false)
     }
 
     /// Retrieve proof metadata.
@@ -1641,7 +1687,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -1978,7 +2024,7 @@ impl ZkVerifierContract {
         public_inputs: Bytes,
         vk_hash: BytesN<32>,
     ) -> bool {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
@@ -2366,6 +2412,25 @@ impl ZkVerifierContract {
     }
 }
 
+/// Largest page `get_proof_hash_registry` returns in one call (issue #1725).
+const MAX_PROOF_HASH_PAGE: u32 = 100;
+
+/// Returns the stored admin address, if the contract has been initialized.
+fn stored_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Admin)
+}
+
+/// Panics unless `caller` is the admin or a registrar (issues #1724, #1725).
+fn require_registrar_or_admin(env: &Env, caller: &Address) {
+    let is_admin = stored_admin(env).is_some_and(|admin| admin == *caller);
+    let is_registrar = env
+        .storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Registrar(caller.clone()))
+        .unwrap_or(false);
+    assert!(is_admin || is_registrar, "unauthorized");
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -2426,8 +2491,14 @@ pub enum DataKey {
     /// A registered constraint system, keyed by its id.
     ConstraintSystem(u64),
     // ===== Proof-hash registry and revocation =====
-    /// Every registered proof hash, in registration order.
-    ProofHashRegistry,
+    /// Registrar role flag (authorized issuer). The admin is always authorized.
+    Registrar(Address),
+    /// Address that wrote the current `ProofMetadata` entry for a key.
+    ProofMetadataWriter(u64, ClaimType),
+    /// Number of entries in the proof-hash registry (persistent storage).
+    ProofHashCount,
+    /// Proof hash at a registry index, in registration order (persistent storage).
+    ProofHashAt(u32),
     /// Whether a given proof hash has been revoked.
     ProofRevocationStatus(BytesN<32>),
     /// The revocation record for a revoked proof hash.
@@ -2662,19 +2733,61 @@ impl ZkVerifierContract {
 
     /// Register a proof hash in the revocation registry.
     ///
-    /// This records the hash on-chain so it can later be revoked. All
-    /// callers may register a proof hash; revocation itself is admin-only.
-    pub fn register_proof_hash(env: Env, proof_hash: BytesN<32>) {
+    /// Issue #1725: `caller` must authorize the call and must be the admin or
+    /// a registrar. A hash can be registered only once: re-registering is
+    /// rejected, so an existing revocation status is never reset. The registry
+    /// lives in persistent storage, one entry per index; read it back with
+    /// `get_proof_hash_registry`.
+    pub fn register_proof_hash(env: Env, caller: Address, proof_hash: BytesN<32>) {
+        caller.require_auth();
+        require_registrar_or_admin(&env, &caller);
+
+        assert!(
+            !env.storage().instance()
+                .has(&DataKey::ProofRevocationStatus(proof_hash.clone())),
+            "proof hash already registered"
+        );
+
         // Record as not-yet-revoked
         env.storage().instance()
             .set(&DataKey::ProofRevocationStatus(proof_hash.clone()), &false);
 
-        // Append to the global registry list
-        let mut registry: Vec<BytesN<32>> = env.storage().instance()
-            .get(&DataKey::ProofHashRegistry)
-            .unwrap_or_else(|| Vec::new(&env));
-        registry.push_back(proof_hash);
-        env.storage().instance().set(&DataKey::ProofHashRegistry, &registry);
+        // Append to the registry: one persistent entry per index.
+        let count: u32 = env.storage().persistent()
+            .get(&DataKey::ProofHashCount)
+            .unwrap_or(0);
+        let index_key = DataKey::ProofHashAt(count);
+        env.storage().persistent().set(&index_key, &proof_hash);
+        env.storage().persistent().extend_ttl(&index_key, 16_384, 524_288);
+        env.storage().persistent().set(&DataKey::ProofHashCount, &(count + 1));
+        env.storage().persistent()
+            .extend_ttl(&DataKey::ProofHashCount, 16_384, 524_288);
+    }
+
+    /// Number of proof hashes in the registry.
+    pub fn get_proof_hash_count(env: Env) -> u32 {
+        env.storage().persistent()
+            .get(&DataKey::ProofHashCount)
+            .unwrap_or(0)
+    }
+
+    /// Return up to `limit` registered proof hashes starting at `offset`,
+    /// in registration order. `limit` is capped at `MAX_PROOF_HASH_PAGE`.
+    pub fn get_proof_hash_registry(env: Env, offset: u32, limit: u32) -> Vec<BytesN<32>> {
+        let count: u32 = env.storage().persistent()
+            .get(&DataKey::ProofHashCount)
+            .unwrap_or(0);
+        let end = offset.saturating_add(limit.min(MAX_PROOF_HASH_PAGE)).min(count);
+
+        let mut page = Vec::new(&env);
+        for index in offset..end {
+            if let Some(hash) = env.storage().persistent()
+                .get::<_, BytesN<32>>(&DataKey::ProofHashAt(index))
+            {
+                page.push_back(hash);
+            }
+        }
+        page
     }
 
     /// Revoke a previously registered proof hash.
@@ -2962,6 +3075,7 @@ mod proptest_zk_verifier;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
     use crate::plonk_test_prover;
@@ -3277,13 +3391,13 @@ mod tests {
     #[test]
     fn test_store_and_get_proof_metadata() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
         let proof_hash = Bytes::from_slice(&env, b"sha256:abc123");
         let description = String::from_str(&env, "Degree proof for MIT 2020");
 
-        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &proof_hash, &description);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &proof_hash, &description);
 
         let meta = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
         assert_eq!(meta.credential_id, 1);
@@ -3295,16 +3409,16 @@ mod tests {
     #[test]
     fn test_metadata_isolated_per_claim_type() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
         let hash_degree = Bytes::from_slice(&env, b"hash-degree");
         let hash_license = Bytes::from_slice(&env, b"hash-license");
         let desc_degree = String::from_str(&env, "degree desc");
         let desc_license = String::from_str(&env, "license desc");
 
-        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash_degree, &desc_degree);
-        client.store_proof_metadata(&1u64, &ClaimType::HasLicense, &hash_license, &desc_license);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &hash_degree, &desc_degree);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasLicense, &hash_license, &desc_license);
 
         let meta_d = client.get_proof_metadata(&1u64, &ClaimType::HasDegree);
         let meta_l = client.get_proof_metadata(&1u64, &ClaimType::HasLicense);
@@ -3316,15 +3430,15 @@ mod tests {
     #[test]
     fn test_metadata_isolated_per_credential() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ZkVerifierContract);
-        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
         let hash1 = Bytes::from_slice(&env, b"hash-cred-1");
         let hash2 = Bytes::from_slice(&env, b"hash-cred-2");
         let desc = String::from_str(&env, "desc");
 
-        client.store_proof_metadata(&1u64, &ClaimType::HasDegree, &hash1, &desc);
-        client.store_proof_metadata(&2u64, &ClaimType::HasDegree, &hash2, &desc);
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &hash1, &desc);
+        client.store_proof_metadata(&admin, &2u64, &ClaimType::HasDegree, &hash2, &desc);
 
         assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash1);
         assert_eq!(client.get_proof_metadata(&2u64, &ClaimType::HasDegree).proof_hash, hash2);
@@ -4849,10 +4963,10 @@ mod tests {
     fn test_register_proof_hash_not_revoked() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin) = setup(&env);
+        let (client, admin) = setup(&env);
 
         let proof_hash = BytesN::from_array(&env, &[0x12u8; 32]);
-        client.register_proof_hash(&proof_hash);
+        client.register_proof_hash(&admin, &proof_hash);
 
         let is_revoked = client.check_proof_revocation(&proof_hash);
         assert!(!is_revoked, "freshly registered proof should not be revoked");
@@ -4865,7 +4979,7 @@ mod tests {
         let (client, admin) = setup(&env);
 
         let proof_hash = BytesN::from_array(&env, &[0x34u8; 32]);
-        client.register_proof_hash(&proof_hash);
+        client.register_proof_hash(&admin, &proof_hash);
 
         let reason = Bytes::from_slice(&env, b"underlying credential revoked");
         client.revoke_proof_by_hash(&admin, &proof_hash, &reason);
@@ -4884,7 +4998,7 @@ mod tests {
 
         let proof_hash = BytesN::from_array(&env, &[0x56u8; 32]);
         let reason = Bytes::from_slice(&env, b"test revocation");
-        client.register_proof_hash(&proof_hash);
+        client.register_proof_hash(&admin, &proof_hash);
         client.revoke_proof_by_hash(&admin, &proof_hash, &reason);
 
         let record = client.get_revocation_record(&proof_hash);
@@ -4902,8 +5016,8 @@ mod tests {
         let hash2 = BytesN::from_array(&env, &[0x02u8; 32]);
         let reason = Bytes::from_slice(&env, b"reason");
 
-        client.register_proof_hash(&hash1);
-        client.register_proof_hash(&hash2);
+        client.register_proof_hash(&admin, &hash1);
+        client.register_proof_hash(&admin, &hash2);
         client.revoke_proof_by_hash(&admin, &hash1, &reason);
         client.revoke_proof_by_hash(&admin, &hash2, &reason);
 
@@ -4933,10 +5047,228 @@ mod tests {
 
         let hash = BytesN::from_array(&env, &[0xAAu8; 32]);
         let reason = Bytes::from_slice(&env, b"reason");
-        client.register_proof_hash(&hash);
+        client.register_proof_hash(&admin, &hash);
         client.revoke_proof_by_hash(&admin, &hash, &reason);
         // Second revocation should panic
         client.revoke_proof_by_hash(&admin, &hash, &reason);
+    }
+
+    // =========================================================================
+    // Issue #1724: store_proof_metadata authorization tests
+    // =========================================================================
+
+    #[test]
+    fn test_store_metadata_rejects_unauthorized_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let stranger = Address::generate(&env);
+        let hash = Bytes::from_slice(&env, b"hash");
+        let desc = String::from_str(&env, "desc");
+
+        let result = client.try_store_proof_metadata(&stranger, &1u64, &ClaimType::HasDegree, &hash, &desc);
+        assert!(result.is_err(), "caller without admin or registrar role must be rejected");
+        assert!(client.try_get_proof_metadata(&1u64, &ClaimType::HasDegree).is_err());
+    }
+
+    #[test]
+    fn test_store_metadata_registrar_can_write() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+        assert!(client.is_registrar(&registrar));
+
+        let hash = Bytes::from_slice(&env, b"hash");
+        let desc = String::from_str(&env, "desc");
+        client.store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash, &desc);
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash);
+    }
+
+    #[test]
+    fn test_store_metadata_rejects_overwrite_by_other_registrar() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar_a = Address::generate(&env);
+        let registrar_b = Address::generate(&env);
+        client.set_registrar(&admin, &registrar_a, &true);
+        client.set_registrar(&admin, &registrar_b, &true);
+
+        let hash_a = Bytes::from_slice(&env, b"hash-a");
+        let hash_b = Bytes::from_slice(&env, b"hash-b");
+        let desc = String::from_str(&env, "desc");
+        client.store_proof_metadata(&registrar_a, &1u64, &ClaimType::HasDegree, &hash_a, &desc);
+
+        let result = client.try_store_proof_metadata(&registrar_b, &1u64, &ClaimType::HasDegree, &hash_b, &desc);
+        assert!(result.is_err(), "another registrar must not overwrite the entry");
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash_a);
+    }
+
+    #[test]
+    fn test_store_metadata_writer_and_admin_can_replace() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+
+        let desc = String::from_str(&env, "desc");
+        let hash_1 = Bytes::from_slice(&env, b"hash-1");
+        let hash_2 = Bytes::from_slice(&env, b"hash-2");
+        let hash_3 = Bytes::from_slice(&env, b"hash-3");
+        client.store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash_1, &desc);
+
+        // The original writer may replace its own entry.
+        client.store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash_2, &desc);
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash_2);
+
+        // The admin may replace any entry.
+        client.store_proof_metadata(&admin, &1u64, &ClaimType::HasDegree, &hash_3, &desc);
+        assert_eq!(client.get_proof_metadata(&1u64, &ClaimType::HasDegree).proof_hash, hash_3);
+    }
+
+    #[test]
+    fn test_revoked_registrar_cannot_store_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+        client.set_registrar(&admin, &registrar, &false);
+        assert!(!client.is_registrar(&registrar));
+
+        let hash = Bytes::from_slice(&env, b"hash");
+        let desc = String::from_str(&env, "desc");
+        let result = client.try_store_proof_metadata(&registrar, &1u64, &ClaimType::HasDegree, &hash, &desc);
+        assert!(result.is_err(), "revoked registrar must be rejected");
+    }
+
+    #[test]
+    fn test_set_registrar_admin_only() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let stranger = Address::generate(&env);
+        let target = Address::generate(&env);
+        let result = client.try_set_registrar(&stranger, &target, &true);
+        assert!(result.is_err(), "only the admin may grant the registrar role");
+        assert!(!client.is_registrar(&target));
+    }
+
+    // =========================================================================
+    // Issue #1725: register_proof_hash authorization, dedup and pagination
+    // =========================================================================
+
+    #[test]
+    fn test_register_proof_hash_rejects_unauthorized_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let stranger = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[0x21u8; 32]);
+        let result = client.try_register_proof_hash(&stranger, &hash);
+        assert!(result.is_err(), "caller without admin or registrar role must be rejected");
+        assert_eq!(client.get_proof_hash_count(), 0);
+    }
+
+    #[test]
+    fn test_registrar_can_register_proof_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let registrar = Address::generate(&env);
+        client.set_registrar(&admin, &registrar, &true);
+
+        let hash = BytesN::from_array(&env, &[0x22u8; 32]);
+        client.register_proof_hash(&registrar, &hash);
+        assert!(!client.check_proof_revocation(&hash));
+        assert_eq!(client.get_proof_hash_count(), 1);
+    }
+
+    #[test]
+    fn test_revoked_proof_stays_revoked_after_reregistration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = BytesN::from_array(&env, &[0x23u8; 32]);
+        let reason = Bytes::from_slice(&env, b"underlying credential revoked");
+        client.register_proof_hash(&admin, &hash);
+        client.revoke_proof_by_hash(&admin, &hash, &reason);
+
+        let result = client.try_register_proof_hash(&admin, &hash);
+        assert!(result.is_err(), "re-registering a revoked hash must be rejected");
+        assert!(client.check_proof_revocation(&hash), "revocation must survive re-registration");
+        assert_eq!(client.get_proof_hash_count(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_proof_hash_registration_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hash = BytesN::from_array(&env, &[0x24u8; 32]);
+        client.register_proof_hash(&admin, &hash);
+        let result = client.try_register_proof_hash(&admin, &hash);
+        assert!(result.is_err(), "duplicate registration must be rejected");
+        assert_eq!(client.get_proof_hash_count(), 1);
+    }
+
+    #[test]
+    fn test_proof_hash_registry_is_paginated() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let hashes: std::vec::Vec<BytesN<32>> = (0u8..5)
+            .map(|i| BytesN::from_array(&env, &[i + 1; 32]))
+            .collect();
+        for hash in &hashes {
+            client.register_proof_hash(&admin, hash);
+        }
+        assert_eq!(client.get_proof_hash_count(), 5);
+
+        let first = client.get_proof_hash_registry(&0u32, &2u32);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.get(0), Some(hashes[0].clone()));
+        assert_eq!(first.get(1), Some(hashes[1].clone()));
+
+        let rest = client.get_proof_hash_registry(&2u32, &10u32);
+        assert_eq!(rest.len(), 3);
+        assert_eq!(rest.get(0), Some(hashes[2].clone()));
+        assert_eq!(rest.get(2), Some(hashes[4].clone()));
+
+        assert_eq!(client.get_proof_hash_registry(&5u32, &3u32).len(), 0);
+        assert_eq!(client.get_proof_hash_registry(&0u32, &0u32).len(), 0);
+    }
+
+    #[test]
+    fn test_proof_hash_registry_page_is_capped() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        for i in 0u32..(MAX_PROOF_HASH_PAGE + 1) {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&i.to_be_bytes());
+            client.register_proof_hash(&admin, &BytesN::from_array(&env, &bytes));
+        }
+        assert_eq!(client.get_proof_hash_count(), MAX_PROOF_HASH_PAGE + 1);
+        assert_eq!(
+            client.get_proof_hash_registry(&0u32, &u32::MAX).len(),
+            MAX_PROOF_HASH_PAGE
+        );
     }
 
     #[test]

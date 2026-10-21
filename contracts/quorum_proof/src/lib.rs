@@ -3487,6 +3487,7 @@ impl QuorumProofContract {
             !env.storage().instance().has(&DataKey::Admin),
             "already initialized"
         );
+        admin.require_auth();
         Self::require_valid_address(&env, &admin);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -22819,6 +22820,26 @@ mod tests {
         client.initialize(&admin);
     }
 
+    /// Issue #1723: `initialize` must require the admin's authorization, so a
+    /// caller cannot install an admin address that never signed.
+    #[test]
+    fn test_initialize_rejects_unsigned_admin() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, QuorumProofContract);
+        let client = QuorumProofContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        // No mock_all_auths and no auth for `admin`: the call must fail.
+        let result = client.try_initialize(&admin);
+        assert!(result.is_err(), "initialize without admin signature must fail");
+
+        // A failed initialization must not leave an admin behind, so a
+        // properly authorized initialize still succeeds.
+        env.mock_all_auths();
+        client.initialize(&admin);
+        assert!(!client.is_paused());
+    }
+
     fn setup(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
@@ -31828,6 +31849,7 @@ mod doc_tests {
 
     /// Helper: create an initialised client + admin.
     fn new_client(env: &Env) -> (QuorumProofContractClient<'_>, Address) {
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, QuorumProofContract);
         let client = QuorumProofContractClient::new(env, &contract_id);
         let admin = Address::generate(env);

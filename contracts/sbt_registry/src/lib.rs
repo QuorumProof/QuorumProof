@@ -106,6 +106,7 @@ pub enum ContractError {
     UnauthorizedClawback = 27,
     /// Issue #1402: `entries` is empty or exceeds `MAX_BATCH_SIZE`.
     BatchTooLarge = 28,
+    CoOwnerProposalNotFound = 29,
 }
 
 #[contracttype]
@@ -191,6 +192,15 @@ pub enum DataKey {
     /// Issue #1509: Governance-tunable credential-revocation cache TTL (in ledgers).
     /// Overrides the compile-time CREDENTIAL_CACHE_TTL_LEDGERS when set.
     GovernanceCacheTtl,
+}
+
+/// Overflow storage keys. Soroban caps a `contracttype` enum at 50 variants, so
+/// keys added after `DataKey` filled up live here.
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey2 {
+    /// Issue #1413: global index of clawback ids that are still pending.
+    PendingClawbacks,
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -613,7 +623,7 @@ impl SbtRegistryContract {
     pub fn mint(env: Env, owner: Address, credential_id: u64, metadata_uri: Bytes) -> u64 {
         owner.require_auth();
 
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1074,6 +1084,10 @@ impl SbtRegistryContract {
 
     /// Initialize the contract with an admin and the quorum_proof contract address.
     pub fn initialize(env: Env, admin: Address, quorum_proof_id: Address) {
+        assert!(
+            !env.storage().instance().has(&DataKey::Admin),
+            "already initialized"
+        );
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -1242,7 +1256,7 @@ impl SbtRegistryContract {
     pub fn burn_sbt(env: Env, holder: Address, sbt_id: u64, proof_of_residency: Bytes) {
         holder.require_auth();
 
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -1625,7 +1639,7 @@ impl SbtRegistryContract {
     /// # Panics
     /// - "token not found" if `token_id` does not exist.
     pub fn transfer_ownership_dual(env: Env, token_id: u64, new_owner: Address) {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -3256,15 +3270,15 @@ impl SbtRegistryContract {
         let mut pending: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&DataKey::PendingClawbacks)
+            .get(&DataKey2::PendingClawbacks)
             .unwrap_or(Vec::new(&env));
         if !pending.iter().any(|id| id == clawback_id) {
             pending.push_back(clawback_id);
             env.storage()
                 .persistent()
-                .set(&DataKey::PendingClawbacks, &pending);
+                .set(&DataKey2::PendingClawbacks, &pending);
             env.storage().persistent().extend_ttl(
-                &DataKey::PendingClawbacks,
+                &DataKey2::PendingClawbacks,
                 STANDARD_TTL,
                 EXTENDED_TTL,
             );
@@ -3306,16 +3320,16 @@ impl SbtRegistryContract {
         let mut pending: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&DataKey::PendingClawbacks)
+            .get(&DataKey2::PendingClawbacks)
             .unwrap_or(Vec::new(&env));
         if let Some(pos) = pending.iter().position(|id| id == clawback_id) {
             pending.remove(pos as u32);
             env.storage()
                 .persistent()
-                .set(&DataKey::PendingClawbacks, &pending);
+                .set(&DataKey2::PendingClawbacks, &pending);
             if !pending.is_empty() {
                 env.storage().persistent().extend_ttl(
-                    &DataKey::PendingClawbacks,
+                    &DataKey2::PendingClawbacks,
                     STANDARD_TTL,
                     EXTENDED_TTL,
                 );
@@ -3335,7 +3349,7 @@ impl SbtRegistryContract {
     pub fn get_pending_clawbacks(env: Env) -> Vec<u64> {
         env.storage()
             .persistent()
-            .get(&DataKey::PendingClawbacks)
+            .get(&DataKey2::PendingClawbacks)
             .unwrap_or(Vec::new(&env))
     }
 
@@ -3577,7 +3591,7 @@ impl SbtRegistryContract {
         sbt_id: u64,
         proof: Bytes,
     ) {
-        if Self::is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic!("contract is paused");
         }
 
@@ -4327,6 +4341,33 @@ mod tests {
         assert_eq!(sbt_client.get_tokens_by_owner(&admin).len(), 0);
     }
 
+    /// Issue #1722: a second `initialize` must not overwrite the admin or the
+    /// quorum_proof binding, even when called by an attacker-controlled address.
+    #[test]
+    fn test_initialize_twice_is_rejected_and_keeps_admin_and_binding() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (sbt_client, admin, _qp_client, qp_id) = setup_with_qp(&env);
+        let sbt_id = sbt_client.address.clone();
+
+        let attacker = Address::generate(&env);
+        let attacker_qp = env.register_contract(None, QuorumProofContract);
+
+        let result = sbt_client.try_initialize(&attacker, &attacker_qp);
+        assert!(result.is_err(), "second initialize must be rejected");
+
+        let (stored_admin, stored_qp): (Address, Address) = env.as_contract(&sbt_id, || {
+            (
+                env.storage().instance().get(&DataKey::Admin).unwrap(),
+                env.storage().instance().get(&DataKey::QuorumProofId).unwrap(),
+            )
+        });
+        assert_eq!(stored_admin, admin);
+        assert_ne!(stored_admin, attacker);
+        assert_eq!(stored_qp, qp_id);
+        assert_ne!(stored_qp, attacker_qp);
+    }
+
     fn setup_with_qp(
         env: &Env,
     ) -> (
@@ -4335,6 +4376,7 @@ mod tests {
         QuorumProofContractClient,
         Address,
     ) {
+        env.mock_all_auths();
         let qp_id = env.register_contract(None, QuorumProofContract);
         let qp_client = QuorumProofContractClient::new(env, &qp_id);
         let admin = Address::generate(env);
@@ -5805,8 +5847,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
-        let contract_id = env.register_contract(None, SoulboundTokenContract);
-        let client = SoulboundTokenContractClient::new(&env, &contract_id);
+        let contract_id = env.register_contract(None, SbtRegistryContract);
+        let client = SbtRegistryContractClient::new(&env, &contract_id);
         let qp_id = Address::generate(&env);
         client.initialize(&admin, &qp_id);
 
@@ -5832,7 +5874,6 @@ mod tests {
         client.unpause(&admin);
         assert!(!client.is_paused());
     }
-}
 
     #[test]
     #[should_panic(expected = "credential is revoked")]
@@ -6847,6 +6888,9 @@ mod tests {
             });
         }
 
+        // A full-size batch exceeds the default test budget; this test is about
+        // the size limit, not the cost of the batch.
+        env.budget().reset_unlimited();
         let result = client.batch_mint(&entries);
         assert_eq!(result.len(), client.get_max_batch_size());
     }
@@ -7096,6 +7140,7 @@ mod tests_governance_1511 {
         QuorumProofContractClient,
         Address,
     ) {
+        env.mock_all_auths();
         let qp_id = env.register_contract(None, QuorumProofContract);
         let qp_client = QuorumProofContractClient::new(env, &qp_id);
         let admin = Address::generate(env);

@@ -142,7 +142,7 @@ mod proptest_sbt_registry {
             prop_assert_eq!(
                 count_after_mints,
                 n_mint as u64,
-                "sbt_count after {n_mint} mints"
+                "sbt_count after {} mints", n_mint
             );
 
             // Burn the first token.
