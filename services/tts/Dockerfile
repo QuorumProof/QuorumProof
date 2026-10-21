@@ -32,5 +32,15 @@ ENV NODE_ENV=production
 ENV TTS_MAX_RETRIES=3
 ENV TTS_MAX_DELAY_MS=60000
 
+# Run as an unprivileged user — never root in production containers.
+RUN addgroup --system tts && adduser --system --ingroup tts tts
+USER tts
+
+# Health check against the HTTP surface on port 3010.
+# Replace with `node dist/server.js` in CMD once src/server.ts is added,
+# at which point the health check will start reporting healthy on /health.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:3010/health || exit 1
+
 # Placeholder: replace with `node dist/server.js` once the HTTP wrapper is added.
 CMD ["node", "-e", "console.log('TTS service library image. Add src/server.ts and rebuild to run as a server. See services/tts/README.md.')"]
