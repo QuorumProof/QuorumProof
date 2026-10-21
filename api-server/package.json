@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc --noEmit false 2>&1 || true",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "dev:once": "tsx src/index.ts",
     "test": "vitest --run",
     "loadtest:ws": "tsx loadtest/wsLoadTest.ts",
     "loadtest:credentials": "tsx loadtest/credentialLoadTest.ts",
@@ -19,7 +20,9 @@
     "openapi:generate": "tsx scripts/generate-openapi-spec.ts",
     "generate:client": "npm run openapi:generate && openapi-ts",
     "generate:types": "openapi-ts -f openapi-ts.types.config.ts",
-    "build:types": "tsc -p tsconfig.types.json"
+    "build:types": "tsc -p tsconfig.types.json",
+    "schema:diagram": "tsx scripts/generate-schema-diagram.ts",
+    "schema:diagram:check": "tsx scripts/generate-schema-diagram.ts --check"
   },
   "dependencies": {
     "@ethereumjs/block": "^10.1.2",

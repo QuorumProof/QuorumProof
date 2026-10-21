@@ -70,6 +70,13 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [ide-setup.md](./ide-setup.md) | VS Code extension recommendations, workspace settings, debug configurations, and tasks for contract and API development (issue #1664). |
 | [code-snippets.md](./code-snippets.md) | Code snippets library for common Soroban smart contract and client SDK patterns (issue #1670). |
 | [environment-parity.md](./environment-parity.md) | Detecting and remediating env/config drift between environments using check_env_parity.sh and compare_environments.sh (issue #1662). |
+| [DOCUMENTATION_SEARCH.md](./DOCUMENTATION_SEARCH.md) | Client-side documentation indexing and search architecture, including index generation and integration patterns. |
+| [hot-reload.md](./hot-reload.md) | Hot reload for the API server (`npm run dev`) and contract WASM rebuilds (`scripts/dev-watch-contracts.sh`), plus development configuration (issue #1676). |
+| [test-factories.md](./test-factories.md) | Test data factories for credentials, quorum slices, and SBTs: defaults, overrides, invariants, and how to add one (issue #1677). |
+| [database-schema.md](./database-schema.md) | Generated Mermaid ER diagram of the database schema, with tables, relationships, and migration conflicts. Regenerate with `npm run schema:diagram` (issue #1678). |
+| [git-workflow.md](./git-workflow.md) | Branching strategy, PR guidelines, commit message conventions, and merge strategy (issue #1675). |
+
+---
 
 ---
 

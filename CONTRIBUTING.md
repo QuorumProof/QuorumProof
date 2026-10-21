@@ -183,6 +183,8 @@ In short:
 ## General Guidelines
 
 - Fork the repository and work on a feature branch.
+- Follow the branching, PR, commit, and merge conventions in
+  [docs/git-workflow.md](docs/git-workflow.md).
 - Run `cargo test --target x86_64-unknown-linux-gnu --workspace` before
   opening a PR.
 - Keep PR titles under 70 characters; use the description for details.
