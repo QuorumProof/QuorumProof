@@ -194,6 +194,11 @@ jobs:
           "$PROMTOOL_BIN" check config monitoring/prometheus/prometheus.yml
           "$PROMTOOL_BIN" check rules monitoring/prometheus/alerts.yml
 
+      # Issue #1829: every alert must have a runbook_url annotation so on-call
+      # engineers receive a direct link to the response procedure.
+      - name: Check alert runbook_url annotations
+        run: ./scripts/check_alert_runbooks.sh
+
       - working-directory: api-server
         run: npm ci
       - name: Critical-event metrics + Prometheus scrape/alert tests

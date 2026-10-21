@@ -1,6 +1,6 @@
 # scripts/ — Operational Script Index
 
-This directory holds **29 shell and Python scripts** that span the full QuorumProof
+This directory holds **30 shell and Python scripts** that span the full QuorumProof
 operational lifecycle: build, test, deploy, backup/DR, migration, benchmarking, and
 security scanning. This index groups them by purpose so you can find the right script
 without opening every file.
@@ -92,6 +92,7 @@ Columns:
 |---|---|---|---|
 | `scan_contracts.sh` | Security pattern scan — checks for bare `unwrap()`/`expect()`, unsafe integer arithmetic, and other Soroban-specific anti-patterns (issue #594) | `ci.yml` (`security` job) | — |
 | `check_deps.sh` | Verifies contract `soroban-sdk` versions match `contracts/dependencies.toml`; warns if a pinned RUSTSEC advisory has been present >90 days (issues #589, #1490) | `ci.yml` (`security` job) | — |
+| `check_alert_runbooks.sh` | CI gate — parses `monitoring/prometheus/alerts.yml` and exits non-zero if any alert is missing a `runbook_url` annotation, listing the offending alert names (issue #1829) | `ci.yml` (`monitoring-integration` job) | — |
 | `generate_docs.sh` | Auto-generates contract API docs from Rust source comments and writes them to `docs/contracts/` with a version stamp (issue #590) | `manual` | — |
 
 ---
