@@ -117,7 +117,7 @@ router.get('/reputation/:address', async (req: Request, res: Response) => {
 // POST /api/attestor/batch-attest
 // Body: { attestor: string; credential_ids: string[]; slice_id: string }
 router.post('/batch-attest', async (req: Request, res: Response) => {
-  const { attestor, credential_ids, slice_id, signed_transactions } = req.body;
+  const { attestor, credential_ids, slice_id } = req.body;
 
   if (typeof attestor !== 'string' || attestor.length === 0 ||
       !Array.isArray(credential_ids) || credential_ids.length === 0 || slice_id === undefined || slice_id === null) {

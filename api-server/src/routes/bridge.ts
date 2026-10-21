@@ -241,7 +241,6 @@ router.post('/anchors', validate({
     contract_address,
     proof_type,
     admin,
-    signed_transaction_xdr,
   } = req.body as Record<string, unknown>;
 
   const missingFields: string[] = [];
@@ -253,17 +252,11 @@ router.post('/anchors', validate({
   if (typeof block_timestamp !== 'number') missingFields.push('block_timestamp');
   if (typeof contract_address !== 'string') missingFields.push('contract_address');
   if (typeof admin !== 'string') missingFields.push('admin (Stellar admin address)');
-  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
-    missingFields.push('signed_transaction_xdr (string)');
-  }
 
   if (missingFields.length > 0) {
     res.status(400).json({ error: `Missing required fields: ${missingFields.join(', ')}` });
     return;
   }
-  const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
-    ? signed_transaction_xdr
-    : undefined;
 
   if (!SUPPORTED_CHAINS[chain_id as number]) {
     res.status(400).json({
@@ -320,8 +313,7 @@ router.post('/anchors', validate({
       nativeToScVal(foreignTxBytes, { type: 'bytes' }),
       nativeToScVal(proofHashBuf, { type: 'bytes' }),
       u32Val(ptCode),
-    ], signedTransactionXdr);
-    if (respondIfNotConfirmed(res, submission)) return;
+    ]);
 
     res.status(202).json({
       status: 'pending_signature',
@@ -336,8 +328,6 @@ router.post('/anchors', validate({
       proof_type: pending.proofType,
       anchored_at: pending.anchoredAt,
       verified: false,
-      transaction_hash: submission.transaction_hash,
-      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -496,36 +486,13 @@ router.post('/anchors/:id/verify', validate({
     return;
   }
 
-  const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
-  if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
-    res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
-    return;
-  }
-  const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
-    ? signed_transaction_xdr
-    : undefined;
-
-  try {
-    const chainAnchor = await simulateCall('get_chain_anchor', [u64Val(id)], { cache: false });
-    if (!chainAnchor) {
-      res.status(404).json({ error: 'Anchor is not confirmed on-chain' });
-      return;
-    }
-  } catch (err: unknown) {
-    res.status(503).json({
-      error: 'Unable to confirm anchor on-chain',
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return;
-  }
-
   let verification;
   try {
     verification = await verifyAnchorReceiptProof({
       anchorId: id,
       logIndexInReceipt: log_index,
       receiptProof: receipt_proof as ReceiptProof,
-    }, undefined, undefined, { persistVerification: false });
+    });
   } catch (err: unknown) {
     if (err instanceof AnchorVerificationError) {
       res.status(404).json({ error: err.message });
@@ -549,8 +516,6 @@ router.post('/anchors/:id/verify', validate({
       proof_valid: true,
       verified: false,
       decoded_event: verification.decoded,
-      transaction_hash: submission.transaction_hash,
-      status: submission.status,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

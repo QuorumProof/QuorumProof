@@ -26,14 +26,12 @@ import { SessionManager, _setDefaultSessionManagerForTest } from '../src/service
 import { UserWalletStore, _setDefaultUserWalletStoreForTest } from '../src/services/userWalletStore.js';
 
 // Mock soroban module
-const { mockSubmitCall } = vi.hoisted(() => ({ mockSubmitCall: vi.fn() }));
 vi.mock('../src/soroban.js', () => ({
   prepareCall: vi.fn(async () => ({
     transaction_xdr: 'prepared-xdr',
     network_passphrase: 'Test SDF Network ; September 2015',
   })),
   simulateCall: vi.fn(),
-  submitCall: mockSubmitCall,
   u64Val: vi.fn((n: number | bigint) => n),
   u32Val: vi.fn((n: number) => n),
   addressVal: vi.fn((a: string) => a),
@@ -147,7 +145,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         VERIFIER_ADDR,
         42,
         expiresAt,
-      ], undefined);
+      ]);
     });
 
     it('defaults expires_at to 0 when omitted', async () => {
@@ -165,23 +163,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         VERIFIER_ADDR,
         42,
         0,
-      ], undefined);
-    });
-
-    it('returns the prepared transaction instead of reporting unconfirmed consent', async () => {
-      mockSubmitCall.mockResolvedValueOnce({
-        status: 'prepared',
-        transaction_xdr: 'unsigned-xdr',
-        authorization_entries_xdr: ['unsigned-auth-xdr'],
-      });
-
-      const res = await request(app)
-        .post('/api/credentials/42/consent/grants')
-        .send({ holder: HOLDER_ADDR, verifier: VERIFIER_ADDR });
-
-      expect(res.status).toBe(428);
-      expect(res.body.granted).toBeUndefined();
-      expect(res.body.transaction_xdr).toBe('unsigned-xdr');
+      ]);
     });
 
     it('returns 400 when holder or verifier is missing from request body', async () => {
@@ -263,7 +245,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         HOLDER_ADDR,
         VERIFIER_ADDR,
         42,
-      ], undefined);
+      ]);
     });
 
     it('returns 400 when holder is missing in request body', async () => {
@@ -412,7 +394,7 @@ describe('Consent Management Routes (/api/credentials/:id/consent)', () => {
         42,
         VERIFIER_ADDR,
         1,
-      ], undefined);
+      ]);
     });
 
     it('returns 400 for invalid access_type code', async () => {

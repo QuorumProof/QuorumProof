@@ -113,14 +113,6 @@ export function createShareLinksRouter(soroban: SorobanClient) {
       passwordHashHex = hexDigest;
       passwordHashArg = nativeToScVal(buf, { type: 'bytes' });
     }
-    const { signed_transaction_xdr } = req.body as { signed_transaction_xdr?: unknown };
-    if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
-      res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
-      return;
-    }
-    const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
-      ? signed_transaction_xdr
-      : undefined;
 
     try {
       // Call contract: generate_share_link(subject, credential_id, expiry_hours, password_hash, permission)
@@ -141,8 +133,6 @@ export function createShareLinksRouter(soroban: SorobanClient) {
         permission: PERMISSION_LABELS[permissionCode],
         password_protected: passwordHashHex !== null,
         credential_id: credentialId,
-        transaction_hash: submission.transaction_hash,
-        status: submission.status,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -195,7 +185,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
 
     try {
       const tokenScVal = nativeToScVal(tokenBuf, { type: 'bytes' });
-      const link = await simulateCall('validate_share_token', [tokenScVal, passwordHashArg], { cache: false });
+      const link = await simulateCall('validate_share_token', [tokenScVal, passwordHashArg]);
       res.json(serializeBigInt(link));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -217,22 +207,12 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    */
   router.delete('/share/:token', requireAuth, requireLinkedWallet((req) => req.body?.subject), async (req: Request, res: Response) => {
     const token = String(req.params.token);
-    const { subject, signed_transaction_xdr } = req.body as {
-      subject?: unknown;
-      signed_transaction_xdr?: unknown;
-    };
+    const { subject } = req.body as { subject?: unknown };
 
     if (typeof subject !== 'string' || subject.length === 0) {
       res.status(400).json({ error: 'subject (Stellar address) is required' });
       return;
     }
-    if (signed_transaction_xdr !== undefined && typeof signed_transaction_xdr !== 'string') {
-      res.status(400).json({ error: 'signed_transaction_xdr must be a string' });
-      return;
-    }
-    const signedTransactionXdr = typeof signed_transaction_xdr === 'string'
-      ? signed_transaction_xdr
-      : undefined;
 
     let tokenBuf: Buffer;
     try {

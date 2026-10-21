@@ -9,8 +9,6 @@ import {
   Account,
   BASE_FEE,
 } from '@stellar/stellar-sdk';
-import type { Operation, Transaction } from '@stellar/stellar-sdk';
-import type { rpc as StellarRpcClient } from '@stellar/stellar-sdk';
 import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
 import { getDefaultGasCostTracker } from './services/gasCostTracker.js';
 
@@ -25,8 +23,6 @@ const PASSPHRASES = {
 };
 
 const server = new StellarRpc.Server(RPC_URL);
-type SorobanRpcServer = Pick<StellarRpcClient.Server, 'getAccount' | 'simulateTransaction' | 'sendTransaction' | 'getTransaction'>;
-let rpcServer: SorobanRpcServer = server;
 const networkPassphrase = PASSPHRASES[NETWORK] ?? Networks.TESTNET;
 
 export interface ContractCall {
@@ -142,14 +138,10 @@ export function deserializeContractState(retval: Parameters<typeof scValToNative
  *
  * Design rationale: docs/adr/adr-015-read-only-api-server-via-simulation.md
  */
-export async function simulateCall(
-  method: string,
-  args: ReturnType<typeof nativeToScVal>[] = [],
-  options: { cache?: boolean } = {},
-) {
+export async function simulateCall(method: string, args: ReturnType<typeof nativeToScVal>[] = []) {
   if (!CONTRACT_ID) throw new Error('CONTRACT_QUORUM_PROOF env var not set');
 
-  const cacheArgs = options.cache === false ? undefined : args.map((arg) => {
+  const cacheArgs = args.map((arg) => {
     try {
       return scValToNative(arg);
     } catch {
@@ -176,7 +168,7 @@ export async function simulateCall(
       getDefaultGasCostTracker().record(method, result.minResourceFee);
       return deserializeContractState(result.result.retval);
     },
-    cacheArgs ? { method, args: cacheArgs } : undefined
+    { method, args: cacheArgs }
   );
 }
 
