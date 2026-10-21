@@ -33,11 +33,8 @@
  *   137 – Polygon Mainnet
  *   80001 – Polygon Mumbai (testnet, deprecated)
  *
- * NOTE: This service performs simulation-only calls against the Soroban
- * contract (read path).  Write operations (register / verify anchor) are
- * prepared here as signed transaction envelopes and must be submitted by
- * a funded Stellar account with the Admin role.  In a production setup,
- * this service holds an HSM-backed keypair for that account.
+ * NOTE: Contract reads use simulation. Write operations are returned as
+ * unsigned transaction envelopes for an Admin wallet to sign and submit.
  *
  * TRUST MODEL: step 3 (`verifyAnchorReceiptProof`) is what makes an anchor
  * `verified`, and it is backed by cryptographic MPT proof verification

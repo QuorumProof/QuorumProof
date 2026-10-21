@@ -147,8 +147,8 @@ export const attestorsPaths: PathsFragment = {
         },
       },
       responses: {
-        '200': {
-          description: 'Per-credential attestation results.',
+        '202': {
+          description: 'Unsigned batch transaction prepared; no credentials are attested until the attestor signs and submits it.',
           content: {
             'application/json': {
               schema: {
@@ -157,9 +157,12 @@ export const attestorsPaths: PathsFragment = {
                   total: { type: 'integer' },
                   succeeded: { type: 'integer' },
                   failed: { type: 'integer' },
+                  pending: { type: 'integer' },
+                  transaction_xdr: { type: 'string' },
+                  network_passphrase: { type: 'string' },
                   results: {
                     type: 'array',
-                    items: { type: 'object', properties: { credential_id: { type: 'string' }, success: { type: 'boolean' }, error: { type: 'string' } } },
+                    items: { type: 'object', properties: { credential_id: { type: 'string' }, status: { type: 'string', const: 'pending_signature' } } },
                   },
                 },
               },

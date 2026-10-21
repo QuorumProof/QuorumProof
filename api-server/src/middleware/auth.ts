@@ -183,6 +183,3 @@ export function requireRole(...roles: string[]) {
 export function isAdmin(req: Request): boolean {
   return req.auth?.role === 'admin';
 }
-
-/** Requires a valid access token with the admin role. */
-export const requireAdmin = requireRole();

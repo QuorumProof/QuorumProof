@@ -17,14 +17,13 @@
  * has changed. See crossChainBridge.ts for the trust-model rationale.
  */
 import { Router, Request, Response } from 'express';
-import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { prepareCall, simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
 import { rbac } from '../middleware/rbac.js';
 import { validate } from '../middleware/validate.js';
 import {
   SUPPORTED_CHAINS,
   ProofType,
   prepareAnchor,
-  confirmAnchor,
   getPendingAnchors,
   getAnchorByTxHash,
   getAnchorById,
@@ -307,7 +306,7 @@ router.post('/anchors', validate({
   const foreignTxBytes = txHashBuf.length <= 64 ? txHashBuf : txHashBuf.slice(0, 64);
 
   try {
-    const anchorIdRaw = await simulateCall('register_chain_anchor', [
+    const transaction = await prepareCall(admin as string, 'register_chain_anchor', [
       addressVal(admin as string),
       u32Val(chain_id as number),
       u64Val(credential_id as number),
@@ -316,11 +315,11 @@ router.post('/anchors', validate({
       u32Val(ptCode),
     ]);
 
-    const anchorId = Number(anchorIdRaw);
-    confirmAnchor(txHashStr, anchorId);
-
-    res.status(201).json({
-      anchor_id: anchorId,
+    res.status(202).json({
+      status: 'pending_signature',
+      message: 'Anchor registration is prepared; the admin must sign and submit the transaction before it is on-chain',
+      ...transaction,
+      anchor: pending,
       credential_id: pending.credentialId,
       chain_id: pending.chainId,
       chain_name: pending.chainName,
@@ -337,12 +336,7 @@ router.post('/anchors', validate({
     } else if (msg.includes('UnauthorizedAction')) {
       res.status(403).json({ error: 'Only the contract admin may register anchors' });
     } else {
-      // Return the prepared anchor even if on-chain call is simulated
-      res.status(202).json({
-        message: 'Anchor prepared (on-chain registration pending — contract may not be deployed)',
-        anchor: pending,
-        simulation_error: msg,
-      });
+      res.status(500).json({ error: msg });
     }
   }
 });
@@ -513,11 +507,14 @@ router.post('/anchors/:id/verify', validate({
   }
 
   try {
-    await simulateCall('verify_chain_anchor', [addressVal(admin), u64Val(id)]);
-    res.json({
-      success: true,
+    const transaction = await prepareCall(admin, 'verify_chain_anchor', [addressVal(admin), u64Val(id)]);
+    res.status(202).json({
+      status: 'pending_signature',
+      message: 'The receipt proof is valid; the admin must sign and submit the transaction before the anchor is verified on-chain',
+      ...transaction,
       anchor_id: id,
-      verified: true,
+      proof_valid: true,
+      verified: false,
       decoded_event: verification.decoded,
     });
   } catch (err: unknown) {
@@ -527,15 +524,7 @@ router.post('/anchors/:id/verify', validate({
     } else if (msg.includes('UnauthorizedAction')) {
       res.status(403).json({ error: 'Only the contract admin may verify anchors' });
     } else {
-      // Off-chain proof verification already succeeded and is durably
-      // recorded; only the on-chain confirmation is pending.
-      res.status(202).json({
-        message: 'Proof verified and recorded (on-chain update pending — contract may not be deployed)',
-        anchor_id: id,
-        verified: true,
-        decoded_event: verification.decoded,
-        simulation_error: msg,
-      });
+      res.status(500).json({ error: msg });
     }
   }
 });

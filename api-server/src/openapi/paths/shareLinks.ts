@@ -25,9 +25,9 @@ export const shareLinksPaths: PathsFragment = {
         },
       },
       responses: {
-        '201': {
-          description: 'Created.',
-          content: { 'application/json': { schema: { type: 'object', properties: { token: { type: 'string' }, expires_at: { type: 'integer' }, permission: { type: 'string' }, password_protected: { type: 'boolean' }, credential_id: { type: 'integer' } } } } },
+        '202': {
+          description: 'Unsigned transaction prepared; the holder must sign and submit it before the token can be used.',
+          content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, permission: { type: 'string' }, password_protected: { type: 'boolean' }, credential_id: { type: 'integer' } } } } },
         },
         '401': { description: 'Authentication required.' },
         '400': { description: 'Missing/invalid fields.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
@@ -77,7 +77,10 @@ export const shareLinksPaths: PathsFragment = {
         content: { 'application/json': { schema: { type: 'object', properties: { subject: { type: 'string' } }, required: ['subject'] } } },
       },
       responses: {
-        '200': { description: 'Revoked.', content: { 'application/json': { schema: { type: 'object', properties: { success: { type: 'boolean' }, message: { type: 'string' } } } } } },
+        '202': {
+          description: 'Unsigned transaction prepared; the link remains active until the holder signs and submits it.',
+          content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', const: 'pending_signature' }, transaction_xdr: { type: 'string' }, network_passphrase: { type: 'string' }, message: { type: 'string' } } } } },
+        },
         '401': { description: 'Authentication required.' },
         '400': { description: 'Missing subject or malformed token.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
         '403': { description: 'No linked wallet, wallet mismatch, or caller is not the link creator.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },

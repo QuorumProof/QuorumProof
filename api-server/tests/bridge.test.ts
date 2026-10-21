@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -7,6 +7,17 @@ import request from 'supertest';
 import bridgeRouter from '../src/routes/bridge.js';
 import { BridgeStore, _setDefaultBridgeStoreForTest } from '../src/services/bridgeStore.js';
 import { BlockHeaderStore, _setDefaultBlockHeaderStoreForTest } from '../src/services/blockHeaderStore.js';
+
+vi.mock('../src/soroban.js', () => ({
+  prepareCall: vi.fn(async () => ({
+    transaction_xdr: 'prepared-xdr',
+    network_passphrase: 'Test SDF Network ; September 2015',
+  })),
+  simulateCall: vi.fn(),
+  u64Val: (n: number | bigint) => n,
+  u32Val: (n: number) => n,
+  addressVal: (address: string) => address,
+}));
 
 function loadFixture(name: string) {
   return JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/headers', `${name}.json`), 'utf8'));
@@ -87,7 +98,7 @@ describe('POST /api/bridge/headers', () => {
 });
 
 describe('POST /api/bridge/anchors', () => {
-  it('registers a pending anchor (contract not deployed in test env, so it falls back to durable storage)', async () => {
+  it('prepares an anchor transaction without reporting it as registered on-chain', async () => {
     const res = await request(app)
       .post('/api/bridge/anchors')
       .send({
@@ -101,7 +112,10 @@ describe('POST /api/bridge/anchors', () => {
         admin: 'GADMIN',
       });
     expect(res.status).toBe(202);
-    expect(res.body.anchor.verified).toBe(false);
+      expect(res.body.status).toBe('pending_signature');
+      expect(res.body.transaction_xdr).toBe('prepared-xdr');
+      expect(res.body.anchor.verified).toBe(false);
+      expect(res.body.anchor_id).toBeUndefined();
   });
 
   it('returns 400 for an unsupported chain', async () => {
