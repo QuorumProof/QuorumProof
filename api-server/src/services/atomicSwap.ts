@@ -5,6 +5,8 @@
  * using atomic swap protocol with lock/unlock mechanism and state machine.
  */
 
+import { randomBytes } from 'crypto';
+
 export type SwapState = 'pending' | 'locked_initiator' | 'locked_both' | 'completed' | 'cancelled' | 'expired';
 
 export interface SwapParticipant {
@@ -202,7 +204,7 @@ export class AtomicSwapService {
   }
 
   private generateSwapId(): string {
-    return 'swap_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
+    return 'swap_' + Date.now() + '_' + randomBytes(16).toString('hex');
   }
 
   /**

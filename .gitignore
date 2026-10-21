@@ -157,3 +157,8 @@ VERIFICATION_CHECKLIST.md
 
 # Longevity test output (#1632)
 longevity-reports/
+
+# Development status dashboard output (scripts/dev_status.py, #1673)
+reports/dev-status/
+# Issue #1676: local development env files (only the .example is committed)
+api-server/.env.development

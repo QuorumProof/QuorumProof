@@ -70,6 +70,13 @@ Then see [`../README.md`](../README.md) for the contribution workflow and
 | [ide-setup.md](./ide-setup.md) | VS Code extension recommendations, workspace settings, debug configurations, and tasks for contract and API development (issue #1664). |
 | [code-snippets.md](./code-snippets.md) | Code snippets library for common Soroban smart contract and client SDK patterns (issue #1670). |
 | [environment-parity.md](./environment-parity.md) | Detecting and remediating env/config drift between environments using check_env_parity.sh and compare_environments.sh (issue #1662). |
+| [DOCUMENTATION_SEARCH.md](./DOCUMENTATION_SEARCH.md) | Client-side documentation indexing and search architecture, including index generation and integration patterns. |
+| [hot-reload.md](./hot-reload.md) | Hot reload for the API server (`npm run dev`) and contract WASM rebuilds (`scripts/dev-watch-contracts.sh`), plus development configuration (issue #1676). |
+| [test-factories.md](./test-factories.md) | Test data factories for credentials, quorum slices, and SBTs: defaults, overrides, invariants, and how to add one (issue #1677). |
+| [database-schema.md](./database-schema.md) | Generated Mermaid ER diagram of the database schema, with tables, relationships, and migration conflicts. Regenerate with `npm run schema:diagram` (issue #1678). |
+| [git-workflow.md](./git-workflow.md) | Branching strategy, PR guidelines, commit message conventions, and merge strategy (issue #1675). |
+
+---
 
 ---
 
@@ -178,6 +185,7 @@ Step-by-step, copy-pasteable procedures for standard operations (issue #1645).
 |---|---|
 | [sdk-methods-reference.md](./sdk-methods-reference.md) | Complete reference for every contract method: signatures, params, errors. |
 | [error-codes.md](./error-codes.md) | Every contract error code and what triggers it. |
+| [contract-initialization.md](./contract-initialization.md) | One-time `initialize` guarantees per contract: re-init guard, admin authorization, and the deploy order (issues #1722, #1723). |
 | [contract-upgrade-guide.md](./contract-upgrade-guide.md) | How to perform a contract upgrade. |
 | [contract-upgrade-checklist.md](./contract-upgrade-checklist.md) | Checklist to run through before and during an upgrade. |
 | [contract-upgrade-strategy.md](./contract-upgrade-strategy.md) | The upgrade strategy and its rationale. |
@@ -237,6 +245,7 @@ for the auto-generated OpenAPI / Swagger reference.
 
 | Doc | What it covers |
 |---|---|
+| [DOCUMENTATION_SEARCH.md](./DOCUMENTATION_SEARCH.md) | Specification for client-side documentation indexing and search. |
 | [documentation-versioning.md](./documentation-versioning.md) | How docs are versioned (git refs listed in [`versions.json`](./versions.json)), switching versions, backport rules, and the deprecation policy (issue #1642). |
 
 You are reading the **latest** docs (`main`). To read the docs for an older

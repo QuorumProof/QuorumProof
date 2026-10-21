@@ -29,13 +29,11 @@ export function publishTierAdvancedEvent(
   const event: WsBroadcastEvent = {
     type: 'tier_advanced',
     credential_id: credentialId,
+    from_tier: fromTier,
+    to_tier: toTier,
+    points,
     timestamp: new Date().toISOString(),
   };
-
-  // Add custom fields to the event
-  (event as any).from_tier = fromTier;
-  (event as any).to_tier = toTier;
-  (event as any).points = points;
 
   return broadcastEventFn(event);
 }
@@ -55,12 +53,11 @@ export function publishTierPointsAccruedEvent(
   const event: WsBroadcastEvent = {
     type: 'tier_points_accrued',
     credential_id: credentialId,
+    points,
+    current_tier: currentTier,
+    current_points: currentPoints,
     timestamp: new Date().toISOString(),
   };
-
-  (event as any).points = points;
-  (event as any).current_tier = currentTier;
-  (event as any).current_points = currentPoints;
 
   return broadcastEventFn(event);
 }
@@ -80,12 +77,11 @@ export function publishRedemptionRequestedEvent(
   const event: WsBroadcastEvent = {
     type: 'redemption_requested',
     credential_id: credentialId,
+    request_id: requestId,
+    amount,
+    destination,
     timestamp: new Date().toISOString(),
   };
-
-  (event as any).request_id = requestId;
-  (event as any).amount = amount;
-  (event as any).destination = destination;
 
   return broadcastEventFn(event);
 }
@@ -104,11 +100,10 @@ export function publishRedemptionApprovedEvent(
   const event: WsBroadcastEvent = {
     type: 'redemption_approved',
     credential_id: credentialId,
+    request_id: requestId,
+    amount,
     timestamp: new Date().toISOString(),
   };
-
-  (event as any).request_id = requestId;
-  (event as any).amount = amount;
 
   return broadcastEventFn(event);
 }
@@ -127,11 +122,10 @@ export function publishRedemptionClaimedEvent(
   const event: WsBroadcastEvent = {
     type: 'redemption_claimed',
     credential_id: credentialId,
+    request_id: requestId,
+    amount,
     timestamp: new Date().toISOString(),
   };
-
-  (event as any).request_id = requestId;
-  (event as any).amount = amount;
 
   return broadcastEventFn(event);
 }
@@ -149,10 +143,9 @@ export function publishRedemptionExpiredEvent(
   const event: WsBroadcastEvent = {
     type: 'redemption_expired',
     credential_id: credentialId,
+    request_id: requestId,
     timestamp: new Date().toISOString(),
   };
-
-  (event as any).request_id = requestId;
 
   return broadcastEventFn(event);
 }

@@ -292,6 +292,13 @@ describe('CredentialWizard — Submission', () => {
 
     await waitFor(() => expect(issueCredential).toHaveBeenCalledOnce());
     await waitFor(() => expect(createSlice).toHaveBeenCalledOnce());
+    expect(issueCredential).toHaveBeenCalledWith(
+      ISSUER,
+      VALID_SUBJECT,
+      1,
+      new TextEncoder().encode('QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco'),
+    );
+    expect(createSlice).toHaveBeenCalledWith(ISSUER, [VALID_ATTESTOR], 1);
   });
 
   it('shows submission error on failure', async () => {

@@ -13,14 +13,67 @@ import express from 'express';
 import request from 'supertest';
 import tracingRouter from '../src/routes/tracing.js';
 import { distributedTracer } from '../src/services/distributedTracing.js';
+import { distributedTracingMiddleware } from '../src/middleware/distributedTracingMiddleware.js';
+import { useTestSessions } from './helpers/testSessions.js';
 
 describe('Tracing Routes (/api/tracing)', () => {
   let app: express.Express;
+  const tokenFor = useTestSessions();
+
+  // Every tracing route is admin-only (#1745), so the success-path tests
+  // send a real admin access token.
+  const adminGet = (url: string) =>
+    request(app).get(url).set('Authorization', `Bearer ${tokenFor('admin-1', 'admin')}`);
 
   beforeEach(() => {
     app = express();
     app.use(express.json());
     app.use('/api/tracing', tracingRouter);
+  });
+
+  describe('access control (#1745)', () => {
+    const routes = [
+      '/api/tracing/trace/trace-acl-1',
+      '/api/tracing/span/trace-acl-1/span-acl-1',
+      '/api/tracing/jaeger/trace-acl-1',
+      '/api/tracing/metrics',
+    ];
+
+    it.each(routes)('rejects unauthenticated requests to %s with 401', async (url) => {
+      const res = await request(app).get(url);
+
+      expect(res.status).toBe(401);
+    });
+
+    it.each(routes)('rejects an x-role header without a token for %s', async (url) => {
+      const res = await request(app).get(url).set('x-role', 'admin');
+
+      expect(res.status).toBe(401);
+    });
+
+    it.each(routes)('rejects non-admin tokens for %s with 403', async (url) => {
+      const res = await request(app)
+        .get(url)
+        .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`);
+
+      expect(res.status).toBe(403);
+    });
+
+    it('does not record client IPs in request span attributes', async () => {
+      const traceApp = express();
+      traceApp.use(distributedTracingMiddleware);
+      traceApp.get('/probe', (_req, res) => res.json({ ok: true }));
+
+      const traceRes = await request(traceApp).get('/probe').set('X-Forwarded-For', '203.0.113.9');
+      const traceId = traceRes.headers['x-trace-id'] as string;
+      const spans = distributedTracer.getTrace(traceId);
+
+      expect(spans.length).toBeGreaterThan(0);
+      for (const span of spans) {
+        expect(span.attributes).not.toHaveProperty('ip');
+        expect(JSON.stringify(span.attributes)).not.toContain('203.0.113.9');
+      }
+    });
   });
 
   describe('GET /api/tracing/trace/:traceId', () => {
@@ -35,7 +88,7 @@ describe('Tracing Routes (/api/tracing)', () => {
       const span2 = distributedTracer.startSpan('child_operation', { traceId, step: 2 }, span1.spanId);
       distributedTracer.endSpan(traceId, span2.spanId, 'completed');
 
-      const res = await request(app).get(`/api/tracing/trace/${traceId}`);
+      const res = await adminGet(`/api/tracing/trace/${traceId}`);
 
       expect(res.status).toBe(200);
       expect(res.body.traceId).toBe(traceId);
@@ -47,7 +100,7 @@ describe('Tracing Routes (/api/tracing)', () => {
     });
 
     it('returns 404 when traceId is not found', async () => {
-      const res = await request(app).get('/api/tracing/trace/non-existent-trace-id-999');
+      const res = await adminGet('/api/tracing/trace/non-existent-trace-id-999');
 
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Trace not found');
@@ -57,7 +110,7 @@ describe('Tracing Routes (/api/tracing)', () => {
       const malformedIds = ['invalid!@#$', '----', 'undefined', 'null'];
 
       for (const id of malformedIds) {
-        const res = await request(app).get(`/api/tracing/trace/${encodeURIComponent(id)}`);
+        const res = await adminGet(`/api/tracing/trace/${encodeURIComponent(id)}`);
         expect(res.status).toBe(404);
         expect(res.body.error).toBe('Trace not found');
       }
@@ -68,7 +121,7 @@ describe('Tracing Routes (/api/tracing)', () => {
         throw new Error('Database lookup failure');
       });
 
-      const res = await request(app).get('/api/tracing/trace/trace-error-case');
+      const res = await adminGet('/api/tracing/trace/trace-error-case');
 
       expect(res.status).toBe(500);
       expect(res.body.error).toBe('Internal server error');
@@ -86,7 +139,7 @@ describe('Tracing Routes (/api/tracing)', () => {
       distributedTracer.addAttribute(traceId, span.spanId, 'rows', 42);
       distributedTracer.endSpan(traceId, span.spanId, 'completed');
 
-      const res = await request(app).get(`/api/tracing/span/${traceId}/${span.spanId}`);
+      const res = await adminGet(`/api/tracing/span/${traceId}/${span.spanId}`);
 
       expect(res.status).toBe(200);
       expect(res.body.traceId).toBe(traceId);
@@ -98,7 +151,7 @@ describe('Tracing Routes (/api/tracing)', () => {
     });
 
     it('returns 404 when span is not found', async () => {
-      const res = await request(app).get('/api/tracing/span/trace-2001/non-existent-span');
+      const res = await adminGet('/api/tracing/span/trace-2001/non-existent-span');
 
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Span not found');
@@ -109,7 +162,7 @@ describe('Tracing Routes (/api/tracing)', () => {
         throw new Error('Internal span lookup failure');
       });
 
-      const res = await request(app).get('/api/tracing/span/trace-err/span-err');
+      const res = await adminGet('/api/tracing/span/trace-err/span-err');
 
       expect(res.status).toBe(500);
       expect(res.body.error).toBe('Internal server error');
@@ -138,7 +191,7 @@ describe('Tracing Routes (/api/tracing)', () => {
       distributedTracer.endSpan(traceId, childSpan.spanId, 'completed');
       distributedTracer.endSpan(traceId, rootSpan.spanId, 'completed');
 
-      const res = await request(app).get(`/api/tracing/jaeger/${traceId}`);
+      const res = await adminGet(`/api/tracing/jaeger/${traceId}`);
 
       expect(res.status).toBe(200);
       expect(res.body.traceID).toBe(traceId);
@@ -175,7 +228,7 @@ describe('Tracing Routes (/api/tracing)', () => {
     });
 
     it('returns 404 when exporting a non-existent trace to Jaeger', async () => {
-      const res = await request(app).get('/api/tracing/jaeger/non-existent-jaeger-trace');
+      const res = await adminGet('/api/tracing/jaeger/non-existent-jaeger-trace');
 
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Trace not found');
@@ -186,7 +239,7 @@ describe('Tracing Routes (/api/tracing)', () => {
         throw new Error('Jaeger serialization failure');
       });
 
-      const res = await request(app).get('/api/tracing/jaeger/trace-jaeger-error');
+      const res = await adminGet('/api/tracing/jaeger/trace-jaeger-error');
 
       expect(res.status).toBe(500);
       expect(res.body.error).toBe('Internal server error');
@@ -196,7 +249,7 @@ describe('Tracing Routes (/api/tracing)', () => {
 
   describe('GET /api/tracing/metrics', () => {
     it('returns tracing metrics summary', async () => {
-      const res = await request(app).get('/api/tracing/metrics');
+      const res = await adminGet('/api/tracing/metrics');
 
       expect(res.status).toBe(200);
       expect(res.body.timestamp).toBeDefined();
@@ -213,7 +266,7 @@ describe('Tracing Routes (/api/tracing)', () => {
         throw new Error('Metrics error');
       });
 
-      const res = await request(app).get('/api/tracing/metrics');
+      const res = await adminGet('/api/tracing/metrics');
 
       expect(res.status).toBe(500);
       expect(res.body.error).toBe('Internal server error');

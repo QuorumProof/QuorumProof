@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QuorumProof</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header class="toolbar">
+    <label><input type="checkbox" id="contract-only"> Contract calls only</label>
+    <button type="button" id="clear">Clear</button>
+    <span id="count" class="muted">0 calls</span>
+  </header>
+  <div class="layout">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Method</th><th>Status</th><th>Duration</th><th>Summary</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p id="empty" class="muted">No Soroban RPC calls recorded yet. Interact with QuorumProof to see them here.</p>
+    </div>
+    <aside id="detail" class="detail" hidden>
+      <div class="detail-head">
+        <strong id="detail-title"></strong>
+        <button type="button" id="detail-close" aria-label="Close details">×</button>
+      </div>
+      <pre id="detail-body"></pre>
+    </aside>
+  </div>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

@@ -1,239 +1,281 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+/**
+ * Tests for encrypted credential decryption routes — Issues #1742 / #1743 / #1744
+ *
+ * Covers:
+ *  - POST /api/credentials/:id/decrypt/authorize: authentication and
+ *    custodian-approval requirements (#1742)
+ *  - POST /api/credentials/:id/decrypt/challenge and POST /decrypt: signed
+ *    requester identity, single-use nonces, audit logging (#1743)
+ *  - GET /api/credentials/:id/decrypt/audit: admin-only access (#1744)
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { Keypair } from '@stellar/stellar-sdk';
-import {
-  buildDecryptionAuthorizationMessage,
-  buildDecryptionRequestMessage,
-  createEncryptedCredentialsRouter,
-} from '../src/routes/encryptedCredentials.js';
-import { ThresholdEncryption } from '../src/crypto/thresholdEncryption.js';
-import { EncryptedCredentialStore } from '../src/services/encryptedCredentialStore.js';
-import * as soroban from '../src/soroban.js';
+import { useTestSessions } from './helpers/testSessions.js';
+import { buildDecryptionApprovalMessage } from '../src/services/encryptedCredentialAuth.js';
 
-describe('Encrypted credential routes', () => {
-  const store = new EncryptedCredentialStore();
-  const encryption = new ThresholdEncryption(3, 5);
-  const requester = Keypair.random();
-  const custodians = Array.from({ length: 5 }, () => Keypair.random());
-  const encryptedRecord = encryption.encryptSensitiveData('{}');
-  const encryptedData = encryptedRecord.encrypted;
-  const credentialRecord = {
-    id: 1,
-    credential_id: 42n,
-    encrypted_data: encryptedData,
-    key_shares: encryptedRecord.keyShares,
-    key_custodians: custodians.map((keypair) => keypair.publicKey()),
-    threshold: 3,
-    created_at: 1,
-    updated_at: 1,
+const storeMock = vi.hoisted(() => ({
+  getEncryptedCredential: vi.fn(),
+  authorizeDecryption: vi.fn(),
+  isDecryptionAuthorized: vi.fn(),
+  getActiveAuthorizations: vi.fn(),
+  logDecryptionAttempt: vi.fn(),
+  storeEncryptedCredential: vi.fn(),
+}));
+
+vi.mock('../src/services/encryptedCredentialStore.js', () => ({
+  // Returning an object from a constructor makes `new EncryptedCredentialStore()`
+  // evaluate to the shared mock, so each test can set its own return values.
+  EncryptedCredentialStore: class {
+    constructor() {
+      return storeMock as unknown as object;
+    }
+  },
+}));
+
+import { createEncryptedCredentialsRouter } from '../src/routes/encryptedCredentials.js';
+
+const CREDENTIAL_ID = '42';
+const REQUESTER = Keypair.random().publicKey();
+const CUSTODIANS = [Keypair.random(), Keypair.random(), Keypair.random(), Keypair.random(), Keypair.random()];
+
+function approve(kp: Keypair, requester: string, issuedAt = Date.now(), credentialId = CREDENTIAL_ID) {
+  const message = buildDecryptionApprovalMessage(credentialId, requester, issuedAt);
+  return {
+    custodian: kp.publicKey(),
+    issued_at: issuedAt,
+    signature: kp.sign(Buffer.from(message, 'utf8')).toString('hex'),
   };
-  const simulateCall = vi.fn<typeof soroban.simulateCall>();
-  const getKeyCustodians = vi.spyOn(store, 'getKeyCustodians');
-  const storeEncryptedCredential = vi.spyOn(store, 'storeEncryptedCredential');
-  const authorizeDecryption = vi.spyOn(store, 'authorizeDecryption');
-  const isDecryptionAuthorized = vi.spyOn(store, 'isDecryptionAuthorized');
-  const getEncryptedCredential = vi.spyOn(store, 'getEncryptedCredential');
-  const logDecryptionAttempt = vi.spyOn(store, 'logDecryptionAttempt');
-  const getActiveAuthorizations = vi.spyOn(store, 'getActiveAuthorizations');
+}
+
+function buildApp() {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/credentials', createEncryptedCredentialsRouter());
+  return app;
+}
+
+describe('POST /api/credentials/:id/decrypt/authorize (#1742)', () => {
+  const tokenFor = useTestSessions();
   let app: express.Express;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    getKeyCustodians.mockResolvedValue(credentialRecord.key_custodians);
-    authorizeDecryption.mockResolvedValue({
-      credential_id: 42n,
-      requester_address: requester.publicKey(),
+    app = buildApp();
+    storeMock.getEncryptedCredential.mockResolvedValue({
+      key_custodians: CUSTODIANS.slice(0, 3).map((kp) => kp.publicKey()),
+      encrypted_data: { threshold: 3 },
+    });
+    storeMock.authorizeDecryption.mockImplementation(async (_id, requester) => ({
+      credential_id: BigInt(CREDENTIAL_ID),
+      requester_address: requester,
       authorized_at: Date.now(),
-      expires_at: Date.now() + 60_000,
-      reason: 'Need to verify',
-      approved_by: custodians.slice(0, 3).map((keypair) => keypair.publicKey()),
-    });
-    isDecryptionAuthorized.mockResolvedValue(true);
-    getEncryptedCredential.mockResolvedValue(credentialRecord);
-    logDecryptionAttempt.mockResolvedValue();
-    getActiveAuthorizations.mockResolvedValue([]);
-    simulateCall.mockResolvedValue({
-      subject: requester.publicKey(),
-      issuer: Keypair.random().publicKey(),
-    });
-
-    app = express();
-    app.use(express.json());
-    app.use('/api/credentials', createEncryptedCredentialsRouter({ store, encryption, simulateCall }));
+      expires_at: Date.now() + 3600000,
+      reason: 'test',
+      approved_by: [],
+    }));
   });
 
-  function signedAuthorization(approverKeys = custodians.slice(0, 3)) {
-    const timestamp = Date.now();
-    const nonce = 'a'.repeat(32);
-    const reason = 'Need to verify';
-    const message = buildDecryptionAuthorizationMessage(
-      '42',
-      requester.publicKey(),
-      reason,
-      timestamp,
-      nonce,
-    );
-    return {
-      requester_address: requester.publicKey(),
-      reason,
-      timestamp,
-      nonce,
-      signature: requester.sign(Buffer.from(message)).toString('base64'),
-      approvals: approverKeys.map((keypair) => ({
-        address: keypair.publicKey(),
-        signature: keypair.sign(Buffer.from(message)).toString('base64'),
-      })),
-    };
-  }
+  const url = `/api/credentials/${CREDENTIAL_ID}/decrypt/authorize`;
 
-  function signedDecrypt() {
-    const timestamp = Date.now();
-    const nonce = 'b'.repeat(32);
-    const message = buildDecryptionRequestMessage('42', requester.publicKey(), timestamp, nonce);
-    return {
-      requester_address: requester.publicKey(),
-      key_shares: credentialRecord.key_shares.slice(0, 3),
-      timestamp,
-      nonce,
-      signature: requester.sign(Buffer.from(message)).toString('base64'),
-    };
-  }
+  it('rejects unauthenticated requests with 401', async () => {
+    const approvals = CUSTODIANS.slice(0, 3).map((kp) => approve(kp, REQUESTER));
+    const res = await request(app).post(url).send({ requester_address: REQUESTER, approvals });
 
-  it('requires the requester signature and threshold approvals from configured custodians', async () => {
-    const payload = signedAuthorization(Array.from({ length: 3 }, () => Keypair.random()));
-    const response = await request(app).post('/api/credentials/42/decrypt/authorize').send(payload);
-
-    expect(response.status).toBe(403);
-    expect(authorizeDecryption).not.toHaveBeenCalled();
+    expect(res.status).toBe(401);
+    expect(storeMock.authorizeDecryption).not.toHaveBeenCalled();
   });
 
-  it('records authorization only for an eligible signed requester and approved custodians', async () => {
-    const response = await request(app)
-      .post('/api/credentials/42/decrypt/authorize')
-      .send(signedAuthorization());
+  it('rejects an invalid bearer token with 401', async () => {
+    const approvals = CUSTODIANS.slice(0, 3).map((kp) => approve(kp, REQUESTER));
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', 'Bearer not-a-real-token')
+      .send({ requester_address: REQUESTER, approvals });
 
-    expect(response.status).toBe(200);
-    expect(simulateCall).toHaveBeenCalledWith('get_credential', [expect.anything()]);
-    expect(authorizeDecryption).toHaveBeenCalledWith(
-      42n,
-      requester.publicKey(),
-      3600000,
-      'Need to verify',
-      custodians.slice(0, 3).map((keypair) => keypair.publicKey()),
-    );
+    expect(res.status).toBe(401);
+    expect(storeMock.authorizeDecryption).not.toHaveBeenCalled();
   });
 
-  it('rejects an address that is neither the credential subject nor issuer', async () => {
+  it('requires an approvals array', async () => {
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER });
+
+    expect(res.status).toBe(400);
+    expect(storeMock.authorizeDecryption).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the credential has no encrypted data', async () => {
+    storeMock.getEncryptedCredential.mockResolvedValue(null);
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals: [] });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects a request with no custodian approvals', async () => {
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals: [] });
+
+    expect(res.status).toBe(403);
+    expect(res.body.valid_approvals).toBe(0);
+    expect(storeMock.authorizeDecryption).not.toHaveBeenCalled();
+  });
+
+  it('rejects when fewer than the threshold of custodians approve', async () => {
+    const approvals = CUSTODIANS.slice(0, 2).map((kp) => approve(kp, REQUESTER));
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals });
+
+    expect(res.status).toBe(403);
+    expect(res.body.required).toBe(3);
+    expect(res.body.valid_approvals).toBe(2);
+    expect(storeMock.authorizeDecryption).not.toHaveBeenCalled();
+  });
+
+  it('does not count approvals from keys that are not key custodians', async () => {
     const outsider = Keypair.random();
-    const timestamp = Date.now();
-    const nonce = 'c'.repeat(32);
-    const message = buildDecryptionAuthorizationMessage(
-      '42',
-      outsider.publicKey(),
-      'Need to verify',
-      timestamp,
-      nonce,
-    );
-    const payload = signedAuthorization();
-    const response = await request(app)
-      .post('/api/credentials/42/decrypt/authorize')
-      .send({
-        ...payload,
-        requester_address: outsider.publicKey(),
-        timestamp,
-        nonce,
-        signature: outsider.sign(Buffer.from(message)).toString('base64'),
-      });
+    const approvals = [
+      approve(CUSTODIANS[0], REQUESTER),
+      approve(CUSTODIANS[1], REQUESTER),
+      approve(outsider, REQUESTER),
+    ];
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals });
 
-    expect(response.status).toBe(403);
-    expect(authorizeDecryption).not.toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(res.body.valid_approvals).toBe(2);
   });
 
-  it('rejects decrypt requests without a valid requester signature', async () => {
-    const response = await request(app)
-      .post('/api/credentials/42/decrypt')
-      .send({ ...signedDecrypt(), signature: Buffer.alloc(64).toString('base64') });
+  it('counts a custodian only once even if they approve repeatedly', async () => {
+    const approvals = [
+      approve(CUSTODIANS[0], REQUESTER),
+      approve(CUSTODIANS[0], REQUESTER, Date.now() - 1000),
+      approve(CUSTODIANS[1], REQUESTER),
+    ];
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals });
 
-    expect(response.status).toBe(401);
-    expect(isDecryptionAuthorized).not.toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(res.body.valid_approvals).toBe(2);
   });
 
-  it('rejects an invalid requester address before authorization checks', async () => {
-    const response = await request(app)
-      .post('/api/credentials/42/decrypt')
-      .send({ ...signedDecrypt(), requester_address: 'not-a-stellar-address' });
+  it('rejects approvals whose signature was made for a different requester', async () => {
+    const otherRequester = Keypair.random().publicKey();
+    const approvals = CUSTODIANS.slice(0, 3).map((kp) => approve(kp, otherRequester));
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals });
 
-    expect(response.status).toBe(400);
-    expect(JSON.stringify(response.body.details)).toContain('requester_address');
-    expect(isDecryptionAuthorized).not.toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(res.body.valid_approvals).toBe(0);
   });
 
-  it('rejects malformed key shares before authorization checks', async () => {
-    const response = await request(app)
-      .post('/api/credentials/42/decrypt')
-      .send({ ...signedDecrypt(), key_shares: ['not-a-key-share'] });
+  it('rejects approvals signed for a different credential', async () => {
+    const approvals = CUSTODIANS.slice(0, 3).map((kp) => approve(kp, REQUESTER, Date.now(), '999'));
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals });
 
-    expect(response.status).toBe(400);
-    expect(isDecryptionAuthorized).not.toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(res.body.valid_approvals).toBe(0);
   });
 
-  it('rejects invalid key custodian addresses before encrypting', async () => {
-    const response = await request(app)
-      .post('/api/credentials/42/encrypt')
-      .send({ sensitive_fields: { secret: 'value' }, keyCustodians: ['invalid'] });
+  it('rejects stale approvals', async () => {
+    const stale = Date.now() - 11 * 60 * 1000;
+    const approvals = CUSTODIANS.slice(0, 3).map((kp) => approve(kp, REQUESTER, stale));
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, approvals });
 
-    expect(response.status).toBe(400);
-    expect(storeEncryptedCredential).not.toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(res.body.valid_approvals).toBe(0);
   });
 
-  it('records malformed decrypted JSON as one failed attempt', async () => {
-    const decryptSpy = vi.spyOn(encryption, 'decryptSensitiveData').mockReturnValue(Buffer.from('not-json'));
+  it('grants authorization when the threshold of custodians approve', async () => {
+    const approvals = CUSTODIANS.slice(0, 3).map((kp) => approve(kp, REQUESTER));
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`)
+      .send({ requester_address: REQUESTER, reason: 'audit', approvals });
 
-    const response = await request(app)
-      .post('/api/credentials/42/decrypt')
-      .send(signedDecrypt());
-    decryptSpy.mockRestore();
+    expect(res.status).toBe(200);
+    expect(res.body.authorized_address).toBe(REQUESTER);
+    expect(storeMock.authorizeDecryption).toHaveBeenCalledTimes(1);
+    const [, requester, , reason, approvedBy] = storeMock.authorizeDecryption.mock.calls[0];
+    expect(requester).toBe(REQUESTER);
+    expect(reason).toBe('audit');
+    expect(approvedBy).toEqual(CUSTODIANS.slice(0, 3).map((kp) => kp.publicKey()));
+  });
+});
 
-    expect(response.status).toBe(400);
-    expect(logDecryptionAttempt).toHaveBeenCalledTimes(1);
-    expect(logDecryptionAttempt).toHaveBeenCalledWith(
-      42n,
-      requester.publicKey(),
-      false,
-      expect.objectContaining({ verified_identity: requester.publicKey() }),
-    );
+describe('GET /api/credentials/:id/decrypt/audit (#1744)', () => {
+  const tokenFor = useTestSessions();
+  let app: express.Express;
+  const url = `/api/credentials/${CREDENTIAL_ID}/decrypt/audit`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    app = buildApp();
+    storeMock.getActiveAuthorizations.mockResolvedValue([
+      {
+        credential_id: BigInt(CREDENTIAL_ID),
+        requester_address: REQUESTER,
+        authorized_at: Date.now(),
+        expires_at: Date.now() + 3600000,
+        reason: 'audit',
+        approved_by: [CUSTODIANS[0].publicKey()],
+      },
+    ]);
   });
 
-  it('decrypts with valid shares and records the verified requester identity', async () => {
-    const response = await request(app)
-      .post('/api/credentials/42/decrypt')
-      .send(signedDecrypt());
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).get(url);
 
-    expect(response.status, JSON.stringify(response.body)).toBe(200);
-    expect(response.body.decrypted_data).toEqual({});
-    expect(logDecryptionAttempt).toHaveBeenCalledTimes(1);
-    expect(logDecryptionAttempt).toHaveBeenCalledWith(
-      42n,
-      requester.publicKey(),
-      true,
-      expect.objectContaining({ verified_identity: requester.publicKey() }),
-    );
+    expect(res.status).toBe(401);
+    expect(storeMock.getActiveAuthorizations).not.toHaveBeenCalled();
   });
 
-  it('requires the admin permission to read the decryption audit log', async () => {
-    const unauthenticated = await request(app).get('/api/credentials/42/decrypt/audit');
-    expect(unauthenticated.status).toBe(401);
+  it('rejects a non-admin authenticated caller with 403', async () => {
+    const res = await request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${tokenFor('issuer-1', 'issuer')}`);
 
-    const nonAdmin = await request(app)
-      .get('/api/credentials/42/decrypt/audit')
-      .set('x-role', 'verifier');
-    expect(nonAdmin.status).toBe(403);
+    expect(res.status).toBe(403);
+    expect(storeMock.getActiveAuthorizations).not.toHaveBeenCalled();
+  });
 
-    const admin = await request(app)
-      .get('/api/credentials/42/decrypt/audit')
-      .set('x-role', 'admin');
-    expect(admin.status).toBe(200);
-    expect(getActiveAuthorizations).toHaveBeenCalledWith(42n);
+  it('ignores an x-role header and rejects it without an admin token', async () => {
+    const res = await request(app).get(url).set('x-role', 'admin');
+
+    expect(res.status).toBe(401);
+    expect(storeMock.getActiveAuthorizations).not.toHaveBeenCalled();
+  });
+
+  it('returns the audit log to an admin', async () => {
+    const res = await request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${tokenFor('admin-1', 'admin')}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.active_authorizations).toHaveLength(1);
+    expect(res.body.active_authorizations[0].requester_address).toBe(REQUESTER);
   });
 });

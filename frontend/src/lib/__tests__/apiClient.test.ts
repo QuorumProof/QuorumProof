@@ -14,9 +14,32 @@ describe('ApiClient', () => {
 
   afterEach(() => {
     vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
+  function mockAbortableFetch() {
+    (global.fetch as any).mockImplementation((_url: string, options: RequestInit) =>
+      new Promise((_, reject) => {
+        options.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('The user aborted a request.', 'AbortError')),
+          { once: true }
+        );
+      })
+    );
+  }
+
   describe('GET requests', () => {
+    it('fails explicitly when the API URL is not configured', async () => {
+      const unconfiguredClient = new ApiClient('', 5000);
+
+      await expect(unconfiguredClient.get('/test')).rejects.toMatchObject({
+        code: 'CONFIGURATION_ERROR',
+        message: expect.stringContaining('VITE_API_URL'),
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
     it('should perform a successful GET request', async () => {
       const mockData = { id: 1, name: 'Test' };
       (global.fetch as any).mockResolvedValue({
@@ -45,7 +68,8 @@ describe('ApiClient', () => {
     });
 
     it('should validate response with provided validator', async () => {
-      const validator = (data: any) => data.id === 1;
+      const validator = (data: unknown): data is { id: number } =>
+        typeof data === 'object' && data !== null && 'id' in data && data.id === 1;
       (global.fetch as any).mockResolvedValue({
         ok: true,
         status: 200,
@@ -56,16 +80,11 @@ describe('ApiClient', () => {
     });
 
     it('should support request cancellation by key', async () => {
-      const controller = new AbortController();
-      (global.fetch as any).mockImplementation(() => {
-        throw new DOMException('The user aborted a request.', 'AbortError');
-      });
-
+      mockAbortableFetch();
       const promise = client.get('/test', { requestKey: 'test-key' });
       client.cancelRequest('test-key');
 
-      // Give the cancellation time to propagate
-      await new Promise(r => setTimeout(r, 10));
+      await expect(promise).rejects.toThrow();
     });
   });
 
@@ -102,7 +121,8 @@ describe('ApiClient', () => {
     });
 
     it('should validate POST response', async () => {
-      const validator = (data: any) => typeof data.id === 'number';
+      const validator = (data: unknown): data is { id: number } =>
+        typeof data === 'object' && data !== null && 'id' in data && typeof data.id === 'number';
       (global.fetch as any).mockResolvedValue({
         ok: true,
         status: 200,
@@ -153,12 +173,7 @@ describe('ApiClient', () => {
 
   describe('request cancellation', () => {
     it('should cancel a specific request by key', async () => {
-      (global.fetch as any).mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            setTimeout(() => resolve({ ok: true, json: () => ({}) }), 100);
-          })
-      );
+      mockAbortableFetch();
 
       const promise = client.get('/test', { requestKey: 'unique-key' });
       client.cancelRequest('unique-key');
@@ -168,12 +183,7 @@ describe('ApiClient', () => {
     });
 
     it('should cancel all pending requests', async () => {
-      (global.fetch as any).mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            setTimeout(() => resolve({ ok: true, json: () => ({}) }), 100);
-          })
-      );
+      mockAbortableFetch();
 
       const p1 = client.get('/test1', { requestKey: 'key1' });
       const p2 = client.get('/test2', { requestKey: 'key2' });
@@ -186,18 +196,14 @@ describe('ApiClient', () => {
     it('should abort a request on timeout', async () => {
       vi.useFakeTimers();
 
-      (global.fetch as any).mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            setTimeout(() => resolve({ ok: true, json: () => ({}) }), 10000);
-          })
-      );
+      mockAbortableFetch();
 
       const promise = client.get('/test', { timeout: 1000 });
+      const rejection = expect(promise).rejects.toThrow();
 
-      vi.advanceTimersByTime(1100);
+      await vi.advanceTimersByTimeAsync(1100);
 
-      await expect(promise).rejects.toThrow();
+      await rejection;
       vi.useRealTimers();
     });
   });

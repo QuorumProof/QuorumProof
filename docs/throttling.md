@@ -38,10 +38,13 @@ single call.
   not run automatically on every call) recomputes the level and, if it
   changed, **adjusts the global rate limit's `max_calls`** up or down by the
   configured `reduce_factor_bps` / `increase_factor_bps`, clamped to
-  `[min_max_calls, max_max_calls]`.
+  `[min_max_calls, max_max_calls]`. It is **admin only**: it takes the admin
+  address and requires its authorization, because it changes the limit for
+  every address.
 - Congestion does not gate a call by itself — it only reshapes system #2's
   threshold, and only at the moments `update_congestion_and_adjust` is
-  called (e.g. by an operator or an off-chain keeper on a schedule).
+  called (by the admin, or by an off-chain keeper acting for the admin, on a
+  schedule).
 
 ## Precedence order
 

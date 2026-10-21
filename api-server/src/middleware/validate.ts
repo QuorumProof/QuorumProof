@@ -76,11 +76,13 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { default as AjvLib } from 'ajv';
+import { problemJson } from './problemDetails.js';
 
 const Ajv = AjvLib as unknown as new (opts: Record<string, unknown>) => {
   compile: (schema: Record<string, unknown>) => AjvValidatorFn;
 };
 const ajv = new Ajv({ coerceTypes: true, useDefaults: true, removeAdditional: true });
+const strictAjv = new Ajv({ coerceTypes: false, useDefaults: true, removeAdditional: true });
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -133,6 +135,10 @@ export type ValidationSchemas = {
   params?: LocationInput;
 };
 
+export interface ValidationOptions {
+  coerceTypes?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -153,7 +159,7 @@ function normalise(input: LocationInput): LocationConfig {
 // Middleware factory
 // ---------------------------------------------------------------------------
 
-export function validate(schemas: ValidationSchemas) {
+export function validate(schemas: ValidationSchemas, options: ValidationOptions = {}) {
   type Entry = {
     location: 'body' | 'query' | 'params';
     validator: AjvValidatorFn | null;
@@ -169,7 +175,7 @@ export function validate(schemas: ValidationSchemas) {
     const cfg = normalise(input);
 
     const validator = cfg.schema
-      ? (ajv.compile(cfg.schema) as AjvValidatorFn)
+      ? ((options.coerceTypes === false ? strictAjv : ajv).compile(cfg.schema) as AjvValidatorFn)
       : null;
 
     entries.push({
@@ -189,8 +195,9 @@ export function validate(schemas: ValidationSchemas) {
       // 1. JSON Schema validation
       if (validator !== null && !validator(data)) {
         const errors = validator.errors ?? [];
+        const missing = errors.some((err) => err.keyword === 'required');
         res.status(400).json({
-          error: 'Validation failed',
+          ...problemJson(400, missing ? 'missing-parameter' : 'validation-failed', 'Validation failed'),
           location,
           details: errors.map((err) => ({
             path: err.schemaPath,
@@ -521,6 +528,7 @@ export const schemas = {
           type: 'array',
           items: { type: 'integer', minimum: 1 },
           minItems: 1,
+          maxItems: 50,
         },
         slice_id: { type: 'integer', minimum: 1 },
       },
@@ -528,6 +536,7 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+
   verifyBatchClaims: {
     body: {
       type: 'object',
@@ -540,7 +549,7 @@ export const schemas = {
             type: 'object',
             properties: {
               credential_id: { type: 'integer', minimum: 1 },
-              claim_type: { type: 'string', minLength: 1, maxLength: 128 },
+              claim_type: { type: 'string', minLength: 1, maxLength: 64 },
             },
             required: ['credential_id', 'claim_type'],
             additionalProperties: false,
@@ -551,31 +560,7 @@ export const schemas = {
       additionalProperties: false,
     },
   },
-  analyticsEvent: {
-    body: {
-      type: 'object',
-      properties: {
-        type: { type: 'string', enum: ['issued', 'attested', 'revoked', 'suspended', 'verified', 'disputed'] },
-        credential_id: { type: 'string', minLength: 1 },
-        timestamp: { type: 'string', minLength: 1 },
-        issuer: { type: 'string' },
-        subject: { type: 'string' },
-        attestor: { type: 'string' },
-        attestation_duration_ms: { type: 'number', minimum: 0 },
-        metadata: { type: 'object' },
-      },
-      required: ['type', 'credential_id', 'timestamp'],
-      additionalProperties: false,
-    },
-  },
-  auditVerify: {
-    body: {
-      type: 'object',
-      properties: { batch_id: { type: 'integer', minimum: 1 } },
-      required: ['batch_id'],
-      additionalProperties: false,
-    },
-  },
+
   notificationPreferences: {
     body: {
       type: 'object',
@@ -583,21 +568,34 @@ export const schemas = {
         address: { type: 'string', minLength: 1 },
         email: { type: 'string' },
         phone: { type: 'string' },
-        channels: { type: 'array', items: { type: 'string', enum: ['email', 'sms'] }, minItems: 1 },
+        channels: {
+          type: 'array',
+          items: { type: 'string', enum: ['email', 'sms'] },
+          minItems: 1,
+        },
         events: {
           type: 'array',
           items: {
             type: 'string',
-            enum: ['credential_issued', 'credential_revoked', 'credential_suspended', 'credential_attested', 'credential_expiring'],
+            enum: [
+              'credential_issued', 'credential_revoked', 'credential_suspended',
+              'credential_attested', 'credential_expiring',
+            ],
           },
+          minItems: 1,
         },
-        credential_type_filters: { type: 'array', items: { type: 'integer', minimum: 0 } },
+        /** #928: optional per-type filter; 1=Degree, 2=License, 3=Employment */
+        credential_type_filters: {
+          type: 'array',
+          items: { type: 'integer', minimum: 1 },
+        },
         enabled: { type: 'boolean' },
       },
       required: ['address', 'channels', 'events'],
       additionalProperties: false,
     },
   },
+
   notificationSend: {
     body: {
       type: 'object',
@@ -605,10 +603,14 @@ export const schemas = {
         address: { type: 'string', minLength: 1 },
         event: {
           type: 'string',
-          enum: ['credential_issued', 'credential_revoked', 'credential_suspended', 'credential_attested', 'credential_expiring'],
+          enum: [
+            'credential_issued', 'credential_revoked', 'credential_suspended',
+            'credential_attested', 'credential_expiring',
+          ],
         },
         credential_id: { type: 'integer', minimum: 1 },
-        credential_type: { type: 'integer', minimum: 0 },
+        /** #928: optional credential type for per-type preference filtering */
+        credential_type: { type: 'integer', minimum: 1 },
         issuer: { type: 'string' },
         holder: { type: 'string' },
       },
@@ -616,4 +618,258 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+
+  analyticsEvent: {
+    body: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['issued', 'attested', 'revoked', 'suspended', 'verified'],
+        },
+        credential_id: { type: 'string', minLength: 1 },
+        timestamp: { type: 'string', minLength: 1 },
+        issuer: { type: 'string' },
+        subject: { type: 'string' },
+        attestor: { type: 'string' },
+      },
+      required: ['type', 'credential_id', 'timestamp'],
+      additionalProperties: false,
+    },
+  },
+
+  auditVerify: {
+    body: {
+      type: 'object',
+      properties: {
+        batch_id: { type: 'integer', minimum: 1 },
+      },
+      required: ['batch_id'],
+      additionalProperties: false,
+    },
+  },
+  privilegeMfaChallenge: {
+    body: {
+      type: 'object',
+      properties: { userId: { type: 'string', minLength: 1 } },
+      required: ['userId'],
+      additionalProperties: false,
+    },
+  },
+  privilegeVerifyMfa: {
+    body: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', minLength: 1 },
+        code: { type: 'string', pattern: '^\\d{6}$' },
+      },
+      required: ['userId', 'code'],
+      additionalProperties: false,
+    },
+  },
+  privilegeRequest: {
+    body: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', minLength: 1 },
+        newRole: { type: 'string', minLength: 1, maxLength: 64 },
+        reason: { type: 'string', maxLength: 1000 },
+        approvers: { type: 'array', items: { type: 'string', minLength: 1 } },
+      },
+      required: ['userId', 'newRole'],
+      additionalProperties: false,
+    },
+  },
+  privilegeApproval: {
+    body: {
+      type: 'object',
+      properties: {
+        requestId: { type: 'string', minLength: 1 },
+        approverId: { type: 'string', minLength: 1 },
+      },
+      required: ['requestId', 'approverId'],
+      additionalProperties: false,
+    },
+  },
+  privilegeRejection: {
+    body: {
+      type: 'object',
+      properties: {
+        requestId: { type: 'string', minLength: 1 },
+        approverId: { type: 'string', minLength: 1 },
+        reason: { type: 'string', maxLength: 1000 },
+      },
+      required: ['requestId', 'approverId'],
+      additionalProperties: false,
+    },
+  },
+  distributedRevocationEntry: {
+    body: {
+      schema: {
+        type: 'object',
+        properties: {
+          credential_id: { type: 'integer', minimum: 1 },
+          revoked_by: { type: 'string', minLength: 1 },
+          reason: { type: 'string', maxLength: 1000 },
+          locked_until: { type: 'string', minLength: 1 },
+        },
+        required: ['credential_id', 'revoked_by'],
+        additionalProperties: false,
+      },
+      custom: (data) => {
+        if (typeof data !== 'object' || data === null) return true;
+        const lockedUntil = (data as Record<string, unknown>).locked_until;
+        return lockedUntil === undefined || (typeof lockedUntil === 'string' && Number.isFinite(Date.parse(lockedUntil)))
+          ? true
+          : 'locked_until must be a valid date';
+      },
+    },
+  },
+  distributedRevocationPeer: {
+    body: {
+      type: 'object',
+      properties: {
+        peer_id: { type: 'string', minLength: 1, maxLength: 128, pattern: '\\S' },
+        peer_address: { type: 'string', minLength: 1, maxLength: 256, pattern: '\\S' },
+      },
+      required: ['peer_id', 'peer_address'],
+      additionalProperties: false,
+    },
+  },
+  distributedRevocationPeerParams: {
+    params: {
+      type: 'object',
+      properties: { peer_id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['peer_id'],
+      additionalProperties: false,
+    },
+  },
+  distributedRevocationCommit: {
+    body: {
+      custom: (data) => data === undefined || (
+        typeof data === 'object' &&
+        data !== null &&
+        !Array.isArray(data) &&
+        Object.keys(data).length === 0
+      ) ? true : 'Request body must be empty',
+    },
+  },
+  atomicSwapInitiate: {
+    body: {
+      type: 'object',
+      properties: {
+        initiator_address: { type: 'string', minLength: 1, pattern: '\\S' },
+        responder_address: { type: 'string', minLength: 1, pattern: '\\S' },
+        initiator_credential_id: { type: 'integer', minimum: 1 },
+        responder_credential_id: { type: 'integer', minimum: 1 },
+      },
+      required: [
+        'initiator_address',
+        'responder_address',
+        'initiator_credential_id',
+        'responder_credential_id',
+      ],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapLock: {
+    body: {
+      type: 'object',
+      properties: { participant_address: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['participant_address'],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapComplete: {
+    body: {
+      type: 'object',
+      properties: {
+        initiator_signature: { type: 'string', minLength: 1 },
+        responder_signature: { type: 'string', minLength: 1 },
+      },
+      required: ['initiator_signature', 'responder_signature'],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapCancel: {
+    body: {
+      type: 'object',
+      properties: { canceller_address: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['canceller_address'],
+      additionalProperties: false,
+    },
+  },
+  atomicSwapIdParams: {
+    params: {
+      type: 'object',
+      properties: { swap_id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['swap_id'],
+      additionalProperties: false,
+    },
+  },
+  passwordlessStart: {
+    body: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', minLength: 3, maxLength: 254, pattern: '^[^\\s@]+@[^\\s@]+$' },
+      },
+      required: ['email'],
+      additionalProperties: false,
+    },
+  },
+  passwordlessVerify: {
+    body: {
+      type: 'object',
+      properties: { token: { type: 'string', pattern: '^[a-f0-9]{64}$' } },
+      required: ['token'],
+      additionalProperties: false,
+    },
+  },
+  webAuthnStart: {
+    body: {
+      type: 'object',
+      properties: { user_id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['user_id'],
+      additionalProperties: false,
+    },
+  },
+  webAuthnRegistrationVerify: {
+    body: {
+      type: 'object',
+      properties: {
+        challenge: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
+        credential_id: { type: 'string', minLength: 1, maxLength: 1024 },
+        public_key: { type: 'string', minLength: 1, maxLength: 4096, pattern: '^[A-Za-z0-9_-]+$' },
+        client_data_json: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        user_id: { type: 'string', minLength: 1, pattern: '\\S' },
+      },
+      required: ['challenge', 'credential_id', 'public_key', 'client_data_json', 'user_id'],
+      additionalProperties: false,
+    },
+  },
+  webAuthnAuthenticationVerify: {
+    body: {
+      type: 'object',
+      properties: {
+        challenge: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
+        credential_id: { type: 'string', minLength: 1, maxLength: 1024 },
+        client_data_json: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        authenticator_data: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        signature: { type: 'string', minLength: 1, pattern: '^[A-Za-z0-9_-]+$' },
+        sign_count: { type: 'integer', minimum: 0 },
+        user_id: { type: 'string', minLength: 1, pattern: '\\S' },
+      },
+      required: [
+        'challenge',
+        'credential_id',
+        'client_data_json',
+        'authenticator_data',
+        'signature',
+        'sign_count',
+        'user_id',
+      ],
+      additionalProperties: false,
+    },
+  },
 };
+export default validate;

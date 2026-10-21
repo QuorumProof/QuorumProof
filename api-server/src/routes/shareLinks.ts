@@ -11,7 +11,9 @@ import { Router, Request, Response } from 'express';
 import { scrypt as scryptCallback } from 'crypto';
 import { promisify } from 'util';
 import type { SorobanClient } from './credentials.js';
-import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { prepareCall, simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
+import { requireAuth } from '../middleware/auth.js';
+import { requireLinkedWallet } from '../middleware/walletAuth.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -76,7 +78,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    *
    * Returns: { token: string (hex), expires_at: number, permission: string }
    */
-  router.post('/:id/share', async (req: Request, res: Response) => {
+  router.post('/:id/share', requireAuth, requireLinkedWallet((req) => req.body?.subject), async (req: Request, res: Response) => {
     const credentialId = parseInt(String(req.params.id), 10);
     if (!Number.isInteger(credentialId) || credentialId <= 0) {
       res.status(400).json({ error: 'Invalid credential ID' });
@@ -129,16 +131,12 @@ export function createShareLinksRouter(soroban: SorobanClient) {
         soroban.u32Val(permissionCode),
       ];
 
-      const tokenBytes = await soroban.simulateCall('generate_share_link', args);
-      const tokenHex = Buffer.from(tokenBytes as Uint8Array).toString('hex');
+      const transaction = await prepareCall(subject, 'generate_share_link', args);
 
-      // Decode expires_at from the token (bytes 8–16)
-      const rawBuf = Buffer.from(tokenBytes as Uint8Array);
-      const expiresAt = rawBuf.readBigUInt64BE(8);
-
-      res.status(201).json({
-        token: tokenHex,
-        expires_at: Number(expiresAt),
+      res.status(202).json({
+        status: 'pending_signature',
+        message: 'Share link creation is prepared; sign and submit the transaction before using the link',
+        ...transaction,
         permission: PERMISSION_LABELS[permissionCode],
         password_protected: passwordHashHex !== null,
         credential_id: credentialId,
@@ -210,7 +208,7 @@ export function createShareLinksRouter(soroban: SorobanClient) {
    * Body: { subject: string }
    * Revokes the link early. Only the creator can revoke.
    */
-  router.delete('/share/:token', async (req: Request, res: Response) => {
+  router.delete('/share/:token', requireAuth, requireLinkedWallet((req) => req.body?.subject), async (req: Request, res: Response) => {
     const token = String(req.params.token);
     const { subject } = req.body as { subject?: unknown };
 
@@ -231,8 +229,12 @@ export function createShareLinksRouter(soroban: SorobanClient) {
     try {
       const { nativeToScVal } = await import('@stellar/stellar-sdk');
       const tokenScVal = nativeToScVal(tokenBuf, { type: 'bytes' });
-      await soroban.simulateCall('revoke_share_link', [addressVal(subject), tokenScVal]);
-      res.json({ success: true, message: 'Share link revoked' });
+      const transaction = await prepareCall(subject, 'revoke_share_link', [addressVal(subject), tokenScVal]);
+      res.status(202).json({
+        status: 'pending_signature',
+        message: 'Share link revocation is prepared; sign and submit the transaction before the link is revoked',
+        ...transaction,
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('InvalidInput')) {

@@ -6,8 +6,12 @@
 import { Router, Request, Response } from 'express';
 import { getDefaultGasCostTracker } from '../services/gasCostTracker.js';
 import { problemJson } from '../middleware/problemDetails.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 const router = Router();
+
+// Cost and optimization data is operational, not public: admin role only (#1747).
+router.use(requireAdmin);
 
 // GET /api/costs/report — aggregated gas cost report across all tracked operations
 router.get('/report', (_req: Request, res: Response) => {

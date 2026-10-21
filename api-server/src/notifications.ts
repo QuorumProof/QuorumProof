@@ -10,7 +10,7 @@
  * implementation in test environments where no pool is initialised.
  */
 
-import { getPool } from '../db.js';
+import { getPool } from './db.js';
 import type { Pool as PgPool } from 'pg';
 
 export type NotificationChannel = 'email' | 'sms';

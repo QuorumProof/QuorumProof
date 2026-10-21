@@ -15,12 +15,13 @@ export function distributedTracingMiddleware(req: Request, res: Response, next: 
   const traceId = req.get('traceparent')?.split('-')[1] || req.get('x-trace-id') || distributedTracer.generateTraceId();
   const parentSpanId = req.get('x-parent-span-id');
 
-  // Create a span for this request
+  // Create a span for this request. Span attributes are exported to tracing
+  // backends and exposed by /api/tracing, so they carry only what is needed to
+  // follow the request. Client IPs and request bodies are never recorded.
   const span = distributedTracer.startSpan(`${req.method} ${req.path}`, {
     traceId,
     method: req.method,
     path: req.path,
-    ip: req.ip,
   }, parentSpanId);
 
   req.traceId = traceId;

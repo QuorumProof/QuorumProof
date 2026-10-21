@@ -106,6 +106,33 @@ export function requireMfa(req: Request, res: Response, next: NextFunction): voi
 }
 
 // ---------------------------------------------------------------------------
+// requireAdmin middleware
+// ---------------------------------------------------------------------------
+
+/**
+ * Requires a valid access token whose signed `role` claim is `admin`.
+ *
+ * Use this instead of rbac.requirePermission for endpoints that must be
+ * admin-only: rbac takes the role from the unsigned `x-role` request header,
+ * which any caller can set.
+ *
+ * Returns 401 if the token is missing/invalid, 403 if the role is not admin.
+ */
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  requireAuth(req, res, () => {
+    if (req.auth?.role !== 'admin') {
+      res.status(403).json({
+        error: 'Insufficient permissions',
+        message: 'This endpoint requires the admin role',
+        required: 'admin',
+      });
+      return;
+    }
+    next();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // optionalAuth middleware
 // ---------------------------------------------------------------------------
 
@@ -122,4 +149,37 @@ export function optionalAuth(req: Request, _res: Response, next: NextFunction): 
     if (payload) req.auth = payload;
   }
   next();
+}
+
+// ---------------------------------------------------------------------------
+// requireRole middleware
+// ---------------------------------------------------------------------------
+
+/**
+ * Requires a valid access token whose `role` claim is one of `roles`.
+ * `admin` is always accepted. Role is read from the signed JWT, not from
+ * request headers, so callers cannot grant themselves a role.
+ *
+ * Returns 401 if the token is missing/invalid, 403 if the role is not allowed.
+ */
+export function requireRole(...roles: string[]) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    requireAuth(req, res, () => {
+      const role = req.auth?.role ?? '';
+      if (role === 'admin' || roles.includes(role)) {
+        next();
+        return;
+      }
+      res.status(403).json({
+        error: 'Insufficient permissions',
+        role,
+        required: roles,
+      });
+    });
+  };
+}
+
+/** True when the authenticated caller holds the admin role. */
+export function isAdmin(req: Request): boolean {
+  return req.auth?.role === 'admin';
 }

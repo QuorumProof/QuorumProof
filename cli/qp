@@ -18,10 +18,48 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Load environment if present (before any subcommand parsing)
+# Load environment if present (before any subcommand parsing).
+#
+# SECURITY: .env is parsed as KEY=VALUE data and never executed as shell code.
+# Each non-blank, non-comment line must be a simple assignment; anything else
+# is rejected. Values are taken literally (no expansion, no command substitution).
+load_env_file() {
+  local env_file="$1"
+  local line key value lineno=0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+
+    # Strip a trailing carriage return (CRLF files).
+    line="${line%$'\r'}"
+
+    # Skip blank lines and comments.
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+
+    # Reject anything that is not a simple KEY=VALUE assignment.
+    if ! [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+      error "Invalid line in $env_file (line $lineno): expected KEY=VALUE"
+      exit 1
+    fi
+
+    key="${line%%=*}"
+    value="${line#*=}"
+
+    # Strip a single pair of matching surrounding quotes, if present.
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+
+    # Export literally — never evaluate the value.
+    export "$key=$value"
+  done < "$env_file"
+}
+
 if [ -f "$PROJECT_ROOT/.env" ]; then
-  # shellcheck disable=SC1091
-  source "$PROJECT_ROOT/.env"
+  load_env_file "$PROJECT_ROOT/.env"
 fi
 
 # ── ANSI colour helpers ────────────────────────────────────────────────────────

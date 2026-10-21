@@ -7,6 +7,7 @@
 import { Router, Request, Response } from 'express';
 import { AtomicSwapService } from '../services/atomicSwap.js';
 import { problemJson } from '../middleware/problemDetails.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 const swapService = new AtomicSwapService();
@@ -15,7 +16,7 @@ const swapService = new AtomicSwapService();
  * POST /api/atomic-swap/initiate
  * Initiates a new atomic swap between two parties
  */
-router.post('/initiate', (req: Request, res: Response) => {
+router.post('/initiate', validate(schemas.atomicSwapInitiate), (req: Request, res: Response) => {
   try {
     const {
       initiator_address,
@@ -62,7 +63,7 @@ router.post('/initiate', (req: Request, res: Response) => {
  * POST /api/atomic-swap/:swap_id/lock
  * Locks a participant's credential
  */
-router.post('/:swap_id/lock', (req: Request, res: Response) => {
+router.post('/:swap_id/lock', validate({ ...schemas.atomicSwapIdParams, ...schemas.atomicSwapLock }), (req: Request, res: Response) => {
   try {
     const swap_id = (req.params.swap_id || '') as string;
     const { participant_address } = req.body as Record<string, unknown>;
@@ -84,7 +85,7 @@ router.post('/:swap_id/lock', (req: Request, res: Response) => {
  * POST /api/atomic-swap/:swap_id/complete
  * Completes an atomic swap
  */
-router.post('/:swap_id/complete', (req: Request, res: Response) => {
+router.post('/:swap_id/complete', validate({ ...schemas.atomicSwapIdParams, ...schemas.atomicSwapComplete }), (req: Request, res: Response) => {
   try {
     const swap_id = (req.params.swap_id || '') as string;
     const { initiator_signature, responder_signature } = req.body as Record<string, unknown>;
@@ -111,7 +112,7 @@ router.post('/:swap_id/complete', (req: Request, res: Response) => {
  * POST /api/atomic-swap/:swap_id/cancel
  * Cancels an ongoing swap
  */
-router.post('/:swap_id/cancel', (req: Request, res: Response) => {
+router.post('/:swap_id/cancel', validate({ ...schemas.atomicSwapIdParams, ...schemas.atomicSwapCancel }), (req: Request, res: Response) => {
   try {
     const swap_id = (req.params.swap_id || '') as string;
     const { canceller_address } = req.body as Record<string, unknown>;

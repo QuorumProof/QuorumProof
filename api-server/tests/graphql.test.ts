@@ -3,10 +3,23 @@ import express from 'express';
 import request from 'supertest';
 import { createGraphqlRouter } from '../src/routes/graphql.js';
 
+const serviceMocks = vi.hoisted(() => ({
+  getTier: vi.fn(),
+  getCredentialRewards: vi.fn(),
+}));
+
+vi.mock('../src/services/credentialTiering.js', () => ({
+  credentialTieringService: { getTier: serviceMocks.getTier },
+}));
+vi.mock('../src/services/credentialRedemption.js', () => ({
+  credentialRedemptionService: { getCredentialRewards: serviceMocks.getCredentialRewards },
+}));
+
 const mockSimulateCall = vi.fn();
 const mockSoroban = {
   simulateCall: mockSimulateCall,
   u64Val: (n: number | bigint) => n as any,
+  u32Val: (n: number) => n as any,
   addressVal: (a: string) => a as any,
 };
 
@@ -34,7 +47,11 @@ describe('GET /api/graphql', () => {
 });
 
 describe('POST /api/graphql', () => {
-  beforeEach(() => mockSimulateCall.mockReset());
+  beforeEach(() => {
+    mockSimulateCall.mockReset();
+    serviceMocks.getTier.mockReset().mockResolvedValue(null);
+    serviceMocks.getCredentialRewards.mockReset().mockResolvedValue([]);
+  });
 
   it('returns 400 for missing query', async () => {
     const res = await request(app).post('/api/graphql').send({});

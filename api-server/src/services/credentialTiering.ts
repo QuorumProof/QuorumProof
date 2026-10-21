@@ -20,7 +20,9 @@ export interface TierProgressionRule {
 }
 
 export class CredentialTieringService {
-  private pool = getPool();
+  private get pool() {
+    return getPool();
+  }
 
   async getOrCreateTier(credentialId: number): Promise<CredentialTier> {
     const existing = await this.pool.query(

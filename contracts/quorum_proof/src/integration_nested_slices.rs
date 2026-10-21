@@ -137,23 +137,85 @@ mod integration_nested_slices {
         assert!(client.is_quorum(&slice_id, &candidates));
     }
 
+    /// `QuorumIntersectionCertificate` is a public contract type (ADR-006) and is
+    /// reachable through `check_quorum_intersection`, so the nested-slice
+    /// certificate path is exercised end-to-end here.
     #[test]
-    fn test_quorum_intersection_cache() {
-        // Verify quorum intersection result is cached
+    fn test_quorum_intersection_certificate_accepted() {
         let env = Env::default();
         let client = setup(&env);
         let creator = Address::generate(&env);
 
         let attestor = Address::generate(&env);
+        let other = Address::generate(&env);
         let attestors = vec![&env, attestor.clone()];
         let weights = vec![&env, 1u32];
 
         let slice1 = client.create_slice(&creator, &attestors, &weights, &1u32);
-        let slice2 = client.create_slice(&creator, &attestors, &weights, &1u32);
+        let slice2 = client.create_slice(&creator, &vec![&env, attestor.clone(), other], &vec![&env, 1u32, 1u32], &1u32);
 
-        // Create intersection certificate
-        let safe_nodes = vec![&env, attestor];
-        // TODO: Create and test QuorumIntersectionCertificate when exposed
+        // `attestor` is a quorum in both slices, so it is a valid common node
+        let slice_ids = vec![&env, slice1, slice2];
+        let safe_nodes = vec![&env, attestor.clone()];
+        let cert = crate::QuorumIntersectionCertificate {
+            slice_ids: slice_ids.clone(),
+            safe_nodes: safe_nodes.clone(),
+            proof_hash: Bytes::from_slice(&env, &[0x11u8; 32]),
+            signature: None,
+        };
+
+        let report = client.check_quorum_intersection(&slice_ids, &cert);
+        assert!(report.is_safe);
+        assert_eq!(report.common_nodes, safe_nodes);
+        assert_eq!(report.partition_count, 0);
+        assert_eq!(report.certificate_version, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_quorum_intersection_certificate_rejects_non_quorum_nodes() {
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let attestor = Address::generate(&env);
+        let outsider = Address::generate(&env);
+        let slice1 = client.create_slice(&creator, &vec![&env, attestor.clone()], &vec![&env, 1u32], &1u32);
+        let slice2 = client.create_slice(&creator, &vec![&env, attestor.clone()], &vec![&env, 1u32], &1u32);
+
+        // `outsider` is not part of either slice, so it cannot form a quorum
+        let slice_ids = vec![&env, slice1, slice2];
+        let cert = crate::QuorumIntersectionCertificate {
+            slice_ids: slice_ids.clone(),
+            safe_nodes: vec![&env, outsider],
+            proof_hash: Bytes::from_slice(&env, &[0x22u8; 32]),
+            signature: None,
+        };
+
+        client.check_quorum_intersection(&slice_ids, &cert);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_quorum_intersection_certificate_rejects_mismatched_slice_ids() {
+        let env = Env::default();
+        let client = setup(&env);
+        let creator = Address::generate(&env);
+
+        let attestor = Address::generate(&env);
+        let slice1 = client.create_slice(&creator, &vec![&env, attestor.clone()], &vec![&env, 1u32], &1u32);
+        let slice2 = client.create_slice(&creator, &vec![&env, attestor.clone()], &vec![&env, 1u32], &1u32);
+
+        // Certificate lists a different slice set than the one being checked
+        let slice_ids = vec![&env, slice1, slice2];
+        let cert = crate::QuorumIntersectionCertificate {
+            slice_ids: vec![&env, slice1],
+            safe_nodes: vec![&env, attestor],
+            proof_hash: Bytes::from_slice(&env, &[0x33u8; 32]),
+            signature: None,
+        };
+
+        client.check_quorum_intersection(&slice_ids, &cert);
     }
 
     #[test]

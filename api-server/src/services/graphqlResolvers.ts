@@ -29,13 +29,38 @@ function serializeBigInt(value: unknown): unknown {
   return value;
 }
 
-function encodePageCursor(offset: number, limit: number): string {
-  return Buffer.from(JSON.stringify({ offset, limit })).toString('base64');
+function encodePageCursor(after: string, limit: number): string {
+  return Buffer.from(JSON.stringify({ after, limit })).toString('base64');
 }
 
-function decodePageCursor(cursor: string): { offset: number; limit: number } | null {
+function decodePageCursor(cursor: string): { after: string; limit: number } | null {
   try {
-    return JSON.parse(Buffer.from(cursor, 'base64').toString('utf-8'));
+    const bytes = Buffer.from(cursor, 'base64');
+    if (bytes.toString('base64') !== cursor) return null;
+
+    const decoded: unknown = JSON.parse(bytes.toString('utf-8'));
+    if (
+      decoded === null ||
+      typeof decoded !== 'object' ||
+      Array.isArray(decoded)
+    ) {
+      return null;
+    }
+
+    const payload = decoded as Record<string, unknown>;
+    const after = payload['after'];
+    const limit = payload['limit'];
+    if (
+      typeof after !== 'string' ||
+      !after ||
+      typeof limit !== 'number' ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      return null;
+    }
+    return { after, limit };
   } catch {
     return null;
   }
@@ -92,31 +117,51 @@ export class GraphQLResolvers {
     const issuer = args['issuer'];
     if (typeof issuer !== 'string') throw new Error('issuer must be a string');
 
-    const limit = Math.min(parseInt(String(args['limit'] ?? 10), 10), 100);
+    const rawCursor = args['cursor'];
+    if (rawCursor !== undefined && typeof rawCursor !== 'string') {
+      throw new Error('cursor must be a string');
+    }
+    const pageCursor = typeof rawCursor === 'string' ? decodePageCursor(rawCursor) : null;
+    if (rawCursor !== undefined && !pageCursor) {
+      throw new Error('cursor is invalid');
+    }
+
+    const requestedLimit = parseInt(String(args['limit'] ?? pageCursor?.limit ?? 10), 10);
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+      throw new Error('limit must be a positive integer');
+    }
+    const limit = Math.min(requestedLimit, 100);
     const offset = parseInt(String(args['offset'] ?? 0), 10);
 
     if (!this.ctx.searchIndex) return { edges: [], pageInfo: { hasNextPage: false }, totalCount: 0 };
 
     const searchOptions: SearchOptions = {
       issuer,
-      limit,
-      cursor: offset > 0 ? encodePageCursor(offset, limit) : undefined,
+      limit: pageCursor ? limit : Math.min(offset + limit, 100),
+      sort_by: 'id',
+      cursor: pageCursor ? Buffer.from(pageCursor.after).toString('base64') : undefined,
     };
 
     const result: SearchResult = this.ctx.searchIndex.search(searchOptions);
-    const credentials = result.data;
-    const hasNextPage = result.pagination.has_more;
+    const credentials = offset > 0 && !pageCursor
+      ? result.data.slice(offset, offset + limit)
+      : result.data;
+    const hasNextPage = pageCursor || offset === 0
+      ? result.pagination.has_more
+      : offset + credentials.length < result.pagination.total;
 
     return {
-      edges: credentials.map((cred: SearchCredentialRecord, idx: number) => ({
+      edges: credentials.map((cred: SearchCredentialRecord) => ({
         node: cred,
-        cursor: encodePageCursor(offset + idx, limit),
+        cursor: encodePageCursor(cred.id.padStart(20, '0'), limit),
       })),
       pageInfo: {
         hasNextPage,
-        hasPreviousPage: offset > 0,
-        startCursor: credentials.length > 0 ? encodePageCursor(offset, limit) : null,
-        endCursor: credentials.length > 0 ? encodePageCursor(offset + credentials.length - 1, limit) : null,
+        hasPreviousPage: offset > 0 || !!pageCursor,
+        startCursor: credentials.length > 0 ? encodePageCursor(credentials[0].id.padStart(20, '0'), limit) : null,
+        endCursor: credentials.length > 0
+          ? encodePageCursor(credentials[credentials.length - 1].id.padStart(20, '0'), limit)
+          : null,
       },
       totalCount: result.pagination.total,
     };
@@ -180,16 +225,16 @@ export class GraphQLResolvers {
     const searchOptions: SearchOptions = {
       query,
       sort_by: 'relevance',
-      limit,
-      cursor: offset > 0 ? encodePageCursor(offset, limit) : undefined,
+      limit: Math.min(offset + limit, 100),
     };
 
     const result: SearchResult = this.ctx.searchIndex.search(searchOptions);
+    const results = offset > 0 ? result.data.slice(offset, offset + limit) : result.data;
 
     return {
-      results: result.data,
+      results,
       totalCount: result.pagination.total,
-      hasMore: result.pagination.has_more,
+      hasMore: offset + results.length < result.pagination.total,
     };
   }
 

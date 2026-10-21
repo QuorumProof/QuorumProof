@@ -10,25 +10,38 @@ interface BulkShareDialogProps {
 export function BulkShareDialog({ credentials, onClose }: BulkShareDialogProps) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [allCopied, setAllCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   function getVerifyUrl(id: bigint) {
     return `${window.location.origin}/verify?id=${id}`;
   }
 
-  function handleCopyOne(id: bigint) {
+  async function handleCopyOne(id: bigint) {
     const idStr = id.toString();
-    navigator.clipboard.writeText(getVerifyUrl(id)).then(() => {
+    setCopiedId(null);
+    setAllCopied(false);
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(getVerifyUrl(id));
       setCopiedId(idStr);
       setTimeout(() => setCopiedId(null), 2000);
-    });
+    } catch {
+      setError('Failed to copy the verification link. Please try again.');
+    }
   }
 
-  function handleCopyAll() {
+  async function handleCopyAll() {
     const allLinks = credentials.map((c) => getVerifyUrl(c.id)).join('\n');
-    navigator.clipboard.writeText(allLinks).then(() => {
+    setCopiedId(null);
+    setAllCopied(false);
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(allLinks);
       setAllCopied(true);
       setTimeout(() => setAllCopied(false), 2000);
-    });
+    } catch {
+      setError('Failed to copy the verification links. Please try again.');
+    }
   }
 
   return (
@@ -86,6 +99,7 @@ export function BulkShareDialog({ credentials, onClose }: BulkShareDialogProps) 
               );
             })}
           </ul>
+          {error && <p role="alert">{error}</p>}
         </div>
 
         <div className="modal-footer">

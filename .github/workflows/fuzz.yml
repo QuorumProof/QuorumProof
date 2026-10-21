@@ -19,6 +19,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     # PR-triggered / push-triggered run: crashes FAIL the build so a newly
@@ -62,6 +65,9 @@ jobs:
     # opens a GitHub issue when a crash is found so failures are not silently
     # buried in the Actions tab (issue #1487).
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     if: github.event_name == 'schedule'
     strategy:
       matrix:

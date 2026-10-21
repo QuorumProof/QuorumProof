@@ -8,6 +8,7 @@ import {
 } from '../services/cryptoShredding.js';
 import { GdprRequestStore, GdprRequest, getDefaultRequestStore } from '../services/gdprRequestStore.js';
 import { verifyAttestorConsentSignature } from '../services/attestorConsent.js';
+import { validate } from '../middleware/validate.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -84,7 +85,17 @@ export function createGdprRouter(soroban: SorobanClient, options: GdprRouterOpti
   //
   // Body: { credentialId: number, subject: string, personalData: unknown }
   // -------------------------------------------------------------------------
-  router.post('/personal-data', async (req: Request, res: Response) => {
+  router.post('/personal-data', validate({
+    body: {
+      type: 'object',
+      required: ['credentialId', 'subject', 'personalData'],
+      properties: {
+        credentialId: {},
+        subject: { type: 'string', minLength: 1 },
+        personalData: {},
+      },
+    },
+  }, { coerceTypes: false }), async (req: Request, res: Response) => {
     const { credentialId: rawCredentialId, subject, personalData } = req.body as {
       credentialId?: unknown;
       subject?: unknown;
@@ -190,7 +201,13 @@ export function createGdprRouter(soroban: SorobanClient, options: GdprRouterOpti
   //
   // Body: { credentialId: number }
   // -------------------------------------------------------------------------
-  router.post('/request', async (req: Request, res: Response) => {
+  router.post('/request', validate({
+    body: {
+      type: 'object',
+      required: ['credentialId'],
+      properties: { credentialId: {} },
+    },
+  }, { coerceTypes: false }), async (req: Request, res: Response) => {
     const { credentialId: rawCredentialId } = req.body as { credentialId?: unknown };
 
     const credentialId = parseCredentialId(rawCredentialId);
@@ -266,7 +283,17 @@ export function createGdprRouter(soroban: SorobanClient, options: GdprRouterOpti
   //
   // Body: { requestId: string, attestorAddress: string, signature: string }
   // -------------------------------------------------------------------------
-  router.post('/consent', async (req: Request, res: Response) => {
+  router.post('/consent', validate({
+    body: {
+      type: 'object',
+      required: ['requestId', 'attestorAddress', 'signature'],
+      properties: {
+        requestId: { type: 'string', minLength: 1 },
+        attestorAddress: { type: 'string', minLength: 1 },
+        signature: { type: 'string', minLength: 1 },
+      },
+    },
+  }, { coerceTypes: false }), async (req: Request, res: Response) => {
     const { requestId, attestorAddress, signature } = req.body as {
       requestId?: string;
       attestorAddress?: string;

@@ -82,14 +82,18 @@ Init ==
 -----------------------------------------------------------------------------
 (* Helper functions *)
 
+\* Sum of weights over a set of attestors. Summed element-wise: collecting the
+\* weights into a set first would merge attestors that share a weight.
+RECURSIVE WeightSum(_, _)
+WeightSum(weights, S) ==
+  IF S = {} THEN 0
+  ELSE LET x == CHOOSE y \in S : TRUE
+       IN  weights[x] + WeightSum(weights, S \ {x})
+
 \* Sum of weights for attestors who have voted TRUE for (cred, slice)
 SupportWeight(id, sid) ==
-  LET s == slices[sid]
-  IN  LET supporters == {a \in s.members : votes[id][sid][a] = TRUE}
-      IN  LET weights == {s.weights[a] : a \in supporters}
-          IN  IF supporters = {} THEN 0
-              ELSE LET seq == SetToSeq(weights)
-                   IN  FoldSeq(LAMBDA x, y : x + y, 0, seq)
+  WeightSum(slices[sid].weights,
+            {a \in slices[sid].members : votes[id][sid][a] = TRUE})
 
 \* Whether a slice's threshold is met by current support votes
 ThresholdMet(id, sid) ==
@@ -98,9 +102,13 @@ ThresholdMet(id, sid) ==
 -----------------------------------------------------------------------------
 (* Actions *)
 
-\* Create / configure a slice
+\* Create a slice. Membership is fixed at creation (`create_slice` in the
+\* contract), so a configured slice is never reconfigured: otherwise a member
+\* could be removed while their vote remains. Threshold updates
+\* (`update_slice_threshold`) are not modelled here.
 ConfigureSlice(sid, members, weights, threshold) ==
   /\ sid \in SliceIds
+  /\ slices[sid].members = {}            \* create-once
   /\ members \subseteq Attestors
   /\ threshold > 0
   /\ slices' = [slices EXCEPT
@@ -154,14 +162,22 @@ ResolveChallenge(id) ==
 PauseContract   == /\ ~paused /\ paused' = TRUE  /\ UNCHANGED <<cred_state, slices, votes, challenges>>
 UnpauseContract == /\ paused  /\ paused' = FALSE /\ UNCHANGED <<cred_state, slices, votes, challenges>>
 
+(* Model bounds *)
+
+\* Model-checking bounds, not part of the protocol. Weights and thresholds are
+\* unbounded naturals in the contract; TLC needs finite domains to enumerate.
+MaxModelWeight    == 2
+MaxModelThreshold == 4
+
+-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------
 (* Next-state relation *)
 
 Next ==
   \/ \E sid \in SliceIds,
         m \in SUBSET Attestors,
-        w \in [Attestors -> Nat],
-        t \in 1..10 :
+        w \in [Attestors -> 0..MaxModelWeight],
+        t \in 1..MaxModelThreshold :
           ConfigureSlice(sid, m, w, t)
   \/ \E a \in Attestors, id \in CredIds, sid \in SliceIds, s \in BOOLEAN :
           CastVote(a, id, sid, s)
@@ -172,9 +188,14 @@ Next ==
   \/ PauseContract
   \/ UnpauseContract
 
+\* Strong fairness on finalisation: it is enabled whenever the threshold is met
+\* and no challenge is open, which can happen only intermittently while
+\* challenges are raised and resolved, so weak fairness is not sufficient.
+\* Challenges are eventually resolved and the contract eventually unpauses.
 Fairness ==
   /\ \A id \in CredIds, sid \in SliceIds :
-       WF_vars(FinaliseAttestation(id, sid))
+       SF_vars(FinaliseAttestation(id, sid))
+  /\ \A id \in CredIds : WF_vars(ResolveChallenge(id))
   /\ WF_vars(UnpauseContract)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -214,10 +235,15 @@ NoDoubleVotePossible ==
   \A id \in CredIds, sid \in SliceIds, a \in Attestors :
     votes[id][sid][a] \in BOOLEAN  \* tautology with type, documents intent
 
-\* I6. A credential with an active challenge cannot be attested
+\* I6. A challenge blocks new attestations. This is a transition property, not
+\*     a state invariant: `challenge_attestation` may be raised against an
+\*     already-attested credential (the accused has attested), and it does not
+\*     revert the credential. What must hold is that no credential moves into
+\*     Attested while challenged.
 ChallengeBlocksAttestation ==
-  \A id \in CredIds :
-    challenges[id] => cred_state[id] # "Attested"
+  [][ \A id \in CredIds :
+        (challenges[id] /\ cred_state[id] # "Attested")
+          => cred_state'[id] # "Attested" ]_vars
 
 \* Composite safety invariant — all of the above
 SafetyInvariant ==
@@ -225,16 +251,18 @@ SafetyInvariant ==
   /\ RevokedNotAttested
   /\ ThresholdEnforced
   /\ AttestorInSlice
-  /\ ChallengeBlocksAttestation
 
 -----------------------------------------------------------------------------
 (* LIVENESS *)
 
-\* L1. A credential with enough supporting votes and no challenges eventually attests.
+\* L1. A credential with enough supporting votes and no challenges eventually
+\*     attests, unless it is revoked first. Revocation is an admin action that
+\*     can happen at any time, so the target is "leaves Active" rather than
+\*     "is Attested"; otherwise a revoked credential would violate the property.
 EventualAttestation ==
   \A id \in CredIds, sid \in SliceIds :
     (cred_state[id] = "Active" /\ ~challenges[id] /\ ThresholdMet(id, sid))
-    ~> (cred_state[id] = "Attested")
+    ~> (cred_state[id] # "Active")
 
 -----------------------------------------------------------------------------
 (*

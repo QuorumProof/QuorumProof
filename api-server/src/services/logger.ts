@@ -77,6 +77,21 @@ const pinoLogger = pino(
     level: LOG_LEVEL,
     base: { service: 'quorumproof-api' },
     timestamp: pino.stdTimeFunctions.isoTime,
+    redact: {
+      paths: [
+        'password', '*.password',
+        'token', '*.token',
+        'authorization', '*.authorization',
+        'otp', '*.otp',
+        'code', '*.code',
+        'secret', '*.secret',
+        'privateKey', '*.privateKey',
+        'private_key', '*.private_key',
+        'contact_value', '*.contact_value',
+        'contactValue', '*.contactValue',
+      ],
+      censor: '[REDACTED]',
+    },
     formatters: {
       level(label) {
         return { level: label };

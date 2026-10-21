@@ -2,72 +2,14 @@ import { Router, Request, Response } from 'express';
 import { Keypair, StrKey } from '@stellar/stellar-sdk';
 import { ThresholdEncryption, type EncryptedData, type ThresholdKeyShare } from '../crypto/thresholdEncryption.js';
 import { EncryptedCredentialStore } from '../services/encryptedCredentialStore.js';
-import { rbac } from '../middleware/rbac.js';
-import { validate } from '../middleware/validate.js';
-import * as soroban from '../soroban.js';
-
-const SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000;
-
-export function buildDecryptionAuthorizationMessage(
-  credentialId: string,
-  requesterAddress: string,
-  reason: string,
-  timestamp: number,
-  nonce: string,
-): string {
-  return [
-    'QuorumProof Decryption Authorization',
-    `credential:${credentialId}`,
-    `requester:${requesterAddress}`,
-    `reason:${reason}`,
-    `timestamp:${timestamp}`,
-    `nonce:${nonce}`,
-  ].join('\n');
-}
-
-export function buildDecryptionRequestMessage(
-  credentialId: string,
-  requesterAddress: string,
-  timestamp: number,
-  nonce: string,
-): string {
-  return [
-    'QuorumProof Decryption Request',
-    `credential:${credentialId}`,
-    `requester:${requesterAddress}`,
-    `timestamp:${timestamp}`,
-    `nonce:${nonce}`,
-  ].join('\n');
-}
-
-function verifyStellarSignature(address: string, message: string, signature: string): boolean {
-  if (!StrKey.isValidEd25519PublicKey(address)) return false;
-  try {
-    const signatureBytes = Buffer.from(signature, 'base64');
-    if (!isValidSignatureEncoding(signature) || signatureBytes.length !== 64) return false;
-    return Keypair.fromPublicKey(address).verify(Buffer.from(message, 'utf8'), signatureBytes);
-  } catch {
-    return false;
-  }
-}
-
-function isValidSignatureEncoding(signature: string): boolean {
-  const signatureBytes = Buffer.from(signature, 'base64');
-  return signatureBytes.length === 64 && signatureBytes.toString('base64') === signature;
-}
-
-function isValidAddress(value: unknown): value is string {
-  return typeof value === 'string' && StrKey.isValidEd25519PublicKey(value);
-}
-
-function isValidBase64Bytes32(value: string): boolean {
-  const decoded = Buffer.from(value, 'base64');
-  return decoded.length === 32 && decoded.toString('base64') === value;
-}
-
-function isRecentTimestamp(timestamp: number): boolean {
-  return Number.isSafeInteger(timestamp) && Math.abs(Date.now() - timestamp) <= SIGNATURE_MAX_AGE_MS;
-}
+import { StrKey } from '@stellar/stellar-sdk';
+import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import {
+  DecryptionChallengeStore,
+  buildDecryptionChallengeMessage,
+  collectValidApprovals,
+  verifyEd25519Signature,
+} from '../services/encryptedCredentialAuth.js';
 
 /**
  * Encrypted Credentials Routes
@@ -76,8 +18,9 @@ function isRecentTimestamp(timestamp: number): boolean {
  * Endpoints:
  * POST /api/credentials/:id/encrypt - Encrypt sensitive fields
  * GET /api/credentials/:id/encrypted - Get encrypted credential data
- * POST /api/credentials/:id/decrypt/authorize - Request decryption authorization
- * POST /api/credentials/:id/decrypt - Decrypt with authorization
+ * POST /api/credentials/:id/decrypt/authorize - Request decryption authorization (JWT + custodian approvals)
+ * POST /api/credentials/:id/decrypt/challenge - Get a single-use challenge to sign
+ * POST /api/credentials/:id/decrypt - Decrypt with authorization and a signed challenge
  * GET /api/credentials/:id/decrypt/status - Check decryption authorization status
  */
 
@@ -89,21 +32,9 @@ export function createEncryptedCredentialsRouter(
   } = {},
 ) {
   const router = Router();
-  const store = dependencies.store ?? new EncryptedCredentialStore();
-  const encryption = dependencies.encryption ?? new ThresholdEncryption(3, 5); // 3-of-5 threshold encryption
-  const simulateCall = dependencies.simulateCall ?? soroban.simulateCall;
-  const threshold = encryption.getConfig().threshold;
-  const sharesCount = encryption.getConfig().shares;
-  const keyShareSchema = {
-    type: 'object',
-    properties: {
-      share_id: { type: 'integer', minimum: 1, maximum: sharesCount },
-      share_value: { type: 'string', minLength: 44, maxLength: 44 },
-      commitment: { type: 'string', minLength: 44, maxLength: 44 },
-    },
-    required: ['share_id', 'share_value', 'commitment'],
-    additionalProperties: false,
-  };
+  const store = new EncryptedCredentialStore();
+  const encryption = new ThresholdEncryption(3, 5); // 3-of-5 threshold encryption
+  const challenges = new DecryptionChallengeStore();
 
   // POST /api/credentials/:id/encrypt
   // Encrypt sensitive fields of a credential
@@ -229,72 +160,15 @@ export function createEncryptedCredentialsRouter(
   });
 
   // POST /api/credentials/:id/decrypt/authorize
-  // Request decryption authorization
-  router.post(
-    '/:id/decrypt/authorize',
-    validate({
-      body: {
-        schema: {
-          type: 'object',
-          properties: {
-            requester_address: { type: 'string' },
-            reason: { type: 'string', minLength: 1, maxLength: 500 },
-            timestamp: { type: 'integer', minimum: 0 },
-            nonce: { type: 'string', pattern: '^[a-fA-F0-9]{32,128}$' },
-            signature: { type: 'string', minLength: 88, maxLength: 88 },
-            approvals: {
-              type: 'array',
-              minItems: threshold,
-              maxItems: sharesCount,
-              items: {
-                type: 'object',
-                properties: {
-                  address: { type: 'string' },
-                  signature: { type: 'string', minLength: 88, maxLength: 88 },
-                },
-                required: ['address', 'signature'],
-                additionalProperties: false,
-              },
-            },
-          },
-          required: ['requester_address', 'reason', 'timestamp', 'nonce', 'signature', 'approvals'],
-          additionalProperties: false,
-        },
-        custom: (body) => {
-          if (typeof body !== 'object' || body === null) return 'Request body must be an object';
-          const values = body as {
-            requester_address?: unknown;
-            signature?: unknown;
-            approvals?: Array<{ address: string; signature: string }>;
-          };
-          if (!isValidAddress(values.requester_address)) {
-            return 'requester_address must be a valid Stellar G-address';
-          }
-          if (typeof values.signature !== 'string' || !isValidSignatureEncoding(values.signature)) {
-            return 'signature must be a valid 64-byte base64 Stellar signature';
-          }
-          const approvals = values.approvals;
-          if (!Array.isArray(approvals) || !approvals.every((approval) =>
-            isValidAddress(approval.address) && isValidSignatureEncoding(approval.signature)
-          )) {
-            return 'approvals must contain valid Stellar addresses and signatures';
-          }
-          if (new Set(approvals.map((approval) => approval.address)).size !== approvals.length) {
-            return 'approvals must not contain duplicate custodians';
-          }
-          return true;
-        },
-      },
-    }),
-    async (req: Request, res: Response) => {
+  // Grant decryption authorization. Requires an authenticated caller and
+  // signed approvals from at least `threshold` of the credential's key custodians.
+  // Body: { requester_address, reason?, approvals: [{ custodian, issued_at, signature }] }
+  router.post('/:id/decrypt/authorize', requireAuth, async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-    const { requester_address, reason, timestamp, nonce, signature, approvals } = req.body as {
+    const { requester_address, reason, approvals } = req.body as {
       requester_address?: string;
       reason?: string;
-      timestamp?: number;
-      nonce?: string;
-      signature?: string;
-      approvals?: Array<{ address: string; signature: string }>;
+      approvals?: unknown;
     };
 
     if (
@@ -329,6 +203,14 @@ export function createEncryptedCredentialsRouter(
       return;
     }
 
+    if (!Array.isArray(approvals)) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'approvals array is required',
+      });
+      return;
+    }
+
     try {
       const credentialId = BigInt(id);
       const credential = await simulateCall('get_credential', [soroban.u64Val(credentialId)]);
@@ -358,12 +240,41 @@ export function createEncryptedCredentialsRouter(
         return;
       }
 
+      const encrypted = await store.getEncryptedCredential(credentialId);
+      if (!encrypted) {
+        res.status(404).json({
+          error: 'Not found',
+          message: 'No encrypted data found for this credential',
+        });
+        return;
+      }
+
+      const approvedBy = collectValidApprovals(
+        credentialId.toString(),
+        requester_address,
+        encrypted.key_custodians,
+        approvals,
+        Date.now(),
+      );
+      const required = encryption.getConfig().threshold;
+
+      if (approvedBy.length < required) {
+        res.status(403).json({
+          error: 'Insufficient approvals',
+          message: `At least ${required} valid approvals from key custodians are required`,
+          required,
+          valid_approvals: approvedBy.length,
+        });
+        return;
+      }
+
+      // Authorize decryption for 1 hour by default
       const authorization = await store.authorizeDecryption(
         credentialId,
         requester_address,
         3600000,
-        reason,
-        [...verifiedApprovers]
+        reason || 'Not specified',
+        approvedBy
       );
 
       res.json({
@@ -382,64 +293,50 @@ export function createEncryptedCredentialsRouter(
     }
   });
 
-  // POST /api/credentials/:id/decrypt
-  // Decrypt with key shares (requires authorization)
-  router.post(
-    '/:id/decrypt',
-    validate({
-      body: {
-        schema: {
-          type: 'object',
-          properties: {
-            requester_address: { type: 'string' },
-            key_shares: {
-              type: 'array',
-              minItems: threshold,
-              maxItems: sharesCount,
-              items: keyShareSchema,
-            },
-            timestamp: { type: 'integer', minimum: 0 },
-            nonce: { type: 'string', pattern: '^[a-fA-F0-9]{32,128}$' },
-            signature: { type: 'string', minLength: 88, maxLength: 88 },
-          },
-          required: ['requester_address', 'key_shares', 'timestamp', 'nonce', 'signature'],
-          additionalProperties: false,
-        },
-        custom: (body) => {
-          if (typeof body !== 'object' || body === null) return 'Request body must be an object';
-          const values = body as {
-            requester_address?: unknown;
-            signature?: unknown;
-            key_shares?: ThresholdKeyShare[];
-          };
-          if (!isValidAddress(values.requester_address)) {
-            return 'requester_address must be a valid Stellar G-address';
-          }
-          if (typeof values.signature !== 'string' || !isValidSignatureEncoding(values.signature)) {
-            return 'signature must be a valid 64-byte base64 Stellar signature';
-          }
-          const keyShares = values.key_shares;
-          if (!Array.isArray(keyShares)) return 'key_shares must be an array';
-          if (new Set(keyShares.map((share) => share.share_id)).size !== keyShares.length) {
-            return 'key_shares must not contain duplicate share_id values';
-          }
-          if (!keyShares.every((share) =>
-            isValidBase64Bytes32(share.share_value) && isValidBase64Bytes32(share.commitment)
-          )) {
-            return 'key_shares must contain 32-byte base64 share values and commitments';
-          }
-          return true;
-        },
-      },
-    }),
-    async (req: Request, res: Response) => {
+  // POST /api/credentials/:id/decrypt/challenge
+  // Issue a single-use challenge the requester signs with the Stellar key for
+  // `requester_address`. The signed challenge is required by POST /decrypt.
+  router.post('/:id/decrypt/challenge', (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
-    const { requester_address, key_shares, timestamp, nonce, signature } = req.body as {
+    const { requester_address } = req.body as { requester_address?: string };
+
+    if (!requester_address || !StrKey.isValidEd25519PublicKey(requester_address)) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'requester_address must be a valid Stellar public key',
+      });
+      return;
+    }
+
+    let credentialId: bigint;
+    try {
+      credentialId = BigInt(id);
+    } catch {
+      res.status(400).json({ error: 'Invalid request', message: 'credential id must be an integer' });
+      return;
+    }
+
+    const challenge = challenges.issue(credentialId.toString(), requester_address);
+    res.json({
+      credential_id: id,
+      requester_address,
+      nonce: challenge.nonce,
+      message: buildDecryptionChallengeMessage(credentialId.toString(), requester_address, challenge.nonce),
+      expires_at: new Date(challenge.expiresAt).toISOString(),
+    });
+  });
+
+  // POST /api/credentials/:id/decrypt
+  // Decrypt with key shares (requires authorization and a signed challenge).
+  // Body: { requester_address, key_shares, nonce, signature }
+  // `signature` is the hex-encoded ed25519 signature of the challenge message.
+  router.post('/:id/decrypt', async (req: Request, res: Response) => {
+    const id = (req.params as Record<string, string>).id;
+    const { requester_address, key_shares, nonce, signature } = req.body as {
       requester_address?: string;
-      key_shares?: ThresholdKeyShare[];
-      timestamp?: number;
-      nonce?: string;
-      signature?: string;
+      key_shares?: unknown[];
+      nonce?: unknown;
+      signature?: unknown;
     };
 
     if (
@@ -456,18 +353,40 @@ export function createEncryptedCredentialsRouter(
       return;
     }
 
-    const requestMessage = buildDecryptionRequestMessage(id, requester_address, timestamp, nonce);
-    if (
-      !isRecentTimestamp(timestamp) ||
-      !/^[a-f0-9]{32,128}$/i.test(nonce) ||
-      !verifyStellarSignature(requester_address, requestMessage, signature)
-    ) {
-      res.status(401).json({ error: 'Invalid requester signature or expired challenge' });
+    if (typeof nonce !== 'string' || !signature) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'nonce and signature are required; request a challenge via POST /decrypt/challenge',
+      });
       return;
     }
 
     try {
       const credentialId = BigInt(id);
+
+      // Verify the requester controls requester_address. The nonce is consumed
+      // here, so a failed attempt cannot be retried with the same challenge.
+      const challenge = challenges.consume(nonce);
+      if (
+        !challenge ||
+        challenge.credentialId !== credentialId.toString() ||
+        challenge.requesterAddress !== requester_address
+      ) {
+        res.status(401).json({
+          error: 'Invalid challenge',
+          message: 'Challenge is unknown, expired, already used, or issued for a different request',
+        });
+        return;
+      }
+
+      const message = buildDecryptionChallengeMessage(credentialId.toString(), requester_address, nonce);
+      if (!verifyEd25519Signature(requester_address, message, signature)) {
+        res.status(401).json({
+          error: 'Invalid signature',
+          message: 'Signature does not match requester_address',
+        });
+        return;
+      }
 
       // Check authorization
       const isAuthorized = await store.isDecryptionAuthorized(credentialId, requester_address);
@@ -505,11 +424,13 @@ export function createEncryptedCredentialsRouter(
         const decrypted = encryption.decryptSensitiveData(encrypted.encrypted_data, key_shares);
         const decryptedData = JSON.parse(decrypted.toString());
 
+        // Log successful decryption with the identity verified by signature
         await store.logDecryptionAttempt(credentialId, requester_address, true, {
           verified_identity: requester_address,
           shared_count: key_shares.length,
-          },
-        );
+          verified_identity: requester_address,
+          identity_method: 'ed25519-challenge',
+        });
 
         res.json({
           success: true,
@@ -524,6 +445,8 @@ export function createEncryptedCredentialsRouter(
           verified_identity: requester_address,
           error: decryptErr instanceof Error ? decryptErr.message : String(decryptErr),
           share_count: key_shares.length,
+          verified_identity: requester_address,
+          identity_method: 'ed25519-challenge',
         });
 
         res.status(400).json({
@@ -583,7 +506,7 @@ export function createEncryptedCredentialsRouter(
 
   // GET /api/credentials/:id/decrypt/audit
   // Get decryption audit log (admin only)
-  router.get('/:id/decrypt/audit', rbac.requirePermission('admin:all'), async (req: Request, res: Response) => {
+  router.get('/:id/decrypt/audit', requireAdmin, async (req: Request, res: Response) => {
     const id = (req.params as Record<string, string>).id;
 
     try {

@@ -1,6 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import { logger } from '../services/logger.js';
 
+declare global {
+  namespace Express {
+    interface Request {
+      requestId?: string;
+    }
+  }
+}
+
 export interface RequestContext {
   requestId: string;
   method: string;
@@ -67,6 +75,7 @@ const requestContexts = new RequestContextCache();
 
 export function structuredLoggingMiddleware(req: Request, res: Response, next: NextFunction): void {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  req.requestId = requestId;
   const startTime = Date.now();
 
   const context: RequestContext = {

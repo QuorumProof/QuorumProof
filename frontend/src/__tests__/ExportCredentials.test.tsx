@@ -112,7 +112,7 @@ describe('Export Credentials', () => {
     // a blank window and calling document.write into it -- so these tests
     // capture the Blob passed to URL.createObjectURL and read its contents.
     it('opens a new window with credential data', async () => {
-      const openSpy = vi.spyOn(window, 'open').mockReturnValue({ onload: null } as unknown as Window);
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
       let capturedBlob: Blob | undefined;
       const createObjectURLSpy = vi
         .spyOn(URL, 'createObjectURL')
@@ -123,7 +123,7 @@ describe('Export Credentials', () => {
 
       exportToPDF(mockCredential, 'https://example.com');
 
-      expect(openSpy).toHaveBeenCalledWith('blob:mock-url', '_blank');
+      expect(openSpy).toHaveBeenCalledWith('blob:mock-url', '_blank', 'noopener,noreferrer');
       expect(capturedBlob).toBeInstanceOf(Blob);
 
       const html = await capturedBlob!.text();
@@ -144,7 +144,7 @@ describe('Export Credentials', () => {
     });
 
     it('marks revoked credentials in the PDF', async () => {
-      vi.spyOn(window, 'open').mockReturnValue({ onload: null } as unknown as Window);
+      vi.spyOn(window, 'open').mockReturnValue(null);
       let capturedBlob: Blob | undefined;
       const createObjectURLSpy = vi
         .spyOn(URL, 'createObjectURL')

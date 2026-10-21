@@ -1,8 +1,29 @@
 import { Router, Request, Response } from 'express';
-import { randomBytes } from 'crypto';
+import { createHmac, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import { getPool } from '../db.js';
+import { validate } from '../middleware/validate.js';
+import { logger } from '../services/logger.js';
 
 const router = Router();
+const recoveryOtpKey = getRecoveryOtpKey();
+
+function getRecoveryOtpKey(): string | Buffer {
+  const configuredKey = process.env.RECOVERY_OTP_SECRET ?? process.env.JWT_SECRET;
+  if (configuredKey) return configuredKey;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('RECOVERY_OTP_SECRET or JWT_SECRET must be configured in production');
+  }
+  return randomBytes(32);
+}
+
+function hashOtp(code: string): string {
+  return createHmac('sha256', recoveryOtpKey).update(code).digest('hex');
+}
+
+function verifyOtpHash(code: string, storedHash: string): boolean {
+  if (!/^[\da-f]{64}$/i.test(storedHash)) return false;
+  return timingSafeEqual(Buffer.from(storedHash, 'hex'), Buffer.from(hashOtp(code), 'hex'));
+}
 
 // ---- Postgres-backed store (Issue #1429) ----
 // Replaced the in-memory Map/array store with getPool()-backed queries so that
@@ -31,7 +52,7 @@ function generateId(): string {
 }
 
 function generateOtp(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(randomInt(100000, 1000000));
 }
 
 /** Delete expired OTP rows (best-effort; does not throw on failure). */
@@ -45,7 +66,19 @@ async function pruneExpiredOtps(): Promise<void> {
 
 // POST /api/recovery/request
 // Body: { credentialId, lostWallet, newWallet, contactType, contactValue }
-router.post('/request', async (req: Request, res: Response) => {
+router.post('/request', validate({
+  body: {
+    type: 'object',
+    required: ['credentialId', 'lostWallet', 'newWallet', 'contactType', 'contactValue'],
+    properties: {
+      credentialId: { type: 'string', minLength: 1, maxLength: 128 },
+      lostWallet: { type: 'string', pattern: '^G[A-Z2-7]{55}$' },
+      newWallet: { type: 'string', pattern: '^G[A-Z2-7]{55}$' },
+      contactType: { type: 'string', enum: ['email', 'phone'] },
+      contactValue: { type: 'string', minLength: 1, maxLength: 320 },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { credentialId, lostWallet, newWallet, contactType, contactValue } = req.body;
 
   if (!credentialId || typeof credentialId !== 'string') {
@@ -89,27 +122,40 @@ router.post('/request', async (req: Request, res: Response) => {
     await pool.query(
       `INSERT INTO recovery_otps (request_id, code, expires_at, attempts)
        VALUES ($1, $2, $3, 0)`,
-      [id, otp, expiresAt],
+      [id, hashOtp(otp), expiresAt],
     );
   } catch (err) {
-    console.error('[recovery] DB error creating request:', err);
+    logger.error('Database error creating recovery request', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to create recovery request' });
     return;
   }
 
-  // Stub: in production, dispatch via SendGrid / Twilio
-  if (contactType === 'email') {
-    console.log(`[recovery] OTP for request ${id} → email ${contactValue}: ${otp}`);
-  } else {
-    console.log(`[recovery] OTP for request ${id} → SMS ${contactValue}: ${otp}`);
-  }
+  // TODO: dispatch through the configured email/SMS provider. Never log the
+  // OTP or contact value; logs are not a secure delivery channel.
+  logger.info('Recovery OTP generated for delivery', 'recovery', {
+    requestId: req.requestId,
+    recoveryRequestId: id,
+    deliveryChannel: contactType,
+  });
 
   res.status(201).json({ requestId: id, message: `Verification code sent to your ${contactType}` });
 });
 
 // POST /api/recovery/verify-otp
 // Body: { requestId, code }
-router.post('/verify-otp', async (req: Request, res: Response) => {
+router.post('/verify-otp', validate({
+  body: {
+    type: 'object',
+    required: ['requestId', 'code'],
+    properties: {
+      requestId: { type: 'string', minLength: 1, maxLength: 128 },
+      code: { type: 'string', pattern: '^\\d{6}$' },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId, code } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -161,7 +207,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       return;
     }
 
-    if (otp.code !== code.trim()) {
+    if (!verifyOtpHash(code.trim(), otp.code)) {
       await pool.query(
         'UPDATE recovery_otps SET attempts = $1 WHERE request_id = $2',
         [newAttempts, requestId],
@@ -181,14 +227,23 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 
     res.json({ success: true, message: 'Identity verified. Your request is now pending attestor approval.' });
   } catch (err) {
-    console.error('[recovery] DB error verifying OTP:', err);
+    logger.error('Database error verifying recovery OTP', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to verify OTP' });
   }
 });
 
 // POST /api/recovery/resend-otp
 // Body: { requestId }
-router.post('/resend-otp', async (req: Request, res: Response) => {
+router.post('/resend-otp', validate({
+  body: {
+    type: 'object',
+    required: ['requestId'],
+    properties: { requestId: { type: 'string', minLength: 1, maxLength: 128 } },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -225,18 +280,21 @@ router.post('/resend-otp', async (req: Request, res: Response) => {
          SET code = EXCLUDED.code,
              expires_at = EXCLUDED.expires_at,
              attempts = 0`,
-      [requestId, otp, expiresAt],
+      [requestId, hashOtp(otp), expiresAt],
     );
 
-    if (request.contact_type === 'email') {
-      console.log(`[recovery] Resent OTP for request ${requestId} → email ${request.contact_value}: ${otp}`);
-    } else {
-      console.log(`[recovery] Resent OTP for request ${requestId} → SMS ${request.contact_value}: ${otp}`);
-    }
+    logger.info('Recovery OTP resent for delivery', 'recovery', {
+      requestId: req.requestId,
+      recoveryRequestId: requestId,
+      deliveryChannel: request.contact_type,
+    });
 
     res.json({ message: `Verification code resent to your ${request.contact_type}` });
   } catch (err) {
-    console.error('[recovery] DB error resending OTP:', err);
+    logger.error('Database error resending recovery OTP', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to resend OTP' });
   }
 });
@@ -256,7 +314,10 @@ router.get('/status/:requestId', async (req: Request, res: Response) => {
     const { contact_value: _hidden, ...safeRequest } = result.rows[0];
     res.json(safeRequest);
   } catch (err) {
-    console.error('[recovery] DB error fetching status:', err);
+    logger.error('Database error fetching recovery status', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to fetch recovery request' });
   }
 });
@@ -284,14 +345,26 @@ router.get('/pending', async (req: Request, res: Response) => {
     const items = result.rows;
     res.json({ attestor, items, total: items.length });
   } catch (err) {
-    console.error('[recovery] DB error fetching pending requests:', err);
+    logger.error('Database error fetching pending recovery requests', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to fetch pending requests' });
   }
 });
 
 // POST /api/recovery/approve
 // Body: { requestId, attestor }
-router.post('/approve', async (req: Request, res: Response) => {
+router.post('/approve', validate({
+  body: {
+    type: 'object',
+    required: ['requestId', 'attestor'],
+    properties: {
+      requestId: { type: 'string', minLength: 1, maxLength: 128 },
+      attestor: { type: 'string', minLength: 1, maxLength: 128 },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId, attestor } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -335,17 +408,34 @@ router.post('/approve', async (req: Request, res: Response) => {
       [attestor, updatedAttestors, requestId],
     );
 
-    console.log(`[recovery] Request ${requestId} approved by attestor ${attestor}`);
+    logger.info('Recovery request approved', 'recovery', {
+      requestId: req.requestId,
+      recoveryRequestId: requestId,
+      attestor,
+    });
     res.json({ success: true, message: 'Recovery request approved. Credential re-issuance has been initiated.' });
   } catch (err) {
-    console.error('[recovery] DB error approving request:', err);
+    logger.error('Database error approving recovery request', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to approve recovery request' });
   }
 });
 
 // POST /api/recovery/reject
 // Body: { requestId, attestor, reason }
-router.post('/reject', async (req: Request, res: Response) => {
+router.post('/reject', validate({
+  body: {
+    type: 'object',
+    required: ['requestId', 'attestor'],
+    properties: {
+      requestId: { type: 'string', minLength: 1, maxLength: 128 },
+      attestor: { type: 'string', minLength: 1, maxLength: 128 },
+      reason: { type: ['string', 'null'], maxLength: 1000 },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId, attestor, reason } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -385,10 +475,17 @@ router.post('/reject', async (req: Request, res: Response) => {
       [attestor, reason ?? 'No reason provided', requestId],
     );
 
-    console.log(`[recovery] Request ${requestId} rejected by attestor ${attestor}`);
+    logger.info('Recovery request rejected', 'recovery', {
+      requestId: req.requestId,
+      recoveryRequestId: requestId,
+      attestor,
+    });
     res.json({ success: true, message: 'Recovery request rejected.' });
   } catch (err) {
-    console.error('[recovery] DB error rejecting request:', err);
+    logger.error('Database error rejecting recovery request', 'recovery', {
+      requestId: req.requestId,
+      error: String(err),
+    });
     res.status(500).json({ error: 'Failed to reject recovery request' });
   }
 });

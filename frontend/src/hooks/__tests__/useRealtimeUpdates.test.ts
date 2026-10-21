@@ -70,6 +70,21 @@ describe('useRealtimeUpdates', () => {
     expect(onUpdate).toHaveBeenCalledTimes(1);
   });
 
+  it('uses the latest onUpdate callback after rerender', () => {
+    const firstUpdate = vi.fn();
+    const latestUpdate = vi.fn();
+    const { rerender } = renderHook(
+      ({ onUpdate }) => useRealtimeUpdates({ wsUrl: 'ws://localhost:9000', onUpdate }),
+      { initialProps: { onUpdate: firstUpdate } }
+    );
+
+    rerender({ onUpdate: latestUpdate });
+    act(() => { MockWebSocket.instances[0].simulateMessage(); });
+
+    expect(firstUpdate).not.toHaveBeenCalled();
+    expect(latestUpdate).toHaveBeenCalledOnce();
+  });
+
   it('falls back to polling on WebSocket error', () => {
     const onUpdate = vi.fn();
     const { result } = renderHook(() =>

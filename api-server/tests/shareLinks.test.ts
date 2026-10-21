@@ -1,82 +1,87 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { Keypair, scValToNative } from '@stellar/stellar-sdk';
-import { assertShareLinkHmacSecretConfigured, createShareLinksRouter } from '../src/routes/shareLinks.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createShareLinksRouter } from '../src/routes/shareLinks.js';
 import * as soroban from '../src/soroban.js';
+import { SessionManager, _setDefaultSessionManagerForTest } from '../src/services/sessionManager.js';
+import { UserWalletStore, _setDefaultUserWalletStoreForTest } from '../src/services/userWalletStore.js';
 
-const mockSimulateCall = vi.fn<typeof soroban.simulateCall>();
+vi.mock('../src/soroban.js', () => ({
+  prepareCall: vi.fn(async () => ({
+    transaction_xdr: 'prepared-xdr',
+    network_passphrase: 'Test SDF Network ; September 2015',
+  })),
+  simulateCall: vi.fn(),
+  u64Val: (n: number | bigint) => n,
+  u32Val: (n: number) => n,
+  addressVal: (address: string) => address,
+}));
 
-function makeToken(credentialId: bigint): Buffer {
-  const token = Buffer.alloc(16);
-  token.writeBigUInt64BE(credentialId, 0);
-  token.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 1000) + 3600), 8);
-  return token;
-}
+describe('Share link write routes', () => {
+  const mockPrepareCall = vi.mocked(soroban.prepareCall);
+  const SUBJECT = 'GSHAREHOLDER';
+  let app: express.Express;
+  let tempDir: string;
+  let token: string;
 
-describe('Share-link password hashing', () => {
-  const keypair = Keypair.random();
-  const app = express();
-
-  app.use(express.json());
-  app.use('/api/credentials', createShareLinksRouter({
-    simulateCall: mockSimulateCall,
-    u64Val: soroban.u64Val,
-    u32Val: soroban.u32Val,
-    addressVal: soroban.addressVal,
-  }));
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-share-links-auth-secret';
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'share-links-auth-'));
+    const sessions = new SessionManager({ dataDir: path.join(tempDir, 'sessions') });
+    _setDefaultSessionManagerForTest(sessions);
+    token = sessions.createSession('share-links-test-user').accessToken;
+    const wallets = new UserWalletStore({ dataDir: path.join(tempDir, 'wallets') });
+    wallets.link('share-links-test-user', SUBJECT);
+    _setDefaultUserWalletStoreForTest(wallets);
+    app = express();
+    app.use(express.json());
+    app.use('/api/credentials', createShareLinksRouter({
+      simulateCall: soroban.simulateCall,
+      u64Val: soroban.u64Val,
+      u32Val: soroban.u32Val,
+      addressVal: soroban.addressVal,
+    }));
+  });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    _setDefaultSessionManagerForTest(undefined);
+    _setDefaultUserWalletStoreForTest(undefined);
   });
 
-  it('uses the same 32-byte scrypt digest when creating and validating a password link', async () => {
-    const token = makeToken(42n);
-    mockSimulateCall.mockResolvedValueOnce(token).mockResolvedValueOnce({ credential_id: 42n });
-
-    const created = await request(app)
+  it('prepares share-link creation without returning a usable token', async () => {
+    const res = await request(app)
       .post('/api/credentials/42/share')
+      .set('Authorization', `Bearer ${token}`)
       .send({
-        subject: keypair.publicKey(),
-        expiry_hours: 1,
+        subject: SUBJECT,
+        expiry_hours: 24,
         permission: 'view_only',
-        password: 'a long password',
       });
-    expect(created.status).toBe(201);
 
-    const creationCall = mockSimulateCall.mock.calls[0];
-    expect(creationCall).toBeDefined();
-    if (!creationCall) throw new Error('Share creation call was not made');
-    const createdHash = Buffer.from(scValToNative(creationCall[1][3]) as Uint8Array);
-    expect(createdHash).toHaveLength(32);
-
-    const validated = await request(app)
-      .post('/api/credentials/share/validate')
-      .send({ token: token.toString('hex'), password: 'a long password' });
-    expect(validated.status).toBe(200);
-
-    const validationCall = mockSimulateCall.mock.calls[1];
-    expect(validationCall).toBeDefined();
-    if (!validationCall) throw new Error('Share validation call was not made');
-    const validatedHash = Buffer.from(scValToNative(validationCall[1][1]) as Uint8Array);
-    expect(validatedHash).toEqual(createdHash);
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe('pending_signature');
+    expect(res.body.transaction_xdr).toBe('prepared-xdr');
+    expect(res.body.token).toBeUndefined();
+    expect(res.body.expires_at).toBeUndefined();
+    expect(mockPrepareCall).toHaveBeenCalledWith('GSHAREHOLDER', 'generate_share_link', expect.any(Array));
   });
 
-  it('requires the HMAC secret outside development and test environments', () => {
-    const previousSecret = process.env.SHARE_LINK_HMAC_SECRET;
-    const previousNodeEnv = process.env.NODE_ENV;
-    delete process.env.SHARE_LINK_HMAC_SECRET;
-    process.env.NODE_ENV = 'production';
+  it('prepares share-link revocation without reporting it revoked', async () => {
+    const shareToken = 'ab'.repeat(16);
+    const res = await request(app)
+      .delete(`/api/credentials/share/${shareToken}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ subject: SUBJECT });
 
-    try {
-      expect(() => assertShareLinkHmacSecretConfigured()).toThrow(
-        'SHARE_LINK_HMAC_SECRET must be configured outside local development',
-      );
-    } finally {
-      if (previousSecret === undefined) delete process.env.SHARE_LINK_HMAC_SECRET;
-      else process.env.SHARE_LINK_HMAC_SECRET = previousSecret;
-      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = previousNodeEnv;
-    }
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe('pending_signature');
+    expect(res.body.transaction_xdr).toBe('prepared-xdr');
+    expect(res.body.success).not.toBe(true);
+    expect(mockPrepareCall).toHaveBeenCalledWith('GSHAREHOLDER', 'revoke_share_link', expect.any(Array));
   });
 });
