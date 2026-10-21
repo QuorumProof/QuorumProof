@@ -150,3 +150,39 @@ export function optionalAuth(req: Request, _res: Response, next: NextFunction): 
   }
   next();
 }
+
+// ---------------------------------------------------------------------------
+// requireRole middleware
+// ---------------------------------------------------------------------------
+
+/**
+ * Requires a valid access token whose `role` claim is one of `roles`.
+ * `admin` is always accepted. Role is read from the signed JWT, not from
+ * request headers, so callers cannot grant themselves a role.
+ *
+ * Returns 401 if the token is missing/invalid, 403 if the role is not allowed.
+ */
+export function requireRole(...roles: string[]) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    requireAuth(req, res, () => {
+      const role = req.auth?.role ?? '';
+      if (role === 'admin' || roles.includes(role)) {
+        next();
+        return;
+      }
+      res.status(403).json({
+        error: 'Insufficient permissions',
+        role,
+        required: roles,
+      });
+    });
+  };
+}
+
+/** True when the authenticated caller holds the admin role. */
+export function isAdmin(req: Request): boolean {
+  return req.auth?.role === 'admin';
+}
+
+/** Requires a valid access token with the admin role. */
+export const requireAdmin = requireRole();
