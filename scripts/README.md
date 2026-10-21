@@ -5,6 +5,24 @@ operational lifecycle: build, test, deploy, backup/DR, migration, benchmarking, 
 security scanning. This index groups them by purpose so you can find the right script
 without opening every file.
 
+## Python dependencies
+
+The Python scripts use the standard library and the pinned third-party dependencies
+in `scripts/requirements.txt`. From the repository root, create a virtual environment
+and install them with:
+
+```sh
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r scripts/requirements.txt
+```
+
+On Windows, use:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r scripts\requirements.txt
+```
+
 Columns:
 
 | Column | Meaning |
