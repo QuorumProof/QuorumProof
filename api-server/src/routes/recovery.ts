@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
 import { getPool } from '../db.js';
+import { validate } from '../middleware/validate.js';
 
 const router = Router();
 
@@ -45,7 +46,19 @@ async function pruneExpiredOtps(): Promise<void> {
 
 // POST /api/recovery/request
 // Body: { credentialId, lostWallet, newWallet, contactType, contactValue }
-router.post('/request', async (req: Request, res: Response) => {
+router.post('/request', validate({
+  body: {
+    type: 'object',
+    required: ['credentialId', 'lostWallet', 'newWallet', 'contactType', 'contactValue'],
+    properties: {
+      credentialId: { type: 'string', minLength: 1, maxLength: 128 },
+      lostWallet: { type: 'string', pattern: '^G[A-Z2-7]{55}$' },
+      newWallet: { type: 'string', pattern: '^G[A-Z2-7]{55}$' },
+      contactType: { type: 'string', enum: ['email', 'phone'] },
+      contactValue: { type: 'string', minLength: 1, maxLength: 320 },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { credentialId, lostWallet, newWallet, contactType, contactValue } = req.body;
 
   if (!credentialId || typeof credentialId !== 'string') {
@@ -105,7 +118,16 @@ router.post('/request', async (req: Request, res: Response) => {
 
 // POST /api/recovery/verify-otp
 // Body: { requestId, code }
-router.post('/verify-otp', async (req: Request, res: Response) => {
+router.post('/verify-otp', validate({
+  body: {
+    type: 'object',
+    required: ['requestId', 'code'],
+    properties: {
+      requestId: { type: 'string', minLength: 1, maxLength: 128 },
+      code: { type: 'string', pattern: '^\\d{6}$' },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId, code } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -184,7 +206,13 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 
 // POST /api/recovery/resend-otp
 // Body: { requestId }
-router.post('/resend-otp', async (req: Request, res: Response) => {
+router.post('/resend-otp', validate({
+  body: {
+    type: 'object',
+    required: ['requestId'],
+    properties: { requestId: { type: 'string', minLength: 1, maxLength: 128 } },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -281,7 +309,16 @@ router.get('/pending', async (req: Request, res: Response) => {
 
 // POST /api/recovery/approve
 // Body: { requestId, attestor }
-router.post('/approve', async (req: Request, res: Response) => {
+router.post('/approve', validate({
+  body: {
+    type: 'object',
+    required: ['requestId', 'attestor'],
+    properties: {
+      requestId: { type: 'string', minLength: 1, maxLength: 128 },
+      attestor: { type: 'string', minLength: 1, maxLength: 128 },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId, attestor } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {
@@ -335,7 +372,17 @@ router.post('/approve', async (req: Request, res: Response) => {
 
 // POST /api/recovery/reject
 // Body: { requestId, attestor, reason }
-router.post('/reject', async (req: Request, res: Response) => {
+router.post('/reject', validate({
+  body: {
+    type: 'object',
+    required: ['requestId', 'attestor'],
+    properties: {
+      requestId: { type: 'string', minLength: 1, maxLength: 128 },
+      attestor: { type: 'string', minLength: 1, maxLength: 128 },
+      reason: { type: ['string', 'null'], maxLength: 1000 },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { requestId, attestor, reason } = req.body;
 
   if (!requestId || typeof requestId !== 'string') {

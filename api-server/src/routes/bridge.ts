@@ -19,6 +19,7 @@
 import { Router, Request, Response } from 'express';
 import { simulateCall, u64Val, u32Val, addressVal } from '../soroban.js';
 import { rbac } from '../middleware/rbac.js';
+import { validate } from '../middleware/validate.js';
 import {
   SUPPORTED_CHAINS,
   ProofType,
@@ -116,7 +117,21 @@ router.get('/chains', (_req: Request, res: Response) => {
 //   finality  object  required – { mode: 'tag', tag: 'finalized' | 'safe' }
 //                              | { mode: 'confirmations', head_block_number: number }
 // ---------------------------------------------------------------------------
-router.post('/headers', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
+router.post('/headers', rbac.requirePermission('admin:all'), validate({
+  body: {
+    type: 'object',
+    required: ['chain_id', 'header', 'finality'],
+    properties: {
+      chain_id: { type: 'integer', minimum: 1 },
+      header: { type: 'object' },
+      finality: {
+        type: 'object',
+        required: ['mode'],
+        properties: { mode: { type: 'string', enum: ['tag', 'confirmations', 'light-client'] } },
+      },
+    },
+  },
+}, { coerceTypes: false }), (req: Request, res: Response) => {
   const { chain_id, header, finality } = req.body as Record<string, unknown>;
 
   if (typeof chain_id !== 'number') {
@@ -197,7 +212,26 @@ router.post('/headers', rbac.requirePermission('admin:all'), (req: Request, res:
 // This only records an unauthenticated claim from the relay — it does NOT
 // establish that the event happened. See POST /anchors/:id/verify.
 // ---------------------------------------------------------------------------
-router.post('/anchors', async (req: Request, res: Response) => {
+router.post('/anchors', validate({
+  body: {
+    type: 'object',
+    required: [
+      'credential_id', 'chain_id', 'tx_hash', 'block_number', 'block_hash',
+      'block_timestamp', 'contract_address', 'admin',
+    ],
+    properties: {
+      credential_id: { type: 'integer', minimum: 1 },
+      chain_id: { type: 'integer', minimum: 1 },
+      tx_hash: { type: 'string', minLength: 1 },
+      block_number: { type: 'integer', minimum: 0 },
+      block_hash: { type: 'string', minLength: 1 },
+      block_timestamp: { type: 'integer', minimum: 0 },
+      contract_address: { type: 'string', minLength: 1 },
+      proof_type: { type: 'integer', minimum: 1, maximum: 3 },
+      admin: { type: 'string', minLength: 1 },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const {
     credential_id,
     chain_id,
@@ -418,7 +452,22 @@ router.get('/credentials/:id/anchors', async (req: Request, res: Response) => {
 // checkpointed via POST /headers. The receipt proof is verified against
 // that header's receiptsRoot before verify_chain_anchor is ever called.
 // ---------------------------------------------------------------------------
-router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
+router.post('/anchors/:id/verify', validate({
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', pattern: '^[1-9]\\d*$' } },
+  },
+  body: {
+    type: 'object',
+    required: ['admin', 'log_index', 'receipt_proof'],
+    properties: {
+      admin: { type: 'string', minLength: 1 },
+      log_index: { type: 'integer', minimum: 0 },
+      receipt_proof: { type: 'object' },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const id = parseInt(String(req.params.id), 10);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: 'Invalid anchor ID' });
@@ -510,7 +559,17 @@ router.post('/anchors/:id/verify', async (req: Request, res: Response) => {
 //     current_sync_committee_branch: string[],
 //   }
 // ---------------------------------------------------------------------------
-router.post('/light-client/bootstrap', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
+router.post('/light-client/bootstrap', rbac.requirePermission('admin:all'), validate({
+  body: {
+    type: 'object',
+    required: ['chain_id', 'trusted_block_root', 'bootstrap'],
+    properties: {
+      chain_id: { type: 'integer', minimum: 1 },
+      trusted_block_root: { type: 'string', minLength: 1 },
+      bootstrap: { type: 'object' },
+    },
+  },
+}, { coerceTypes: false }), (req: Request, res: Response) => {
   const { chain_id, trusted_block_root, bootstrap } = req.body as Record<string, unknown>;
   if (typeof chain_id !== 'number') {
     res.status(400).json({ error: 'chain_id is required' });
@@ -553,7 +612,36 @@ router.post('/light-client/bootstrap', rbac.requirePermission('admin:all'), (req
 //     sync_aggregate: { sync_committee_bits: boolean[512], sync_committee_signature: string },
 //   }
 // ---------------------------------------------------------------------------
-router.post('/light-client/update', rbac.requirePermission('admin:all'), (req: Request, res: Response) => {
+router.post('/light-client/update', rbac.requirePermission('admin:all'), validate({
+  body: {
+    type: 'object',
+    required: ['chain_id', 'update'],
+    properties: {
+      chain_id: { type: 'integer', minimum: 1 },
+      update: {
+        type: 'object',
+        required: ['attested_header', 'signature_slot', 'sync_aggregate'],
+        properties: {
+          attested_header: { type: 'object' },
+          signature_slot: { type: 'integer', minimum: 0 },
+          sync_aggregate: {
+            type: 'object',
+            required: ['sync_committee_bits', 'sync_committee_signature'],
+            properties: {
+              sync_committee_bits: {
+                type: 'array',
+                minItems: 512,
+                maxItems: 512,
+                items: { type: 'boolean' },
+              },
+              sync_committee_signature: { type: 'string', minLength: 1 },
+            },
+          },
+        },
+      },
+    },
+  },
+}, { coerceTypes: false }), (req: Request, res: Response) => {
   const { chain_id, update } = req.body as Record<string, unknown>;
   if (typeof chain_id !== 'number') {
     res.status(400).json({ error: 'chain_id is required' });

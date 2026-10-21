@@ -123,7 +123,7 @@ describe('POST /api/bridge/anchors', () => {
   it('returns 400 when required fields are missing', async () => {
     const res = await request(app).post('/api/bridge/anchors').send({ credential_id: 1 });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Missing required fields/);
+    expect(res.body.error).toBe('Validation failed');
   });
 });
 

@@ -21,6 +21,7 @@ import { Router, Request, Response } from 'express';
 import { getDefaultMfaService } from '../services/mfa.js';
 import { getDefaultSessionManager } from '../services/sessionManager.js';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../middleware/validate.js';
 import { getPool } from '../db.js';
 import crypto from 'crypto';
 import { promisify } from 'util';
@@ -181,7 +182,15 @@ async function findUser(userId: string, password: string): Promise<UserRow | nul
  *
  * Body: { userId: string, password: string }
  */
-router.post('/login', async (req: Request, res: Response) => {
+router.post('/login', validate({
+  body: {
+    type: 'object',
+    properties: {
+      userId: { type: 'string' },
+      password: { type: 'string' },
+    },
+  },
+}, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { userId, password } = req.body as { userId?: unknown; password?: unknown };
 
   if (typeof userId !== 'string' || !userId.trim()) {
@@ -232,7 +241,11 @@ router.post('/login', async (req: Request, res: Response) => {
  *
  * MFA is not active until the user calls POST /auth/mfa/verify with a valid code.
  */
-router.post('/mfa/enable', requireAuth, (req: Request, res: Response) => {
+router.post('/mfa/enable', requireAuth, validate({
+  body: {
+    custom: (data) => data === undefined || (typeof data === 'object' && data !== null && !Array.isArray(data)),
+  },
+}), (req: Request, res: Response) => {
   const userId = req.auth!.sub;
   const mfaService = getDefaultMfaService();
 
@@ -267,7 +280,12 @@ router.post('/mfa/enable', requireAuth, (req: Request, res: Response) => {
  *
  * Body: { code: string }
  */
-router.post('/mfa/verify', requireAuth, (req: Request, res: Response) => {
+router.post('/mfa/verify', requireAuth, validate({
+  body: {
+    type: 'object',
+    properties: { code: { type: 'string' } },
+  },
+}, { coerceTypes: false }), (req: Request, res: Response) => {
   const userId = req.auth!.sub;
   const { code } = req.body as { code?: unknown };
 
@@ -334,7 +352,12 @@ router.post('/mfa/verify', requireAuth, (req: Request, res: Response) => {
  *
  * Body: { refreshToken: string }
  */
-router.post('/refresh', (req: Request, res: Response) => {
+router.post('/refresh', validate({
+  body: {
+    type: 'object',
+    properties: { refreshToken: { type: 'string' } },
+  },
+}, { coerceTypes: false }), (req: Request, res: Response) => {
   const { refreshToken } = req.body as { refreshToken?: unknown };
 
   if (typeof refreshToken !== 'string' || !refreshToken.trim()) {
@@ -374,7 +397,11 @@ router.get('/sessions', requireAuth, (req: Request, res: Response) => {
 // DELETE /auth/sessions — revoke ALL sessions (logout everywhere)
 // ---------------------------------------------------------------------------
 
-router.delete('/sessions', requireAuth, (req: Request, res: Response) => {
+router.delete('/sessions', requireAuth, validate({
+  body: {
+    custom: (data) => data === undefined || (typeof data === 'object' && data !== null && !Array.isArray(data)),
+  },
+}), (req: Request, res: Response) => {
   const userId = req.auth!.sub;
   const sessionManager = getDefaultSessionManager();
   const count = sessionManager.revokeAllSessions(userId);
@@ -385,7 +412,13 @@ router.delete('/sessions', requireAuth, (req: Request, res: Response) => {
 // DELETE /auth/sessions/:id — revoke a specific session
 // ---------------------------------------------------------------------------
 
-router.delete('/sessions/:id', requireAuth, (req: Request, res: Response) => {
+router.delete('/sessions/:id', requireAuth, validate({
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', minLength: 1 } },
+  },
+}, { coerceTypes: false }), (req: Request, res: Response) => {
   const userId = req.auth!.sub;
   const sessionId = req.params.id as string;
   const sessionManager = getDefaultSessionManager();
@@ -411,7 +444,11 @@ router.delete('/sessions/:id', requireAuth, (req: Request, res: Response) => {
 // POST /auth/logout — revoke the current session
 // ---------------------------------------------------------------------------
 
-router.post('/logout', requireAuth, (req: Request, res: Response) => {
+router.post('/logout', requireAuth, validate({
+  body: {
+    custom: (data) => data === undefined || (typeof data === 'object' && data !== null && !Array.isArray(data)),
+  },
+}), (req: Request, res: Response) => {
   const sessionId = req.auth!.jti;
   const sessionManager = getDefaultSessionManager();
   sessionManager.revokeSession(sessionId);
