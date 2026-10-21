@@ -48,8 +48,10 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: api-server
-          image: quorumproof/api-server:latest
-          imagePullPolicy: IfNotPresent
+          # Tag is set at deploy time by scripts/blue_green_deploy.sh via
+          # `kubectl set image`. Do not set :latest here. See issue #1825.
+          image: quorumproof/api-server:IMAGE_TAG
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 3001
