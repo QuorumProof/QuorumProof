@@ -1,0 +1,77 @@
+# Pre-commit hooks for QuorumProof (#1672).
+#
+# Install once:   pip install pre-commit && pre-commit install
+# Run on all:     pre-commit run --all-files
+#
+# The same checks run in CI, so a hook failure locally means CI would fail too.
+# Hooks run on staged files by default. Avoid `--all-files` on this repo: the
+# whitespace and EOF fixers would rewrite unrelated files (see docs/pre-commit.md).
+# See docs/pre-commit.md for what each hook does and how to bypass it safely.
+
+fail_fast: false
+
+repos:
+  # ── Generic hygiene ───────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(api-server/openapi/|api-server/docs/interactive/)
+      - id: end-of-file-fixer
+        exclude: \.(svg|lock)$
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+        # JSONC files (comments allowed) are not valid strict JSON.
+        exclude: ^(\.vscode/|\.devcontainer/|.*tsconfig.*\.json$)
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-executables-have-shebangs
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # ── Rust formatting & linting (matches the Rust toolchain used in CI) ─────
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt (check)
+        description: Fails when Rust sources are not rustfmt-formatted.
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-check
+        name: cargo check (wasm32 contracts)
+        description: Type-checks the contract crates for the wasm target.
+        entry: cargo check --target wasm32-unknown-unknown -p quorum_proof -p sbt_registry -p zk_verifier
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: unwrap-ratchet
+        name: contract unwrap ratchet (#1391)
+        description: Blocks new bare .unwrap() calls in contract code.
+        entry: ./scripts/check_unwraps.sh
+        language: system
+        files: ^contracts/.*\.rs$
+        pass_filenames: false
+
+  # ── JavaScript / TypeScript linting (ESLint, as run by CI) ────────────────
+  - repo: local
+    hooks:
+      - id: eslint-frontend
+        name: eslint (frontend)
+        description: Lints staged frontend TypeScript/JavaScript files.
+        entry: ./scripts/hooks/lint-js.sh frontend
+        language: system
+        files: ^frontend/.*\.(ts|tsx|js|jsx)$
+
+      - id: eslint-dashboard
+        name: eslint (dashboard)
+        description: Lints staged dashboard TypeScript/JavaScript files.
+        entry: ./scripts/hooks/lint-js.sh dashboard
+        language: system
+        files: ^dashboard/src/.*\.(ts|tsx|js|jsx)$
