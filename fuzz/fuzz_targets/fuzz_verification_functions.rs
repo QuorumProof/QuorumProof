@@ -46,35 +46,36 @@ fuzz_target!(|input: VerificationFuzzInput| {
     }
 
     // Create slices and test verification paths
-    for slice_idx in 0..slice_count {
-        let mut attestors = SorobanVec::new(&env);
+    for _ in 0..slice_count {
         let attestor_count = (threshold as usize).clamp(1, 5);
 
+        let mut attestors = SorobanVec::new(&env);
+        let mut weights = SorobanVec::new(&env);
         for _ in 0..attestor_count {
             attestors.push_back(Address::generate(&env));
+            weights.push_back(1u32);
         }
 
-        if attestors.is_empty() {
-            continue;
-        }
+        let creator = Address::generate(&env);
 
-        // Create slice
+        // Create slice — requires creator, attestors, per-attestor weights, and threshold.
         let slice_id = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.create_slice(&attestors, &threshold)
+            client.create_slice(&creator, &attestors, &weights, &threshold)
         })) {
             Ok(id) => id,
             Err(_) => continue,
         };
 
         // Test attestation for each credential
-        for (cred_idx, &credential_id) in credential_ids.iter().enumerate() {
-            // Get first attestor from the slice
+        for &credential_id in credential_ids.iter() {
+            // Pick the first attestor from the slice to attest with.
             if let Ok(Some(attestor)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 attestors.get(0)
             })) {
-                // Test attestation
+                // attest now takes (attestor, credential_id, slice_id,
+                // attestation_value: bool, expires_at: Option<u64>).
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    client.attest(&attestor, &credential_id, &slice_id)
+                    client.attest(&attestor, &credential_id, &slice_id, &true, &None)
                 }));
 
                 // Test attestation status check
@@ -82,9 +83,9 @@ fuzz_target!(|input: VerificationFuzzInput| {
                     client.is_attested(&credential_id, &slice_id)
                 }));
 
-                // Test get_attestors
+                // get_attestors takes credential_id only (no slice_id).
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    client.get_attestors(&credential_id, &slice_id)
+                    client.get_attestors(&credential_id)
                 }));
             }
         }
