@@ -36,11 +36,12 @@ struct BbsPlusFuzzInput {
 fuzz_target!(|input: BbsPlusFuzzInput| {
     // ── Bound inputs to keep runtime tractable ──────────────────────────────
     // At most 16 messages; at least 1 so VerifyingKey::derive doesn't get 0.
-    let message_count = (input.message_scalars.len() % 16) + 1;
+    // message_count must be u32 to match VerifyingKey::derive's signature.
+    let message_count: u32 = ((input.message_scalars.len() % 16) + 1) as u32;
     let messages: Vec<Fr> = input
         .message_scalars
         .iter()
-        .take(message_count)
+        .take(message_count as usize)
         .map(|&v| Fr::from_u64(v))
         .collect();
 
@@ -52,7 +53,7 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     let pk = sk.public_key();
 
     // ── 2. VerifyingKey derivation ───────────────────────────────────────────
-    // Pass message_count as the generator count; an empty context tag is valid.
+    // Pass message_count as u32; an empty context tag is valid.
     let vk = match VerifyingKey::derive(pk, b"fuzz-context-v1", message_count) {
         Ok(vk) => vk,
         Err(_) => return, // derivation can fail for 0 messages; we bounded above but guard anyway
@@ -90,11 +91,11 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
 
     // ── 6. Presentation creation (selective disclosure) ──────────────────────
     // Convert revealed_indices to the subset of valid indices.
-    let all_indices: Vec<u32> = (0..message_count as u32).collect();
+    let all_indices: Vec<u32> = (0..message_count).collect();
     let revealed: Vec<u32> = input
         .revealed_indices
         .iter()
-        .map(|&i| (i as u32) % message_count as u32)
+        .map(|&i| (i as u32) % message_count)
         .collect::<std::collections::BTreeSet<_>>() // deduplicate
         .into_iter()
         .collect();
@@ -102,7 +103,11 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     // Revealing *all* messages is a degenerate but valid case — test it.
     let reveal_set: Vec<u32> = if revealed.is_empty() { all_indices } else { revealed };
 
-    let nonce = if input.nonce.is_empty() { b"default-nonce".as_slice() } else { &input.nonce };
+    let nonce = if input.nonce.is_empty() {
+        b"default-nonce".as_slice()
+    } else {
+        &input.nonce
+    };
     // Clamp nonce to 64 bytes to keep computation bounded.
     let nonce = &nonce[..nonce.len().min(64)];
 
@@ -154,7 +159,6 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     let _ = PresentationProof::from_bytes(&[]);
 
     // ── 11. Malformed signature bytes: must return Err, never panic ──────────
-    // (If the library exposes BbsSignature::from_bytes; fall back gracefully.)
     // We attempt to verify an obviously wrong signature against the real vk/messages
     // by constructing a presentation from corrupt bytes and verifying — the
     // result must be Err or Ok(false), never a panic.

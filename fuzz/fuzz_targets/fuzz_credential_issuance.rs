@@ -2,11 +2,11 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, Vec};
+use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
 use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
 
 /// Fuzz input specifically targeting issue_credential with edge cases
-/// 
+///
 /// This fuzz target focuses on:
 /// - Various metadata hash sizes and formats
 /// - Boundary conditions for credential_type
@@ -17,13 +17,13 @@ struct CredentialIssuanceFuzzInput {
     // Metadata variations
     metadata_size: u8,
     metadata_pattern: u8,
-    
+
     // Credential type variations
     credential_type: u32,
-    
+
     // Expiration variations
     expires_at: Option<u64>,
-    
+
     // Multiple issuances to test ID assignment
     issuance_count: u8,
 }
@@ -75,7 +75,7 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
     for i in 1..count {
         let subject_i = Address::generate(&env);
         let ctype_i = (ctype.wrapping_add(i as u32)).max(1);
-        
+
         let id_i = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.issue_credential(&issuer, &subject_i, &ctype_i, &meta, &input.expires_at, &0u64)
         })) {
@@ -99,16 +99,22 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
             Ok(c) => c,
             Err(_) => return,
         };
-        
-        // Metadata should be preserved
-        assert_eq!(cred.metadata_hash.len(), metadata.len(), "Metadata size mismatch");
+
+        // Metadata should be preserved; both sides are u32 (soroban Bytes::len)
+        assert_eq!(
+            cred.metadata_hash.len(),
+            meta.len(),
+            "Metadata size mismatch"
+        );
     }
 });
 
-/// Generate metadata with various patterns for fuzzing
-fn generate_metadata(size: u8, pattern: u8) -> Vec<u8> {
+/// Generate metadata with various patterns for fuzzing.
+/// Returns a plain `std::vec::Vec<u8>` — callers convert to `soroban_sdk::Bytes`
+/// via `Bytes::from_slice`.
+fn generate_metadata(size: u8, pattern: u8) -> std::vec::Vec<u8> {
     let size = (size as usize).clamp(1, 256);
-    let mut metadata = vec![0u8; size];
+    let mut metadata = std::vec![0u8; size];
 
     match pattern % 4 {
         0 => {
