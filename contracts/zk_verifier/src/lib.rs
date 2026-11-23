@@ -1120,15 +1120,26 @@ impl ZkVerifierContract {
             ClaimType::HasCertification => 4,
             ClaimType::HasResearchPublication => 5,
         };
-        let mut public_inputs = Bytes::new(&env);
-        public_inputs.extend_from_array(&credential_id.to_le_bytes());
-        // Pad to 32-byte field element
+
+        // Build public inputs: two 32-byte little-endian BLS12-381 Fr scalars.
+        //
+        // Layout matches what `groth16_test_prover::generate_proof` produces
+        // when called with `&[credential_id, claim_discriminant]`:
+        //   bytes  0..32 : Scalar::from(credential_id).to_bytes()
+        //                  = credential_id as u64 LE, zero-padded to 32 bytes
+        //   bytes 32..64 : Scalar::from(claim_u32 as u64).to_bytes()
+        //                  = claim_u32 as u32 LE, zero-padded to 32 bytes
+        //
+        // Both u64 and u32 values are well below the BLS12-381 scalar field
+        // order r ≈ 2^255, so the encoding is canonical and no reduction is
+        // needed.
         let mut pi_part = [0u8; 32];
         pi_part[0..8].copy_from_slice(&credential_id.to_le_bytes());
-        public_inputs = Bytes::new(&env);
-        public_inputs.extend_from_array(&pi_part);
         let mut pi_part2 = [0u8; 32];
         pi_part2[0..4].copy_from_slice(&claim_u32.to_le_bytes());
+
+        let mut public_inputs = Bytes::new(&env);
+        public_inputs.extend_from_array(&pi_part);
         public_inputs.extend_from_array(&pi_part2);
 
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)

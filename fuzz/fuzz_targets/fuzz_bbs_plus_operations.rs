@@ -66,7 +66,7 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
 
     // ── 4. Signature verification — must succeed for a fresh, unmodified sig ─
     let verify_ok = BbsSignature::verify(&vk, &messages, &sig)
-        .expect("verify must not panic on a freshly issued signature");
+        .expect("verify must not return Err on a freshly issued signature");
     assert!(
         verify_ok,
         "A freshly issued signature must verify correctly"
@@ -78,7 +78,7 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
         // Flip the last message to something different.
         tampered[messages.len() - 1] = Fr::from_u64(input.seed.wrapping_add(1));
         let tampered_result = BbsSignature::verify(&vk, &tampered, &sig)
-            .expect("verify must not panic on tampered messages");
+            .expect("verify must not return Err on tampered messages");
         // Only assert if tampered value is actually different.
         if tampered[messages.len() - 1] != messages[messages.len() - 1] {
             assert!(
@@ -120,7 +120,7 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
 
     // ── 7. Presentation verification — must succeed ──────────────────────────
     let pres_ok = BbsPresentation::verify_presentation(&vk, &presentation, nonce)
-        .expect("verify_presentation must not panic on a freshly created presentation");
+        .expect("verify_presentation must not return Err on a freshly created presentation");
     assert!(
         pres_ok,
         "A freshly created presentation must verify correctly"
@@ -130,7 +130,7 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     let wrong_nonce = b"wrong-nonce-should-fail";
     if wrong_nonce != nonce {
         let wrong_ok = BbsPresentation::verify_presentation(&vk, &presentation, wrong_nonce)
-            .expect("verify_presentation must not panic on a wrong nonce");
+            .expect("verify_presentation must not return Err on a wrong nonce");
         assert!(
             !wrong_ok,
             "Presentation must not verify against a different nonce"
@@ -140,9 +140,9 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     // ── 9. Wire-format round-trip ────────────────────────────────────────────
     let bytes = presentation.to_bytes();
     let decoded = PresentationProof::from_bytes(&bytes)
-        .expect("from_bytes must not panic on bytes produced by to_bytes");
+        .expect("from_bytes must not return Err on bytes produced by to_bytes");
     let roundtrip_ok = BbsPresentation::verify_presentation(&vk, &decoded, nonce)
-        .expect("verify_presentation must not panic on a round-tripped presentation");
+        .expect("verify_presentation must not return Err on a round-tripped presentation");
     assert!(
         roundtrip_ok,
         "Round-tripped presentation must verify correctly"
@@ -150,6 +150,10 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
 
     // ── 10. Malformed bytes: from_bytes must return Err, never panic ─────────
     // Both empty and arbitrary garbage are valid fuzz inputs here.
+    // `PresentationProof::from_bytes` must NEVER panic; it must only
+    // return `Ok` or `Err`.  With `panic = "abort"` any panic is a
+    // hard-crash of the libFuzzer process, so this is a correctness
+    // requirement for the fuzz infrastructure.
     let _ = PresentationProof::from_bytes(&input.corrupt_bytes);
     let _ = PresentationProof::from_bytes(&[]);
 
@@ -160,7 +164,9 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     // result must be Err or Ok(false), never a panic.
     if !input.corrupt_sig_bytes.is_empty() {
         if let Ok(corrupt_proof) = PresentationProof::from_bytes(&input.corrupt_sig_bytes) {
-            // Must not panic regardless of result.
+            // Must not panic regardless of result; `verify_presentation` now
+            // returns Ok(false) for all structurally invalid proofs and only
+            // returns Err for transcript failures (which never actually occur).
             let _ = BbsPresentation::verify_presentation(&vk, &corrupt_proof, nonce);
         }
     }

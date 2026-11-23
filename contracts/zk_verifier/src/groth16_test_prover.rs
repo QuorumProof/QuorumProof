@@ -43,8 +43,42 @@ pub struct ToyProof {
 /// A fixed, deterministic (non-random) toxic-waste scalar for the toy
 /// trusted setup. Fine for tests — a real deployment must run an actual
 /// multi-party ceremony.
+///
+/// # Zero-safety
+///
+/// `wrapping_mul` / `wrapping_add` on `u64` can produce 0 for adversarially
+/// chosen seeds (e.g. the seed that makes `0x51e_c0de * seed + 424_242`
+/// wrap to exactly 0 mod 2^64). `Scalar::from(0)` is `Scalar::ZERO`, whose
+/// inverse is undefined: calling `.invert().expect(…)` on it panics, which
+/// with `panic = "abort"` hard-crashes the libFuzzer process.
+///
+/// Fix: if the raw result is 0, mix the seed back in with a +1 rotation so
+/// the output is guaranteed non-zero. The resulting value is still fully
+/// deterministic (same seed → same scalar) and unpredictable without the
+/// seed, satisfying the "nothing-up-my-sleeve" property needed for tests.
 fn toxic_waste(seed: u64) -> Scalar {
-    Scalar::from(0x51e_c0de_u64.wrapping_mul(seed).wrapping_add(424_242))
+    let raw = 0x51e_c0de_u64
+        .wrapping_mul(seed)
+        .wrapping_add(424_242);
+    // Ensure the scalar is never zero: substitute a stable non-zero fallback
+    // derived from the seed so the output remains deterministic.
+    let safe = if raw == 0 {
+        seed.wrapping_add(0xDEAD_BEEF_CAFE_1234)
+            .wrapping_add(1)   // guarantee ≠ 0 even if the first add wraps
+    } else {
+        raw
+    };
+    // A further guard: Scalar::from(safe) == ZERO can only happen if safe ==
+    // 0 mod r (the BLS12-381 scalar field order, r ≈ 2^255). Since safe is a
+    // u64 value (≤ 2^64 - 1) and r >> 2^64, Scalar::from(safe) is ZERO iff
+    // safe == 0. The check above already prevents safe == 0, so this loop
+    // is a no-op in practice; it exists purely as a defensive belt-and-braces
+    // guard so the invariant is stated and checked explicitly.
+    let mut s = Scalar::from(safe);
+    if bool::from(s.is_zero()) {
+        s = Scalar::from(seed.wrapping_add(1).max(1));
+    }
+    s
 }
 
 /// Generates a toy Groth16 verifying key with `num_public_inputs`
@@ -125,7 +159,17 @@ pub fn generate_proof(env: &Env, vk: &ToyVerifyingKey, proof_seed: u64, public_i
         vk_x_s += *pi * vk.ic_scalars[i + 1];
     }
 
-    let delta_inv = Option::<Scalar>::from(vk.delta_s.invert()).expect("delta must be invertible");
+    // `toxic_waste` guarantees non-zero outputs, so delta_s is always
+    // invertible. The `unwrap_or_else` guard is a belt-and-braces defence:
+    // it replaces a potential `expect`-panic (which would hard-abort the
+    // libFuzzer process under `panic = "abort"`) with a fallback scalar
+    // that still produces a structurally valid proof (though one that
+    // won't pass pairing verification, which is acceptable for the
+    // fallback path — the fuzz target only asserts the valid-proof case
+    // when the proof was generated from the SAME `vk_seed` whose delta is
+    // invertible).
+    let delta_inv = Option::<Scalar>::from(vk.delta_s.invert())
+        .unwrap_or_else(|| Scalar::from(1u64)); // non-invertible delta: produce a structurally valid but non-verifying proof
     // Solve for C such that a*b == alpha*beta + vk_x*gamma + c_exp*delta.
     let c_exp = (a_s * b_s - vk.alpha_s * vk.beta_s - vk_x_s * vk.gamma_s) * delta_inv;
     let c = G1Affine::from(g1 * c_exp);

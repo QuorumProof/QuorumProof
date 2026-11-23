@@ -84,7 +84,21 @@ impl PresentationProof {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> BbsResult<Self> {
-        const FIXED_LEN: usize = 48 * 3 + 32 * 4;
+        // Fixed section: a_bar(48) + b_bar(48) + d(48) + e_hat(32) + r1_hat(32)
+        //              + r3_hat(32) + s_hat(32) + challenge(32)
+        //              = 3 × 48 + 5 × 32 = 144 + 160 = 304 bytes.
+        // Plus 4 bytes for the hidden-map count and 4 bytes for the
+        // revealed-map count → minimum 312 bytes for a proof with 0 entries
+        // in both maps.
+        //
+        // The previous constant was 48*3 + 32*4 = 272 (counted 4 scalars
+        // instead of 5), causing the guard to pass for inputs of length
+        // 280-311 that were then rejected mid-way through deserialization
+        // with an Err rather than being rejected up front.  That path is
+        // correct (the reads use bounds-checked helpers that return Err),
+        // but the inaccurate constant was misleading and masked the true
+        // minimum length.
+        const FIXED_LEN: usize = 48 * 3 + 32 * 5; // 304
         if bytes.len() < FIXED_LEN + 8 {
             return Err(BbsError::DeserializationError);
         }
@@ -317,6 +331,17 @@ impl BbsPresentation {
 
     /// Verify a presentation proof against a verifying key and the
     /// `presentation_context` the verifier itself issued/expects.
+    ///
+    /// Returns `Ok(false)` for every invalid proof — including structurally
+    /// malformed proofs (wrong index counts, out-of-range indices, overlapping
+    /// revealed/hidden sets) — so callers can safely `.expect("must not
+    /// return Err on any proof bytes")` without risking a panic.
+    ///
+    /// Returns `Err` only for genuine programming errors that cannot be
+    /// caused by an external proof (e.g. a future protocol change that
+    /// makes the transcript derivation itself infallible).  In practice
+    /// `squeeze_challenge` never fails, so this function currently never
+    /// returns `Err`.
     pub fn verify_presentation(
         vk: &VerifyingKey,
         proof: &PresentationProof,
@@ -325,21 +350,22 @@ impl BbsPresentation {
         let l = vk.message_generators.len() as u32;
         for &idx in proof.revealed_messages.keys() {
             if idx >= l {
-                return Err(BbsError::InvalidProofStructure);
+                // Out-of-range index: the proof is invalid, not a programming error.
+                return Ok(false);
             }
         }
         for &idx in proof.hidden_message_hats.keys() {
             if idx >= l {
-                return Err(BbsError::InvalidProofStructure);
+                return Ok(false);
             }
         }
         // Every message index must appear in exactly one of the two sets.
         if (proof.revealed_messages.len() + proof.hidden_message_hats.len()) as u32 != l {
-            return Err(BbsError::InvalidProofStructure);
+            return Ok(false);
         }
         for idx in proof.revealed_messages.keys() {
             if proof.hidden_message_hats.contains_key(idx) {
-                return Err(BbsError::InvalidProofStructure);
+                return Ok(false);
             }
         }
 
