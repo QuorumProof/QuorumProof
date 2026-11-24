@@ -429,7 +429,9 @@ describe('OAuth2 Services and Routes (#1442)', () => {
         signature: 'sig',
       });
       expect(resNoProvider.status).toBe(400);
-      expect(resNoProvider.body.error).toContain('provider must be one of');
+      expect(resNoProvider.body.error).toBe('Validation failed');
+      expect(resNoProvider.body.location).toBe('body');
+      expect(resNoProvider.body.details[0].message).toContain('provider');
 
       const resNoCode = await request(app).post('/auth/oauth2/callback').send({
         provider: 'google',
@@ -437,7 +439,8 @@ describe('OAuth2 Services and Routes (#1442)', () => {
         signature: 'sig',
       });
       expect(resNoCode.status).toBe(400);
-      expect(resNoCode.body.error).toContain('code is required');
+      expect(resNoCode.body.error).toBe('Validation failed');
+      expect(resNoCode.body.details[0].message).toContain('code');
 
       const resNoAddress = await request(app).post('/auth/oauth2/callback').send({
         provider: 'google',
@@ -445,7 +448,8 @@ describe('OAuth2 Services and Routes (#1442)', () => {
         signature: 'sig',
       });
       expect(resNoAddress.status).toBe(400);
-      expect(resNoAddress.body.error).toContain('stellarAddress is required');
+      expect(resNoAddress.body.error).toBe('Validation failed');
+      expect(resNoAddress.body.details[0].message).toContain('stellarAddress');
 
       const resNoSig = await request(app).post('/auth/oauth2/callback').send({
         provider: 'google',
@@ -453,7 +457,40 @@ describe('OAuth2 Services and Routes (#1442)', () => {
         stellarAddress: 'G...',
       });
       expect(resNoSig.status).toBe(400);
-      expect(resNoSig.body.error).toContain('signature is required');
+      expect(resNoSig.body.error).toBe('Validation failed');
+      expect(resNoSig.body.details[0].message).toContain('signature');
+    });
+
+    it('returns 400 when parameters fail schema validation', async () => {
+      const app = makeApp();
+
+      const resInvalidProvider = await request(app).post('/auth/oauth2/callback').send({
+        provider: 'twitter',
+        code: 'code',
+        stellarAddress: 'G...',
+        signature: 'sig',
+      });
+      expect(resInvalidProvider.status).toBe(400);
+      expect(resInvalidProvider.body.error).toBe('Validation failed');
+      expect(resInvalidProvider.body.location).toBe('body');
+
+      const resBlankCode = await request(app).post('/auth/oauth2/callback').send({
+        provider: 'google',
+        code: '   ',
+        stellarAddress: 'G...',
+        signature: 'sig',
+      });
+      expect(resBlankCode.status).toBe(400);
+      expect(resBlankCode.body.error).toBe('Validation failed');
+
+      const resNonStringCode = await request(app).post('/auth/oauth2/callback').send({
+        provider: 'google',
+        code: 12345,
+        stellarAddress: 'G...',
+        signature: 'sig',
+      });
+      expect(resNonStringCode.status).toBe(400);
+      expect(resNonStringCode.body.error).toBe('Validation failed');
     });
 
     it('returns 401 when code exchange or provider verification fails', async () => {
