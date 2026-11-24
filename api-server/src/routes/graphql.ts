@@ -2,6 +2,9 @@ import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { getPool } from '../db.js';
 import { GraphQLResolvers } from '../services/graphqlResolvers.js';
+import { validate } from '../middleware/validate.js';
+
+const DEFAULT_MAX_OPERATION_SIZE = 16_384;
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -176,6 +179,70 @@ function maxGraphqlDepth(query: string): number {
 export function createGraphqlRouter(soroban: SorobanClient) {
   const router = Router();
   const maxDepth = parseInt(process.env.GRAPHQL_MAX_DEPTH ?? '8', 10);
+  const parsedMaxOperationSize = parseInt(
+    process.env.GRAPHQL_MAX_OPERATION_SIZE ?? String(DEFAULT_MAX_OPERATION_SIZE),
+    10,
+  );
+  const maxOperationSize =
+    Number.isFinite(parsedMaxOperationSize) && parsedMaxOperationSize > 0
+      ? parsedMaxOperationSize
+      : DEFAULT_MAX_OPERATION_SIZE;
+
+  const graphqlOperationValidation = validate(
+    {
+      body: {
+        schema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              minLength: 1,
+              maxLength: maxOperationSize,
+              pattern: '\\S',
+            },
+            variables: {
+              type: 'object',
+              additionalProperties: true,
+            },
+            operationName: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 128,
+            },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        custom: (data) => {
+          const payloadBytes = Buffer.byteLength(JSON.stringify(data), 'utf8');
+          if (payloadBytes > maxOperationSize) {
+            return `GraphQL operation size ${payloadBytes} exceeds maximum allowed size of ${maxOperationSize} bytes`;
+          }
+          return true;
+        },
+      },
+    },
+    { coerceTypes: false },
+  );
+
+  const subscriptionIdValidation = validate(
+    {
+      params: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+            pattern: '\\S',
+          },
+        },
+        required: ['id'],
+        additionalProperties: false,
+      },
+    },
+    { coerceTypes: false },
+  );
 
   /**
    * POST /api/graphql
@@ -195,23 +262,17 @@ export function createGraphqlRouter(soroban: SorobanClient) {
    *   searchCredentials(query: String!)
    *   tierStats
    */
-  router.post('/', async (req: Request, res: Response) => {
+  router.post('/', graphqlOperationValidation, async (req: Request, res: Response) => {
     const startTime = Date.now();
-    const { query, variables } = req.body as { query?: unknown; variables?: unknown };
+    const { query, variables } = req.body as { query: string; variables?: GraphQLVariables };
 
-    if (typeof query !== 'string' || !query.trim()) {
-      res.status(400).json({ errors: [{ message: 'query must be a non-empty string' }] });
-      return;
-    }
     const depth = maxGraphqlDepth(query);
     if (Number.isFinite(maxDepth) && depth > maxDepth) {
       res.status(400).json({ errors: [{ message: `query depth ${depth} exceeds max depth ${maxDepth}` }] });
       return;
     }
 
-    const vars = (variables && typeof variables === 'object' && !Array.isArray(variables))
-      ? (variables as GraphQLVariables)
-      : {};
+    const vars: GraphQLVariables = variables ?? {};
 
     // Handle introspection queries
     if (query.includes('__schema') || query.includes('__type')) {
@@ -312,19 +373,13 @@ export function createGraphqlRouter(soroban: SorobanClient) {
    * the existing WebSocket event stream. This keeps subscription state explicit
    * without introducing a second socket protocol.
    */
-  router.post('/subscriptions', (req: Request, res: Response) => {
-    const { query, variables } = req.body as { query?: unknown; variables?: unknown };
-    if (typeof query !== 'string' || !query.trim()) {
-      res.status(400).json({ error: 'query must be a non-empty string' });
-      return;
-    }
+  router.post('/subscriptions', graphqlOperationValidation, (req: Request, res: Response) => {
+    const { query, variables } = req.body as { query: string; variables?: GraphQLVariables };
     const id = `gqlsub_${Date.now().toString(36)}_${subscriptions.size.toString(36)}`;
     const record = {
       id,
       query,
-      variables: variables && typeof variables === 'object' && !Array.isArray(variables)
-        ? variables as GraphQLVariables
-        : {},
+      variables: variables ?? {},
       created_at: new Date().toISOString(),
     };
     subscriptions.set(id, record);
@@ -334,7 +389,7 @@ export function createGraphqlRouter(soroban: SorobanClient) {
     });
   });
 
-  router.delete('/subscriptions/:id', (req: Request, res: Response) => {
+  router.delete('/subscriptions/:id', subscriptionIdValidation, (req: Request, res: Response) => {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const deleted = subscriptions.delete(id);
     res.status(deleted ? 204 : 404).send(deleted ? undefined : { error: 'subscription not found' });
