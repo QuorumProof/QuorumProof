@@ -65,8 +65,12 @@ import {
   type WsMetrics,
 } from './metrics.js';
 
+export interface MonitoredWebSocket extends WebSocket {
+  isAlive?: boolean;
+}
+
 interface WsClientMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ping' | 'subscribe_dashboard' | 'unsubscribe_dashboard';
+  type?: string;
   filters?: SubscriptionFilter[];
 }
 
@@ -164,15 +168,15 @@ export function createWsServer(server: HttpServer, path = '/ws'): WebSocketServe
   initPubSub();
   wss = new WebSocketServer({ server, path });
 
-  wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
+  wss.on('connection', (ws: MonitoredWebSocket, _req: IncomingMessage) => {
     incrementConnections();
     recordMessageReceived(0);
     setSubscribers(getSubscriberCount());
 
-    (ws as any).isAlive = true;
+    ws.isAlive = true;
 
     ws.on('pong', () => {
-      (ws as any).isAlive = true;
+      ws.isAlive = true;
     });
 
     ws.on('message', (raw: Buffer) => {
@@ -223,7 +227,7 @@ export function createWsServer(server: HttpServer, path = '/ws'): WebSocketServe
 
           default:
             sendQueued(ws, createMessage('error', {
-              message: `Unknown message type: ${(msg as any).type ?? 'undefined'}`,
+              message: `Unknown message type: ${msg.type ?? 'undefined'}`,
             }));
             recordError();
             break;
@@ -255,14 +259,14 @@ export function createWsServer(server: HttpServer, path = '/ws'): WebSocketServe
 
   pingTimer = setInterval(() => {
     if (!wss) return;
-    wss.clients.forEach((ws) => {
-      if ((ws as any).isAlive === false) {
+    wss.clients.forEach((ws: MonitoredWebSocket) => {
+      if (ws.isAlive === false) {
         removeConnection(ws);
         closeConnectionQueue(ws);
         ws.terminate();
         return;
       }
-      (ws as any).isAlive = false;
+      ws.isAlive = false;
       ws.ping();
     });
   }, PING_INTERVAL_MS);
