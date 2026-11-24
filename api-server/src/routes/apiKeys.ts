@@ -5,6 +5,7 @@
 
 import { Router, Request, Response } from 'express';
 import { getDefaultApiKeyManager, type ApiKeySecret } from '../services/apiKeyManager.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 
@@ -16,19 +17,14 @@ function getIssuerFromRequest(req: Request): string | undefined {
 }
 
 // POST /api/api-keys — Generate a new API key
-router.post('/', (req: Request, res: Response) => {
+router.post('/', validate(schemas.apiKeyCreate), (req: Request, res: Response) => {
   const issuer = getIssuerFromRequest(req);
   if (!issuer) {
     res.status(401).json({ error: 'Missing or invalid authorization' });
     return;
   }
 
-  const { name } = req.body as { name?: unknown };
-
-  if (typeof name !== 'string' || !name.trim()) {
-    res.status(400).json({ error: 'name is required and must be a non-empty string' });
-    return;
-  }
+  const { name } = req.body as { name: string };
 
   try {
     const manager = getDefaultApiKeyManager();
@@ -102,7 +98,7 @@ router.get('/:id', (req: Request, res: Response) => {
 });
 
 // DELETE /api/api-keys/:id — Revoke an API key
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', validate(schemas.apiKeyRevoke), (req: Request, res: Response) => {
   const issuer = getIssuerFromRequest(req);
   if (!issuer) {
     res.status(401).json({ error: 'Missing or invalid authorization' });
@@ -126,7 +122,7 @@ router.delete('/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/api-keys/:id/rotate — Rotate a key; old key keeps working for a grace period
-router.post('/:id/rotate', (req: Request, res: Response) => {
+router.post('/:id/rotate', validate(schemas.apiKeyRotate), (req: Request, res: Response) => {
   const issuer = getIssuerFromRequest(req);
   if (!issuer) {
     res.status(401).json({ error: 'Missing or invalid authorization' });
@@ -142,7 +138,7 @@ router.post('/:id/rotate', (req: Request, res: Response) => {
       return;
     }
 
-    const { gracePeriodMs } = req.body as { gracePeriodMs?: unknown };
+    const { gracePeriodMs } = (req.body ?? {}) as { gracePeriodMs?: number };
     const grace = typeof gracePeriodMs === 'number' && gracePeriodMs > 0 ? gracePeriodMs : undefined;
 
     const newSecret = manager.rotateKey(req.params.id as string, grace);
