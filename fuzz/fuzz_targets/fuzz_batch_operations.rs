@@ -112,14 +112,11 @@ fn test_single_issuer_batch(env: &Env, client: &QuorumProofContractClient, input
         }
     }
 
-    // Verify batch was created successfully (at least 80% success rate)
-    let success_rate = if batch_size > 0 {
-        (issued_count as f64) / (batch_size as f64)
-    } else {
-        0.0
-    };
-
-    assert!(success_rate >= 0.8, "Batch issuance success rate too low: {}", success_rate);
+    // Fuzz contract calls may fail for valid protocol-level reasons (e.g. duplicate
+    // credential, rate-limit, PoW) — do not assert a floor here; that would cause
+    // libFuzzer to treat normal rejection paths as crashes.
+    let _ = issued_count;
+    let _ = failed_count;
 }
 
 /// Test multiple issuers issuing batches concurrently
@@ -146,8 +143,10 @@ fn test_multiple_issuers_batch(env: &Env, client: &QuorumProofContractClient, in
         }
     }
 
-    // Verify credentials from different issuers were created
-    assert!(all_credentials.len() > 0, "No credentials created in multi-issuer batch");
+    // Verify credentials from different issuers were created.
+    // A fuzz target must not assert on counts that depend on fuzz-controlled
+    // inputs — an empty batch is a valid (if uninteresting) outcome.
+    let _ = all_credentials;
 }
 
 /// Test large batch with integrity verification
@@ -219,14 +218,17 @@ fn test_maximum_batch_size(env: &Env, client: &QuorumProofContractClient, input:
             }
         }
 
-        // Ensure at least 50% success rate for batch testing
-        let success_rate = (successful as f64) / ((successful + failed) as f64).max(1.0);
-        assert!(success_rate >= 0.5, "Batch size {} has insufficient success rate: {}", size, success_rate);
+        // A fuzz target must not assert a minimum success rate — the contract
+        // correctly rejects inputs for many protocol-level reasons (duplicates,
+        // rate limits, etc.) that are not bugs.  `successful` and `failed` are
+        // already used above to bail the inner loop early; nothing further to check.
+        let _ = successful;
+        let _ = failed;
     }
 }
 
 /// Generate metadata with varying complexity
-fn generate_metadata_for_batch(complexity: u8, seed: u32) -> Vec<u8> {
+fn generate_metadata_for_batch(complexity: u8, seed: u32) -> std::vec::Vec<u8> {
     let size = match complexity % 4 {
         0 => 32,      // Small metadata
         1 => 96,      // Medium metadata
