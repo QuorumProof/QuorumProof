@@ -110,7 +110,17 @@ fuzz_target!(|input: FuzzInput| {
 
     // Mode 2: real Groth16 verification with a registered key.
     let toy = groth16_test_prover::generate_vk(&env, input.vk_seed, CLAIM_PUBLIC_INPUTS);
-    client.set_groth16_verifying_key(&admin, &toy.vk_hash, &toy.vk);
+    // `validate()` inside set_groth16_verifying_key asserts all VK points
+    // are valid BLS12-381 curve points.  For extreme seed values the toy
+    // generator can produce a point that fails that check; treat such a
+    // VK registration failure as an invalid input (not a verifier bug).
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_groth16_verifying_key(&admin, &toy.vk_hash, &toy.vk)
+    }))
+    .is_err()
+    {
+        return;
+    }
 
     let claim = claim_discriminant(&claim_type);
     let valid = groth16_test_prover::generate_proof(&env, &toy, input.vk_seed, &[input.credential_id, claim]);
