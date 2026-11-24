@@ -7,6 +7,7 @@
 import { Router, Request, Response } from 'express';
 import { TimeLockPuzzleService, type PuzzleDifficulty } from '../services/timeLockPuzzle.js';
 import { problemJson } from '../middleware/problemDetails.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 const puzzleService = new TimeLockPuzzleService();
@@ -15,7 +16,7 @@ const puzzleService = new TimeLockPuzzleService();
  * POST /api/time-lock-puzzle/generate
  * Generates a new time-lock puzzle for verification
  */
-router.post('/generate', (req: Request, res: Response) => {
+router.post('/generate', validate(schemas.timeLockPuzzleGenerate), (req: Request, res: Response) => {
   try {
     const { difficulty } = req.body as Record<string, unknown>;
 
@@ -44,7 +45,7 @@ router.post('/generate', (req: Request, res: Response) => {
  * POST /api/time-lock-puzzle/:puzzle_id/solve
  * Solves a time-lock puzzle
  */
-router.post('/:puzzle_id/solve', (req: Request, res: Response) => {
+router.post('/:puzzle_id/solve', validate(schemas.timeLockPuzzleParams), (req: Request, res: Response) => {
   try {
     const { puzzle_id } = req.params;
 
@@ -64,7 +65,13 @@ router.post('/:puzzle_id/solve', (req: Request, res: Response) => {
  * POST /api/time-lock-puzzle/:puzzle_id/verify
  * Verifies a puzzle solution
  */
-router.post('/:puzzle_id/verify', (req: Request, res: Response) => {
+router.post(
+  '/:puzzle_id/verify',
+  validate({
+    ...schemas.timeLockPuzzleParams,
+    ...schemas.timeLockPuzzleVerify,
+  }),
+  (req: Request, res: Response) => {
   try {
     const { puzzle_id } = req.params;
     const { solution } = req.body as Record<string, unknown>;
