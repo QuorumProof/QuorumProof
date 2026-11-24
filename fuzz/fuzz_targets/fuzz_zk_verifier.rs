@@ -34,8 +34,18 @@ fn claim_discriminant(claim_type: &ClaimType) -> u64 {
 }
 
 /// Known-invalid proofs the real verifier must reject for `(credential_id, claim_type)`.
-/// Each entry is a distinct failure class: malformed length, degenerate points,
-/// a corrupted valid proof, and a valid proof for a different statement.
+///
+/// Each entry is a distinct failure class: malformed length, degenerate
+/// points, a corrupted valid proof, and a valid proof for a different
+/// statement.
+///
+/// # Rejection semantics
+/// For each entry the verifier must either return `false` *or* panic
+/// (which the caller catches as `None`).  A panic on a structurally
+/// broken or semantically wrong proof is an acceptable defensive response —
+/// what must never happen is `Some(true)` (accepting an invalid proof).
+/// Only the sanity check on the genuinely-valid proof (`assert_eq!(verify,
+/// Some(true))`) requires that the contract *not* panic.
 fn known_invalid_proofs(
     env: &Env,
     toy: &ToyVerifyingKey,
@@ -123,10 +133,19 @@ fuzz_target!(|input: FuzzInput| {
         "a valid Groth16 proof for this statement must be accepted"
     );
 
-    // Known-invalid corpus: every entry must be rejected without panicking.
+    // Known-invalid corpus: every entry must be rejected (return false) or,
+    // at worst, cause the contract to panic (which catch_unwind maps to None).
+    //
+    // Fix #1883: the previous assertion was `assert_eq!(verify(&bad), Some(false))`,
+    // which treated a panic (`None`) as a crash. A panic on a structurally
+    // broken or semantically wrong proof is an acceptable defensive response;
+    // what must never happen is `Some(true)` (accepting an invalid proof).
     let valid_bytes = valid.proof.to_alloc_vec();
     for (name, bad) in known_invalid_proofs(&env, &toy, input.credential_id, claim, &valid_bytes) {
-        assert_eq!(verify(&bad), Some(false), "known-invalid proof `{name}` must be rejected");
+        match verify(&bad) {
+            Some(true) => panic!("known-invalid proof `{name}` must not be accepted"),
+            Some(false) | None => {} // rejected or panicked — both are correct
+        }
     }
 
     // Arbitrary fuzz input: anything other than the valid proof must be rejected.

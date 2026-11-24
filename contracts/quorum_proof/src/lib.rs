@@ -6354,6 +6354,28 @@ impl QuorumProofContract {
         }
     }
 
+    /// Fix #1884 / #1881: Validate that an optional credential expiry
+    /// timestamp is strictly in the future at the time of issuance.
+    ///
+    /// `validate_optional_timestamp` only checks that the value falls
+    /// within a ±10-year window around *now*, which permits `Some(0)` when
+    /// the ledger timestamp is 0 (the default in test environments) and
+    /// any other value that has already elapsed.  A credential issued with
+    /// an already-expired `expires_at` can never be read back through
+    /// `get_credential` without immediately hitting the expiry error,
+    /// making such credentials effectively write-only.
+    ///
+    /// This helper adds the strict-future guard so that callers that need
+    /// to validate a credential expiry at issuance time use a consistent
+    /// check.
+    fn validate_future_expiry(env: &Env, expires_at: &Option<u64>) {
+        if let Some(ts) = expires_at {
+            if *ts <= env.ledger().timestamp() {
+                panic_with_error!(env, ContractError::InvalidTimestamp);
+            }
+        }
+    }
+
     /// Issue #377: Get cached attestation verification result.
     /// Issue #1555: Increments hit/miss counters for cache metrics.
     fn get_verification_cache(
@@ -6963,6 +6985,10 @@ impl QuorumProofContract {
 
         // Issue #379: Validate timestamp
         Self::validate_optional_timestamp(&env, &expires_at);
+        // Fix #1884 / #1881: reject any expiry that has already elapsed at
+        // the moment of issuance so that `get_credential` can never
+        // immediately panic on the same credential we just wrote.
+        Self::validate_future_expiry(&env, &expires_at);
 
         // Check for duplicate credential of same type from same issuer to same subject
         let duplicate_key =
@@ -7734,11 +7760,17 @@ impl QuorumProofContract {
             .instance()
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
+        // Fix #1884 / #1881: reject with a typed error instead of an
+        // untyped `assert!` panic so callers (including fuzz targets and
+        // on-chain integrations) can distinguish "not found" from
+        // "expired" and handle both gracefully.  Using `panic_with_error!`
+        // rather than `assert!` also keeps the ABI contract-error–based
+        // rather than string–based, which matters for cross-contract calls
+        // that inspect the error code.
         if let Some(expires_at) = credential.expires_at {
-            assert!(
-                env.ledger().timestamp() < expires_at,
-                "credential has expired"
-            );
+            if env.ledger().timestamp() >= expires_at {
+                panic_with_error!(&env, ContractError::AttestationExpired);
+            }
         }
         credential
     }
