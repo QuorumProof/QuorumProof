@@ -64,4 +64,35 @@ describe('API metering middleware', () => {
       `quorumproof_api_errors_total{route="${route}"} 0`,
     );
   });
+
+  it('regression_1997_exports_request_duration_histogram_buckets_sum_and_count', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-03-01T00:00:00.000Z'));
+    const route = '/metering-coverage-histogram';
+
+    recordRequest(route, 200, 50);
+    recordRequest(route, 503, 750);
+
+    const output = getApiMeteringPrometheus();
+    const label = `route="GET ${route}"`;
+    expect(output).toContain('# TYPE quorumproof_api_request_duration_seconds histogram');
+    expect(output).toContain(
+      `quorumproof_api_request_duration_seconds_bucket{${label},le="0.1"} 1`,
+    );
+    expect(output).toContain(
+      `quorumproof_api_request_duration_seconds_bucket{${label},le="0.5"} 1`,
+    );
+    expect(output).toContain(
+      `quorumproof_api_request_duration_seconds_bucket{${label},le="1"} 2`,
+    );
+    expect(output).toContain(
+      `quorumproof_api_request_duration_seconds_bucket{${label},le="+Inf"} 2`,
+    );
+    expect(output).toContain(
+      `quorumproof_api_request_duration_seconds_sum{${label}} 0.8`,
+    );
+    expect(output).toContain(
+      `quorumproof_api_request_duration_seconds_count{${label}} 2`,
+    );
+  });
 });

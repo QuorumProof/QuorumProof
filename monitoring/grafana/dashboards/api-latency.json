@@ -5,7 +5,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "RPC Latency Percentiles",
+      "title": "API Request Latency Percentiles",
       "type": "timeseries",
       "targets": [
         {

@@ -270,7 +270,7 @@ run-to-run variance (typically ±5%) without raising error rate.
 
 | Layer | Metric | Source | Dashboard |
 |---|---|---|---|
-| API latency | `quorumproof_api_request_duration_seconds` (p50/p95/p99) | exporter | `api-latency.json` |
+| API latency | `quorumproof_api_request_duration_seconds` (p50/p95/p99) | `/metrics/api` | `api-latency.json` |
 | API errors | `quorumproof_api_errors_total` | exporter | `api-latency.json` |
 | RPC health | `quorumproof_rpc_circuit_breaker_{state,calls_total,failures_total,trips_total}` | `/metrics/rpc` | — |
 | DB pool | `quorumproof_db_pool_{active,idle,waiting,utilization_pct}` | `/metrics/db` | — |

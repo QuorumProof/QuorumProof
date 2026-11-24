@@ -59,7 +59,8 @@ All metrics are prefixed `quorumproof_`.
 | `quorumproof_credentials_revoked_total` | Counter | Total credentials revoked |
 | `quorumproof_attestations_total` | Counter | Total attestation events |
 | `quorumproof_attestation_success_rate` | Gauge | Ratio of attested credentials to total issued (0–1) |
-| `quorumproof_api_request_duration_seconds` | Histogram | RPC call latency (buckets: 0.1, 0.5, 1, 2, 5 s) |
+| `quorumproof_api_request_duration_seconds` | Histogram | API request latency by route (buckets: 0.1, 0.5, 1, 2, 5 s) from `GET /metrics/api` |
+| `quorumproof_rpc_scrape_duration_seconds` | Histogram | Exporter RPC scrape latency (buckets: 0.1, 0.5, 1, 2, 5 s) |
 | `quorumproof_api_errors_total` | Counter | Total RPC / contract errors, labelled by `error_code` |
 | `quorumproof_contract_paused` | Gauge | 1 if contract is paused, 0 otherwise |
 | `quorumproof_active_slices_total` | Gauge | Number of quorum slices currently active |
