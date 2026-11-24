@@ -13,7 +13,7 @@ layers.
 |---|---|---|
 | Static state-compatibility check | Removed/renamed storage keys, changed struct fields, renumbered error codes, removed or re-signed public functions | `scripts/upgrade/check_state_compat.py` |
 | Upgrade simulation tests | State that is lost or changes across a code swap, broken migrations, missing upgrade guard rails | `contracts/integration_tests/src/upgrade_simulation.rs` (plus the existing `upgrade_safety.rs` #558 and `contract_upgrade_testing.rs` #579) |
-| Pre-upgrade / rollback scripts | Environment readiness, rollback path | `scripts/pre_upgrade_checks.sh`, `scripts/test_upgrade_rollback.sh` |
+| Pre-upgrade / rollback scripts | Environment readiness, rollback path | `scripts/pre_upgrade_checks.sh`, `scripts/tests/test_upgrade_rollback.sh` |
 | Testnet rehearsal | Real WASM, real ledger, real fees | Manual, see [contract-upgrade-strategy.md](./contract-upgrade-strategy.md) |
 
 Layers 1 and 2 run automatically in `.github/workflows/upgrade-safety.yml` on
