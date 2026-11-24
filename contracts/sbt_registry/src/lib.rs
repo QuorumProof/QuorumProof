@@ -21,6 +21,15 @@ const EXTENDED_TTL: u32 = 524_288;
 const MAX_BATCH_SIZE: u32 = 1000;
 /// Issue #989: maximum accepted length of an SBT metadata URI, in bytes.
 const MAX_METADATA_URI_LEN: usize = 256;
+/// Issue #1955: maximum number of notification-history entries retained per
+/// holder. Older entries are dropped (most recent kept) so storage and read
+/// cost stay bounded; the total count is preserved in a running counter
+/// (`DataKey2::NotificationCount`) so reputation never loads the history.
+const MAX_NOTIFICATION_HISTORY: u32 = 256;
+/// Issue #1953: maximum number of credential-access-log entries retained per
+/// credential. Older entries are dropped (most recent kept); read the log via
+/// `get_credential_access_log` (bounded) or `get_credential_access_log_paged`.
+const MAX_CREDENTIAL_ACCESS_LOG: u32 = 256;
 
 // ── Issue #1511: Governance audit trail for cross-contract address repointing ──
 const TOPIC_ADMIN_TRANSFERRED: &str = "AdminTransferred";
@@ -202,6 +211,9 @@ pub enum DataKey {
 pub enum DataKey2 {
     /// Issue #1413: global index of clawback ids that are still pending.
     PendingClawbacks,
+    /// Issue #1955: running counter of total notifications ever recorded for a
+    /// holder, so `get_holder_reputation` need not load the (capped) history.
+    NotificationCount(Address),
 }
 
 /// Issue #516: Cached result of a cross-contract is_revoked check.
@@ -2317,35 +2329,73 @@ impl SbtRegistryContract {
             .get::<DataKey, Vec<u64>>(&DataKey::OwnerTokens(holder.clone()))
             .unwrap_or(Vec::new(&env))
             .len();
-        let activity = env
+        // Issue #1955: read the running counter instead of loading the whole
+        // (now capped) notification history, so cost is O(1) and does not rise
+        // with the number of notifications recorded.
+        let activity_count: u64 = env
             .storage()
             .persistent()
-            .get::<DataKey, Vec<NotificationEntry>>(&DataKey::NotificationHistory(holder))
-            .unwrap_or(Vec::new(&env))
-            .len();
+            .get(&DataKey2::NotificationCount(holder))
+            .unwrap_or(0);
+        let activity: u32 = activity_count.min(u32::MAX as u64) as u32;
         tokens * cfg.token_weight + activity * cfg.activity_weight
     }
 
     /// Append a notification entry to the holder's on-chain history.
+    ///
+    /// Issue #1955: the history is capped at `MAX_NOTIFICATION_HISTORY` entries
+    /// (most recent retained) so storage and read cost stay bounded, and a
+    /// running counter (`DataKey2::NotificationCount`) records the total number
+    /// of notifications so [`get_holder_reputation`] never has to load the vec.
     fn record_notification(env: &Env, holder: Address, token_id: u64, event: Symbol) {
-        let key = DataKey::NotificationHistory(holder);
+        let key = DataKey::NotificationHistory(holder.clone());
+        let count_key = DataKey2::NotificationCount(holder.clone());
+
         let mut history: Vec<NotificationEntry> = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or(Vec::new(env));
+
+        // Running counter: total notifications ever recorded for this holder.
+        // For pre-fix data the counter is absent, so seed it from the current
+        // history length on the first write after the upgrade.
+        let mut count: u64 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or_else(|| history.len() as u64);
+
         history.push_back(NotificationEntry {
             token_id,
             event,
             timestamp: env.ledger().timestamp(),
         });
+        // Bound the on-chain history to the most recent entries.
+        if history.len() > MAX_NOTIFICATION_HISTORY {
+            let len = history.len();
+            let start = len - MAX_NOTIFICATION_HISTORY;
+            let mut trimmed: Vec<NotificationEntry> = Vec::new(env);
+            for i in start..len {
+                trimmed.push_back(history.get(i).unwrap());
+            }
+            history = trimmed;
+        }
         env.storage().persistent().set(&key, &history);
         env.storage()
             .persistent()
             .extend_ttl(&key, STANDARD_TTL, EXTENDED_TTL);
+
+        count += 1;
+        env.storage().persistent().set(&count_key, &count);
+        env.storage()
+            .persistent()
+            .extend_ttl(&count_key, STANDARD_TTL, EXTENDED_TTL);
     }
 
-    /// Return all notification entries recorded for a holder.
+    /// Return the notification entries recorded for a holder, in chronological
+    /// order. Issue #1955: at most `MAX_NOTIFICATION_HISTORY` entries are retained
+    /// (most recent); the total count is available to [`get_holder_reputation`].
     pub fn get_notifications(env: Env, holder: Address) -> Vec<NotificationEntry> {
         env.storage()
             .persistent()
@@ -2617,6 +2667,13 @@ impl SbtRegistryContract {
     /// Returns the transferred token IDs in input order.
     /// Only the admin may call this.
     ///
+    /// This is an auditable exception to ADR-002's non-transferability rule, which
+    /// applies to *holder-initiated* transfers (the always-rejected `transfer()`).
+    /// Admin recovery transfers let the issuer correct or recover a credential's
+    /// binding without revoking and re-attesting. Each transfer emits an
+    /// `admin_xfer` event attributing the move to the admin. See
+    /// `docs/adr/adr-002-sbt-non-transferability.md`.
+    ///
     /// # Parameters
     /// - `admin`: The admin address; must authorize this call.
     /// - `entries`: Vector of transfer entries, each specifying a token_id and new_owner.
@@ -2700,7 +2757,18 @@ impl SbtRegistryContract {
             topics.push_back(symbol_short!("transfer").into_val(&env));
             topics.push_back(entry.token_id.into_val(&env));
             env.events()
-                .publish(topics, (old_owner, entry.new_owner.clone()));
+                .publish(topics, (old_owner.clone(), entry.new_owner.clone()));
+
+            // Issue #1954: emit a distinct, auditable event attributing this
+            // transfer to the admin (issuer) recovery path. ADR-002 forbids
+            // holder-initiated transfers; admin recovery transfers are a
+            // documented, admin-only exception (see ADR-002).
+            let mut admin_topics: Vec<soroban_sdk::Val> = Vec::new(&env);
+            admin_topics.push_back(Symbol::new(&env, "admin_xfer").into_val(&env));
+            admin_topics.push_back(entry.token_id.into_val(&env));
+            env.events()
+                .publish(admin_topics, (admin.clone(), old_owner, entry.new_owner.clone()));
+
             Self::record_notification(&env, entry.new_owner.clone(), entry.token_id, symbol_short!("transfer"));
 
             result_ids.push_back(entry.token_id);
@@ -3032,6 +3100,19 @@ impl SbtRegistryContract {
             timestamp: env.ledger().timestamp(),
             payment,
         });
+        // Issue #1953: bound the on-chain access log so storage and read cost
+        // stay flat regardless of how many times the credential is accessed.
+        // Only the most recent MAX_CREDENTIAL_ACCESS_LOG entries are retained;
+        // the complete record is the emitted `access` event stream.
+        if log.len() > MAX_CREDENTIAL_ACCESS_LOG {
+            let len = log.len();
+            let start = len - MAX_CREDENTIAL_ACCESS_LOG;
+            let mut trimmed: Vec<CredentialAccessEntry> = Vec::new(&env);
+            for i in start..len {
+                trimmed.push_back(log.get(i).unwrap());
+            }
+            log = trimmed;
+        }
         env.storage().persistent().set(&key, &log);
         env.storage()
             .persistent()
@@ -3055,14 +3136,49 @@ impl SbtRegistryContract {
         CREDENTIAL_ACCESS_MICROPAYMENT
     }
 
-    /// Return the full credential access log — every verifier access recorded via
-    /// [`track_credential_access`], in chronological order. Returns an empty vec for
-    /// a credential that has never been accessed.
+    /// Return the credential access log — every verifier access recorded via
+    /// [`track_credential_access`], in chronological order. Returns an empty vec
+    /// for a credential that has never been accessed.
+    ///
+    /// Issue #1953: the log is capped at `MAX_CREDENTIAL_ACCESS_LOG` entries
+    /// (most recent retained), so this call is bounded. For paginated reads use
+    /// [`get_credential_access_log_paged`].
     pub fn get_credential_access_log(env: Env, credential_id: u64) -> Vec<CredentialAccessEntry> {
         env.storage()
             .persistent()
             .get(&DataKey::CredentialAccessLog(credential_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Issue #1953: paginated read of the credential access log, returning up to
+    /// `limit` entries starting at `offset` (0-indexed, chronological order). Use
+    /// this when the (now capped) log is still too large to read in one call.
+    ///
+    /// `offset` past the end returns an empty vec. `limit` is clamped to the
+    /// number of entries remaining from `offset`. For the complete (capped) log
+    /// in a single call, use [`get_credential_access_log`].
+    pub fn get_credential_access_log_paged(
+        env: Env,
+        credential_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<CredentialAccessEntry> {
+        let log: Vec<CredentialAccessEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CredentialAccessLog(credential_id))
+            .unwrap_or(Vec::new(&env));
+        let len = log.len();
+        if offset >= len {
+            return Vec::new(&env);
+        }
+        let remaining = len - offset;
+        let take = limit.min(remaining);
+        let mut page: Vec<CredentialAccessEntry> = Vec::new(&env);
+        for i in 0..take {
+            page.push_back(log.get(offset + i).unwrap());
+        }
+        page
     }
 
     // ── Issue #1242: SBT Revocation Reasons and Appeals ─────────────────────────
@@ -6952,6 +7068,93 @@ mod tests {
 
         let entries: Vec<BatchTransferEntry> = Vec::new(&env);
         client.batch_transfer(&admin, &entries);
+    }
+
+    // --- Issue #1954: admin batch_transfer documented behaviour (ADR-002 exception) ---
+
+    #[test]
+    fn test_batch_transfer_updates_ownership() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let new_owner = Address::generate(&env);
+        let entries = vec![
+            &env,
+            BatchTransferEntry {
+                token_id,
+                new_owner: new_owner.clone(),
+            },
+        ];
+        let transferred = client.batch_transfer(&admin, &entries);
+        assert_eq!(transferred.get(0).unwrap(), token_id);
+        // Admin recovery transfer moves the SBT to the new owner.
+        assert_eq!(client.owner_of(&token_id), new_owner);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_batch_transfer_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let new_owner = Address::generate(&env);
+        let entries = vec![
+            &env,
+            BatchTransferEntry {
+                token_id,
+                new_owner,
+            },
+        ];
+        let non_admin = Address::generate(&env);
+        client.batch_transfer(&non_admin, &entries);
+    }
+
+    #[test]
+    fn test_batch_transfer_emits_admin_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let meta = soroban_sdk::Bytes::from_slice(&env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = Bytes::from_slice(&env, b"ipfs://QmSBT");
+        let token_id = client.mint(&owner, &cred_id, &uri);
+
+        let new_owner = Address::generate(&env);
+        let entries = vec![
+            &env,
+            BatchTransferEntry {
+                token_id,
+                new_owner,
+            },
+        ];
+        client.batch_transfer(&admin, &entries);
+
+        // The admin transfer must emit a distinct, auditable admin_xfer event.
+        let events = env.events().all();
+        let found = events.iter().any(|e| {
+            let event_str = std::format!("{:?}", e);
+            event_str.contains("admin_xfer")
+        });
+        assert!(found, "admin_xfer event not emitted");
     }
 
     // --- Issue #1403: blacklist enforcement on all owner-assigning paths ---
