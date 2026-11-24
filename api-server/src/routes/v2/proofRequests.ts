@@ -17,8 +17,12 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
 import { problemJson } from '../../middleware/problemDetails.js';
+import { validate, schemas } from '../../middleware/validate.js';
 
 const router = Router();
+
+export const proofRequestCreateSchema = schemas.proofRequestCreate;
+export const proofRequestParamsSchema = schemas.proofRequestParams;
 
 // ---------------------------------------------------------------------------
 // In-process store (demonstrable, testable without a live DB in this sprint).
@@ -50,44 +54,35 @@ function newId(): string {
 // ---------------------------------------------------------------------------
 // POST /api/v2/proof-requests
 // ---------------------------------------------------------------------------
-router.post('/', (req: Request, res: Response) => {
-  const { credential_id, claim_type, requester } = req.body as {
-    credential_id?: unknown;
-    claim_type?: unknown;
-    requester?: unknown;
-  };
+router.post(
+  '/',
+  validate(proofRequestCreateSchema, { coerceTypes: false }),
+  (req: Request, res: Response) => {
+    const { credential_id, claim_type, requester } = req.body as {
+      credential_id: number;
+      claim_type: string;
+      requester: string;
+    };
 
-  if (typeof credential_id !== 'number' || !Number.isInteger(credential_id) || credential_id < 1) {
-    res.status(400).json(problemJson(400, 'missing-parameter', 'credential_id must be a positive integer'));
-    return;
-  }
-  if (typeof claim_type !== 'string' || !claim_type.trim()) {
-    res.status(400).json(problemJson(400, 'missing-parameter', 'claim_type is required'));
-    return;
-  }
-  if (typeof requester !== 'string' || !requester.trim()) {
-    res.status(400).json(problemJson(400, 'missing-parameter', 'requester is required'));
-    return;
-  }
+    const id = newId();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 h TTL
 
-  const id = newId();
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 h TTL
+    const proofRequest: ProofRequest = {
+      id,
+      credential_id,
+      claim_type: claim_type.trim(),
+      requester: requester.trim(),
+      created_at: now.toISOString(),
+      expires_at: expiresAt.toISOString(),
+      status: 'pending',
+      proof: null,
+    };
 
-  const proofRequest: ProofRequest = {
-    id,
-    credential_id,
-    claim_type: claim_type.trim(),
-    requester: requester.trim(),
-    created_at: now.toISOString(),
-    expires_at: expiresAt.toISOString(),
-    status: 'pending',
-    proof: null,
-  };
-
-  store.set(id, proofRequest);
-  res.status(201).json(proofRequest);
-});
+    store.set(id, proofRequest);
+    res.status(201).json(proofRequest);
+  },
+);
 
 // ---------------------------------------------------------------------------
 // GET /api/v2/proof-requests?status=pending&cursor=<opaque>&limit=20
@@ -144,19 +139,23 @@ router.get('/:id', (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // DELETE /api/v2/proof-requests/:id — cancel
 // ---------------------------------------------------------------------------
-router.delete('/:id', (req: Request, res: Response) => {
-  const item = store.get(req.params.id);
-  if (!item) {
-    res.status(404).json(problemJson(404, 'not-found', `Proof request "${req.params.id}" not found`));
-    return;
-  }
-  if (item.status !== 'pending') {
-    res.status(409).json(problemJson(409, 'invalid-state', `Cannot cancel a proof request with status "${item.status}"`));
-    return;
-  }
-  item.status = 'cancelled';
-  res.json(item);
-});
+router.delete(
+  '/:id',
+  validate(proofRequestParamsSchema, { coerceTypes: false }),
+  (req: Request, res: Response) => {
+    const item = store.get(req.params.id);
+    if (!item) {
+      res.status(404).json(problemJson(404, 'not-found', `Proof request "${req.params.id}" not found`));
+      return;
+    }
+    if (item.status !== 'pending') {
+      res.status(409).json(problemJson(409, 'invalid-state', `Cannot cancel a proof request with status "${item.status}"`));
+      return;
+    }
+    item.status = 'cancelled';
+    res.json(item);
+  },
+);
 
 /** Exposed for testing. */
 export { store as _proofRequestStore };
