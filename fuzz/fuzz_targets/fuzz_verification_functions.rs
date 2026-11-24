@@ -82,9 +82,9 @@ fuzz_target!(|input: VerificationFuzzInput| {
                     client.is_attested(&credential_id, &slice_id)
                 }));
 
-                // Test get_attestors
+                // Test get_attestors — takes only credential_id (not slice_id)
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    client.get_attestors(&credential_id, &slice_id)
+                    client.get_attestors(&credential_id)
                 }));
             }
         }

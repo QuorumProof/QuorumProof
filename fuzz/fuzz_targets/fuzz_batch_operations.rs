@@ -112,14 +112,14 @@ fn test_single_issuer_batch(env: &Env, client: &QuorumProofContractClient, input
         }
     }
 
-    // Verify batch was created successfully (at least 80% success rate)
-    let success_rate = if batch_size > 0 {
-        (issued_count as f64) / (batch_size as f64)
-    } else {
-        0.0
-    };
-
-    assert!(success_rate >= 0.8, "Batch issuance success rate too low: {}", success_rate);
+    // The fuzz target must not assert a minimum success rate: the contract
+    // legitimately rejects issuance for many reasons (DuplicateCredential when
+    // type_seed is small, rate limiting, quota exhaustion).  Asserting here
+    // converts normal contract behaviour into a crash that the fuzzer reports
+    // as a bug.  We simply record the counts; the invariant we care about is
+    // "no unhandled panic" — which catch_unwind above already enforces.
+    let _ = issued_count;
+    let _ = failed_count;
 }
 
 /// Test multiple issuers issuing batches concurrently
@@ -146,8 +146,11 @@ fn test_multiple_issuers_batch(env: &Env, client: &QuorumProofContractClient, in
         }
     }
 
-    // Verify credentials from different issuers were created
-    assert!(all_credentials.len() > 0, "No credentials created in multi-issuer batch");
+    // Do not assert a minimum number of successful credentials: fuzz inputs
+    // that happen to trigger DuplicateCredential or other contract errors for
+    // every attempt are valid, not bugs.  The invariant we verify is simply
+    // "no unhandled panic", which catch_unwind above already enforces.
+    let _ = all_credentials;
 }
 
 /// Test large batch with integrity verification
@@ -219,9 +222,11 @@ fn test_maximum_batch_size(env: &Env, client: &QuorumProofContractClient, input:
             }
         }
 
-        // Ensure at least 50% success rate for batch testing
-        let success_rate = (successful as f64) / ((successful + failed) as f64).max(1.0);
-        assert!(success_rate >= 0.5, "Batch size {} has insufficient success rate: {}", size, success_rate);
+        // Do not assert a minimum success rate: the contract legitimately
+        // rejects issuance (DuplicateCredential, rate limits, quota) for
+        // certain fuzz inputs.  Asserting here turns normal rejection into a
+        // reported crash.  The only property we check is "no unhandled panic".
+        let _ = (successful, failed);
     }
 }
 
