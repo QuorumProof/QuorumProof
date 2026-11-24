@@ -170,11 +170,90 @@ impl TransparencyMerkleTree {
         }
     }
 
-    /// Add an entry to the log and update the tree.
+    /// Add an entry to the log and update the Merkle tree root.
+    ///
+    /// The root is recomputed after every insert using a simple iterative
+    /// binary-tree hash over all leaf hashes.  This keeps the root consistent
+    /// with the entry list at all times so that `get_root_hash` reflects the
+    /// current state of the log.
     pub fn add_entry(&mut self, entry: TransparencyLogEntry) {
+        // Compute the leaf hash from the entry's credential hash and entry id.
+        let leaf_hash = Self::hash_leaf(&entry);
+        let leaf_index = self.entries.len() as u64;
+
+        // Store the leaf node.
+        self.nodes.push(MerkleNode::new_leaf(leaf_hash, leaf_index));
+
+        // Push the entry after we have used its data for the hash.
         self.entries.push(entry);
-        // In a real implementation, update the Merkle tree structure
-        // For now, just track that the entry was added
+
+        // Recompute the root from the current set of leaf hashes.
+        self.root_hash = Some(Self::compute_root(&self.nodes));
+    }
+
+    /// Hash a single transparency log entry to produce its leaf hash.
+    ///
+    /// Uses a domain-separated concatenation of the entry id (8 bytes) and the
+    /// credential hash (32 bytes), processed with a simple XOR-folded hash.
+    /// Production deployments should replace this with SHA-256 or Poseidon.
+    fn hash_leaf(entry: &TransparencyLogEntry) -> [u8; 32] {
+        let mut h = entry.credential_hash;
+        // Mix in the entry_id to domain-separate each leaf.
+        let id_bytes = entry.entry_id.to_le_bytes();
+        for i in 0..8 {
+            h[i] = h[i].wrapping_add(id_bytes[i]);
+        }
+        // Mix in the logged_at timestamp for additional uniqueness.
+        let ts_bytes = entry.logged_at.to_le_bytes();
+        for i in 0..8 {
+            h[8 + i] = h[8 + i].wrapping_add(ts_bytes[i]);
+        }
+        h
+    }
+
+    /// Recompute the Merkle root from the current leaf nodes.
+    ///
+    /// Uses an iterative bottom-up approach: pairs of sibling hashes are
+    /// combined by XOR-folding both arrays together (a placeholder for a
+    /// proper hash combiner).  An odd node is promoted unchanged to the next
+    /// level.  Returns a zero-filled root when the tree is empty.
+    fn compute_root(nodes: &[MerkleNode]) -> [u8; 32] {
+        if nodes.is_empty() {
+            return [0u8; 32];
+        }
+
+        // Collect the current level's hashes.
+        let mut level: Vec<[u8; 32]> = nodes.iter().map(|n| n.hash).collect();
+
+        while level.len() > 1 {
+            let mut next_level: Vec<[u8; 32]> = Vec::new();
+            let mut i = 0;
+            while i < level.len() {
+                if i + 1 < level.len() {
+                    next_level.push(Self::hash_pair(&level[i], &level[i + 1]));
+                    i += 2;
+                } else {
+                    // Odd leaf: promote unchanged.
+                    next_level.push(level[i]);
+                    i += 1;
+                }
+            }
+            level = next_level;
+        }
+
+        level[0]
+    }
+
+    /// Combine two sibling hashes into a parent hash.
+    ///
+    /// XOR-folds the right sibling over the left to produce the parent.
+    /// Replace with SHA-256(left || right) in production.
+    fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut out = *left;
+        for i in 0..32 {
+            out[i] ^= right[i];
+        }
+        out
     }
 
     /// Get the current root hash of the tree.
@@ -192,10 +271,15 @@ impl TransparencyMerkleTree {
         if entry_id >= self.entries.len() as u64 {
             return None;
         }
+        let leaf_hash = if entry_id < self.nodes.len() as u64 {
+            self.nodes[entry_id as usize].hash
+        } else {
+            [0u8; 32]
+        };
         Some(InclusionProof::new(
             entry_id,
             self.entries.len() as u64,
-            [0u8; 32], // Placeholder hash
+            leaf_hash,
         ))
     }
 
@@ -336,5 +420,45 @@ mod tests {
         tree.add_entry(entry);
         assert!(!tree.is_empty());
         assert_eq!(tree.len(), 1);
+    }
+
+    #[test]
+    fn test_root_changes_after_every_insert() {
+        let mut tree = TransparencyMerkleTree::new();
+
+        // No entries yet — root is None.
+        assert!(tree.get_root_hash().is_none());
+
+        let make_entry = |id: u64, cred_hash: [u8; 32]| {
+            TransparencyLogEntry::new(
+                id,
+                id,
+                cred_hash,
+                id * 100,
+                alloc::vec![0u8],
+                alloc::vec![0u8],
+            )
+        };
+
+        tree.add_entry(make_entry(1, [1u8; 32]));
+        let root_after_1 = tree.get_root_hash().expect("root must be Some after first insert");
+
+        tree.add_entry(make_entry(2, [2u8; 32]));
+        let root_after_2 = tree.get_root_hash().expect("root must be Some after second insert");
+        assert_ne!(root_after_1, root_after_2, "root must change after second insert");
+
+        tree.add_entry(make_entry(3, [3u8; 32]));
+        let root_after_3 = tree.get_root_hash().expect("root must be Some after third insert");
+        assert_ne!(root_after_2, root_after_3, "root must change after third insert");
+
+        tree.add_entry(make_entry(4, [4u8; 32]));
+        let root_after_4 = tree.get_root_hash().expect("root must be Some after fourth insert");
+        assert_ne!(root_after_3, root_after_4, "root must change after fourth insert");
+
+        // Entries with identical credential hashes but different IDs must still
+        // produce distinct roots because the leaf hash mixes in the entry id.
+        tree.add_entry(make_entry(5, [4u8; 32]));
+        let root_after_5 = tree.get_root_hash().expect("root must be Some after fifth insert");
+        assert_ne!(root_after_4, root_after_5, "root must change even when credential hash is repeated");
     }
 }

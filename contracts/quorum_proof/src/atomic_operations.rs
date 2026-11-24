@@ -6,9 +6,9 @@
 //! Uses Soroban's event-driven coordination model with a transaction log
 //! to achieve atomicity and rollback capability.
 
-use soroban_sdk::{contracttype, Address, Bytes, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, Bytes, Env, Symbol, Vec};
 
-use crate::{EXTENDED_TTL, STANDARD_TTL};
+use crate::{ContractError, EXTENDED_TTL, STANDARD_TTL};
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +155,7 @@ pub fn advance_phase(
     {
         let now = env.ledger().timestamp();
         if now > txn.expires_at {
-            panic!("transaction expired");
+            panic_with_error!(env, ContractError::TransactionExpired);
         }
 
         txn.phase = next_phase;
@@ -165,7 +165,7 @@ pub fn advance_phase(
         env.storage().instance().set(&key, &txn);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     } else {
-        panic!("transaction not found");
+        panic_with_error!(env, ContractError::TransactionNotFound);
     }
 }
 
@@ -234,7 +234,7 @@ pub fn commit_transaction(env: &Env, txn_id: u64) {
         .get::<DataKeyAtomicity, AtomicTransaction>(&key)
     {
         if txn.phase != TxnPhase::Phase3_ZkVerifier {
-            panic!("cannot commit transaction not in final phase");
+            panic_with_error!(env, ContractError::CannotCommitTransaction);
         }
 
         txn.phase = TxnPhase::Committed;
@@ -243,7 +243,7 @@ pub fn commit_transaction(env: &Env, txn_id: u64) {
         env.storage().instance().set(&key, &txn);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     } else {
-        panic!("transaction not found");
+        panic_with_error!(env, ContractError::TransactionNotFound);
     }
 }
 
@@ -259,7 +259,7 @@ pub fn initiate_rollback(env: &Env, txn_id: u64, reason: Option<Bytes>) {
             || txn.phase == TxnPhase::RolledBack
             || txn.phase == TxnPhase::RollingBack
         {
-            panic!("cannot rollback transaction in current state");
+            panic_with_error!(env, ContractError::CannotRollbackTransaction);
         }
 
         txn.phase = TxnPhase::RollingBack;
@@ -277,7 +277,7 @@ pub fn initiate_rollback(env: &Env, txn_id: u64, reason: Option<Bytes>) {
                 .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
         }
     } else {
-        panic!("transaction not found");
+        panic_with_error!(env, ContractError::TransactionNotFound);
     }
 }
 
@@ -290,7 +290,7 @@ pub fn complete_rollback(env: &Env, txn_id: u64) {
         .get::<DataKeyAtomicity, AtomicTransaction>(&key)
     {
         if txn.phase != TxnPhase::RollingBack {
-            panic!("transaction not in rollback state");
+            panic_with_error!(env, ContractError::CannotRollbackTransaction);
         }
 
         txn.phase = TxnPhase::RolledBack;
@@ -299,7 +299,7 @@ pub fn complete_rollback(env: &Env, txn_id: u64) {
         env.storage().instance().set(&key, &txn);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     } else {
-        panic!("transaction not found");
+        panic_with_error!(env, ContractError::TransactionNotFound);
     }
 }
 

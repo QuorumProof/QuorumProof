@@ -6,7 +6,9 @@
 //!   - #1289: BBS+ Key Rotation for Issuers
 //!   - #1290: BBS+ Attribute Privacy Controls
 
-use soroban_sdk::{contracttype, Address, Bytes, Env, Map, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, Bytes, Env, Map, Vec};
+
+use crate::ContractError;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Issue #1287 — BBS+ Revocation Registry Integration
@@ -311,7 +313,7 @@ pub fn create_non_revocation_proof(
         .storage()
         .instance()
         .get(&DataKeyBbs::BbsAccumulator)
-        .unwrap_or_else(|| panic!("revocation accumulator not initialised"));
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::RevocationAccumulatorNotInitialized));
 
     let record = BbsNonRevocationProofRecord {
         credential_id,

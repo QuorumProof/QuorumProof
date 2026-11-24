@@ -398,6 +398,225 @@ client.transfer(&owner, &recipient, &token_id); // Error(Contract, #1)
 
 ---
 
+---
+
+## See Also
+
+- [Architecture Overview](architecture.md)
+- [Threat Model & Security](threat-model.md)
+- [Trust Slice Model](trust-slices.md)
+
+---
+
+## New Error Codes — Issue #1951
+
+The following codes were introduced to replace raw `panic!` string messages with
+typed `ContractError` values. Clients that parse Soroban `Error(Contract, #N)`
+results can now handle all contract error paths programmatically.
+
+### #99 — `TransactionExpired`
+**Trigger:** `advance_phase` was called on a transaction whose `expires_at` timestamp has already passed.
+
+**Recovery:** Begin a new atomic transaction with `init_atomic_operations` and replay the operation.
+
+---
+
+### #100 — `TransactionNotFound`
+**Trigger:** A transaction ID was supplied to `advance_phase`, `commit_transaction`, `initiate_rollback`, or `complete_rollback` that does not exist in storage.
+
+**Recovery:** Confirm the `txn_id` returned from `begin_transaction`. The transaction may have already been committed or rolled back and evicted.
+
+---
+
+### #101 — `CannotCommitTransaction`
+**Trigger:** `commit_transaction` was called but the transaction has not yet reached `Phase3_ZkVerifier`.
+
+**Recovery:** Advance through all three phases before committing.
+
+---
+
+### #102 — `CannotRollbackTransaction`
+**Trigger:** `initiate_rollback` was called on a transaction that is already Committed, RolledBack, or RollingBack; or `complete_rollback` was called on a transaction not in the RollingBack state.
+
+**Recovery:** Check the current transaction phase before attempting rollback.
+
+---
+
+### #103 — `VetoRequestNotFound`
+**Trigger:** `cancel_veto` or `execute_veto` was called with a `veto_id` that does not exist in storage.
+
+**Recovery:** Verify the `veto_id` returned from `request_veto`.
+
+---
+
+### #104 — `VetoNotAuthorized`
+**Trigger:** `request_veto`, `cancel_veto`, or `execute_veto` was called by an address that is not a registered veto authority.
+
+**Recovery:** Only addresses registered via `add_veto_authority` / `init_veto_authorities` may perform veto operations.
+
+---
+
+### #105 — `VetoInvalidState`
+**Trigger:** `cancel_veto` was called on a veto that is already Executed or Cancelled; or `execute_veto` was called on a veto not in Pending or Ready state.
+
+**Recovery:** Check the current `VetoStatus` before calling.
+
+---
+
+### #106 — `MigrationNotInitialized`
+**Trigger:** A migration operation was attempted before the migration state was stored in instance storage.
+
+**Recovery:** Call the migration initialization entry point first.
+
+---
+
+### #107 — `MigrationNotSupported`
+**Trigger:** `migrate_to_v2` detected a source schema version other than V1.
+
+**Recovery:** Only the V1 → V2 migration path is supported. Ensure the contract is on schema version 1 before migrating.
+
+---
+
+### #108 — `MigrationInvalidState`
+**Trigger:** A migration step was called when the migration is in an incompatible state (e.g. already completed, not yet started, or already committed).
+
+**Recovery:** Check the current `MigrationStatus` before calling. Resume or restart migration as appropriate.
+
+---
+
+### #109 — `MigrationCheckpointNotFound`
+**Trigger:** A chunked migration step attempted to read a checkpoint that does not exist.
+
+**Recovery:** Ensure the checkpoint was written before resuming a chunked migration.
+
+---
+
+### #110 — `RevocationAccumulatorNotInitialized`
+**Trigger:** `store_non_revocation_proof` was called before the BBS+ revocation accumulator was initialized.
+
+**Recovery:** Call `add_to_revocation_accumulator` to initialize the accumulator before submitting proofs.
+
+---
+
+### #111 — `AttestorAlreadyAttested`
+**Trigger:** An attestor attempted to attest a credential in `batch_attest` that they have already attested.
+
+**Recovery:** Each attestor may attest a given credential only once per slice. Query existing attestation records before batching.
+
+---
+
+### #112 — `PostconditionViolated`
+**Trigger:** An internal postcondition invariant failed after a state mutation. This indicates a contract bug.
+
+**Recovery:** File a bug report. Do not retry; the transaction will have been reverted.
+
+---
+
+### #113 — `CredentialAttributesTooLarge`
+**Trigger:** Setting a credential attribute would push the total serialized attribute size over 5 120 bytes.
+
+**Recovery:** Remove unused attributes or reduce attribute value sizes before setting a new one.
+
+---
+
+### #114 — `AttestorNotResolvable`
+**Trigger:** The attestor is neither a direct member of the slice nor a valid delegate of any member.
+
+**Recovery:** Ensure the attestor is added to the slice or granted a delegation before attesting.
+
+---
+
+### #115 — `AttestorSuspended`
+**Trigger:** An attestation was attempted by or for an attestor whose account is currently suspended.
+
+**Recovery:** Lift the suspension before the attestor may participate in new attestations.
+
+---
+
+### #116 — `AttestationNotFound`
+**Trigger:** A query for an attestation record returned no match for the supplied `(credential_id, attestor)` pair.
+
+**Recovery:** Verify that the attestor has attested the credential using `get_attestors`.
+
+---
+
+### #117 — `InvalidAtomicPhase`
+**Trigger:** `advance_atomic_phase` or `record_atomic_phase_result` was called with a phase discriminant outside the valid range (1–4 or 1–3 respectively).
+
+**Recovery:** Use only the values 1 (`Phase1_QuorumProof`), 2 (`Phase2_SbtRegistry`), or 3 (`Phase3_ZkVerifier`).
+
+---
+
+### #118 — `InvalidDerivativeType`
+**Trigger:** `create_credential_derivative` was called with a type discriminant other than 0 (Call), 1 (Put), or 2 (Future).
+
+**Recovery:** Pass a valid derivative type value.
+
+---
+
+### #119 — `DerivativeNotFound`
+**Trigger:** `exercise_credential_derivative` was called with a derivative ID that does not exist.
+
+**Recovery:** Verify the derivative ID returned from `create_credential_derivative`.
+
+---
+
+### #120 — `StakeNotFound`
+**Trigger:** `liquidate_credential_stake` was called with a stake ID that does not exist.
+
+**Recovery:** Verify the stake ID returned from the staking entry point.
+
+---
+
+### #121 — `SubjectMismatch`
+**Trigger:** `merge_credentials` was called with credential IDs that belong to different subjects.
+
+**Recovery:** Only credentials held by the same subject can be merged.
+
+---
+
+### #122 — `CredentialNotFoundLocal`
+**Trigger:** A cross-chain wrap or fractional-transfer operation referenced a credential ID that does not exist in the local contract storage.
+
+**Recovery:** Verify the credential ID against `get_credential` before wrapping or fractionalizing.
+
+---
+
+### #123 — `IssuerOnlyAction`
+**Trigger:** `enable_fractional_transfer` was called by an address other than the credential's issuer.
+
+**Recovery:** Only the original issuer may enable fractional transfer on a credential.
+
+---
+
+### #124 — `NotFractionalized`
+**Trigger:** `transfer_credential_fraction` was called on a credential that has not been fractionalized.
+
+**Recovery:** Call `enable_fractional_transfer` first.
+
+---
+
+### #125 — `BranchNotFound`
+**Trigger:** `commit_to_branch` or `merge_credential_branches` was called with a branch ID that does not exist.
+
+**Recovery:** Verify the branch ID returned from `create_credential_branch`.
+
+---
+
+### #126 — `BranchCredentialMismatch`
+**Trigger:** `merge_credential_branches` was called with branches that belong to different credentials.
+
+**Recovery:** Only branches of the same credential can be merged.
+
+---
+
+### #127 — `NoMigrationForVersion`
+**Trigger:** The generic migration dispatcher encountered a source schema version that has no migration arm defined.
+
+**Recovery:** This version transition is unsupported. Consult the upgrade guide for the supported migration path.
+
+---
+
 ## See Also
 
 - [Architecture Overview](architecture.md)
