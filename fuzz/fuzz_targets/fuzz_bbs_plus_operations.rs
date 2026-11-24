@@ -36,11 +36,12 @@ struct BbsPlusFuzzInput {
 fuzz_target!(|input: BbsPlusFuzzInput| {
     // ── Bound inputs to keep runtime tractable ──────────────────────────────
     // At most 16 messages; at least 1 so VerifyingKey::derive doesn't get 0.
-    let message_count = (input.message_scalars.len() % 16) + 1;
+    // message_count must be u32 to match VerifyingKey::derive's parameter type.
+    let message_count: u32 = ((input.message_scalars.len() % 16) + 1) as u32;
     let messages: Vec<Fr> = input
         .message_scalars
         .iter()
-        .take(message_count)
+        .take(message_count as usize)
         .map(|&v| Fr::from_u64(v))
         .collect();
 
@@ -90,11 +91,11 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
 
     // ── 6. Presentation creation (selective disclosure) ──────────────────────
     // Convert revealed_indices to the subset of valid indices.
-    let all_indices: Vec<u32> = (0..message_count as u32).collect();
+    let all_indices: Vec<u32> = (0..message_count).collect();
     let revealed: Vec<u32> = input
         .revealed_indices
         .iter()
-        .map(|&i| (i as u32) % message_count as u32)
+        .map(|&i| (i as u32) % message_count)
         .collect::<std::collections::BTreeSet<_>>() // deduplicate
         .into_iter()
         .collect();
