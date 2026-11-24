@@ -112,14 +112,15 @@ fn test_single_issuer_batch(env: &Env, client: &QuorumProofContractClient, input
         }
     }
 
-    // Verify batch was created successfully (at least 80% success rate)
-    let success_rate = if batch_size > 0 {
-        (issued_count as f64) / (batch_size as f64)
-    } else {
-        0.0
-    };
-
-    assert!(success_rate >= 0.8, "Batch issuance success rate too low: {}", success_rate);
+    // The fuzz target's goal is to confirm the contract never panics (i.e.
+    // no unhandled abort/SIGABRT escapes catch_unwind), not to mandate a
+    // specific throughput.  Many fuzzer-generated inputs legitimately produce
+    // high rejection rates: the duplicate-credential guard fires when
+    // `type_seed` causes all iterations to map to the same (issuer, subject,
+    // type) triple, and rate-limiting fires on dense bursts.  An unconditional
+    // success-rate assert would turn those valid scenarios into fuzz crashes
+    // rather than finding real bugs.  Record the counts for visibility only.
+    let _ = (issued_count, failed_count);
 }
 
 /// Test multiple issuers issuing batches concurrently
@@ -146,8 +147,10 @@ fn test_multiple_issuers_batch(env: &Env, client: &QuorumProofContractClient, in
         }
     }
 
-    // Verify credentials from different issuers were created
-    assert!(all_credentials.len() > 0, "No credentials created in multi-issuer batch");
+    // No success-rate assertion: some fuzz inputs may produce zero successful
+    // credentials (e.g. all calls rejected by rate-limiting or duplicate
+    // guards) — that is a valid contract state, not a bug.
+    let _ = all_credentials;
 }
 
 /// Test large batch with integrity verification
@@ -219,9 +222,11 @@ fn test_maximum_batch_size(env: &Env, client: &QuorumProofContractClient, input:
             }
         }
 
-        // Ensure at least 50% success rate for batch testing
-        let success_rate = (successful as f64) / ((successful + failed) as f64).max(1.0);
-        assert!(success_rate >= 0.5, "Batch size {} has insufficient success rate: {}", size, success_rate);
+        // Fuzz goal: confirm no unhandled panic escapes from any batch size.
+        // Success-rate thresholds are not asserted here — many fuzzer inputs
+        // legitimately produce rejections (duplicates, rate-limits, etc.) at
+        // any batch size; asserting a floor would misclassify those as crashes.
+        let _ = (successful, failed);
     }
 }
 

@@ -146,6 +146,21 @@ fn read_indexed_map(bytes: &[u8], offset: &mut usize) -> BbsResult<BTreeMap<u32,
     let count = u32::from_le_bytes(count_bytes) as usize;
     *offset += 4;
 
+    // Each map entry is 4 bytes (index) + 32 bytes (Fr scalar) = 36 bytes.
+    // Guard against a crafted count larger than the remaining buffer could ever
+    // satisfy: an adversary can set count=u32::MAX with only a handful of bytes
+    // left, which previously forced ~4 billion loop iterations (each hitting the
+    // inner bounds check) before returning Err — an O(count) CPU burn.
+    // MAX_MESSAGES_PER_CREDENTIAL (255) is the tightest meaningful upper bound;
+    // we also cross-check against the remaining buffer length as a belt-and-
+    // suspenders guard.
+    const BYTES_PER_ENTRY: usize = 4 + 32; // idx u32 + Fr scalar
+    let remaining = bytes.len().saturating_sub(*offset);
+    let max_possible = remaining / BYTES_PER_ENTRY;
+    if count > max_possible || count > crate::MAX_MESSAGES_PER_CREDENTIAL as usize {
+        return Err(BbsError::DeserializationError);
+    }
+
     let mut map = BTreeMap::new();
     for _ in 0..count {
         if *offset + 4 > bytes.len() {
