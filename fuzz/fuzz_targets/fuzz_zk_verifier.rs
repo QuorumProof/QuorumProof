@@ -126,7 +126,17 @@ fuzz_target!(|input: FuzzInput| {
     // Known-invalid corpus: every entry must be rejected without panicking.
     let valid_bytes = valid.proof.to_alloc_vec();
     for (name, bad) in known_invalid_proofs(&env, &toy, input.credential_id, claim, &valid_bytes) {
-        assert_eq!(verify(&bad), Some(false), "known-invalid proof `{name}` must be rejected");
+        // `verify` returns `None` when the contract panicked (see closure above).
+        // With `panic = "abort"` (the release/fuzz profile) a panic from inside
+        // `catch_unwind` aborts the process rather than being caught, so the
+        // contract must NEVER panic on any proof input — it must return `false`.
+        // If `verify` returns `None` here it means the contract panicked, which
+        // is itself a bug; the outer assert would then fire as an uncaught panic
+        // and crash the fuzzer.  Treat `None` as a failed rejection (same as
+        // `Some(true)`) so the assert fires with a useful message instead of an
+        // abort.
+        let rejected = verify(&bad).map_or(false, |r| !r);
+        assert!(rejected, "known-invalid proof `{name}` must be rejected without panicking");
     }
 
     // Arbitrary fuzz input: anything other than the valid proof must be rejected.

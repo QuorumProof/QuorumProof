@@ -1092,15 +1092,24 @@ impl ZkVerifierContract {
         claim_type: ClaimType,
         proof: Bytes,
     ) -> bool {
+        // Fail closed: paused contract must never accept a proof.
         if Self::is_paused(env.clone()) {
-            panic!("contract is paused");
+            return false;
         }
 
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance()
+        let stored_admin: Address = match env.storage().instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
-        assert!(stored_admin == admin, "unauthorized");
+        {
+            Some(a) => a,
+            None => return false,
+        };
+        // Fail closed on admin mismatch rather than panicking: a panic aborts
+        // the process under `panic = "abort"` (the fuzz/release profile),
+        // which crashes libFuzzer instead of reporting a property violation.
+        if stored_admin != admin {
+            return false;
+        }
 
         // Look up the real Groth16 verifying key hash (set via
         // set_groth16_verifying_key / rotate_groth16_verifying_key).
@@ -1630,7 +1639,11 @@ impl ZkVerifierContract {
         vk_hash: BytesN<32>,
     ) -> bool {
         if Self::is_paused(env.clone()) {
-            panic!("contract is paused");
+            // Fail closed: paused contract must never accept a proof.
+            // Returning `false` rather than panicking keeps the fuzz harness
+            // in control — a panic with `panic = "abort"` aborts the whole
+            // process, crashing libFuzzer instead of reporting the violation.
+            return false;
         }
         groth16_real_verify(&env, &vk_hash, &public_inputs, &proof)
     }
@@ -1979,7 +1992,11 @@ impl ZkVerifierContract {
         vk_hash: BytesN<32>,
     ) -> bool {
         if Self::is_paused(env.clone()) {
-            panic!("contract is paused");
+            // Fail closed: paused contract must never accept a proof.
+            // Returning `false` rather than panicking keeps the fuzz harness
+            // in control — a panic with `panic = "abort"` aborts the whole
+            // process, crashing libFuzzer instead of reporting the violation.
+            return false;
         }
         plonk_verify(&env, &vk_hash, &public_inputs, &proof)
     }

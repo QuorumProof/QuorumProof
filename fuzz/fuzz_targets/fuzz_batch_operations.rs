@@ -175,27 +175,41 @@ fn test_large_batch_with_verification(env: &Env, client: &QuorumProofContractCli
 
     // Verify integrity: sample verification across the batch
     let sample_rate = if credential_ids.len() > 100 { 10 } else { 2 };
-    for (idx, &cred_id) in credential_ids.iter().enumerate().step_by(sample_rate.max(1)) {
+    // `enumerate().step_by(rate)` yields `(0, item0), (1, item1), …` with every
+    // Nth item visited — so `idx` is the iterator's sequential counter, NOT the
+    // position inside `credential_ids`.  We need to index `subjects` by the
+    // *actual* position that was sampled, not by the iterator's count.
+    for (iter_count, (actual_pos, &cred_id)) in credential_ids
+        .iter()
+        .enumerate()
+        .step_by(sample_rate.max(1))
+        .enumerate()
+    {
+        let _ = iter_count; // suppress unused-variable warning
         if let Ok(credential) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.get_credential(&cred_id)
         })) {
             // Verify critical properties
-            assert_eq!(credential.issuer, issuer, "Issuer mismatch at credential {}", idx);
-            assert_eq!(credential.subject, subjects[idx], "Subject mismatch at credential {}", idx);
-            assert!(!credential.revoked, "Credential {} should not be revoked", idx);
-            assert!(credential.credential_type > 0, "Invalid credential type at {}", idx);
+            assert_eq!(credential.issuer, issuer, "Issuer mismatch at credential {}", actual_pos);
+            assert_eq!(credential.subject, subjects[actual_pos], "Subject mismatch at credential {}", actual_pos);
+            assert!(!credential.revoked, "Credential {} should not be revoked", actual_pos);
+            assert!(credential.credential_type > 0, "Invalid credential type at {}", actual_pos);
         }
     }
 }
 
 /// Test maximum batch size that contract can handle
 fn test_maximum_batch_size(env: &Env, client: &QuorumProofContractClient, input: &BatchOperationsFuzzInput) {
-    let issuer = Address::generate(&env);
+    // Test progressively larger batches to find limits.
+    // Each size gets a fresh issuer so the rate limit (default 1000 calls per
+    // issuer per window) is never hit by accumulated calls across sizes.
+    // Sizes above the rate limit are capped to avoid false failures from
+    // RateLimitExceeded errors that have nothing to do with batch semantics.
+    let test_sizes: &[usize] = &[100, 500, 1000];
     
-    // Test progressively larger batches to find limits
-    let test_sizes = vec![100, 500, 1000, 2000];
-    
-    for &size in &test_sizes {
+    for &size in test_sizes {
+        // Fresh issuer per size avoids rate-limit accumulation across test rounds.
+        let issuer = Address::generate(&env);
         let mut successful = 0u64;
         let mut failed = 0u64;
 
