@@ -84,7 +84,15 @@ impl PresentationProof {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> BbsResult<Self> {
-        const FIXED_LEN: usize = 48 * 3 + 32 * 4;
+        // Fixed section: a_bar(48) + b_bar(48) + d(48) + e_hat(32) + r1_hat(32)
+        //                + r3_hat(32) + s_hat(32) + challenge(32) = 304 bytes.
+        // The previous constant (48*3 + 32*4 = 272) omitted `challenge`, so
+        // inputs in the 280–303 byte range slipped past the guard and caused
+        // `read_fr` to return `Err(DeserializationError)` for the challenge
+        // field.  Any caller using `.expect()` on that result would panic,
+        // which is the root cause of the nightly fuzz crashes (#1908 / #1912).
+        const FIXED_LEN: usize = 48 * 3 + 32 * 5; // 3 G1 points + 5 scalars (incl. challenge)
+        // Two u32 count fields follow the fixed section.
         if bytes.len() < FIXED_LEN + 8 {
             return Err(BbsError::DeserializationError);
         }
