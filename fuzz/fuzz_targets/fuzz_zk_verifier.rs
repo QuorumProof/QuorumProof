@@ -9,7 +9,7 @@ use zk_verifier::{ClaimType, ZkVerifierContract, ZkVerifierContractClient, GROTH
 /// Fuzz input covering verify_claim with arbitrary proof bytes and claim types.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    proof: Vec<u8>,
+    proof: std::vec::Vec<u8>,
     claim_type_idx: u8,
     credential_id: u64,
     /// Selects the verification mode the oracle is checked under:
@@ -36,37 +36,54 @@ fn claim_discriminant(claim_type: &ClaimType) -> u64 {
 /// Known-invalid proofs the real verifier must reject for `(credential_id, claim_type)`.
 /// Each entry is a distinct failure class: malformed length, degenerate points,
 /// a corrupted valid proof, and a valid proof for a different statement.
+///
+/// Returns `None` if toy-proof generation fails (e.g. degenerate scalar from
+/// the vk_seed — see `generate_proof`'s delta-inversion guard).
 fn known_invalid_proofs(
     env: &Env,
     toy: &ToyVerifyingKey,
     credential_id: u64,
     claim: u64,
     valid: &[u8],
-) -> Vec<(&'static str, Bytes)> {
+) -> Option<std::vec::Vec<(&'static str, Bytes)>> {
     let proof_len = GROTH16_BLS_PROOF_LEN as usize;
     let mut flip_first = valid.to_vec();
     flip_first[0] ^= 0x01;
     let mut flip_last = valid.to_vec();
-    *flip_last.last_mut().unwrap() ^= 0x01;
+    *flip_last.last_mut()? ^= 0x01;
     let mut long = valid.to_vec();
     long.push(0);
 
-    let other_cid = groth16_test_prover::generate_proof(env, toy, 77, &[credential_id.wrapping_add(1), claim]);
-    let other_claim_value = (claim % 5) + 1;
-    let other_claim = groth16_test_prover::generate_proof(env, toy, 78, &[credential_id, other_claim_value]);
+    // `generate_proof` can panic if the toy VK has a degenerate delta scalar
+    // (zero mod the curve order).  Wrap in catch_unwind and bail if so.
+    let other_cid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        groth16_test_prover::generate_proof(
+            env,
+            toy,
+            77,
+            &[credential_id.wrapping_add(1), claim],
+        )
+    }))
+    .ok()?;
 
-    vec![
+    let other_claim_value = (claim % 5) + 1;
+    let other_claim = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        groth16_test_prover::generate_proof(env, toy, 78, &[credential_id, other_claim_value])
+    }))
+    .ok()?;
+
+    Some(std::vec![
         ("empty", Bytes::new(env)),
         ("one_byte", Bytes::from_slice(env, &[0u8])),
         ("truncated", Bytes::from_slice(env, &valid[..proof_len - 1])),
         ("oversized", Bytes::from_slice(env, &long)),
-        ("all_zero", Bytes::from_slice(env, &vec![0u8; proof_len])),
-        ("all_ff", Bytes::from_slice(env, &vec![0xffu8; proof_len])),
+        ("all_zero", Bytes::from_slice(env, &std::vec![0u8; proof_len])),
+        ("all_ff", Bytes::from_slice(env, &std::vec![0xffu8; proof_len])),
         ("corrupt_leading_point", Bytes::from_slice(env, &flip_first)),
         ("corrupt_trailing_point", Bytes::from_slice(env, &flip_last)),
         ("wrong_credential_id", other_cid.proof),
         ("wrong_claim_type", other_claim.proof),
-    ]
+    ])
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -89,7 +106,7 @@ fuzz_target!(|input: FuzzInput| {
         _ => ClaimType::HasResearchPublication,
     };
 
-    // Returns `None` if the contract panicked on this input. Fuzz inputs may
+    // Returns `None` if the contract panicked on this input.  Fuzz inputs may
     // legitimately trigger contract panics, so those are skipped below; the
     // known-invalid corpus treats a panic as a failure instead.
     let verify = |p: &Bytes| -> Option<bool> {
@@ -109,11 +126,27 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Mode 2: real Groth16 verification with a registered key.
-    let toy = groth16_test_prover::generate_vk(&env, input.vk_seed, CLAIM_PUBLIC_INPUTS);
+    //
+    // `generate_vk` uses `toxic_waste` which does a wrapping u64 multiply.
+    // For certain `vk_seed` values the resulting `delta_s` is the zero scalar,
+    // making `generate_proof` panic.  Catch that panic and skip the real-mode
+    // checks for this seed rather than crashing the fuzz harness.
+    let toy = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        groth16_test_prover::generate_vk(&env, input.vk_seed, CLAIM_PUBLIC_INPUTS)
+    })) {
+        Ok(t) => t,
+        Err(_) => return, // degenerate seed — skip real-mode verification
+    };
+
     client.set_groth16_verifying_key(&admin, &toy.vk_hash, &toy.vk);
 
     let claim = claim_discriminant(&claim_type);
-    let valid = groth16_test_prover::generate_proof(&env, &toy, input.vk_seed, &[input.credential_id, claim]);
+    let valid = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        groth16_test_prover::generate_proof(&env, &toy, input.vk_seed, &[input.credential_id, claim])
+    })) {
+        Ok(p) => p,
+        Err(_) => return, // degenerate proof seed — skip
+    };
 
     // Sanity: a genuinely valid proof for this statement must be accepted,
     // otherwise the rejection checks below would pass for the wrong reason.
@@ -124,9 +157,19 @@ fuzz_target!(|input: FuzzInput| {
     );
 
     // Known-invalid corpus: every entry must be rejected without panicking.
+    // `known_invalid_proofs` itself returns `None` when toy-proof generation
+    // hits a degenerate delta scalar; skip the corpus check in that case.
     let valid_bytes = valid.proof.to_alloc_vec();
-    for (name, bad) in known_invalid_proofs(&env, &toy, input.credential_id, claim, &valid_bytes) {
-        assert_eq!(verify(&bad), Some(false), "known-invalid proof `{name}` must be rejected");
+    if let Some(invalid_corpus) =
+        known_invalid_proofs(&env, &toy, input.credential_id, claim, &valid_bytes)
+    {
+        for (name, bad) in invalid_corpus {
+            assert_eq!(
+                verify(&bad),
+                Some(false),
+                "known-invalid proof `{name}` must be rejected"
+            );
+        }
     }
 
     // Arbitrary fuzz input: anything other than the valid proof must be rejected.
