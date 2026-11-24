@@ -1,11 +1,11 @@
+use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 /// Credential Database Backup Module
 ///
 /// Implements automated daily backup of the credential database with integrity verification.
 /// Supports encryption, compression, and S3 storage.
-
 use std::collections::HashMap;
-use sha2::{Sha256, Digest};
-use chrono::{Utc, DateTime};
+use std::fs;
 
 #[derive(Debug, Clone)]
 pub struct BackupIntegrity {
@@ -46,7 +46,8 @@ pub async fn backup_credentials(
 
     // Calculate checksums
     let data_checksum = calculate_data_checksum(&credentials, &slices)?;
-    let metadata_checksum = calculate_metadata_checksum(&backup_date, credential_count, slice_count)?;
+    let metadata_checksum =
+        calculate_metadata_checksum(&backup_date, credential_count, slice_count)?;
 
     let backup_integrity = BackupIntegrity {
         checksum_algorithm: "sha256".to_string(),
@@ -92,6 +93,13 @@ pub async fn verify_backup_integrity(
     backup_path: &str,
     encryption_key: Option<&str>,
 ) -> Result<BackupIntegrityReport, BackupError> {
+    verify_backup_integrity_sync(backup_path, encryption_key)
+}
+
+fn verify_backup_integrity_sync(
+    backup_path: &str,
+    encryption_key: Option<&str>,
+) -> Result<BackupIntegrityReport, BackupError> {
     // Read backup file
     let backup_data = read_backup_file(backup_path)?;
 
@@ -117,7 +125,8 @@ pub async fn verify_backup_integrity(
     )?;
 
     let data_checksum_valid = recalculated_data_checksum == metadata.backup_integrity.data_checksum;
-    let metadata_checksum_valid = recalculated_metadata_checksum == metadata.backup_integrity.metadata_checksum;
+    let metadata_checksum_valid =
+        recalculated_metadata_checksum == metadata.backup_integrity.metadata_checksum;
 
     Ok(BackupIntegrityReport {
         valid: data_checksum_valid && metadata_checksum_valid,
@@ -165,7 +174,9 @@ impl std::fmt::Display for BackupError {
             BackupError::EncryptionFailed(msg) => write!(f, "Encryption failed: {}", msg),
             BackupError::DecryptionFailed(msg) => write!(f, "Decryption failed: {}", msg),
             BackupError::S3UploadFailed(msg) => write!(f, "S3 upload failed: {}", msg),
-            BackupError::ChecksumCalculationFailed(msg) => write!(f, "Checksum calculation failed: {}", msg),
+            BackupError::ChecksumCalculationFailed(msg) => {
+                write!(f, "Checksum calculation failed: {}", msg)
+            }
             BackupError::InvalidBackup(msg) => write!(f, "Invalid backup: {}", msg),
             BackupError::IoError(msg) => write!(f, "IO error: {}", msg),
         }
@@ -264,18 +275,91 @@ async fn upload_to_s3_bucket(
     Ok(())
 }
 
-fn read_backup_file(_path: &str) -> Result<Vec<u8>, BackupError> {
-    Ok(vec![])
+fn read_backup_file(path: &str) -> Result<Vec<u8>, BackupError> {
+    let data = fs::read(path).map_err(|err| {
+        BackupError::IoError(format!("Failed to read backup file '{}': {}", path, err))
+    })?;
+
+    if data.is_empty() {
+        return Err(BackupError::InvalidBackup(format!(
+            "Backup file '{}' is empty",
+            path
+        )));
+    }
+
+    Ok(data)
 }
 
 fn parse_backup(_data: &[u8]) -> Result<BackupMetadata, BackupError> {
     Err(BackupError::InvalidBackup("Not implemented".to_string()))
 }
 
-fn extract_credentials_from_backup(_data: &[u8]) -> Result<Vec<HashMap<String, String>>, BackupError> {
+fn extract_credentials_from_backup(
+    _data: &[u8],
+) -> Result<Vec<HashMap<String, String>>, BackupError> {
     Ok(vec![])
 }
 
 fn extract_slices_from_backup(_data: &[u8]) -> Result<Vec<HashMap<String, String>>, BackupError> {
     Ok(vec![])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_backup_path(name: &str) -> String {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("quorumproof-{}-{}.backup", name, unique))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn read_backup_file_returns_error_when_missing() {
+        let path = temporary_backup_path("missing");
+        let result = read_backup_file(&path);
+
+        assert!(matches!(result, Err(BackupError::IoError(_))));
+    }
+
+    #[test]
+    fn read_backup_file_returns_error_when_empty() {
+        let path = temporary_backup_path("empty");
+        fs::write(&path, b"").unwrap();
+
+        let result = read_backup_file(&path);
+        fs::remove_file(&path).unwrap();
+
+        assert!(matches!(result, Err(BackupError::InvalidBackup(message))
+            if message.contains("is empty")));
+    }
+
+    #[test]
+    fn empty_backup_fails_verification() {
+        let path = temporary_backup_path("empty-verification");
+        fs::write(&path, b"").unwrap();
+
+        let result = verify_backup_integrity_sync(&path, None);
+        fs::remove_file(&path).unwrap();
+
+        assert!(matches!(result, Err(BackupError::InvalidBackup(message))
+            if message.contains("is empty")));
+    }
+
+    #[test]
+    fn read_backup_file_reads_non_empty_data() {
+        let path = temporary_backup_path("valid");
+        fs::write(&path, b"backup-data").unwrap();
+
+        let result = read_backup_file(&path);
+        fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), b"backup-data");
+    }
 }
