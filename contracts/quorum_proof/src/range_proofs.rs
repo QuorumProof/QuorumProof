@@ -89,8 +89,18 @@ pub fn generate_age_commitment(_env: &Env, _age: u64, _randomness: &Bytes) -> By
     Bytes::new(_env)
 }
 
-/// Create a range proof for an age attribute
-/// This demonstrates the structure; real implementation would use Bulletproofs
+/// Create a range proof for an age attribute.
+///
+/// Gated behind `#[cfg(test)]`: this helper does not yet generate real
+/// Bulletproof bytes, so the returned `RangeProof` carries *empty*
+/// `commitment`, `proof_bytes` and `attribute_hash` fields.  A proof that is
+/// structurally valid but carries no cryptographic material would be
+/// indistinguishable from a real one to callers, so the helper is kept
+/// test-only until a real prover exists.  The verification boundary
+/// ([`verify_age_range_proof`]) rejects any proof whose `proof_bytes`
+/// (or commitment/attribute hash) is empty, so a placeholder proof can never
+/// be accepted.
+#[cfg(test)]
 pub fn create_age_range_proof(
     _env: &Env,
     age: u64,
@@ -105,8 +115,9 @@ pub fn create_age_range_proof(
         return Err("age is outside the specified range");
     }
 
-    // In production, this would use actual Bulletproof generation
-    // For now, we structure the proof correctly
+    // In production, this would use actual Bulletproof generation.
+    // For now, we structure the proof correctly; the empty cryptographic fields
+    // are rejected by `verify_age_range_proof` at the boundary.
     Ok(RangeProof {
         commitment: Bytes::new(_env),
         proof_bytes: Bytes::new(_env),
@@ -131,9 +142,20 @@ pub fn verify_age_range_proof(
     // 2. Verify the Bulletproof using the commitment
     // 3. Ensure the proof covers the entire range [min_value, max_value]
 
-    // For now, structural validation
+    // Structural validation at the verification boundary: a proof that carries
+    // no cryptographic material must never be accepted.  This rejects the
+    // placeholder proofs produced by the test-only `create_age_range_proof`
+    // (whose commitment, proof_bytes and attribute_hash are all empty), so a
+    // structurally valid-looking RangeProof that carries no proof can never
+    // slip through.
     if proof.commitment.len() == 0 {
         return Err("invalid commitment");
+    }
+    if proof.proof_bytes.len() == 0 {
+        return Err("invalid proof bytes");
+    }
+    if proof.attribute_hash.len() == 0 {
+        return Err("invalid attribute hash");
     }
 
     Ok(true)
@@ -194,5 +216,81 @@ mod tests {
         assert!(check_value_in_range(&proof, 65));
         assert!(!check_value_in_range(&proof, 17));
         assert!(!check_value_in_range(&proof, 66));
+    }
+
+    fn proof_config() -> RangeProofConfig {
+        RangeProofConfig {
+            min_range_size: 1,
+            max_range_size: 100,
+            enable_cache: true,
+            cache_ttl_seconds: 3600,
+        }
+    }
+
+    // Issue #1944: `create_age_range_proof` must not be able to mint proofs that
+    // look structurally valid but carry no proof. The helper is test-only and
+    // the verification boundary rejects empty cryptographic fields.
+    #[test]
+    fn test_verify_age_range_proof_rejects_empty_proof_bytes() {
+        let env = Env::default();
+        let config = proof_config();
+
+        // A fully empty proof is rejected (empty commitment).
+        let empty_proof = RangeProof {
+            commitment: Bytes::new(&env),
+            proof_bytes: Bytes::new(&env),
+            min_value: 18,
+            max_value: 65,
+            attribute_hash: Bytes::new(&env),
+        };
+        assert!(verify_age_range_proof(&env, &empty_proof, &config).is_err());
+
+        // Non-empty commitment but empty proof_bytes: still rejected at the
+        // boundary because the proof carries no actual proof bytes.
+        let no_proof_bytes = RangeProof {
+            commitment: Bytes::from_slice(&env, b"commitment"),
+            proof_bytes: Bytes::new(&env),
+            min_value: 18,
+            max_value: 65,
+            attribute_hash: Bytes::from_slice(&env, b"age"),
+        };
+        let res = verify_age_range_proof(&env, &no_proof_bytes, &config);
+        assert!(
+            res.is_err(),
+            "empty proof_bytes must be rejected at the verification boundary"
+        );
+
+        // Non-empty commitment and proof_bytes but empty attribute_hash: rejected.
+        let no_attribute_hash = RangeProof {
+            commitment: Bytes::from_slice(&env, b"commitment"),
+            proof_bytes: Bytes::from_slice(&env, b"proof"),
+            min_value: 18,
+            max_value: 65,
+            attribute_hash: Bytes::new(&env),
+        };
+        assert!(verify_age_range_proof(&env, &no_attribute_hash, &config).is_err());
+    }
+
+    // Issue #1944: `create_age_range_proof` is gated behind #[cfg(test)] and only
+    // produces placeholder (empty) proof bytes, which the boundary rejects.
+    #[test]
+    fn test_create_age_range_proof_is_test_only_and_unverifiable() {
+        let env = Env::default();
+        let config = proof_config();
+        let randomness = Bytes::new(&env);
+
+        // Out-of-range age is rejected before any proof is produced.
+        assert!(create_age_range_proof(&env, 200, 18, 65, &randomness, &config).is_err());
+
+        // In-range age produces a structurally valid RangeProof whose proof bytes
+        // are empty, so verification must reject it.
+        let proof = create_age_range_proof(&env, 40, 18, 65, &randomness, &config).unwrap();
+        assert_eq!(proof.min_value, 18);
+        assert_eq!(proof.max_value, 65);
+        assert_eq!(proof.proof_bytes.len(), 0);
+        assert!(
+            verify_age_range_proof(&env, &proof, &config).is_err(),
+            "placeholder (empty) proof must be rejected at the boundary"
+        );
     }
 }
