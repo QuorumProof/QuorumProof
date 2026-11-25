@@ -28,6 +28,7 @@
  */
 
 import type { Pool as PgPool, PoolConfig } from 'pg';
+import { logger } from './services/logger.js';
 
 let _pool: PgPool | null = null;
 
@@ -63,22 +64,11 @@ export async function initPool(connectionString: string): Promise<PgPool> {
   // Surface connection-level errors (e.g. server restart, network blip) as
   // logs rather than unhandled promise rejections that would crash the process.
   pool.on('error', (err: Error) => {
-    console.error(JSON.stringify({
-      ts: new Date().toISOString(),
-      level: 'error',
-      service: 'quorumproof-api',
-      msg: 'Idle database client error',
-      error: err.message,
-    }));
+    logger.error('Idle database client error', 'db', { error: err.message });
   });
 
   pool.on('connect', () => {
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      level: 'debug',
-      service: 'quorumproof-api',
-      msg: 'New database connection established',
-    }));
+    logger.debug('New database connection established', 'db');
   });
 
   _pool = pool;

@@ -103,6 +103,9 @@ jobs:
           cache: npm
           cache-dependency-path: api-server/package-lock.json
       - run: npm ci
+      # Issue #1980: server logging must go through the structured logger so
+      # output carries request IDs and redaction (enforced by no-console).
+      - run: npm run lint
       - run: npm test -- contract-tests.test.ts
       - run: npm test -- snapshots.test.ts
 

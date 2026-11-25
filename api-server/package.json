@@ -11,6 +11,7 @@
     "dev": "tsx watch --clear-screen=false src/index.ts",
     "dev:once": "tsx src/index.ts",
     "test": "vitest --run",
+    "lint": "eslint src",
     "loadtest:ws": "tsx loadtest/wsLoadTest.ts",
     "loadtest:credentials": "tsx loadtest/credentialLoadTest.ts",
     "longevity": "node --expose-gc --import tsx longevity/harness.ts",
@@ -57,12 +58,14 @@
     "@types/supertest": "^7.2.0",
     "@types/swagger-ui-express": "^4.1.8",
     "@types/ws": "^8.18.1",
+    "eslint": "^9.39.5",
     "hardhat": "^3.10.0",
     "openapi3-ts": "^4.6.1",
     "solc": "^0.8.36",
     "supertest": "^7.2.2",
     "tsx": "^4.19.4",
     "typescript": "~5.9.3",
+    "typescript-eslint": "^8.74.0",
     "vitest": "^1.6.0"
   }
 }

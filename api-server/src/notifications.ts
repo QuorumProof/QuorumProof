@@ -11,6 +11,7 @@
  */
 
 import { getPool } from './db.js';
+import { logger } from './services/logger.js';
 import type { Pool as PgPool } from 'pg';
 
 export type NotificationChannel = 'email' | 'sms';
@@ -132,17 +133,31 @@ function buildBatchMessage(
 /**
  * Simulate sending an email notification.
  * Replace with a real provider (e.g. SendGrid, SES) in production.
+ *
+ * The recipient is passed as `contact_value` so the logger's redaction rules
+ * apply — notification destinations are PII and must not reach the log files.
  */
 async function sendEmail(to: string, message: string): Promise<void> {
-  console.log(`[EMAIL] To: ${to} | ${message}`);
+  logger.info('Notification email dispatched', 'notifications', {
+    channel: 'email',
+    contact_value: to,
+    message,
+  });
 }
 
 /**
  * Simulate sending an SMS notification.
  * Replace with a real provider (e.g. Twilio) in production.
+ *
+ * The recipient is passed as `contact_value` so the logger's redaction rules
+ * apply — notification destinations are PII and must not reach the log files.
  */
 async function sendSms(phone: string, message: string): Promise<void> {
-  console.log(`[SMS] To: ${phone} | ${message}`);
+  logger.info('Notification SMS dispatched', 'notifications', {
+    channel: 'sms',
+    contact_value: phone,
+    message,
+  });
 }
 
 // ---------------------------------------------------------------------------
