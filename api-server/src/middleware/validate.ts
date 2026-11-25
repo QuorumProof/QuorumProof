@@ -871,5 +871,28 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+  bulkOperations: {
+    body: {
+      type: 'object',
+      properties: {
+        operations: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', minLength: 1 },
+              type: { type: 'string' },
+              args: { type: 'object', additionalProperties: true },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['operations'],
+      additionalProperties: false,
+    },
+  },
 };
 export default validate;

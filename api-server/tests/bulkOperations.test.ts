@@ -30,7 +30,7 @@ describe('bulk operations route', () => {
     expect(simulateCall).not.toHaveBeenCalled();
   });
 
-  it('enforces the 50-operation maximum without resolving any operations', async () => {
+  it('enforces the 50-operation maximum via validate() without resolving any operations', async () => {
     const { app, simulateCall } = createTestApp();
     const operations = Array.from({ length: 51 }, (_, id) => ({
       type: 'slice',
@@ -38,8 +38,11 @@ describe('bulk operations route', () => {
     }));
     const response = await request(app).post('/api/bulk').send({ operations });
 
-    expect(response.status).toBe(413);
-    expect(response.body.error).toBe('operations cannot exceed 50 items');
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('Validation failed');
+    expect(response.body.details).toEqual(
+      expect.arrayContaining([expect.objectContaining({ keyword: 'maxItems' })]),
+    );
     expect(simulateCall).not.toHaveBeenCalled();
   });
 
