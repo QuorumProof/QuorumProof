@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import AttestorRecoveryApprovals from '../AttestorRecoveryApprovals';
 
@@ -21,6 +21,14 @@ function renderWithRouter(component: React.ReactElement) {
 describe('AttestorRecoveryApprovals', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [] }),
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('should render the attestor recovery approvals page', () => {
@@ -28,31 +36,17 @@ describe('AttestorRecoveryApprovals', () => {
     expect(screen.getByTestId('navbar')).toBeInTheDocument();
   });
 
-  it('should display loading state initially', async () => {
+  it('shows an empty state when the API returns no requests', async () => {
     renderWithRouter(<AttestorRecoveryApprovals />);
-    await waitFor(() => {
-      expect(screen.getByTestId('navbar')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('No pending recovery requests.')).toBeInTheDocument();
+    expect(screen.queryByText('Approve')).not.toBeInTheDocument();
   });
 
-  it('should display error state on load failure', async () => {
+  it('shows an error instead of requests when loading fails', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('Network error'));
     renderWithRouter(<AttestorRecoveryApprovals />);
-    await waitFor(() => {
-      expect(screen.getByTestId('navbar')).toBeInTheDocument();
-    });
-  });
-
-  it('should display empty state when no approvals required', async () => {
-    renderWithRouter(<AttestorRecoveryApprovals />);
-    await waitFor(() => {
-      expect(screen.getByTestId('navbar')).toBeInTheDocument();
-    });
-  });
-
-  it('should display success state with recovery approvals', async () => {
-    renderWithRouter(<AttestorRecoveryApprovals />);
-    await waitFor(() => {
-      expect(screen.getByTestId('navbar')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('Failed to load recovery requests. Please try again.')).toBeInTheDocument();
+    expect(screen.queryByText('No pending recovery requests.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Approve')).not.toBeInTheDocument();
   });
 });
