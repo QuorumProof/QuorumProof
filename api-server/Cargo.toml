@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "quorumproof-backup"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "backup"
+path = "src/backup.rs"
+
+[dependencies]
+aws-config = "1"
+aws-sdk-s3 = "1"
+chrono = "0.4"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread"] }

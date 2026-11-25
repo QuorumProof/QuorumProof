@@ -4,6 +4,10 @@
 /// Supports encryption, compression, and S3 storage.
 
 use std::collections::HashMap;
+use std::path::Path;
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client as S3Client;
 use sha2::{Sha256, Digest};
 use chrono::{Utc, DateTime};
 
@@ -172,6 +176,8 @@ impl std::fmt::Display for BackupError {
     }
 }
 
+impl std::error::Error for BackupError {}
+
 // Helper functions
 
 async fn fetch_contract_credentials(
@@ -254,13 +260,66 @@ fn save_backup_locally(
     Ok(path)
 }
 
+fn build_s3_object_key(local_path: &str, network: &str, contract_id: &str) -> Result<String, BackupError> {
+    let file_name = Path::new(local_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            BackupError::S3UploadFailed(format!("Invalid local backup path: '{}'", local_path))
+        })?;
+
+    Ok(format!("backups/{}/{}/{}", network, contract_id, file_name))
+}
+
 async fn upload_to_s3_bucket(
-    _local_path: &str,
-    _s3_bucket: &str,
-    _network: &str,
-    _contract_id: &str,
+    local_path: &str,
+    s3_bucket: &str,
+    network: &str,
+    contract_id: &str,
 ) -> Result<(), BackupError> {
-    // Implementation would upload to S3
+    let sdk_config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+    let client = S3Client::new(&sdk_config);
+    upload_to_s3_with_client(&client, local_path, s3_bucket, network, contract_id).await
+}
+
+pub async fn upload_to_s3_with_client(
+    client: &S3Client,
+    local_path: &str,
+    s3_bucket: &str,
+    network: &str,
+    contract_id: &str,
+) -> Result<(), BackupError> {
+    if s3_bucket.trim().is_empty() {
+        return Err(BackupError::S3UploadFailed(
+            "S3 bucket name cannot be empty".to_string(),
+        ));
+    }
+
+    let object_key = build_s3_object_key(local_path, network, contract_id)?;
+
+    let file_bytes = tokio::fs::read(local_path).await.map_err(|err| {
+        BackupError::IoError(format!(
+            "Failed to read local backup file '{}': {}",
+            local_path, err
+        ))
+    })?;
+
+    client
+        .put_object()
+        .bucket(s3_bucket)
+        .key(&object_key)
+        .body(ByteStream::from(file_bytes))
+        .content_type("application/json")
+        .send()
+        .await
+        .map_err(|err| {
+            BackupError::S3UploadFailed(format!(
+                "Failed to upload '{}' to s3://{}/{}: {}",
+                local_path, s3_bucket, object_key, err
+            ))
+        })?;
+
     Ok(())
 }
 
@@ -278,4 +337,222 @@ fn extract_credentials_from_backup(_data: &[u8]) -> Result<Vec<HashMap<String, S
 
 fn extract_slices_from_backup(_data: &[u8]) -> Result<Vec<HashMap<String, String>>, BackupError> {
     Ok(vec![])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_s3::config::{retry::RetryConfig, BehaviorVersion, Credentials, Region};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    struct CapturedRequest {
+        request_line: String,
+        body: Vec<u8>,
+    }
+
+    async fn spawn_mock_s3_server(
+        response: &'static str,
+    ) -> (String, oneshot::Receiver<CapturedRequest>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind mock S3 listener");
+        let addr = listener.local_addr().expect("failed to get local addr");
+        let (tx, rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+
+                let header_end = loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break buffer.len();
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+
+                let headers_str = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                let request_line = headers_str
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+
+                let content_length: usize = headers_str
+                    .lines()
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        if k.eq_ignore_ascii_case("content-length") {
+                            v.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+
+                while buffer.len() < header_end + content_length {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                }
+
+                let body = buffer[header_end..header_end + content_length.min(buffer.len() - header_end)].to_vec();
+                let _ = tx.send(CapturedRequest { request_line, body });
+
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{}", addr), rx)
+    }
+
+    fn build_mock_s3_client(endpoint_url: &str) -> S3Client {
+        let conf = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new(
+                "test-access-key",
+                "test-secret-key",
+                None,
+                None,
+                "static-test",
+            ))
+            .endpoint_url(endpoint_url)
+            .force_path_style(true)
+            .retry_config(RetryConfig::disabled())
+            .build();
+        S3Client::from_conf(conf)
+    }
+
+    #[tokio::test]
+    async fn test_upload_to_s3_success() {
+        let response = "HTTP/1.1 200 OK\r\nETag: \"mock-etag-123\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (endpoint, rx) = spawn_mock_s3_server(response).await;
+        let client = build_mock_s3_client(&endpoint);
+
+        let payload = br#"{"backup":"ok","credentials":42}"#;
+        let temp_path = std::env::temp_dir().join(format!(
+            "quorumproof-test-backup-{}.json",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        tokio::fs::write(&temp_path, payload)
+            .await
+            .expect("failed to write temp backup file");
+
+        let file_name = temp_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
+        let path_str = temp_path.to_str().unwrap().to_string();
+
+        let result = upload_to_s3_with_client(
+            &client,
+            &path_str,
+            "quorumproof-backups",
+            "testnet",
+            "CABC123",
+        )
+        .await;
+
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        assert!(result.is_ok(), "expected S3 upload to succeed, got {:?}", result);
+
+        let captured = rx.await.expect("mock S3 server did not receive request");
+        let expected_path = format!("/quorumproof-backups/backups/testnet/CABC123/{}", file_name);
+        assert!(
+            captured.request_line.starts_with(&format!("PUT {} ", expected_path)),
+            "unexpected request line: {}",
+            captured.request_line
+        );
+        assert_eq!(captured.body, payload);
+    }
+
+    #[tokio::test]
+    async fn test_upload_to_s3_returns_error_on_server_failure() {
+        let error_body = "<Error><Code>InternalError</Code><Message>Simulated S3 failure</Message></Error>";
+        let response: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                error_body.len(),
+                error_body
+            )
+            .into_boxed_str(),
+        );
+        let (endpoint, _rx) = spawn_mock_s3_server(response).await;
+        let client = build_mock_s3_client(&endpoint);
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "quorumproof-test-fail-{}.json",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        tokio::fs::write(&temp_path, b"{}")
+            .await
+            .expect("failed to write temp backup file");
+
+        let result = upload_to_s3_with_client(
+            &client,
+            temp_path.to_str().unwrap(),
+            "quorumproof-backups",
+            "testnet",
+            "CABC123",
+        )
+        .await;
+
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        assert!(
+            matches!(result, Err(BackupError::S3UploadFailed(_))),
+            "expected S3UploadFailed error, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upload_to_s3_returns_error_when_file_missing() {
+        let client = build_mock_s3_client("http://127.0.0.1:1");
+        let result = upload_to_s3_with_client(
+            &client,
+            "/nonexistent/path/quorumproof-backup.json",
+            "quorumproof-backups",
+            "testnet",
+            "CABC123",
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(BackupError::IoError(_))),
+            "expected IoError for missing local file, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upload_to_s3_returns_error_on_empty_bucket() {
+        let client = build_mock_s3_client("http://127.0.0.1:1");
+        let result = upload_to_s3_with_client(
+            &client,
+            "backups/daily/test.json",
+            "   ",
+            "testnet",
+            "CABC123",
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(BackupError::S3UploadFailed(_))),
+            "expected S3UploadFailed for empty bucket, got {:?}",
+            result
+        );
+    }
 }
