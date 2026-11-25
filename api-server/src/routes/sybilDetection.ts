@@ -7,6 +7,7 @@
 import { Router, Request, Response } from 'express';
 import { SybilDetectionService } from '../services/sybilDetection.js';
 import { problemJson } from '../middleware/problemDetails.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 const sybilService = new SybilDetectionService();
@@ -15,14 +16,9 @@ const sybilService = new SybilDetectionService();
  * POST /api/sybil/record-event
  * Records a credential creation event for Sybil analysis
  */
-router.post('/record-event', (req: Request, res: Response) => {
+router.post('/record-event', validate(schemas.sybilRecordEvent), (req: Request, res: Response) => {
   try {
-    const { address } = req.body as Record<string, unknown>;
-
-    if (!address || typeof address !== 'string') {
-      res.status(400).json(problemJson(400, 'invalid-parameter', 'address is required'));
-      return;
-    }
+    const { address } = req.body as { address: string };
 
     sybilService.recordCredentialCreation(address);
 
@@ -112,9 +108,9 @@ router.get('/alerts/:address', (req: Request, res: Response) => {
  * POST /api/sybil/dismiss-alert/:alert_id
  * Dismisses an anomaly alert
  */
-router.post('/dismiss-alert/:alert_id', (req: Request, res: Response) => {
+router.post('/dismiss-alert/:alert_id', validate(schemas.sybilDismissAlert), (req: Request, res: Response) => {
   try {
-    const alert_id = (req.params.alert_id || '') as string;
+    const alert_id = req.params.alert_id as string;
 
     const dismissed = sybilService.dismissAlert(alert_id);
 

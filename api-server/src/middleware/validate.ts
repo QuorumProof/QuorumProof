@@ -871,5 +871,35 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+  sybilRecordEvent: {
+    body: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', minLength: 1, pattern: '\\S' },
+      },
+      required: ['address'],
+      additionalProperties: false,
+    },
+  },
+  sybilDismissAlert: {
+    params: {
+      type: 'object',
+      properties: {
+        alert_id: { type: 'string', minLength: 1, pattern: '\\S' },
+      },
+      required: ['alert_id'],
+      additionalProperties: false,
+    },
+    body: {
+      custom: (data) =>
+        data === undefined ||
+        (typeof data === 'object' &&
+          data !== null &&
+          !Array.isArray(data) &&
+          Object.keys(data).length === 0)
+          ? true
+          : 'Request body must be empty',
+    },
+  },
 };
 export default validate;
