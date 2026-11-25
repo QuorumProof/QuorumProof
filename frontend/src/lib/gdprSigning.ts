@@ -1,6 +1,8 @@
 /**
  * GDPR request signing utilities
- * Signs challenges and payload to prove ownership of a credential subject address
+ * Prepares wallet-signed payloads for server-side ownership verification.
+ * No client-side signer recovery or authentication is performed here.
+ * See docs/gdpr-compliance.md for the verification contract.
  */
 
 import { signMessage } from '@stellar/freighter-api';
@@ -17,7 +19,8 @@ export function generateChallenge(): string {
 
 /**
  * Sign a GDPR request payload with the connected wallet
- * Proves the signer controls the credential subject address
+ * The supplied subject address is a claim until the server verifies the
+ * signature against the credential subject; signing alone does not authorize it.
  */
 export async function signGdprRequest(
   credentialId: number,
@@ -37,8 +40,9 @@ export async function signGdprRequest(
 }
 
 /**
- * Verify that a signature matches the expected message format
- * This is a client-side check; server performs cryptographic verification
+ * Check only that the wallet result is non-empty and base64-like.
+ * This does not verify a signature or identify its signer. Cryptographic
+ * verification and credential ownership checks belong on the server.
  */
 export function validateSignatureFormat(signature: string): boolean {
   // Signature should be non-empty and base64-like
@@ -46,22 +50,8 @@ export function validateSignatureFormat(signature: string): boolean {
 }
 
 /**
- * Extract the signer address from a signed message (client-side verification)
- * Server-side will perform cryptographic verification
- */
-export async function extractSignerAddress(message: string, signature: string): Promise<string | null> {
-  try {
-    // This is a placeholder for actual cryptographic verification
-    // In production, the server should verify the signature and extract the signer address
-    // For now, we return null to indicate the server must verify
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Create a signed GDPR request payload
+ * Payload sent to POST /api/gdpr/request for server-side verification.
+ * subjectAddress is caller-supplied, not a recovered or authenticated signer.
  */
 export interface SignedGdprRequestPayload {
   credentialId: number;
@@ -70,6 +60,10 @@ export interface SignedGdprRequestPayload {
   subjectAddress: string;
 }
 
+/**
+ * Build the payload to submit to the API, checking signature format only.
+ * Callers must not treat successful creation as proof of credential ownership.
+ */
 export async function createSignedGdprRequest(
   credentialId: number,
   subjectAddress: string
