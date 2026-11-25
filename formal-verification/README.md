@@ -56,7 +56,7 @@ tla-tools CredentialIssuance.tla \
 **Liveness Properties:**
 - `EventualAttestation` — Credentials with enough votes and no challenges eventually attested
 
-**Reference:** [contracts/quorum_proof/src/lib.rs](../contracts/quorum_proof/src/lib.rs), [docs/trust-slices.md](../docs/trust-slices.md), Issue #1317
+**Reference:** [contracts/quorum_proof/src/lib.rs](../contracts/quorum_proof/src/lib.rs), [docs/quorum-slice-guide.md](../docs/quorum-slice-guide.md), Issue #1317
 
 **How to Run:**
 ```bash
@@ -202,7 +202,7 @@ done
 echo "All formal specifications verified successfully."
 ```
 
-See [GitHub Actions workflow](./.github/workflows/formal-verification.yml) for CI/CD integration.
+See [Formal Verification for Critical Functions](../docs/formal-verification.md) and the [CI workflow](../.github/workflows/ci.yml) for build integration.
 
 ---
 
@@ -254,11 +254,11 @@ If you are adding a new formal specification:
 For questions about these specifications or formal verification in QuorumProof:
 
 - Open an issue tagged `formal-verification` on GitHub
-- See [docs/formal-verification-guide.md](../docs/formal-verification-guide.md) for integration patterns
+- See [docs/formal-verification.md](../docs/formal-verification.md) for integration patterns
 - Contact the maintainers
 
 ---
 
 ## License
 
-All TLA+ specifications in this directory are licensed under the MIT License (same as QuorumProof). See [LICENSE](../LICENSE) for details.
+All TLA+ specifications in this directory are licensed under the [MIT License](https://opensource.org/licenses/MIT) (same as QuorumProof).

@@ -854,7 +854,7 @@ fn validate_employment_metadata(metadata: &serde_json::Value) -> Result<(), Erro
 
 ## References
 
-- [Credential Expiry and Auto-Revocation](./credential-expiry.md)
-- [Trust Slice Model](./trust-slices.md)
-- [ZK Verification Design](./zk-verification.md)
+- [Credential Expiry and Auto-Revocation](./sbt-lifecycle.md)
+- [Trust Slice Model](./quorum-slice-guide.md)
+- [ZK Verification Design](./zk-verification-implementation.md)
 - [Threat Model & Security](./threat-model.md)

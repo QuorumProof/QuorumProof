@@ -402,4 +402,4 @@ client.transfer(&owner, &recipient, &token_id); // Error(Contract, #1)
 
 - [Architecture Overview](architecture.md)
 - [Threat Model & Security](threat-model.md)
-- [Trust Slice Model](trust-slices.md)
+- [Trust Slice Model](quorum-slice-guide.md)

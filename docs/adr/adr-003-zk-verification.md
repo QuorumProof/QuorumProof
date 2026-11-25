@@ -164,4 +164,4 @@ The system will use a dedicated `zk_verifier` contract that:
 - [Zero-Knowledge Proofs - Wikipedia](https://en.wikipedia.org/wiki/Zero-knowledge_proof)
 - [zk-SNARKs - Vitalik Buterin](https://blog.ethereum.org/2016/12/05/zksnarks-in-a-nutshell/)
 - [Circom - Circuit Compiler](https://docs.circom.io/)
-- [ZK Verification Design Documentation](../zk-verification.md)
+- [ZK Verification Design Documentation](../zk-verification-implementation.md)

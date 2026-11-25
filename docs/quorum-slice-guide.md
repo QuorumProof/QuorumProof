@@ -304,4 +304,4 @@ Below is a concrete example of a Brazilian mechanical engineer, Ana, seeking ver
 - [ADR-006: Quorum Intersection Verification](./adr/adr-006-quorum-intersection-verification.md) — nested slices, off-chain certificate pattern, equivocation handling
 - [ADR-008: Economic Security Model](./adr/adr-008-economic-security-model.md) — reputation-tied weighting and cost-of-attack estimation
 - [contracts/quorum_proof/API.md](../contracts/quorum_proof/API.md) — full contract API reference
-- [docs/trust-slices.md](./trust-slices.md) — broader trust-slice architecture overview
+- [docs/architecture.md](./architecture.md) — broader trust-slice architecture overview

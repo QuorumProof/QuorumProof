@@ -130,4 +130,4 @@ Credentials are considered attested when the weighted sum of attestations from t
 ## References
 - [Stellar Consensus Protocol (SCP) Whitepaper](https://www.stellar.org/papers/stellar-consensus-protocol.pdf)
 - [Federated Byzantine Agreement - Wikipedia](https://en.wikipedia.org/wiki/Byzantine_fault_tolerance#Federated_Byzantine_Agreement)
-- [Trust Slice Model Documentation](../trust-slices.md)
+- [Trust Slice Model Documentation](../quorum-slice-guide.md)

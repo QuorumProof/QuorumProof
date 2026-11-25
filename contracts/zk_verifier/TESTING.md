@@ -594,4 +594,4 @@ println!("Admin: {}", admin);
 
 ---
 
-For more details on implementation, see [zk-verification-implementation.md](./zk-verification-implementation.md).
+For more details on implementation, see [zk-verification-implementation.md](../../docs/zk-verification-implementation.md).

@@ -127,4 +127,4 @@ The `transfer()` function will be disabled or will panic if called. The only way
 ## References
 - [Soulbound Tokens (SBTs) - Vitalik Buterin](https://vitalik.ca/general/2022/01/26/soulbound.html)
 - [ERC-5192: Minimal Soulbound NFTs](https://eips.ethereum.org/EIPS/eip-5192)
-- [Credential Expiry and Auto-Revocation](../credential-expiry.md)
+- [Credential Expiry and Auto-Revocation](../sbt-lifecycle.md)
