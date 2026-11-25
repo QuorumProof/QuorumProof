@@ -67,6 +67,20 @@ npm run build
 npm run type-check
 ```
 
+### Soroban Testnet Integration Test
+
+The testnet integration test is opt-in and simulates `get_credential_count` on
+the configured QuorumProof contract. Set a deployed testnet contract ID and
+enable it when running the dashboard tests:
+
+```bash
+VITE_STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+VITE_STELLAR_NETWORK=testnet \
+VITE_CONTRACT_QUORUM_PROOF=<deployed-testnet-contract-id> \
+VITE_RUN_STELLAR_TESTNET_INTEGRATION=true \
+npm test -- src/lib/contracts/rpc.integration.test.ts
+```
+
 ## Project Structure
 
 ```
