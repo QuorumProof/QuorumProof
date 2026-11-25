@@ -1,0 +1,3 @@
+-r scripts/requirements.txt
+-r monitoring/exporter/requirements.txt
+pytest==8.4.2
