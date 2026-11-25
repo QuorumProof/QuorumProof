@@ -18,16 +18,12 @@ export function EmptyState({ address }: EmptyStateProps) {
         </span>
       </div>
       <div className="empty-state__actions">
-        <button
+        <a
           className="btn btn--primary"
-          onClick={() =>
-            alert(
-              'Credential issuance request flow coming soon.\nContact your institution with your Stellar address.'
-            )
-          }
+          href="/credential/issue"
         >
           ✦ Request Credential Issuance
-        </button>
+        </a>
       </div>
     </div>
   );
