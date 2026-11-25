@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { getPool } from '../db.js';
+import { validate, schemas } from '../middleware/validate.js';
 import {
   publishTierAdvancedEvent,
   publishTierPointsAccruedEvent,
@@ -77,7 +78,7 @@ export function createCredentialTiersRouter() {
    * POST /api/credentials/:id/tier/advance
    * Attempt to advance a credential to the next tier
    */
-  router.post('/:id/tier/advance', async (req: Request, res: Response) => {
+  router.post('/:id/tier/advance', validate(schemas.credentialTierAdvance), async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const pool = getPool();
@@ -174,7 +175,7 @@ export function createCredentialTiersRouter() {
    * POST /api/credentials/:id/tier/points
    * Add tier points to a credential
    */
-  router.post('/:id/tier/points', async (req: Request, res: Response) => {
+  router.post('/:id/tier/points', validate(schemas.credentialTierPoints), async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { points, reason } = req.body as { points?: number; reason?: string };
