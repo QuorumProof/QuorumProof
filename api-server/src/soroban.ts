@@ -11,6 +11,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
 import { getDefaultGasCostTracker } from './services/gasCostTracker.js';
+import { contractInvocationDurationSeconds } from './services/metrics.js';
 
 const RPC_URL = process.env.STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org';
 const NETWORK = (process.env.STELLAR_NETWORK ?? 'testnet') as keyof typeof PASSPHRASES;
@@ -149,27 +150,32 @@ export async function simulateCall(method: string, args: ReturnType<typeof nativ
     }
   });
 
-  return getDefaultRpcCircuitBreaker().execute(
-    async () => {
-      const contract = new Contract(CONTRACT_ID);
-      const dummyKeypair = Keypair.random();
-      const dummyAccount = new Account(dummyKeypair.publicKey(), '0');
+  const endTimer = contractInvocationDurationSeconds.startTimer({ operation: method });
+  try {
+    return await getDefaultRpcCircuitBreaker().execute(
+      async () => {
+        const contract = new Contract(CONTRACT_ID);
+        const dummyKeypair = Keypair.random();
+        const dummyAccount = new Account(dummyKeypair.publicKey(), '0');
 
-      const tx = new TransactionBuilder(dummyAccount, { fee: BASE_FEE, networkPassphrase })
-        .addOperation(contract.call(method, ...args))
-        .setTimeout(30)
-        .build();
+        const tx = new TransactionBuilder(dummyAccount, { fee: BASE_FEE, networkPassphrase })
+          .addOperation(contract.call(method, ...args))
+          .setTimeout(30)
+          .build();
 
-      const result = await server.simulateTransaction(tx);
-      if (StellarRpc.Api.isSimulationError(result)) {
-        throw new Error(result.error ?? 'Simulation failed');
-      }
-      if (!result.result) throw new Error('No result from simulation');
-      getDefaultGasCostTracker().record(method, result.minResourceFee);
-      return deserializeContractState(result.result.retval);
-    },
-    { method, args: cacheArgs }
-  );
+        const result = await server.simulateTransaction(tx);
+        if (StellarRpc.Api.isSimulationError(result)) {
+          throw new Error(result.error ?? 'Simulation failed');
+        }
+        if (!result.result) throw new Error('No result from simulation');
+        getDefaultGasCostTracker().record(method, result.minResourceFee);
+        return deserializeContractState(result.result.retval);
+      },
+      { method, args: cacheArgs }
+    );
+  } finally {
+    endTimer();
+  }
 }
 
 export function u64Val(n: number | bigint) {
