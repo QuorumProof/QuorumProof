@@ -47,7 +47,7 @@ module "compute" {
   certificate_arn     = var.certificate_arn
   desired_count       = 1
   max_count           = 3
-  deletion_protection = false
+  deletion_protection = true
   log_retention_days  = 14
   environment         = merge(var.api_environment, { BACKUP_BUCKET = module.storage.bucket_id })
 }
@@ -61,7 +61,7 @@ module "database" {
   allowed_security_group_ids = [module.compute.task_security_group_id]
   instance_class             = "db.t4g.medium"
   instance_count             = 1
-  deletion_protection        = false
+  deletion_protection        = true
   backup_retention_days      = 3
 }
 
