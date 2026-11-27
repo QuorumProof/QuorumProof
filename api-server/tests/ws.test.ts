@@ -130,6 +130,7 @@ describe('WebSocket connection lifecycle', () => {
     await sendMessage(ws, { type: 'invalid_type' });
     const msg = await nextMessage(ws);
     expect(msg.type).toBe('error');
+    expect(msg.data.message).toBe('Unknown message type: invalid_type');
     ws.close();
   });
 

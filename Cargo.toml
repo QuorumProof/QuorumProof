@@ -6,7 +6,7 @@ members = [
     "contracts/integration_tests",
     "contracts/e2e_tests",
 ]
-exclude = ["benches", "fuzz", "contracts/bbs_plus_v1"]
+exclude = ["benches", "fuzz", "contracts/bbs_plus_v1", "api-server"]
 resolver = "2"
 
 [workspace.dependencies]
