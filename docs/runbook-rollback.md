@@ -113,7 +113,7 @@ reports that it rolled back, go straight to [§6](#6-verify-after-any-rollback).
 6. [ ] Unpause once the IC signs off.
 
 The rollback path can be rehearsed on testnet with
-`scripts/test_upgrade_rollback.sh` (see [upgrade-testing.md](./upgrade-testing.md)).
+`scripts/tests/test_upgrade_rollback.sh` (see [upgrade-testing.md](./upgrade-testing.md)).
 
 ### 3.3 State restoration (last resort)
 

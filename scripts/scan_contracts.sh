@@ -12,7 +12,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONTRACT_SRC="$ROOT_DIR/contracts"
+# Source tree to scan. Defaults to the repo's contracts/ so production runs are
+# unchanged; tests override CONTRACT_SRC_DIR to point at a fixture directory
+# (issue #1839) so the real contract sources are never scanned during tests.
+CONTRACT_SRC="${CONTRACT_SRC_DIR:-$ROOT_DIR/contracts}"
 
 CRITICAL=0
 WARN=0

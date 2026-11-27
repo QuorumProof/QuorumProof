@@ -15,6 +15,10 @@ on:
     paths:
       - "contracts/**"
       - "scripts/upgrade/**"
+      - "scripts/scan_contracts.sh"
+      - "scripts/upgrade_rollback.sh"
+      - "scripts/tests/test_scan_contracts.sh"
+      - "scripts/tests/test_upgrade_rollback.sh"
       - ".github/workflows/upgrade-safety.yml"
   workflow_dispatch:
 
@@ -66,3 +70,23 @@ jobs:
 
       - name: Run upgrade simulation and safety tests
         run: cargo test -p integration_tests upgrade -- --nocapture
+
+  # Issue #1839: the release scanner (scan_contracts.sh) and the upgrade/rollback
+  # driver (upgrade_rollback.sh) underpin upgrade safety, so their behavior is
+  # asserted here alongside the state-compatibility and simulation jobs. The
+  # tests use fixture trees and a fake `stellar` CLI — no network or Soroban RPC.
+  script-tests:
+    name: Upgrade-safety script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: scan_contracts.sh tests
+        run: bash scripts/tests/test_scan_contracts.sh
+
+      - name: upgrade_rollback.sh tests
+        run: bash scripts/tests/test_upgrade_rollback.sh

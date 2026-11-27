@@ -80,7 +80,7 @@ Run the rollback for real on testnet — a rollback that has never been
 exercised is not a rollback plan.
 
 ```bash
-./scripts/test_upgrade_rollback.sh   # automated WASM upgrade → rollback cycle
+./scripts/tests/test_upgrade_rollback.sh   # automated WASM upgrade → rollback cycle
 ```
 
 Then, for the migration being shipped:

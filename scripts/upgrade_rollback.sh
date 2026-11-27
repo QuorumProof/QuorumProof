@@ -46,6 +46,10 @@ require_cmd() {
   command -v "$1" &>/dev/null || fail "Required command not found: $1"
 }
 
+# Returns 0 if both probes succeed, 1 if either fails. Callers decide whether a
+# failure aborts the run (pre-upgrade, Step 2) or triggers a rollback
+# (post-upgrade, Step 4): the post-upgrade phase must NOT exit here, or the
+# rollback path in Step 5 is unreachable dead code (issue #1839).
 run_smoke_test_live_contract() {
   local contract_id="$1"
   local test_phase="$2"
@@ -61,7 +65,7 @@ run_smoke_test_live_contract() {
     --network "$NETWORK" \
     --rpc-url "$RPC_URL" \
     -- get_version \
-    || fail "${test_phase} smoke test failed: contract $contract_id did not respond to get_version"
+    || { log "ERROR: ${test_phase} smoke test failed: contract $contract_id did not respond to get_version"; return 1; }
 
   log "[${test_phase}] Verifying contract state (get_state_metrics)..."
   stellar contract invoke \
@@ -70,9 +74,10 @@ run_smoke_test_live_contract() {
     --network "$NETWORK" \
     --rpc-url "$RPC_URL" \
     -- get_state_metrics \
-    || fail "${test_phase} smoke test failed: contract $contract_id did not respond to get_state_metrics"
+    || { log "ERROR: ${test_phase} smoke test failed: contract $contract_id did not respond to get_state_metrics"; return 1; }
 
   log "[${test_phase}] Live contract smoke tests passed."
+  return 0
 }
 
 require_cmd stellar
@@ -103,7 +108,8 @@ log "Pre-upgrade WASM hash: $PRE_WASM_HASH (saved to $SNAPSHOT_FILE)"
 
 # ── Step 2: Pre-upgrade smoke tests ──────────────────────────────────────────
 log "Step 2: Running pre-upgrade smoke tests..."
-run_smoke_test_live_contract "$CONTRACT_ID" "Pre-upgrade"
+run_smoke_test_live_contract "$CONTRACT_ID" "Pre-upgrade" \
+  || fail "Pre-upgrade smoke test failed — aborting before upgrade"
 
 # ── Step 3: Upload new WASM and upgrade ──────────────────────────────────────
 log "Step 3: Uploading new WASM: $NEW_WASM"
