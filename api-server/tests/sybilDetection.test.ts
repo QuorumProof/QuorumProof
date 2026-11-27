@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import express from 'express';
+import request from 'supertest';
 import { SybilDetectionService } from '../src/services/sybilDetection.js';
+import sybilRouter from '../src/routes/sybilDetection.js';
 
 describe('SybilDetectionService', () => {
   let sybilService: SybilDetectionService;
@@ -143,5 +146,50 @@ describe('SybilDetectionService', () => {
     const score = sybilService.getSybilScore('GA123');
     const totalWeight = score?.factors.reduce((sum, f) => sum + f.weight, 0);
     expect(totalWeight).toBeCloseTo(1.0, 1);
+  });
+});
+
+describe('sybilDetection routes validation (#1966)', () => {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/sybil', sybilRouter);
+
+  it('rejects POST /record-event when address is missing', async () => {
+    const res = await request(app).post('/api/sybil/record-event').send({});
+    expect(res.status).toBe(400);
+    expect(res.body.location).toBe('body');
+    expect(res.body.details).toBeDefined();
+  });
+
+  it('rejects POST /record-event when address is empty or whitespace', async () => {
+    const res = await request(app).post('/api/sybil/record-event').send({ address: '   ' });
+    expect(res.status).toBe(400);
+    expect(res.body.location).toBe('body');
+  });
+
+  it('accepts POST /record-event with a valid address', async () => {
+    const res = await request(app).post('/api/sybil/record-event').send({ address: 'GVALID123' });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.data.address).toBe('GVALID123');
+  });
+
+  it('rejects POST /dismiss-alert/:alert_id when alert_id is whitespace', async () => {
+    const res = await request(app).post('/api/sybil/dismiss-alert/%20%20').send();
+    expect(res.status).toBe(400);
+    expect(res.body.location).toBe('params');
+  });
+
+  it('rejects POST /dismiss-alert/:alert_id when request body is non-empty', async () => {
+    const res = await request(app)
+      .post('/api/sybil/dismiss-alert/alert-1')
+      .send({ unexpected: true });
+    expect(res.status).toBe(400);
+    expect(res.body.location).toBe('body');
+  });
+
+  it('accepts POST /dismiss-alert/:alert_id with valid param and empty body', async () => {
+    const res = await request(app).post('/api/sybil/dismiss-alert/nonexistent-alert').send();
+    expect(res.status).toBe(404);
   });
 });
