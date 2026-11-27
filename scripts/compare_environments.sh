@@ -89,7 +89,7 @@ get_toml_value() {
     grep -A 5 "^\[$section\]" "$ENVIRONMENTS_FILE" \
         | grep "^$field" \
         | head -1 \
-        | cut -d'"' -f2
+        | cut -d'"' -f2 || true
 }
 
 # ── Discover snapshot files ───────────────────────────────────────────────────

@@ -48,8 +48,8 @@ Columns:
 | `check_code_examples.sh` | Runs the multi-language code examples against a mock API and diffs their output (issue #1638) | `code-examples.yml` | — |
 | `validate_env.sh` | Cross-checks `environments.toml` against `.env` to ensure the selected network matches the contract addresses | `manual` | — |
 | `setup_dev.sh` | One-shot local dev environment setup: checks prerequisites, installs Rust targets, builds contracts, installs npm deps, creates `.env` (issue #1663) | `manual` | — |
-| `check_env_parity.sh` | Compares two env files for missing keys, placeholder values, network consistency, and contract address format; emits color-coded drift report (issue #1662) | `manual` / CI | — |
-| `compare_environments.sh` | Multi-environment comparison: reads named snapshots from `environments/`, checks RPC/passphrase consistency, delegates per-file diff to `check_env_parity.sh` (issue #1662) | `manual` | — |
+| `check_env_parity.sh` | Compares two env files for missing keys, placeholder values, network consistency, and contract address format; emits color-coded drift report (issue #1662) | `manual` / CI | `tests/test_check_env_parity.sh` |
+| `compare_environments.sh` | Multi-environment comparison: reads named snapshots from `environments/`, checks RPC/passphrase consistency, delegates per-file diff to `check_env_parity.sh` (issue #1662) | `manual` | `tests/test_compare_environments.sh` |
 
 ---
 
@@ -83,6 +83,14 @@ Columns:
 
 ---
 
+## Cost Reporting
+
+| Script | What it does | Invoked by | Test coverage |
+|---|---|---|---|
+| `cost_report.sh` | Queries the API cost endpoints and emits a human-readable report plus optional JSON output for CI/dashboards (issue #1657) | `manual` | `tests/test_cost_report.sh` |
+
+---
+
 ## Migration
 
 | Script | What it does | Invoked by | Test coverage |
@@ -109,7 +117,7 @@ Columns:
 | Script | What it does | Invoked by | Test coverage |
 |---|---|---|---|
 | `scan_contracts.sh` | Security pattern scan — checks for bare `unwrap()`/`expect()`, unsafe integer arithmetic, and other Soroban-specific anti-patterns (issue #594) | `ci.yml` (`security` job) | — |
-| `check_deps.sh` | Verifies contract `soroban-sdk` versions match `contracts/dependencies.toml`; warns if a pinned RUSTSEC advisory has been present >90 days (issues #589, #1490) | `ci.yml` (`security` job) | — |
+| `check_deps.sh` | Verifies contract `soroban-sdk` versions match `contracts/dependencies.toml`; warns if a pinned RUSTSEC advisory has been present >90 days (issues #589, #1490) | `ci.yml` (`security` job) | `tests/test_check_deps.sh` |
 | `check_alert_runbooks.sh` | CI gate — parses `monitoring/prometheus/alerts.yml` and exits non-zero if any alert is missing a `runbook_url` annotation, listing the offending alert names (issue #1829) | `ci.yml` (`monitoring-integration` job) | — |
 | `generate_docs.sh` | Auto-generates contract API docs from Rust source comments and writes them to `docs/contracts/` with a version stamp (issue #590) | `manual` | — |
 
@@ -132,13 +140,19 @@ Columns:
 
 ## Test Coverage Summary
 
-Three scripts in `scripts/tests/` provide automated test coverage:
+Nine test files in `scripts/tests/` provide automated test coverage:
 
 | Test file | Covers |
 |---|---|
 | `tests/test_failover.sh` | `failover.sh` — RPC failover logic and consistency checks |
 | `tests/test_reconcile_state.sh` | `reconcile_state.sh` — state reconciliation diff and alerting logic |
 | `tests/test_migration_orchestrator.py` | `migration_orchestrator.py` — cursor resume, chunk processing, error handling |
+| `tests/test_dev_status.py` | `dev_status.py` — development status aggregation |
+| `tests/test_log_archive_retrieve.sh` | `log_archive.sh` / `log_retrieve.sh` — archive, retrieval, and checksum integrity |
+| `tests/test_cost_report.sh` | `cost_report.sh` — summary, JSON output, projections, and error handling |
+| `tests/test_check_deps.sh` | `check_deps.sh` — version parity, breaking-version gate, and advisory age warnings |
+| `tests/test_check_env_parity.sh` | `check_env_parity.sh` — drift detection categories and report formats |
+| `tests/test_compare_environments.sh` | `compare_environments.sh` — multi-snapshot drift and report output |
 
 Scripts **without** dedicated test coverage (marked `—` in the table above) are either:
 - Thin wrappers around well-tested tools (`stellar`, `cargo`, `aws s3`) where the test value is low, or
