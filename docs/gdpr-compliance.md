@@ -50,6 +50,32 @@ Users can request deletion of their personal data, subject to legal and contract
 4. **Deletion**: Personal data is deleted from all systems
 5. **Confirmation**: User receives confirmation of deletion
 
+### Signed request verification contract
+
+`frontend/src/lib/gdprSigning.ts` prepares a wallet-signed request; it does
+not authenticate the requester. The unused `extractSignerAddress(message,
+signature)` export was removed because it always returned `null`. There are no
+client call sites to migrate. Consumers should use `createSignedGdprRequest`
+and submit its payload to `POST /api/gdpr/request`, as the GDPR request page does.
+
+The payload contains `credentialId`, `challenge`, `subjectAddress`, and the
+wallet's base64 `signature`. The signed message is exactly:
+
+```text
+GDPR_REQUEST:${credentialId}:${challenge}:${subjectAddress}
+```
+
+`subjectAddress` is a caller-supplied claim, not a recovered signer identity.
+`validateSignatureFormat` only checks for a non-empty base64-like value; a
+successful format check or payload creation is not proof of ownership.
+
+Server-side authorization must resolve the credential's subject from trusted
+on-chain state, require it to match the claimed address, and verify the signature
+using that subject's public key and the wallet's message-signing encoding. It
+must also validate challenge freshness and prevent replay before accepting the
+request. These are server requirements, not guarantees provided by this client
+helper. Removing the placeholder does not implement or change API authorization.
+
 ### Data That Cannot Be Deleted
 
 - **Blockchain Records**: Immutable on-chain data cannot be deleted (by design)
