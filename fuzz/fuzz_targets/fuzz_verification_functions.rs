@@ -57,7 +57,6 @@ fuzz_target!(|input: VerificationFuzzInput| {
 
     // Create slices and test verification paths
     for _slice_idx in 0..slice_count {
-        let creator = Address::generate(&env);
         let attestor_count = (threshold as usize).clamp(1, 5);
         let mut attestors = SorobanVec::new(&env);
         // All attestors get weight 1; threshold ≤ attestor_count so quorum is reachable
@@ -72,7 +71,9 @@ fuzz_target!(|input: VerificationFuzzInput| {
 
         let creator = Address::generate(&env);
 
-        // Create slice — signature: create_slice(env, creator, attestors, weights, threshold)
+        let creator = Address::generate(&env);
+
+        // Create slice — signature: create_slice(creator, attestors, weights, threshold)
         let slice_id = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.create_slice(&creator, &attestors, &weights, &threshold)
         })) {
@@ -86,8 +87,8 @@ fuzz_target!(|input: VerificationFuzzInput| {
             if let Ok(Some(attestor)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 attestors.get(0)
             })) {
-                // attest now takes (attestor, credential_id, slice_id,
-                // attestation_value: bool, expires_at: Option<u64>).
+                // Test attestation — signature: attest(attestor, credential_id, slice_id,
+                //                                      attestation_value, expires_at)
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     client.attest(&attestor, &credential_id, &slice_id, &true, &None)
                 }));
@@ -97,7 +98,7 @@ fuzz_target!(|input: VerificationFuzzInput| {
                     client.is_attested(&credential_id, &slice_id)
                 }));
 
-                // Test get_attestors — takes only credential_id (no slice_id)
+                // Test get_attestors — signature: get_attestors(credential_id)
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     client.get_attestors(&credential_id)
                 }));
@@ -109,9 +110,9 @@ fuzz_target!(|input: VerificationFuzzInput| {
     }
 });
 
-fn generate_fuzzy_metadata(size: u8) -> std::vec::Vec<u8> {
+fn generate_fuzzy_metadata(size: u8) -> Vec<u8> {
     let meta_size = (size as usize).clamp(1, 256);
-    let mut metadata = std::vec![0u8; meta_size];
+    let mut metadata = vec![0u8; meta_size];
 
     for i in 0..meta_size {
         metadata[i] = ((i as u8).wrapping_mul(size)).wrapping_add(i as u8);

@@ -56,6 +56,7 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
 
     // ── 2. VerifyingKey derivation ───────────────────────────────────────────
     // Pass message_count as the generator count; an empty context tag is valid.
+    // Cast message_count from usize to u32 as required by VerifyingKey::derive.
     let vk = match VerifyingKey::derive(pk, b"fuzz-context-v1", message_count as u32) {
         Ok(vk) => vk,
         Err(_) => return,

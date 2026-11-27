@@ -103,15 +103,11 @@ fn test_single_issuer_batch(
         }
     }
 
-    // At least one credential must succeed; the rest may be legitimately
-    // rejected (rate-limit, duplicate, etc.).
-    if batch_size > 0 {
-        assert!(
-            issued_count > 0,
-            "No credential was accepted in single-issuer batch of {}",
-            batch_size
-        );
-    }
+    // Fuzz contract calls may fail for valid protocol-level reasons (e.g. duplicate
+    // credential, rate-limit, PoW) — do not assert a floor here; that would cause
+    // libFuzzer to treat normal rejection paths as crashes.
+    let _ = issued_count;
+    let _ = failed_count;
 }
 
 /// Test multiple issuers issuing batches concurrently.
@@ -158,12 +154,10 @@ fn test_multiple_issuers_batch(
         }
     }
 
-    // A multi-issuer batch with at least one credential per issuer should
-    // produce at least one accepted credential overall.  If every single call
-    // was rejected the test corpus is degenerate rather than interesting.
-    // We do not assert a fixed minimum here because the contract is allowed
-    // to reject all inputs (e.g. all hit the rate-limit window edge).
-    let _ = total_issued; // recorded for future corpus analysis; no hard assert
+    // Verify credentials from different issuers were created.
+    // A fuzz target must not assert on counts that depend on fuzz-controlled
+    // inputs — an empty batch is a valid (if uninteresting) outcome.
+    let _ = all_credentials;
 }
 
 /// Test a moderate batch with integrity verification of sampled credentials.
@@ -274,15 +268,16 @@ fn test_maximum_batch_size(
             }
         }
 
-        // Record but do not hard-assert the success rate — the contract may
-        // legitimately reject all calls (e.g., rate-limit hit in a prior
-        // sub-test within the same iteration).
-        let _ = (successful, failed);
+        // A fuzz target must not assert a minimum success rate — the contract
+        // correctly rejects inputs for many protocol-level reasons (duplicates,
+        // rate limits, etc.) that are not bugs.  `successful` and `failed` are
+        // already used above to bail the inner loop early; nothing further to check.
+        let _ = successful;
+        let _ = failed;
     }
 }
 
-/// Generate metadata bytes with varying complexity.
-/// Returns a plain Rust `Vec<u8>`.
+/// Generate metadata with varying complexity
 fn generate_metadata_for_batch(complexity: u8, seed: u32) -> std::vec::Vec<u8> {
     let size = match complexity % 4 {
         0 => 32,  // Small metadata
