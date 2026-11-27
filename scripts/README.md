@@ -41,7 +41,7 @@ Columns:
 | `build.sh` | Compiles all contract crates to `wasm32-unknown-unknown` via `cargo build --release` | `ci.yml` (`contracts` job) | — |
 | `test.sh` | Runs `cargo test` for the full workspace | `ci.yml` (`contracts` job) | — |
 | `run_e2e_tests.sh` | Runs the Soroban end-to-end test suite (`contracts/e2e_tests`) against a live testnet | `ci.yml` (`e2e-tests` job) | — |
-| `coverage.sh` | Generates an LLVM/gcov coverage report for the frontend (`npm run test:coverage`) | `ci.yml` (`frontend` job) | — |
+| `coverage.sh` | Generates a coverage report for the frontend (`npm run test:coverage`) | `ci.yml` (`coverage-script-smoke` job) | `tests/regression_2000_coverage.sh` |
 | `check_unwraps.sh` | Ratchet check — fails if new bare `.unwrap()` calls appear in contract source (issue #1391) | `ci.yml` (`contracts` job) | — |
 | `check_docs_index.sh` | Verifies every `docs/*.md` file is linked from `docs/README.md` (issue #1498) | `ci.yml` (`docs-index` job) | — |
 | `docs_versions.py` | Manages documentation versions in `docs/versions.json` (`list`, `cut`, `deprecate`, `eol`, `check`) — see `docs/documentation-versioning.md` (issue #1642) | `ci.yml` (`docs-index` job, `check`) / `manual` | — |
@@ -140,10 +140,11 @@ Columns:
 
 ## Test Coverage Summary
 
-Nine test files in `scripts/tests/` provide automated test coverage:
+Test files in `scripts/tests/` provide automated test coverage:
 
 | Test file | Covers |
 |---|---|
+| `tests/regression_2000_coverage.sh` | `coverage.sh` — fixture-project path resolution, npm invocation, and report output |
 | `tests/test_failover.sh` | `failover.sh` — RPC failover logic and consistency checks |
 | `tests/test_reconcile_state.sh` | `reconcile_state.sh` — state reconciliation diff and alerting logic |
 | `tests/test_migration_orchestrator.py` | `migration_orchestrator.py` — cursor resume, chunk processing, error handling |

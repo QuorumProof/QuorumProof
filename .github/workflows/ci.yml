@@ -106,6 +106,14 @@ jobs:
       - run: npm test -- contract-tests.test.ts
       - run: npm test -- snapshots.test.ts
 
+  # Issue #2000: exercise coverage.sh on a fixture without installing frontend dependencies.
+  coverage-script-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Smoke-test coverage script
+        run: ./scripts/tests/regression_2000_coverage.sh
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
