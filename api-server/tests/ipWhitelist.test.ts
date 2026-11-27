@@ -1,13 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request, Response } from 'express';
 import {
-  clearAccessLog,
   createIPWhitelistMiddleware,
-  getAccessLog,
   initializeWhitelist,
-  setProtectedEndpoints,
   setTrustedProxies,
 } from '../src/middleware/ipWhitelist.js';
+import { logger } from '../src/services/logger.js';
 
 function runMiddleware(
   remoteAddress: string,
@@ -34,14 +32,13 @@ describe('IP whitelist middleware', () => {
   beforeEach(() => {
     initializeWhitelist([], ['/api/admin']);
     setTrustedProxies([]);
-    clearAccessLog();
-    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(logger, 'info').mockImplementation(() => {});
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     initializeWhitelist([]);
     setTrustedProxies([]);
-    clearAccessLog();
     vi.restoreAllMocks();
   });
 
@@ -55,7 +52,11 @@ describe('IP whitelist middleware', () => {
     expect(res.status).toHaveBeenCalledWith(403);
     expect(json).toHaveBeenCalledWith(expect.objectContaining({ code: 'IP_NOT_WHITELISTED' }));
     expect(next).not.toHaveBeenCalled();
-    expect(getAccessLog()[0]).toMatchObject({ clientIP: '203.0.113.10', action: 'denied' });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'IP whitelist access denied',
+      'ip-whitelist',
+      expect.objectContaining({ clientIP: '203.0.113.10', action: 'denied' }),
+    );
   });
 
   it('uses the rightmost untrusted address in a trusted proxy chain', () => {
@@ -68,11 +69,15 @@ describe('IP whitelist middleware', () => {
 
     expect(res.status).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledOnce();
-    expect(getAccessLog()[0]).toMatchObject({
-      clientIP: '192.0.2.45',
-      forwardedIP: '192.0.2.45',
-      action: 'allowed',
-    });
+    expect(logger.info).toHaveBeenCalledWith(
+      'IP whitelist access allowed',
+      'ip-whitelist',
+      expect.objectContaining({
+        clientIP: '192.0.2.45',
+        forwardedIP: '192.0.2.45',
+        action: 'allowed',
+      }),
+    );
   });
 
   it('accepts alternate proxy headers only from a trusted proxy', () => {
@@ -82,7 +87,11 @@ describe('IP whitelist middleware', () => {
     const { next } = runMiddleware('10.0.0.8', { 'cf-connecting-ip': '198.51.100.25' });
 
     expect(next).toHaveBeenCalledOnce();
-    expect(getAccessLog()[0]).toMatchObject({ clientIP: '198.51.100.25', action: 'allowed' });
+    expect(logger.info).toHaveBeenCalledWith(
+      'IP whitelist access allowed',
+      'ip-whitelist',
+      expect.objectContaining({ clientIP: '198.51.100.25', action: 'allowed' }),
+    );
   });
 
   it('does not apply the whitelist to unprotected routes', () => {
@@ -90,6 +99,7 @@ describe('IP whitelist middleware', () => {
 
     expect(res.status).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledOnce();
-    expect(getAccessLog()).toHaveLength(0);
+    expect(logger.info).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 });

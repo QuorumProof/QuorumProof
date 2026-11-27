@@ -6,6 +6,11 @@ import { validate } from '../middleware/validate.js';
 
 const DEFAULT_MAX_OPERATION_SIZE = 16_384;
 
+import {
+  createDefaultGraphqlSubscriptionStore,
+  type GraphQLSubscriptionStore,
+} from '../services/graphqlSubscriptions.js';
+
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
   u64Val: (n: number | bigint) => ReturnType<typeof SimulateCallType>;
@@ -53,12 +58,6 @@ const SCHEMA_DESCRIPTION = {
 };
 
 type GraphQLVariables = Record<string, unknown>;
-const subscriptions = new Map<string, {
-  id: string;
-  query: string;
-  variables: GraphQLVariables;
-  created_at: string;
-}>();
 
 
 async function resolveTierRequirements(
@@ -176,7 +175,10 @@ function maxGraphqlDepth(query: string): number {
   return maxDepth;
 }
 
-export function createGraphqlRouter(soroban: SorobanClient) {
+export function createGraphqlRouter(
+  soroban: SorobanClient,
+  subscriptionStore: GraphQLSubscriptionStore = createDefaultGraphqlSubscriptionStore(),
+) {
   const router = Router();
   const maxDepth = parseInt(process.env.GRAPHQL_MAX_DEPTH ?? '8', 10);
   const parsedMaxOperationSize = parseInt(
@@ -369,29 +371,39 @@ export function createGraphqlRouter(soroban: SorobanClient) {
 
   /**
    * POST /api/graphql/subscriptions
-   * Registers a lightweight subscription descriptor that clients can pair with
-   * the existing WebSocket event stream. This keeps subscription state explicit
-   * without introducing a second socket protocol.
+   * Registers a lightweight subscription descriptor in the shared store/pub-sub
+   * layer so clients can pair with the WebSocket event stream across replicas
+   * and process restarts.
    */
-  router.post('/subscriptions', graphqlOperationValidation, (req: Request, res: Response) => {
-    const { query, variables } = req.body as { query: string; variables?: GraphQLVariables };
-    const id = `gqlsub_${Date.now().toString(36)}_${subscriptions.size.toString(36)}`;
-    const record = {
-      id,
-      query,
-      variables: variables ?? {},
-      created_at: new Date().toISOString(),
-    };
-    subscriptions.set(id, record);
+  router.post('/subscriptions', graphqlOperationValidation, async (req: Request, res: Response) => {
+    const { query, variables } = req.body as { query?: unknown; variables?: unknown };
+    if (typeof query !== 'string' || !query.trim()) {
+      res.status(400).json({ error: 'query must be a non-empty string' });
+      return;
+    }
+    const parsedVariables = variables && typeof variables === 'object' && !Array.isArray(variables)
+      ? variables as GraphQLVariables
+      : {};
+    const record = await subscriptionStore.create(query, parsedVariables);
     res.status(201).json({
       subscription: record,
       stream: '/ws',
     });
   });
 
-  router.delete('/subscriptions/:id', subscriptionIdValidation, (req: Request, res: Response) => {
+  router.get('/subscriptions/:id', subscriptionIdValidation, async (req: Request, res: Response) => {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const deleted = subscriptions.delete(id);
+    const record = await subscriptionStore.get(id);
+    if (!record) {
+      res.status(404).json({ error: 'subscription not found' });
+      return;
+    }
+    res.json({ subscription: record, stream: '/ws' });
+  });
+
+  router.delete('/subscriptions/:id', subscriptionIdValidation, async (req: Request, res: Response) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const deleted = await subscriptionStore.delete(id);
     res.status(deleted ? 204 : 404).send(deleted ? undefined : { error: 'subscription not found' });
   });
 

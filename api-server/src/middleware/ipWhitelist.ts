@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { existsSync, readFileSync } from 'fs';
 import { logger } from '../services/logger.js';
 
 /**
@@ -50,8 +51,51 @@ let config: IPWhitelistConfig = {
   logDenials: true,
 };
 
-// In-memory access log (in production, this would go to a database/logging service)
-const accessLog: AccessLogEntry[] = [];
+const DEFAULT_LOG_FILE = '/var/log/quorumproof/api.log';
+
+function getStructuredLogFilePath(): string {
+  return process.env.LOG_FILE ?? DEFAULT_LOG_FILE;
+}
+
+function readStructuredAccessLog(): AccessLogEntry[] {
+  const logFile = getStructuredLogFilePath();
+  if (!existsSync(logFile)) {
+    return [];
+  }
+
+  try {
+    const raw = readFileSync(logFile, 'utf8');
+    const entries: AccessLogEntry[] = [];
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+        if (
+          parsed.module === 'ip-whitelist' &&
+          (parsed.action === 'allowed' || parsed.action === 'denied') &&
+          typeof parsed.clientIP === 'string' &&
+          typeof parsed.endpoint === 'string'
+        ) {
+          const tsSource = parsed.timestamp ?? parsed.time;
+          entries.push({
+            timestamp: tsSource ? new Date(String(tsSource)) : new Date(0),
+            clientIP: parsed.clientIP,
+            forwardedIP: typeof parsed.forwardedIP === 'string' ? parsed.forwardedIP : undefined,
+            endpoint: parsed.endpoint,
+            action: parsed.action,
+            reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+          });
+        }
+      } catch {
+        // Skip non-JSON or partially written lines
+      }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Extract the client's real IP address, checking for proxy headers
@@ -156,15 +200,14 @@ function isProtectedEndpoint(path: string): boolean {
 }
 
 /**
- * Log access attempt
+ * Log access attempt to the structured logging pipeline.
  */
 function logAccess(entry: AccessLogEntry, requestId?: string): void {
   if (!config.enableAuditLogging) return;
   if (entry.action === 'denied' && !config.logDenials) return;
 
-  accessLog.push(entry);
-
   const metadata = {
+    timestamp: entry.timestamp.toISOString(),
     requestId,
     action: entry.action,
     endpoint: entry.endpoint,
@@ -266,7 +309,7 @@ export function setProtectedEndpoints(endpoints: string[], requestId?: string): 
 }
 
 /**
- * Get access log entries with optional filtering
+ * Get access log entries from the structured logging pipeline with optional filtering
  */
 export function getAccessLog(filters?: {
   clientIP?: string;
@@ -274,7 +317,7 @@ export function getAccessLog(filters?: {
   action?: 'allowed' | 'denied';
   since?: Date;
 }): AccessLogEntry[] {
-  return accessLog.filter(entry => {
+  return readStructuredAccessLog().filter(entry => {
     if (filters?.clientIP && entry.clientIP !== filters.clientIP) return false;
     if (filters?.endpoint && !entry.endpoint.startsWith(filters.endpoint)) return false;
     if (filters?.action && entry.action !== filters.action) return false;
@@ -284,24 +327,25 @@ export function getAccessLog(filters?: {
 }
 
 /**
- * Clear access log
+ * Record an audit marker when access log clearing is requested (retention/rotation
+ * is handled by the structured logging pipeline).
  */
 export function clearAccessLog(requestId?: string): void {
-  accessLog.length = 0;
-  logger.info('IP access log cleared', 'ip-whitelist', { requestId });
+  logger.info('IP access log clear requested (managed by structured logging pipeline)', 'ip-whitelist', { requestId });
 }
 
 /**
- * Get access statistics
+ * Get access statistics from the structured logging pipeline
  */
 export function getAccessStats() {
-  const totalAccess = accessLog.length;
-  const allowedAccess = accessLog.filter(e => e.action === 'allowed').length;
-  const deniedAccess = accessLog.filter(e => e.action === 'denied').length;
+  const entries = readStructuredAccessLog();
+  const totalAccess = entries.length;
+  const allowedAccess = entries.filter(e => e.action === 'allowed').length;
+  const deniedAccess = entries.filter(e => e.action === 'denied').length;
 
-  const uniqueIPs = new Set(accessLog.map(e => e.clientIP));
+  const uniqueIPs = new Set(entries.map(e => e.clientIP));
   const deniedIPs = new Set(
-    accessLog.filter(e => e.action === 'denied').map(e => e.clientIP)
+    entries.filter(e => e.action === 'denied').map(e => e.clientIP)
   );
 
   return {
