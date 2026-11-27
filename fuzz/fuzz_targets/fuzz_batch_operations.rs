@@ -8,14 +8,14 @@ use quorum_proof::{QuorumProofContract, QuorumProofContractClient};
 /// Fuzz testing for batch credential issuance operations at scale
 ///
 /// This fuzz target focuses on:
-/// - Batch issuance of 1000+ credentials with random parameters
+/// - Batch issuance of credentials with random parameters
 /// - Performance testing with various batch configurations
 /// - Memory and storage efficiency under stress
 /// - Identifying bottlenecks in batch operations
-/// - Verifying data integrity across large batches
+/// - Verifying data integrity across batches
 #[derive(Arbitrary, Debug)]
 struct BatchOperationsFuzzInput {
-    // Batch size variations (10-2000 credentials)
+    // Batch size variations
     batch_size: u16,
 
     // Number of sequential batches to issue
@@ -72,66 +72,57 @@ fuzz_target!(|input: BatchOperationsFuzzInput| {
     test_maximum_batch_size(&env, &client, &input);
 });
 
-/// Test single issuer issuing large batch of credentials
+/// Test single issuer issuing a batch of credentials.
+///
+/// The contract enforces a rate limit of `DEFAULT_RATE_LIMIT_MAX_CALLS`
+/// (1 000) calls per day, so we cap the batch at 100 and treat any rejection
+/// as expected rather than asserting a minimum success rate.
 fn test_single_issuer_batch(
     env: &Env,
     client: &QuorumProofContractClient,
     input: &BatchOperationsFuzzInput,
 ) {
     let issuer = Address::generate(env);
-    let batch_size = (input.batch_size as usize).clamp(10, 1000);
+    // Keep batch size small enough to stay well under the per-issuer rate limit.
+    let batch_size = (input.batch_size as usize).clamp(1, 100);
 
     let mut issued_count = 0u64;
-    let mut failed_count = 0u64;
 
     for i in 0..batch_size {
         let subject = Address::generate(env);
-
         let credential_type = input.type_seed.wrapping_add(i as u32).max(1);
         let metadata = generate_metadata_for_batch(input.metadata_complexity, i as u32);
         let meta_bytes = Bytes::from_slice(env, &metadata);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.issue_credential(
-                &issuer,
-                &subject,
-                &credential_type,
-                &meta_bytes,
-                &None,
-                &0u64,
-            )
-        }));
-
-        match result {
-            Ok(_) => issued_count += 1,
-            Err(_) => failed_count += 1,
-        }
-
-        // Stop early if the failure rate is too high to avoid wasting budget.
-        if failed_count > (batch_size as u64 / 2) {
-            break;
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.issue_credential(&issuer, &subject, &credential_type, &meta_bytes, &None, &0u64)
+        }))
+        .is_ok()
+        {
+            issued_count += 1;
         }
     }
 
-    // A fuzz target must never assert business-logic success rates; a high
-    // reject rate is itself a valid (and informative) fuzzer finding.  We
-    // only assert the invariant that the counts add up sensibly.
-    assert_eq!(
-        issued_count + failed_count,
-        (issued_count + failed_count), // tautology — keeps the variables live
-        "counter mismatch"
-    );
-    let _ = (issued_count, failed_count); // suppress unused-variable lint
+    // At least one credential must succeed; the rest may be legitimately
+    // rejected (rate-limit, duplicate, etc.).
+    if batch_size > 0 {
+        assert!(
+            issued_count > 0,
+            "No credential was accepted in single-issuer batch of {}",
+            batch_size
+        );
+    }
 }
 
-/// Test multiple issuers issuing batches concurrently
+/// Test multiple issuers issuing batches concurrently.
 fn test_multiple_issuers_batch(
     env: &Env,
     client: &QuorumProofContractClient,
     input: &BatchOperationsFuzzInput,
 ) {
-    let num_issuers = ((input.batch_iterations as usize) % 5).max(2); // 2-5 issuers
-    let batch_size = ((input.batch_size as usize) / num_issuers).clamp(10, 500);
+    // 2–5 issuers, each issuing a small batch to stay under rate limits.
+    let num_issuers = ((input.batch_iterations as usize) % 5).max(2);
+    let batch_size = ((input.batch_size as usize) / num_issuers).clamp(1, 50);
 
     let mut total_issued = 0usize;
 
@@ -142,11 +133,11 @@ fn test_multiple_issuers_batch(
             let subject = Address::generate(env);
             let credential_type = input
                 .type_seed
-                .wrapping_add((issuer_idx as u32 * 10000) + cred_idx as u32)
+                .wrapping_add((issuer_idx as u32 * 10_000) + cred_idx as u32)
                 .max(1);
             let metadata = generate_metadata_for_batch(
                 input.metadata_complexity,
-                (issuer_idx as u32 * 1000) + cred_idx as u32,
+                (issuer_idx as u32 * 1_000) + cred_idx as u32,
             );
             let meta_bytes = Bytes::from_slice(env, &metadata);
 
@@ -167,28 +158,31 @@ fn test_multiple_issuers_batch(
         }
     }
 
-    // Record how many were created; do not assert a minimum — the contract may
-    // legitimately reject all inputs (e.g. rate-limit or quota hit).
-    let _ = total_issued;
+    // A multi-issuer batch with at least one credential per issuer should
+    // produce at least one accepted credential overall.  If every single call
+    // was rejected the test corpus is degenerate rather than interesting.
+    // We do not assert a fixed minimum here because the contract is allowed
+    // to reject all inputs (e.g. all hit the rate-limit window edge).
+    let _ = total_issued; // recorded for future corpus analysis; no hard assert
 }
 
-/// Test large batch with integrity verification
+/// Test a moderate batch with integrity verification of sampled credentials.
 fn test_large_batch_with_verification(
     env: &Env,
     client: &QuorumProofContractClient,
     input: &BatchOperationsFuzzInput,
 ) {
     let issuer = Address::generate(env);
-    let batch_size = (input.batch_size as usize).clamp(100, 2000);
+    // Cap at 200 to stay inside the rate-limit window.
+    let batch_size = (input.batch_size as usize).clamp(1, 200);
 
-    // Both vecs grow in lock-step: an entry is pushed to both or neither.
     let mut credential_ids: std::vec::Vec<u64> = std::vec::Vec::new();
     let mut subjects: std::vec::Vec<Address> = std::vec::Vec::new();
 
     // Issue batch
     for i in 0..batch_size {
         let subject = Address::generate(env);
-        let credential_type = (2000u32).wrapping_add(i as u32).max(1);
+        let credential_type = (2_000u32).wrapping_add(i as u32);
         let metadata = generate_metadata_for_batch(input.metadata_complexity, i as u32);
         let meta_bytes = Bytes::from_slice(env, &metadata);
 
@@ -207,36 +201,22 @@ fn test_large_batch_with_verification(
         }
     }
 
-    // Verify integrity: sample a subset of the successfully issued credentials.
-    // `idx` from `enumerate()` indexes into `credential_ids`; `subjects[idx]`
-    // is safe because both vecs have the same length and entries are parallel.
-    let sample_rate = if credential_ids.len() > 100 { 10 } else { 2 };
-    for (idx, &cred_id) in credential_ids
-        .iter()
-        .enumerate()
-        .step_by(sample_rate.max(1))
-    {
+    // Verify integrity: sample a subset of issued credentials.
+    let sample_rate = if credential_ids.len() > 100 { 10 } else { 2 }.max(1);
+    for (idx, &cred_id) in credential_ids.iter().enumerate().step_by(sample_rate) {
         if let Ok(credential) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.get_credential(&cred_id)
         })) {
-            assert_eq!(
-                credential.issuer, issuer,
-                "Issuer mismatch at credential {}",
-                idx
-            );
+            assert_eq!(credential.issuer, issuer, "Issuer mismatch at index {}", idx);
             assert_eq!(
                 credential.subject, subjects[idx],
-                "Subject mismatch at credential {}",
+                "Subject mismatch at index {}",
                 idx
             );
-            assert!(
-                !credential.revoked,
-                "Credential {} should not be revoked",
-                idx
-            );
+            assert!(!credential.revoked, "Credential at index {} should not be revoked", idx);
             assert!(
                 credential.credential_type > 0,
-                "Invalid credential type at {}",
+                "Invalid credential type at index {}",
                 idx
             );
         }
@@ -244,16 +224,22 @@ fn test_large_batch_with_verification(
     }
 }
 
-/// Test maximum batch size that the contract can handle
+/// Probe progressively larger batch sizes to find the contract's practical
+/// throughput limit without asserting a fixed success rate — the contract is
+/// free to reject any call (rate-limit, quota, etc.).
 fn test_maximum_batch_size(
     env: &Env,
     client: &QuorumProofContractClient,
     input: &BatchOperationsFuzzInput,
 ) {
+    // Use a fresh issuer per test to avoid cross-contamination with the other
+    // sub-tests that share the same contract instance.
     let issuer = Address::generate(env);
 
-    // Test progressively larger batches to find limits
-    let test_sizes = [100usize, 500, 1000, 2000];
+    // Keep individual sizes small so the total stays well under 1 000
+    // (the default per-day rate limit).  We care about shape/correctness,
+    // not raw throughput, in a fuzz corpus.
+    let test_sizes: std::vec::Vec<usize> = std::vec![10, 25, 50, 100];
 
     for &size in &test_sizes {
         let mut successful = 0u64;
@@ -278,7 +264,9 @@ fn test_maximum_batch_size(
                 Ok(_) => successful += 1,
                 Err(_) => {
                     failed += 1;
-                    // Stop early if too many failures to avoid wasting budget.
+                    // Stop early if the failure rate becomes too high to be
+                    // informative — avoids burning fuzzer time on a wall of
+                    // rejections.
                     if failed > (size as u64 / 2) {
                         break;
                     }
@@ -286,27 +274,27 @@ fn test_maximum_batch_size(
             }
         }
 
-        // Do not assert a minimum success rate — high rejection is a valid
-        // fuzzer signal (e.g. rate-limit or quota exhaustion).
+        // Record but do not hard-assert the success rate — the contract may
+        // legitimately reject all calls (e.g., rate-limit hit in a prior
+        // sub-test within the same iteration).
         let _ = (successful, failed);
     }
 }
 
-/// Generate metadata with varying complexity.
-/// Returns a plain `std::vec::Vec<u8>` — callers convert to `soroban_sdk::Bytes`
-/// via `Bytes::from_slice`.
+/// Generate metadata bytes with varying complexity.
+/// Returns a plain Rust `Vec<u8>`.
 fn generate_metadata_for_batch(complexity: u8, seed: u32) -> std::vec::Vec<u8> {
     let size = match complexity % 4 {
         0 => 32,  // Small metadata
         1 => 96,  // Medium metadata
-        2 => 256, // Large metadata (at the contract's MAX_METADATA_SIZE limit)
+        2 => 256, // Large metadata (contract maximum)
         _ => 64,  // Standard metadata
     };
 
     let mut metadata = std::vec![0u8; size];
     let mut rng = seed;
 
-    // LCG for deterministic pseudo-random fill
+    // LCG for deterministic pseudo-random content
     for byte in metadata.iter_mut() {
         rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
         *byte = ((rng >> 16) ^ (rng >> 8)) as u8;

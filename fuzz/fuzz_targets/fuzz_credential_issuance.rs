@@ -40,8 +40,9 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
     let issuer = Address::generate(&env);
     let subject = Address::generate(&env);
 
-    // Generate metadata with various patterns
-    let metadata = generate_metadata(input.metadata_size, input.metadata_pattern);
+    // Generate metadata with various patterns — returns a plain Rust Vec<u8>
+    let metadata: std::vec::Vec<u8> =
+        generate_metadata(input.metadata_size, input.metadata_pattern);
     let meta = Bytes::from_slice(&env, &metadata);
 
     // Ensure credential_type is at least 1
@@ -70,7 +71,7 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
 
     // Test multiple issuances for ID uniqueness
     let count = (input.issuance_count as usize).clamp(1, 10);
-    let mut ids = vec![cid];
+    let mut ids = std::vec![cid];
 
     for i in 1..count {
         let subject_i = Address::generate(&env);
@@ -100,18 +101,17 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
             Err(_) => return,
         };
 
-        // Metadata should be preserved; both sides are u32 (soroban Bytes::len)
+        // Soroban Bytes::len() returns u32; cast the Rust usize to match.
         assert_eq!(
             cred.metadata_hash.len(),
-            meta.len(),
+            metadata.len() as u32,
             "Metadata size mismatch"
         );
     }
 });
 
 /// Generate metadata with various patterns for fuzzing.
-/// Returns a plain `std::vec::Vec<u8>` — callers convert to `soroban_sdk::Bytes`
-/// via `Bytes::from_slice`.
+/// Returns a plain Rust `Vec<u8>` (not a Soroban `Vec`).
 fn generate_metadata(size: u8, pattern: u8) -> std::vec::Vec<u8> {
     let size = (size as usize).clamp(1, 256);
     let mut metadata = std::vec![0u8; size];

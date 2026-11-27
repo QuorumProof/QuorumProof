@@ -34,13 +34,7 @@ fuzz_target!(|input: VerificationFuzzInput| {
     // Threshold ≤ total weight (= attestor_count_per_slice × 1).
     let threshold = (attestor_count_per_slice as u32).min(5);
 
-    // Build a non-empty metadata payload so the contract's non-empty assertion
-    // is satisfied. Minimum 1 byte; maximum 256 bytes (MAX_METADATA_SIZE).
-    let metadata = generate_fuzzy_metadata(input.proof_size);
-    // Always at least 1 byte — the contract panics on empty metadata.
-    let metadata_clamped = if metadata.is_empty() { vec![0u8] } else { metadata };
-
-    // Create multiple credentials; use a plain std::vec to collect IDs.
+    // Create multiple credentials
     let mut credential_ids: std::vec::Vec<u64> = std::vec::Vec::new();
     for i in 0..cred_count {
         let issuer = Address::generate(&env);
@@ -62,8 +56,12 @@ fuzz_target!(|input: VerificationFuzzInput| {
     }
 
     // Create slices and test verification paths
-    for _ in 0..slice_count {
+    for _slice_idx in 0..slice_count {
+        let creator = Address::generate(&env);
         let attestor_count = (threshold as usize).clamp(1, 5);
+        let mut attestors = SorobanVec::new(&env);
+        // All attestors get weight 1; threshold ≤ attestor_count so quorum is reachable
+        let mut weights = SorobanVec::new(&env);
 
         let mut attestors = SorobanVec::new(&env);
         let mut weights = SorobanVec::new(&env);
@@ -74,7 +72,7 @@ fuzz_target!(|input: VerificationFuzzInput| {
 
         let creator = Address::generate(&env);
 
-        // Create slice — requires creator, attestors, per-attestor weights, and threshold.
+        // Create slice — signature: create_slice(env, creator, attestors, weights, threshold)
         let slice_id = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.create_slice(&creator, &attestors, &weights, &threshold)
         })) {
@@ -84,7 +82,7 @@ fuzz_target!(|input: VerificationFuzzInput| {
 
         // Test attestation for each credential
         for &credential_id in credential_ids.iter() {
-            // Pick the first attestor from the slice to attest with.
+            // Get first attestor from the slice
             if let Ok(Some(attestor)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 attestors.get(0)
             })) {
@@ -99,7 +97,7 @@ fuzz_target!(|input: VerificationFuzzInput| {
                     client.is_attested(&credential_id, &slice_id)
                 }));
 
-                // get_attestors takes credential_id only (no slice_id).
+                // Test get_attestors — takes only credential_id (no slice_id)
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     client.get_attestors(&credential_id)
                 }));
@@ -111,10 +109,10 @@ fuzz_target!(|input: VerificationFuzzInput| {
     }
 });
 
-fn generate_fuzzy_metadata(size: u8) -> Vec<u8> {
-    // MAX_METADATA_SIZE in the contract is 256 bytes; stay inside that limit.
-    let meta_size = (size as usize).clamp(0, 255);
-    let mut metadata = vec![0u8; meta_size];
+fn generate_fuzzy_metadata(size: u8) -> std::vec::Vec<u8> {
+    let meta_size = (size as usize).clamp(1, 256);
+    let mut metadata = std::vec![0u8; meta_size];
+
     for i in 0..meta_size {
         metadata[i] = ((i as u8).wrapping_mul(size)).wrapping_add(i as u8);
     }
