@@ -49,7 +49,7 @@ const EXPIRY_OPTIONS = [
 const STORAGE_KEY = 'qp_share_tokens';
 const LOG_KEY = 'qp_access_log';
 
-// ── QR code via Google Charts (no extra dependency) ───────────────────────────
+// ── QR code via api.qrserver.com (no extra dependency) ───────────────────────────
 function qrUrl(data: string): string {
   return `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(data)}`;
 }
