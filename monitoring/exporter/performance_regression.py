@@ -6,9 +6,11 @@ emits Prometheus metrics when operations breach their SLA ceiling.
 
 import json
 import logging
+import math
 import os
 import time
-from typing import Dict, Optional
+from collections import defaultdict, deque
+from typing import Deque, Dict, Optional
 
 from metrics import (
     contract_invocation_duration_seconds,
@@ -32,6 +34,7 @@ DEFAULT_SLA_SECONDS: Dict[str, float] = {
 
 # How much slower than baseline (relative) triggers a regression alert.
 REGRESSION_THRESHOLD_RATIO = 1.20  # 20% slower than baseline
+SAMPLE_WINDOW = 1000
 
 
 class PerformanceRegressionDetector:
@@ -45,6 +48,9 @@ class PerformanceRegressionDetector:
         self.baseline_path = baseline_path
         self.sla: Dict[str, float] = sla_config or DEFAULT_SLA_SECONDS
         self.baseline: Dict[str, float] = self._load_baseline()
+        self._samples: Dict[str, Deque[float]] = defaultdict(
+            lambda: deque(maxlen=SAMPLE_WINDOW)
+        )
         self._register_sla_metrics()
 
     # ------------------------------------------------------------------
@@ -56,6 +62,7 @@ class PerformanceRegressionDetector:
         contract_invocation_duration_seconds.labels(operation=operation).observe(
             duration_seconds
         )
+        self._samples[operation].append(duration_seconds)
 
         sla_ceiling = self.sla.get(operation)
         if sla_ceiling is not None and duration_seconds > sla_ceiling:
@@ -128,26 +135,14 @@ class PerformanceRegressionDetector:
             return {}
 
     def _estimate_p95(self, operation: str) -> Optional[float]:
-        """Approximate p95 from the Prometheus histogram bucket counts."""
-        histogram = contract_invocation_duration_seconds.labels(operation=operation)
-        # Access internal _buckets — works with prometheus_client >= 0.7
-        try:
-            buckets = list(histogram._buckets)  # upper bound counts
-            upper_bounds = list(contract_invocation_duration_seconds._upper_bounds)
-        except AttributeError:
+        """Estimate p95 from the bounded in-memory sample window."""
+        samples = self._samples.get(operation)
+        if not samples:
             return None
 
-        total = sum(buckets)
-        if total == 0:
-            return None
-
-        target = 0.95 * total
-        cumulative = 0
-        for count, upper in zip(buckets, upper_bounds):
-            cumulative += count
-            if cumulative >= target:
-                return upper
-        return upper_bounds[-1] if upper_bounds else None
+        ordered = sorted(samples)
+        index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+        return float(ordered[index])
 
     def _register_sla_metrics(self) -> None:
         for operation, ceiling in self.sla.items():

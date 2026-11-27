@@ -246,6 +246,26 @@ jobs:
       - name: Validate documentation versions manifest
         run: python3 scripts/docs_versions.py check
 
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            scripts/requirements.txt
+            monitoring/exporter/requirements.txt
+      - name: Install pinned test requirements
+        run: python -m pip install --disable-pip-version-check -r requirements-test.txt
+      - name: Run scripts tests
+        run: python -m pytest -q scripts/tests
+      - name: Run exporter tests
+        run: python -m pytest -q monitoring/exporter/tests
+
   # Issue #1659: validate that all DR scripts exist, are executable, and that
   # docs reference the correct procedures. Lightweight check — does not run
   # live DR scenarios (use scripts/dr_test_harness.sh for that).
