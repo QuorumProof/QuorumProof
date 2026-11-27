@@ -67,29 +67,29 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
         Err(_) => return, // must not panic
     };
 
-    // ── 4. Signature verification — must not panic; must succeed for a fresh sig ─
-    // Use `?`-style early return on Err to avoid panicking: if the library
-    // returns Err for a freshly issued signature that is a library bug, but
-    // the fuzz harness should report it via libFuzzer's crash-on-assert
-    // mechanism only if the correctness property is violated, not if the
-    // library's own error path is exercised.
-    let verify_result = match BbsSignature::verify(&vk, &messages, &sig) {
+    // ── 4. Signature verification — must succeed for a fresh, unmodified sig ─
+    // Use `match` rather than `.expect()` so a library-side `Err` surfaces as
+    // a test failure with context instead of an opaque panic that libFuzzer
+    // records as a crash.  (#1908 / #1912)
+    let verify_ok = match BbsSignature::verify(&vk, &messages, &sig) {
         Ok(r) => r,
-        Err(_) => return, // unexpected Err — do not panic the harness
+        Err(e) => panic!("BbsSignature::verify returned Err on a fresh signature: {:?}", e),
     };
-    if !verify_result {
-        // A freshly issued, unmodified signature must verify. Assert here so
-        // libFuzzer captures the input as a reproducible crash artifact.
-        panic!("A freshly issued signature must verify correctly");
-    }
+    assert!(
+        verify_ok,
+        "A freshly issued signature must verify correctly"
+    );
 
     // ── 5. Verify rejects if a message is altered ────────────────────────────
     if messages.len() > 1 {
         let mut tampered = messages.clone();
         // Flip the last message to something different.
-        let flipped = Fr::from_u64(input.seed.wrapping_add(1));
-        tampered[messages.len() - 1] = flipped;
-        // Only assert the tampered case when the flip actually changed the value.
+        tampered[messages.len() - 1] = Fr::from_u64(input.seed.wrapping_add(1));
+        let tampered_result = match BbsSignature::verify(&vk, &tampered, &sig) {
+            Ok(r) => r,
+            Err(e) => panic!("BbsSignature::verify returned Err on tampered messages: {:?}", e),
+        };
+        // Only assert if tampered value is actually different.
         if tampered[messages.len() - 1] != messages[messages.len() - 1] {
             match BbsSignature::verify(&vk, &tampered, &sig) {
                 Ok(false) => {} // correct: tampered messages must not verify
@@ -133,41 +133,61 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
         Err(_) => return, // must not panic
     };
 
-    // ── 7. Presentation verification — must not panic; must succeed ──────────
-    let pres_result = match BbsPresentation::verify_presentation(&vk, &presentation, nonce) {
+    // ── 7. Presentation verification — must succeed ──────────────────────────
+    // A freshly created presentation must be accepted. Use `match` so an
+    // unexpected `Err` from the library surfaces as a named failure rather
+    // than a bare panic that crashes the fuzz process.  (#1908 / #1912)
+    let pres_ok = match BbsPresentation::verify_presentation(&vk, &presentation, nonce) {
         Ok(r) => r,
-        Err(_) => return, // unexpected Err — do not panic the harness
+        Err(e) => panic!(
+            "verify_presentation returned Err on a freshly created presentation: {:?}", e
+        ),
     };
-    if !pres_result {
-        panic!("A freshly created presentation must verify correctly");
-    }
+    assert!(
+        pres_ok,
+        "A freshly created presentation must verify correctly"
+    );
 
     // ── 8. Presentation rejects a different nonce ────────────────────────────
     let wrong_nonce = b"wrong-nonce-should-fail";
     if wrong_nonce != nonce {
-        match BbsPresentation::verify_presentation(&vk, &presentation, wrong_nonce) {
-            Ok(false) => {} // correct
-            Ok(true) => panic!("Presentation must not verify against a different nonce"),
-            Err(_) => {} // Err is acceptable; must not panic
-        }
+        let wrong_ok = match BbsPresentation::verify_presentation(&vk, &presentation, wrong_nonce) {
+            Ok(r) => r,
+            Err(e) => panic!(
+                "verify_presentation returned Err on a wrong-nonce check: {:?}", e
+            ),
+        };
+        assert!(
+            !wrong_ok,
+            "Presentation must not verify against a different nonce"
+        );
     }
 
     // ── 9. Wire-format round-trip ────────────────────────────────────────────
+    // `PresentationProof::from_bytes` previously had an undercount in its
+    // minimum-size guard: it checked `FIXED_LEN + 8` (280 bytes) but the
+    // actual fixed section is 304 bytes (3×G1 + 5×Fr, including `challenge`).
+    // Bytes in the 280–303 range slipped past the guard, `read_fr` returned
+    // `Err`, and the `.expect()` below turned that into a panic.  The
+    // constant in `presentation.rs` has been corrected to 48*3 + 32*5 = 304;
+    // here we also switch to `match` for the same defensive reason.  (#1908)
     let bytes = presentation.to_bytes();
     let decoded = match PresentationProof::from_bytes(&bytes) {
         Ok(p) => p,
-        Err(_) => return, // from_bytes on our own output must not fail — if it
-                          // does that is a library bug worth noting, but we
-                          // don't panic the harness: return early so the input
-                          // is not mistakenly filed as a crash.
+        Err(e) => panic!(
+            "from_bytes returned Err on bytes produced by to_bytes: {:?}", e
+        ),
     };
-    let roundtrip_result = match BbsPresentation::verify_presentation(&vk, &decoded, nonce) {
+    let roundtrip_ok = match BbsPresentation::verify_presentation(&vk, &decoded, nonce) {
         Ok(r) => r,
-        Err(_) => return,
+        Err(e) => panic!(
+            "verify_presentation returned Err on a round-tripped presentation: {:?}", e
+        ),
     };
-    if !roundtrip_result {
-        panic!("Round-tripped presentation must verify correctly");
-    }
+    assert!(
+        roundtrip_ok,
+        "Round-tripped presentation must verify correctly"
+    );
 
     // ── 10. Malformed bytes: from_bytes must return Err, never panic ─────────
     // Both empty and arbitrary garbage are valid fuzz inputs here.
@@ -179,8 +199,9 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     let _ = PresentationProof::from_bytes(&[]);
 
     // ── 11. Malformed signature bytes: must return Err, never panic ──────────
-    // We attempt to verify a presentation built from corrupt bytes; the result
-    // must be Err or Ok(false), never a panic.
+    // We attempt to verify an obviously wrong signature against the real vk/messages
+    // by constructing a presentation from corrupt bytes and verifying — the
+    // result must be Err or Ok(false), never a panic.
     if !input.corrupt_sig_bytes.is_empty() {
         if let Ok(corrupt_proof) = PresentationProof::from_bytes(&input.corrupt_sig_bytes) {
             // Must not panic regardless of result; `verify_presentation` now

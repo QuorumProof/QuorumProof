@@ -85,20 +85,14 @@ impl PresentationProof {
 
     pub fn from_bytes(bytes: &[u8]) -> BbsResult<Self> {
         // Fixed section: a_bar(48) + b_bar(48) + d(48) + e_hat(32) + r1_hat(32)
-        //              + r3_hat(32) + s_hat(32) + challenge(32)
-        //              = 3 × 48 + 5 × 32 = 144 + 160 = 304 bytes.
-        // Plus 4 bytes for the hidden-map count and 4 bytes for the
-        // revealed-map count → minimum 312 bytes for a proof with 0 entries
-        // in both maps.
-        //
-        // The previous constant was 48*3 + 32*4 = 272 (counted 4 scalars
-        // instead of 5), causing the guard to pass for inputs of length
-        // 280-311 that were then rejected mid-way through deserialization
-        // with an Err rather than being rejected up front.  That path is
-        // correct (the reads use bounds-checked helpers that return Err),
-        // but the inaccurate constant was misleading and masked the true
-        // minimum length.
-        const FIXED_LEN: usize = 48 * 3 + 32 * 5; // 304
+        //                + r3_hat(32) + s_hat(32) + challenge(32) = 304 bytes.
+        // The previous constant (48*3 + 32*4 = 272) omitted `challenge`, so
+        // inputs in the 280–303 byte range slipped past the guard and caused
+        // `read_fr` to return `Err(DeserializationError)` for the challenge
+        // field.  Any caller using `.expect()` on that result would panic,
+        // which is the root cause of the nightly fuzz crashes (#1908 / #1912).
+        const FIXED_LEN: usize = 48 * 3 + 32 * 5; // 3 G1 points + 5 scalars (incl. challenge)
+        // Two u32 count fields follow the fixed section.
         if bytes.len() < FIXED_LEN + 8 {
             return Err(BbsError::DeserializationError);
         }

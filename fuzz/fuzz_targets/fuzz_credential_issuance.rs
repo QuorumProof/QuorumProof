@@ -40,10 +40,11 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
     let issuer = Address::generate(&env);
     let subject = Address::generate(&env);
 
-    // Generate metadata with various patterns — returns a plain Rust Vec<u8>
-    let metadata: std::vec::Vec<u8> =
-        generate_metadata(input.metadata_size, input.metadata_pattern);
-    let meta = Bytes::from_slice(&env, &metadata);
+    // Generate metadata with various patterns.
+    // `generate_metadata` now returns `std::vec::Vec<u8>` (see its doc comment).
+    // `Bytes::from_slice` accepts `&[u8]`, so coerce explicitly.  (#1909)
+    let metadata = generate_metadata(input.metadata_size, input.metadata_pattern);
+    let meta = Bytes::from_slice(&env, metadata.as_slice());
 
     // Ensure credential_type is at least 1
     let ctype = input.credential_type.max(1);
@@ -100,8 +101,11 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
             Ok(c) => c,
             Err(_) => return,
         };
-
-        // Soroban Bytes::len() returns u32; cast the Rust usize to match.
+        
+        // Metadata should be preserved
+        // `cred.metadata_hash.len()` returns `u32` (soroban Bytes) while
+        // `metadata.len()` returns `usize` (std Vec). Cast both to u32 for
+        // the comparison so the types align.  (#1909)
         assert_eq!(
             cred.metadata_hash.len(),
             metadata.len() as u32,
@@ -111,7 +115,11 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
 });
 
 /// Generate metadata with various patterns for fuzzing.
-/// Returns a plain Rust `Vec<u8>` (not a Soroban `Vec`).
+///
+/// Returns a plain `std::vec::Vec<u8>`.  This module imports
+/// `soroban_sdk::Vec` which shadows the standard `Vec` name; using the
+/// fully-qualified type here avoids the ambiguity that previously caused a
+/// compile error (and consequently a CI/fuzz crash: #1909).
 fn generate_metadata(size: u8, pattern: u8) -> std::vec::Vec<u8> {
     let size = (size as usize).clamp(1, 256);
     let mut metadata = std::vec![0u8; size];
