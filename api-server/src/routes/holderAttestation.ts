@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { AttestationManager } from '../crypto/attestation.js';
+import { validate, schemas } from '../middleware/validate.js';
 import { CredentialAttestationStore } from '../services/credentialAttestationStore.js';
 
 /**
@@ -19,28 +20,14 @@ export function createHolderAttestationRouter() {
 
   // POST /api/credentials/:id/attestation/challenge
   // Request a signing challenge for the credential holder
-  router.post('/:id/attestation/challenge', async (req: Request, res: Response) => {
-    const id = (req.params as Record<string, string>).id;
-    const { holder_address } = req.body as { holder_address?: string };
+  router.post(
+    '/:id/attestation/challenge',
+    validate(schemas.holderAttestationChallenge),
+    async (req: Request, res: Response) => {
+      const id = (req.params as Record<string, string>).id;
+      const { holder_address } = req.body as { holder_address: string };
 
-    if (!holder_address || typeof holder_address !== 'string') {
-      res.status(400).json({
-        error: 'Invalid request',
-        message: 'holder_address is required and must be a string',
-      });
-      return;
-    }
-
-    // Validate Stellar address format
-    if (!holder_address.startsWith('G') || holder_address.length !== 56) {
-      res.status(400).json({
-        error: 'Invalid address',
-        message: 'holder_address must be a valid Stellar address',
-      });
-      return;
-    }
-
-    try {
+      try {
       const credentialId = BigInt(id);
       const challenge = attestationManager.generateChallenge(id, holder_address);
 
@@ -71,23 +58,18 @@ export function createHolderAttestationRouter() {
 
   // POST /api/credentials/:id/attestation/verify
   // Verify a holder's signature
-  router.post('/:id/attestation/verify', async (req: Request, res: Response) => {
-    const id = (req.params as Record<string, string>).id;
-    const { challenge_id, holder_address, signature } = req.body as {
-      challenge_id?: string;
-      holder_address?: string;
-      signature?: string;
-    };
+  router.post(
+    '/:id/attestation/verify',
+    validate(schemas.holderAttestationVerify),
+    async (req: Request, res: Response) => {
+      const id = (req.params as Record<string, string>).id;
+      const { challenge_id, holder_address, signature } = req.body as {
+        challenge_id: string;
+        holder_address: string;
+        signature: string;
+      };
 
-    if (!challenge_id || !holder_address || !signature) {
-      res.status(400).json({
-        error: 'Invalid request',
-        message: 'challenge_id, holder_address, and signature are required',
-      });
-      return;
-    }
-
-    try {
+      try {
       const credentialId = BigInt(id);
 
       // Verify the signature using the attestation manager

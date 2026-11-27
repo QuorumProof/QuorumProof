@@ -51,11 +51,13 @@ describe('holder attestation routes', () => {
   it('validates the challenge request and stores a generated challenge', async () => {
     const missing = await request(app).post('/api/credentials/15/attestation/challenge').send({});
     expect(missing.status).toBe(400);
+    expect(missing.body.error).toBe('Validation failed');
 
     const invalidAddress = await request(app)
       .post('/api/credentials/15/attestation/challenge')
       .send({ holder_address: 'invalid' });
     expect(invalidAddress.status).toBe(400);
+    expect(invalidAddress.body.error).toBe('Validation failed');
 
     const challenge = {
       challenge_id: 'challenge-15',
@@ -82,7 +84,15 @@ describe('holder attestation routes', () => {
 
   it('rejects incomplete or invalid signatures and stores a verified attestation', async () => {
     const endpoint = '/api/credentials/15/attestation/verify';
-    expect((await request(app).post(endpoint).send({})).status).toBe(400);
+    const missing = await request(app).post(endpoint).send({});
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toBe('Validation failed');
+
+    const invalidHolder = await request(app)
+      .post(endpoint)
+      .send({ challenge_id: 'challenge-15', holder_address: 'invalid', signature: 'signed-value' });
+    expect(invalidHolder.status).toBe(400);
+    expect(invalidHolder.body.error).toBe('Validation failed');
 
     const payload = { challenge_id: 'challenge-15', holder_address: holderAddress, signature: 'signed-value' };
     verifySignature.mockReturnValueOnce(false);
