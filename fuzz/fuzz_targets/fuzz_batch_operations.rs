@@ -132,9 +132,15 @@ fn test_single_issuer_batch(
         }
     }
 
-    // At least one credential must succeed for the test to be meaningful.
-    // If all fail, the input is uninteresting from a coverage perspective.
-    let _ = issued_count; // metrics available for future assertions
+    // The fuzz target's goal is to confirm the contract never panics (i.e.
+    // no unhandled abort/SIGABRT escapes catch_unwind), not to mandate a
+    // specific throughput.  Many fuzzer-generated inputs legitimately produce
+    // high rejection rates: the duplicate-credential guard fires when
+    // `type_seed` causes all iterations to map to the same (issuer, subject,
+    // type) triple, and rate-limiting fires on dense bursts.  An unconditional
+    // success-rate assert would turn those valid scenarios into fuzz crashes
+    // rather than finding real bugs.  Record the counts for visibility only.
+    let _ = (issued_count, failed_count);
 }
 
 /// Test multiple issuers issuing batches.
@@ -171,9 +177,10 @@ fn test_multiple_issuers_batch(
         }
     }
 
-    // Record for coverage — no hard assertion; zero issuances is a valid
-    // (though uninteresting) outcome under adversarial input.
-    let _ = total_issued;
+    // No success-rate assertion: some fuzz inputs may produce zero successful
+    // credentials (e.g. all calls rejected by rate-limiting or duplicate
+    // guards) — that is a valid contract state, not a bug.
+    let _ = all_credentials;
 }
 
 /// Test large batch with integrity verification on a sample of issued credentials.
@@ -283,7 +290,10 @@ fn test_maximum_batch_size(
             }
         }
 
-        // Collect metrics — no hard assertion on success rate.
+        // Fuzz goal: confirm no unhandled panic escapes from any batch size.
+        // Success-rate thresholds are not asserted here — many fuzzer inputs
+        // legitimately produce rejections (duplicates, rate-limits, etc.) at
+        // any batch size; asserting a floor would misclassify those as crashes.
         let _ = (successful, failed);
     }
 

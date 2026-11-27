@@ -160,21 +160,18 @@ fn read_indexed_map(bytes: &[u8], offset: &mut usize) -> BbsResult<BTreeMap<u32,
     let count = raw_count as usize;
     *offset += 4;
 
-    // Each entry is a u32 index (4 bytes) + an Fr scalar (32 bytes) = 36 bytes.
-    // Reject before allocating if the declared count cannot possibly be satisfied
-    // by the remaining bytes.  Without this check a crafted input can claim
-    // count=2^31, force a huge Vec allocation, then panic when reads fail — the
-    // exact pattern that caused the nightly fuzz crashes in issues #1932/#1934/#1935.
-    // MAX_MESSAGES_PER_CREDENTIAL (255) is the natural upper bound on how many
-    // entries either map can legitimately hold.
-    const MAX_ENTRIES: usize = crate::MAX_MESSAGES_PER_CREDENTIAL as usize;
-    const ENTRY_SIZE: usize = 4 + 32; // u32 index + Fr scalar
-
-    if count > MAX_ENTRIES {
-        return Err(BbsError::DeserializationError);
-    }
-    let needed = count.saturating_mul(ENTRY_SIZE);
-    if *offset + needed > bytes.len() {
+    // Each map entry is 4 bytes (index) + 32 bytes (Fr scalar) = 36 bytes.
+    // Guard against a crafted count larger than the remaining buffer could ever
+    // satisfy: an adversary can set count=u32::MAX with only a handful of bytes
+    // left, which previously forced ~4 billion loop iterations (each hitting the
+    // inner bounds check) before returning Err — an O(count) CPU burn.
+    // MAX_MESSAGES_PER_CREDENTIAL (255) is the tightest meaningful upper bound;
+    // we also cross-check against the remaining buffer length as a belt-and-
+    // suspenders guard.
+    const BYTES_PER_ENTRY: usize = 4 + 32; // idx u32 + Fr scalar
+    let remaining = bytes.len().saturating_sub(*offset);
+    let max_possible = remaining / BYTES_PER_ENTRY;
+    if count > max_possible || count > crate::MAX_MESSAGES_PER_CREDENTIAL as usize {
         return Err(BbsError::DeserializationError);
     }
 
