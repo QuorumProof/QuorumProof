@@ -70,7 +70,7 @@ export async function issueCredential(
   metadataHash: Uint8Array,
 ): Promise<bigint> {
   const client = getRpcClient();
-  const contract = new Contract(import.meta.env.VITE_QUORUM_PROOF_CONTRACT_ID);
+  const contract = new Contract(import.meta.env.VITE_CONTRACT_QUORUM_PROOF);
   const result = await client.simulateTransaction(
     contract.call(
       'issue_credential',
@@ -90,7 +90,7 @@ export async function createSlice(
   threshold: number,
 ): Promise<bigint> {
   const client = getRpcClient();
-  const contract = new Contract(import.meta.env.VITE_QUORUM_PROOF_CONTRACT_ID);
+  const contract = new Contract(import.meta.env.VITE_CONTRACT_QUORUM_PROOF);
   const result = await client.simulateTransaction(
     contract.call(
       'create_slice',

@@ -19,7 +19,7 @@ export function initSentry(): void {
 
   Sentry.init({
     dsn,
-    environment: (import.meta.env.VITE_STELLAR_NETWORK as string) ?? 'testnet',
+    environment: (import.meta.env.VITE_STELLAR_NETWORK as string) ?? (import.meta.env.DEV ? 'development' : 'production'),
     tracesSampleRate: 0.2,
     integrations: [Sentry.browserTracingIntegration()],
   });

@@ -24,20 +24,38 @@ function validateEnv(): EnvConfig {
     'VITE_CONTRACT_ZK_VERIFIER',
   ];
 
-  const missingVars = requiredVars.filter(varName => !import.meta.env[varName]);
+  const missingVars = requiredVars.filter(varName => {
+    const value = import.meta.env[varName];
+    return typeof value !== 'string' || !value.trim() || value.startsWith('<');
+  });
 
   if (missingVars.length > 0) {
+    if (import.meta.env.PROD) {
+      throw new Error(
+        `[QuorumProof] Missing required production environment variables: ${missingVars.join(', ')}.`
+      );
+    }
+
     console.warn(
-      `[QuorumProof] Missing env vars: ${missingVars.join(', ')}. Using empty defaults.`
+      `[QuorumProof] Missing env vars: ${missingVars.join(', ')}. Using development defaults.`
+    );
+  }
+
+  const network = import.meta.env.VITE_STELLAR_NETWORK?.trim();
+  const rpcUrl = import.meta.env.VITE_STELLAR_RPC_URL?.trim();
+
+  if (import.meta.env.PROD && network && !['testnet', 'mainnet', 'futurenet', 'standalone'].includes(network)) {
+    throw new Error(
+      `[QuorumProof] Invalid VITE_STELLAR_NETWORK "${network}". Expected testnet, mainnet, futurenet, or standalone.`
     );
   }
 
   return {
-    STELLAR_NETWORK: import.meta.env.VITE_STELLAR_NETWORK ?? 'testnet',
-    STELLAR_RPC_URL: import.meta.env.VITE_STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org',
-    CONTRACT_QUORUM_PROOF: import.meta.env.VITE_CONTRACT_QUORUM_PROOF ?? '',
-    CONTRACT_SBT_REGISTRY: import.meta.env.VITE_CONTRACT_SBT_REGISTRY ?? '',
-    CONTRACT_ZK_VERIFIER: import.meta.env.VITE_CONTRACT_ZK_VERIFIER ?? '',
+    STELLAR_NETWORK: network ?? 'testnet',
+    STELLAR_RPC_URL: rpcUrl ?? 'https://soroban-testnet.stellar.org',
+    CONTRACT_QUORUM_PROOF: import.meta.env.VITE_CONTRACT_QUORUM_PROOF?.trim() ?? '',
+    CONTRACT_SBT_REGISTRY: import.meta.env.VITE_CONTRACT_SBT_REGISTRY?.trim() ?? '',
+    CONTRACT_ZK_VERIFIER: import.meta.env.VITE_CONTRACT_ZK_VERIFIER?.trim() ?? '',
   };
 }
 

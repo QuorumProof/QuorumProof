@@ -32,9 +32,12 @@ export interface ProofRequest {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-const RPC_URL =
-  import.meta.env.VITE_STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org';
-const NETWORK = (import.meta.env.VITE_STELLAR_NETWORK ?? 'testnet') as string;
+const RPC_URL = import.meta.env.VITE_STELLAR_RPC_URL;
+const NETWORK = import.meta.env.VITE_STELLAR_NETWORK as string;
+
+if (import.meta.env.PROD && (!RPC_URL || !NETWORK)) {
+  throw new Error('Missing required Stellar production environment variables');
+}
 
 const PASSPHRASES: Record<string, string> = {
   testnet: Networks.TESTNET,

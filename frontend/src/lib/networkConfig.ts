@@ -47,6 +47,9 @@ function getInitialNetwork(): StellarNetwork {
   if (env && (VALID_NETWORKS as string[]).includes(env)) {
     return env as StellarNetwork;
   }
+  if (import.meta.env.PROD) {
+    throw new Error('VITE_STELLAR_NETWORK is required in production');
+  }
   return 'testnet';
 }
 
