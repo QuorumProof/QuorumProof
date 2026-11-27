@@ -12,6 +12,9 @@ import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
 import { logger } from '../services/logger.js';
+import {
+  getDefaultDashboardAccessLogStore,
+} from '../services/dashboardAccessLogs.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -20,7 +23,6 @@ export type SorobanClient = {
   addressVal: (a: string) => ReturnType<typeof SimulateCallType>;
 };
 
-// In-memory store for dashboard state (in production, use persistent DB)
 interface DashboardAccessLog {
   credential_id: string;
   accessed_by: string;
@@ -62,7 +64,6 @@ interface DisputeInfo {
   resolution?: string;
 }
 
-const accessLogs = new Map<string, DashboardAccessLog[]>();
 const disputes = new Map<string, DisputeInfo[]>();
 
 function serializeBigInt(value: unknown): unknown {
@@ -78,6 +79,7 @@ function serializeBigInt(value: unknown): unknown {
 
 export function createDashboardRouter(soroban: SorobanClient) {
   const router = Router();
+  const accessLogStore = getDefaultDashboardAccessLogStore();
 
   /**
    * GET /api/me/credentials
@@ -252,10 +254,10 @@ export function createDashboardRouter(soroban: SorobanClient) {
       }
 
       // Add access information
-      const logs = accessLogs.get(credentialId.toString()) || [];
-      response.access_count = logs.length;
-      if (logs.length > 0) {
-        response.last_accessed_at = logs[logs.length - 1].accessed_at;
+      const credentialAccessLogs = await accessLogStore.forCredentials([credentialId.toString()]);
+      response.access_count = await accessLogStore.countCredential(credentialId.toString());
+      if (credentialAccessLogs.length > 0) {
+        response.last_accessed_at = credentialAccessLogs[0].accessed_at;
       }
 
       res.json(response);
@@ -412,41 +414,21 @@ export function createDashboardRouter(soroban: SorobanClient) {
         }
       }
 
-      // Collect access logs for user's credentials
-      let allLogs: DashboardAccessLog[] = [];
-      for (const credId of userCredentialIds) {
-        if (credentialIdFilter && credId !== credentialIdFilter) {
-          continue;
-        }
-
-        const logs = accessLogs.get(credId) || [];
-        allLogs = allLogs.concat(logs);
-      }
-
-      // Filter by date range if provided
-      if (fromDate || toDate) {
-        allLogs = allLogs.filter((log) => {
-          const logDate = new Date(log.accessed_at);
-          if (fromDate && logDate < fromDate) return false;
-          if (toDate && logDate > toDate) return false;
-          return true;
-        });
-      }
-
-      // Sort by date (newest first)
-      allLogs.sort((a, b) => new Date(b.accessed_at).getTime() - new Date(a.accessed_at).getTime());
-
-      const total = allLogs.length;
-
-      // Apply pagination
-      allLogs = allLogs.slice(offset, offset + limit);
+      const { logs: allLogs, total } = await accessLogStore.list({
+        credentialIds: [...userCredentialIds],
+        credentialId: credentialIdFilter,
+        from: fromDate && !Number.isNaN(fromDate.getTime()) ? fromDate : undefined,
+        to: toDate && !Number.isNaN(toDate.getTime()) ? toDate : undefined,
+        limit,
+        offset,
+      });
 
       res.json({
         access_logs: allLogs,
         total,
         limit,
         offset,
-        total_access_count: allLogs.reduce((sum, log) => sum + 1, 0),
+        total_access_count: total,
       });
     } catch (error) {
       logger.error('Error fetching access log', 'dashboard', { requestId: req.requestId, error: String(error) });
@@ -515,6 +497,11 @@ export function createDashboardRouter(soroban: SorobanClient) {
    */
   router.post('/access-log', async (req: Request, res: Response) => {
     try {
+      const userAddress = req.auth?.sub;
+      if (!userAddress) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+
       const { credential_id, accessed_by, reason, duration_seconds } = req.body;
 
       if (!credential_id || !accessed_by || !reason) {
@@ -523,17 +510,15 @@ export function createDashboardRouter(soroban: SorobanClient) {
         });
       }
 
-      const logEntry: DashboardAccessLog = {
+      const logEntry: DashboardAccessLog = await accessLogStore.record({
         credential_id,
         accessed_by,
         accessed_at: new Date().toISOString(),
         reason,
-        duration_seconds: duration_seconds || 0,
-      };
-
-      const credLogs = accessLogs.get(credential_id) || [];
-      credLogs.push(logEntry);
-      accessLogs.set(credential_id, credLogs);
+        duration_seconds: typeof duration_seconds === 'number' && duration_seconds >= 0
+          ? duration_seconds
+          : 0,
+      });
 
       res.status(201).json(logEntry);
     } catch (error) {
@@ -605,14 +590,11 @@ export function createDashboardRouter(soroban: SorobanClient) {
       }
 
       // Find latest access
-      for (const credId of userCredentialIds) {
-        const logs = accessLogs.get(credId) || [];
-        if (logs.length > 0) {
-          const lastLog = logs[logs.length - 1];
-          const logDate = new Date(lastLog.accessed_at);
-          if (!lastAccess || logDate > lastAccess) {
-            lastAccess = logDate;
-          }
+      const latestLogs = await accessLogStore.forCredentials(userCredentialIds);
+      if (latestLogs.length > 0) {
+        const logDate = new Date(latestLogs[0].accessed_at);
+        if (!lastAccess || logDate > lastAccess) {
+          lastAccess = logDate;
         }
       }
 
