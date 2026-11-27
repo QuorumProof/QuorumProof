@@ -102,15 +102,9 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
             Err(_) => return,
         };
         
-        // Metadata should be preserved
-        // `cred.metadata_hash.len()` returns `u32` (soroban Bytes) while
-        // `metadata.len()` returns `usize` (std Vec). Cast both to u32 for
-        // the comparison so the types align.  (#1909)
-        assert_eq!(
-            cred.metadata_hash.len(),
-            metadata.len() as u32,
-            "Metadata size mismatch"
-        );
+        // Metadata should be preserved.
+        // `Bytes::len()` returns `u32`; cast the local Vec length to match.
+        assert_eq!(cred.metadata_hash.len(), metadata.len() as u32, "Metadata size mismatch");
     }
 });
 

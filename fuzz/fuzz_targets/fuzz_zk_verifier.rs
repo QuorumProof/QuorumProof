@@ -145,19 +145,18 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Mode 2: real Groth16 verification with a registered key.
-    //
-    // `generate_vk` uses `toxic_waste` which does a wrapping u64 multiply.
-    // For certain `vk_seed` values the resulting `delta_s` is the zero scalar,
-    // making `generate_proof` panic.  Catch that panic and skip the real-mode
-    // checks for this seed rather than crashing the fuzz harness.
-    let toy = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        groth16_test_prover::generate_vk(&env, input.vk_seed, CLAIM_PUBLIC_INPUTS)
-    })) {
-        Ok(t) => t,
-        Err(_) => return, // degenerate seed — skip real-mode verification
-    };
-
-    client.set_groth16_verifying_key(&admin, &toy.vk_hash, &toy.vk);
+    let toy = groth16_test_prover::generate_vk(&env, input.vk_seed, CLAIM_PUBLIC_INPUTS);
+    // `validate()` inside set_groth16_verifying_key asserts all VK points
+    // are valid BLS12-381 curve points.  For extreme seed values the toy
+    // generator can produce a point that fails that check; treat such a
+    // VK registration failure as an invalid input (not a verifier bug).
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_groth16_verifying_key(&admin, &toy.vk_hash, &toy.vk)
+    }))
+    .is_err()
+    {
+        return;
+    }
 
     let claim = claim_discriminant(&claim_type);
     let valid = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
