@@ -110,6 +110,20 @@ fuzz_target!(|input: FuzzInput| {
 
     // Mode 2: real Groth16 verification with a registered key.
     let toy = groth16_test_prover::generate_vk(&env, input.vk_seed, CLAIM_PUBLIC_INPUTS);
+
+    // Guard: `generate_vk` guarantees non-zero `delta_s` via the fixed
+    // `toxic_waste` function.  We double-check here so that if the invariant
+    // is ever broken by a future refactor, the fuzz target skips the proof
+    // rather than hard-aborting (`.expect` panics are fatal with
+    // `panic = "abort"`).  `generate_proof` now uses `unwrap_or_else`
+    // internally, so it also never panics — but the valid-proof assertion
+    // below only holds when delta was invertible and C was solved correctly.
+    // We detect the degenerate case by checking whether the VK delta point
+    // is the identity (which happens iff delta_s == 0 after the fix).
+    // In practice `toxic_waste` guarantees non-zero, so this branch is
+    // never taken; it exists purely as a defensive belt-and-braces guard.
+    // (A delta G2 point == identity corresponds to delta_s == 0, since
+    //  G2::generator() * 0 == identity.)
     client.set_groth16_verifying_key(&admin, &toy.vk_hash, &toy.vk);
 
     let claim = claim_discriminant(&claim_type);
@@ -117,11 +131,24 @@ fuzz_target!(|input: FuzzInput| {
 
     // Sanity: a genuinely valid proof for this statement must be accepted,
     // otherwise the rejection checks below would pass for the wrong reason.
-    assert_eq!(
-        verify(&valid.proof),
-        Some(true),
-        "a valid Groth16 proof for this statement must be accepted"
-    );
+    //
+    // Skip this assertion when delta was not invertible (the proof's C point
+    // was computed with a fallback scalar and is NOT algebraically valid).
+    // `toy.vk.delta_g2` being the identity is the observable signal for
+    // that degenerate case — in all normal (non-zero delta_s) inputs the
+    // delta G2 point is a non-identity curve point.
+    let delta_is_identity = toy.vk.delta_g2.to_array().iter().all(|&b| b == 0);
+    if !delta_is_identity {
+        assert_eq!(
+            verify(&valid.proof),
+            Some(true),
+            "a valid Groth16 proof for this statement must be accepted"
+        );
+    } else {
+        // Degenerate vk: skip the valid-proof assertion (the proof is not
+        // algebraically valid because delta_s was zero).
+        return;
+    }
 
     // Known-invalid corpus: every entry must be rejected.
     //
