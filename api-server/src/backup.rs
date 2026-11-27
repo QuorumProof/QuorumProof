@@ -3,9 +3,10 @@
 /// Implements automated daily backup of the credential database with integrity verification.
 /// Supports encryption, compression, and S3 storage.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use sha2::{Sha256, Digest};
 use chrono::{Utc, DateTime};
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct BackupIntegrity {
@@ -197,15 +198,17 @@ fn calculate_data_checksum(
     let mut hasher = Sha256::new();
 
     for credential in credentials {
-        if let Ok(json) = serde_json::to_string(credential) {
-            hasher.update(json.as_bytes());
-        }
+        let sorted: BTreeMap<_, _> = credential.iter().collect();
+        let json = serde_json::to_string(&sorted)
+            .map_err(|e| BackupError::ChecksumCalculationFailed(e.to_string()))?;
+        hasher.update(json.as_bytes());
     }
 
     for slice in slices {
-        if let Ok(json) = serde_json::to_string(slice) {
-            hasher.update(json.as_bytes());
-        }
+        let sorted: BTreeMap<_, _> = slice.iter().collect();
+        let json = serde_json::to_string(&sorted)
+            .map_err(|e| BackupError::ChecksumCalculationFailed(e.to_string()))?;
+        hasher.update(json.as_bytes());
     }
 
     let result = hasher.finalize();
@@ -227,12 +230,29 @@ fn calculate_metadata_checksum(
 }
 
 fn serialize_backup(
-    _metadata: &BackupMetadata,
-    _credentials: &[HashMap<String, String>],
-    _slices: &[HashMap<String, String>],
+    metadata: &BackupMetadata,
+    credentials: &[HashMap<String, String>],
+    slices: &[HashMap<String, String>],
 ) -> Result<Vec<u8>, BackupError> {
-    // Implementation would serialize to JSON
-    Ok(vec![])
+    let payload = serde_json::json!({
+        "backup_date": metadata.backup_date,
+        "network": metadata.network,
+        "contract_id": metadata.contract_id,
+        "credential_count": metadata.credential_count,
+        "slice_count": metadata.slice_count,
+        "backup_integrity": {
+            "checksum_algorithm": metadata.backup_integrity.checksum_algorithm,
+            "data_checksum": metadata.backup_integrity.data_checksum,
+            "metadata_checksum": metadata.backup_integrity.metadata_checksum,
+            "compressed": metadata.backup_integrity.compressed,
+            "encrypted": metadata.backup_integrity.encrypted,
+        },
+        "created_at": metadata.created_at.to_rfc3339(),
+        "credentials": credentials,
+        "slices": slices,
+    });
+
+    serde_json::to_vec(&payload).map_err(|e| BackupError::SerializationFailed(e.to_string()))
 }
 
 fn encrypt_backup(_data: &[u8]) -> Result<Vec<u8>, BackupError> {
@@ -268,14 +288,225 @@ fn read_backup_file(_path: &str) -> Result<Vec<u8>, BackupError> {
     Ok(vec![])
 }
 
-fn parse_backup(_data: &[u8]) -> Result<BackupMetadata, BackupError> {
-    Err(BackupError::InvalidBackup("Not implemented".to_string()))
+fn parse_backup_value(data: &[u8]) -> Result<Value, BackupError> {
+    serde_json::from_slice(data).map_err(|e| BackupError::InvalidBackup(e.to_string()))
 }
 
-fn extract_credentials_from_backup(_data: &[u8]) -> Result<Vec<HashMap<String, String>>, BackupError> {
-    Ok(vec![])
+fn parse_backup(data: &[u8]) -> Result<BackupMetadata, BackupError> {
+    let value = parse_backup_value(data)?;
+    let backup_date = value
+        .get("backup_date")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BackupError::InvalidBackup("missing backup_date".to_string()))?
+        .to_string();
+    let network = value
+        .get("network")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BackupError::InvalidBackup("missing network".to_string()))?
+        .to_string();
+    let contract_id = value
+        .get("contract_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BackupError::InvalidBackup("missing contract_id".to_string()))?
+        .to_string();
+    let credential_count = value
+        .get("credential_count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| BackupError::InvalidBackup("missing credential_count".to_string()))?;
+    let slice_count = value
+        .get("slice_count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| BackupError::InvalidBackup("missing slice_count".to_string()))?;
+
+    let integrity = value
+        .get("backup_integrity")
+        .ok_or_else(|| BackupError::InvalidBackup("missing backup_integrity".to_string()))?;
+    let backup_integrity = BackupIntegrity {
+        checksum_algorithm: integrity
+            .get("checksum_algorithm")
+            .and_then(Value::as_str)
+            .unwrap_or("sha256")
+            .to_string(),
+        data_checksum: integrity
+            .get("data_checksum")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BackupError::InvalidBackup("missing data_checksum".to_string()))?
+            .to_string(),
+        metadata_checksum: integrity
+            .get("metadata_checksum")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BackupError::InvalidBackup("missing metadata_checksum".to_string()))?
+            .to_string(),
+        compressed: integrity
+            .get("compressed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        encrypted: integrity
+            .get("encrypted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+
+    let created_at = value
+        .get("created_at")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+
+    Ok(BackupMetadata {
+        backup_date,
+        network,
+        contract_id,
+        credential_count,
+        slice_count,
+        backup_integrity,
+        created_at,
+    })
 }
 
-fn extract_slices_from_backup(_data: &[u8]) -> Result<Vec<HashMap<String, String>>, BackupError> {
-    Ok(vec![])
+fn extract_string_map_array(
+    data: &[u8],
+    field: &str,
+) -> Result<Vec<HashMap<String, String>>, BackupError> {
+    let value = parse_backup_value(data)?;
+    let array = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| BackupError::InvalidBackup(format!("missing {}", field)))?;
+
+    array
+        .iter()
+        .map(|item| {
+            let obj = item
+                .as_object()
+                .ok_or_else(|| BackupError::InvalidBackup(format!("{} entries must be objects", field)))?;
+            let mut map = HashMap::new();
+            for (key, val) in obj {
+                let string_val = match val {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                map.insert(key.clone(), string_val);
+            }
+            Ok(map)
+        })
+        .collect()
+}
+
+fn extract_credentials_from_backup(data: &[u8]) -> Result<Vec<HashMap<String, String>>, BackupError> {
+    extract_string_map_array(data, "credentials")
+}
+
+fn extract_slices_from_backup(data: &[u8]) -> Result<Vec<HashMap<String, String>>, BackupError> {
+    extract_string_map_array(data, "slices")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_backup(
+        credentials: Vec<HashMap<String, String>>,
+        slices: Vec<HashMap<String, String>>,
+    ) -> Vec<u8> {
+        let backup_date = "2026-05-29_14-30-00".to_string();
+        let credential_count = credentials.len() as u64;
+        let slice_count = slices.len() as u64;
+        let data_checksum = calculate_data_checksum(&credentials, &slices).unwrap();
+        let metadata_checksum =
+            calculate_metadata_checksum(&backup_date, credential_count, slice_count).unwrap();
+
+        let metadata = BackupMetadata {
+            backup_date,
+            network: "testnet".to_string(),
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM".to_string(),
+            credential_count,
+            slice_count,
+            backup_integrity: BackupIntegrity {
+                checksum_algorithm: "sha256".to_string(),
+                data_checksum,
+                metadata_checksum,
+                compressed: true,
+                encrypted: false,
+            },
+            created_at: Utc::now(),
+        };
+
+        serialize_backup(&metadata, &credentials, &slices).unwrap()
+    }
+
+    fn sorted_maps(items: &[HashMap<String, String>]) -> Vec<BTreeMap<String, String>> {
+        let mut sorted: Vec<BTreeMap<String, String>> = items
+            .iter()
+            .map(|item| item.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .collect();
+        sorted.sort_by_key(|item| serde_json::to_string(item).unwrap());
+        sorted
+    }
+
+    #[test]
+    fn extract_credentials_from_backup_round_trip() {
+        let credentials = vec![
+            HashMap::from([
+                ("id".to_string(), "1".to_string()),
+                ("subject".to_string(), "GABC".to_string()),
+                ("issuer".to_string(), "GDEF".to_string()),
+                ("credential_type".to_string(), "Degree".to_string()),
+                ("revoked".to_string(), "false".to_string()),
+            ]),
+            HashMap::from([
+                ("id".to_string(), "2".to_string()),
+                ("subject".to_string(), "GHIJ".to_string()),
+                ("issuer".to_string(), "GKLM".to_string()),
+            ]),
+        ];
+        let slices = vec![HashMap::from([
+            ("id".to_string(), "10".to_string()),
+            ("creator".to_string(), "GXYZ".to_string()),
+        ])];
+
+        let backup = sample_backup(credentials.clone(), slices);
+        let extracted = extract_credentials_from_backup(&backup).unwrap();
+
+        assert_eq!(sorted_maps(&extracted), sorted_maps(&credentials));
+    }
+
+    #[test]
+    fn extract_slices_from_backup_round_trip() {
+        let credentials = vec![HashMap::from([
+            ("id".to_string(), "1".to_string()),
+            ("subject".to_string(), "GABC".to_string()),
+        ])];
+        let slices = vec![
+            HashMap::from([
+                ("id".to_string(), "7".to_string()),
+                ("creator".to_string(), "GCREATOR".to_string()),
+                ("threshold".to_string(), "2".to_string()),
+            ]),
+            HashMap::from([
+                ("id".to_string(), "8".to_string()),
+                ("creator".to_string(), "GOTHER".to_string()),
+            ]),
+        ];
+
+        let backup = sample_backup(credentials, slices.clone());
+        let extracted = extract_slices_from_backup(&backup).unwrap();
+
+        assert_eq!(sorted_maps(&extracted), sorted_maps(&slices));
+    }
+
+    #[test]
+    fn extract_from_backup_round_trip_empty_collections() {
+        let backup = sample_backup(vec![], vec![]);
+
+        let credentials = extract_credentials_from_backup(&backup).unwrap();
+        let slices = extract_slices_from_backup(&backup).unwrap();
+
+        assert!(credentials.is_empty());
+        assert!(slices.is_empty());
+    }
 }
