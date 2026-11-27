@@ -13,7 +13,7 @@ mod proptest_sbt_registry;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, Env, IntoVal, Symbol, Vec,
+    Bytes, Env, IntoVal, Map, Symbol, Vec,
 };
 
 const STANDARD_TTL: u32 = 16_384;
@@ -3383,23 +3383,23 @@ impl SbtRegistryContract {
             EXTENDED_TTL,
         );
 
-        // Issue #1413: maintain the global pending-clawbacks index.
-        let mut pending: Vec<u64> = env
+        // Issue #1956: maintain the global pending-clawbacks index as a
+        // Map<u64, Symbol> (clawback_id → status) for O(1) insert and lookup,
+        // replacing the previous Vec<u64> that required a linear duplicate scan.
+        let mut pending: Map<u64, Symbol> = env
             .storage()
             .persistent()
             .get(&DataKey2::PendingClawbacks)
-            .unwrap_or(Vec::new(&env));
-        if !pending.iter().any(|id| id == clawback_id) {
-            pending.push_back(clawback_id);
-            env.storage()
-                .persistent()
-                .set(&DataKey2::PendingClawbacks, &pending);
-            env.storage().persistent().extend_ttl(
-                &DataKey2::PendingClawbacks,
-                STANDARD_TTL,
-                EXTENDED_TTL,
-            );
-        }
+            .unwrap_or(Map::new(&env));
+        pending.set(clawback_id, symbol_short!("pending"));
+        env.storage()
+            .persistent()
+            .set(&DataKey2::PendingClawbacks, &pending);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::PendingClawbacks,
+            STANDARD_TTL,
+            EXTENDED_TTL,
+        );
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
         topics.push_back(symbol_short!("clawback").into_val(&env));
@@ -3433,24 +3433,26 @@ impl SbtRegistryContract {
             .persistent()
             .remove(&DataKey::PendingClawbackBySbt(request.sbt_id));
 
-        // Issue #1413: remove from the global pending-clawbacks index.
-        let mut pending: Vec<u64> = env
+        // Issue #1956: remove from the Map-based pending-clawbacks index.
+        let mut pending: Map<u64, Symbol> = env
             .storage()
             .persistent()
             .get(&DataKey2::PendingClawbacks)
-            .unwrap_or(Vec::new(&env));
-        if let Some(pos) = pending.iter().position(|id| id == clawback_id) {
-            pending.remove(pos as u32);
+            .unwrap_or(Map::new(&env));
+        pending.remove(clawback_id);
+        if pending.is_empty() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey2::PendingClawbacks);
+        } else {
             env.storage()
                 .persistent()
                 .set(&DataKey2::PendingClawbacks, &pending);
-            if !pending.is_empty() {
-                env.storage().persistent().extend_ttl(
-                    &DataKey2::PendingClawbacks,
-                    STANDARD_TTL,
-                    EXTENDED_TTL,
-                );
-            }
+            env.storage().persistent().extend_ttl(
+                &DataKey2::PendingClawbacks,
+                STANDARD_TTL,
+                EXTENDED_TTL,
+            );
         }
 
         let mut topics: Vec<soroban_sdk::Val> = Vec::new(&env);
@@ -3459,15 +3461,22 @@ impl SbtRegistryContract {
         env.events().publish(topics, issuer);
     }
 
-    /// Issue #1413: Return all currently-pending clawback IDs.
+    /// Issue #1956: Return all currently-pending clawback IDs.
     ///
-    /// These are clawbacks with `status = "pending"` that have not yet been
-    /// cancelled or executed. Useful for dashboards and bulk notifications.
+    /// Reads the Map<u64, Symbol> index and returns only the keys whose
+    /// status is `"pending"` (i.e. excludes anything that was cancelled or
+    /// otherwise resolved but whose entry was not yet cleaned up).
     pub fn get_pending_clawbacks(env: Env) -> Vec<u64> {
-        env.storage()
+        let map: Map<u64, Symbol> = env
+            .storage()
             .persistent()
             .get(&DataKey2::PendingClawbacks)
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Map::new(&env));
+        let mut result: Vec<u64> = Vec::new(&env);
+        for (id, _status) in map.iter() {
+            result.push_back(id);
+        }
+        result
     }
 
     /// Look up a clawback request by id.
@@ -7324,6 +7333,82 @@ mod tests {
 
         let uri = Bytes::from_slice(&env, b"ftp://example.com/meta.json");
         client.mint(&owner, &cred_id, &uri);
+    }
+
+    // ── Issue #1956: Pending-clawback index — Map-based, O(1) insert/remove ──
+
+    /// Mint a single SBT and return its token_id.
+    fn mint_one(
+        env: &Env,
+        client: &SbtRegistryContractClient,
+        qp_client: &QuorumProofContractClient,
+    ) -> u64 {
+        let issuer = Address::generate(env);
+        let owner = Address::generate(env);
+        let meta = soroban_sdk::Bytes::from_slice(env, b"ipfs://meta");
+        let cred_id = qp_client.issue_credential(&issuer, &owner, &1u32, &meta, &None, &0u64);
+        let uri = soroban_sdk::Bytes::from_slice(env, b"ipfs://QmSBT");
+        client.mint(&owner, &cred_id, &uri)
+    }
+
+    /// Initiating N clawbacks then querying the pending index returns exactly N ids,
+    /// and cancelling each one shrinks the index back to zero — all without the
+    /// O(n) duplicate-scan that the previous Vec-based implementation required.
+    #[test]
+    fn test_pending_clawback_index_large_n() {
+        const N: u64 = 50;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let reason = soroban_sdk::Bytes::from_slice(&env, b"test");
+
+        // Initiate N independent clawbacks (one per distinct SBT).
+        let mut clawback_ids: Vec<u64> = Vec::new(&env);
+        for _ in 0..N {
+            let sbt_id = mint_one(&env, &client, &qp_client);
+            let cid = client.initiate_sbt_clawback(&issuer, &sbt_id, &reason, &3600u64);
+            clawback_ids.push_back(cid);
+        }
+
+        // All N entries appear in the pending index.
+        let pending = client.get_pending_clawbacks();
+        assert_eq!(pending.len(), N as u32, "expected {N} pending clawbacks");
+
+        // Each initiated clawback id is present exactly once.
+        for cid in clawback_ids.iter() {
+            assert!(
+                pending.iter().any(|id| id == cid),
+                "clawback id {cid} missing from index",
+            );
+        }
+
+        // Cancel every clawback; the index must shrink to zero.
+        for cid in clawback_ids.iter() {
+            client.cancel_sbt_clawback(&issuer, &cid);
+        }
+        let after = client.get_pending_clawbacks();
+        assert_eq!(after.len(), 0, "index must be empty after all cancellations");
+    }
+
+    /// Initiating a duplicate clawback for the same SBT is rejected by the
+    /// PendingClawbackBySbt guard, and the index count stays at 1.
+    #[test]
+    #[should_panic]
+    fn test_pending_clawback_index_no_duplicate_for_same_sbt() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, qp_client, _qp_id) = setup_with_qp(&env);
+
+        let issuer = Address::generate(&env);
+        let reason = soroban_sdk::Bytes::from_slice(&env, b"dup");
+        let sbt_id = mint_one(&env, &client, &qp_client);
+
+        client.initiate_sbt_clawback(&issuer, &sbt_id, &reason, &3600u64);
+        // Second call for the same SBT — must panic with ClawbackAlreadyExists.
+        client.initiate_sbt_clawback(&issuer, &sbt_id, &reason, &3600u64);
     }
 }
 

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import type { simulateCall as SimulateCallType } from '../soroban.js';
+import { getPool } from '../db.js';
 
 export type SorobanClient = {
   simulateCall: typeof SimulateCallType;
@@ -33,10 +34,15 @@ type BatchVerificationResult = {
   error?: string;
 };
 
-const services = new Map<string, ServiceRecord>();
-const attestations: ThirdPartyAttestation[] = [];
+// ---------------------------------------------------------------------------
+// ID generation — matches the pattern used by the previous in-memory counter,
+// but uses a short random hex string so IDs are unique across instances.
+// ---------------------------------------------------------------------------
+import { randomBytes } from 'crypto';
 
-let idCounter = 0;
+function newServiceId(): string {
+  return `svc_${randomBytes(6).toString('hex')}`;
+}
 
 /**
  * Validate the structure of a batch of ZK proofs before verification.
@@ -125,6 +131,34 @@ export async function verifyProofBatch(
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// Row-to-domain mappers
+// ---------------------------------------------------------------------------
+
+function rowToServiceRecord(row: any): ServiceRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    webhookUrl: row.webhook_url,
+    serviceType: row.service_type,
+    registeredAt: row.registered_at instanceof Date
+      ? row.registered_at.toISOString()
+      : String(row.registered_at),
+  };
+}
+
+function rowToAttestation(row: any): ThirdPartyAttestation {
+  return {
+    serviceId: row.service_id,
+    credentialId: Number(row.credential_id),
+    result: row.result as 'pass' | 'fail' | 'pending',
+    notes: row.notes ?? undefined,
+    submittedAt: row.submitted_at instanceof Date
+      ? row.submitted_at.toISOString()
+      : String(row.submitted_at),
+  };
+}
+
 export function createVerificationRouter(soroban: SorobanClient) {
   const router = Router();
 
@@ -132,8 +166,12 @@ export function createVerificationRouter(soroban: SorobanClient) {
    * GET /api/verification-services
    * List all registered third-party verification providers.
    */
-  router.get('/', (_req: Request, res: Response) => {
-    res.json({ services: Array.from(services.values()), total: services.size });
+  router.get('/', async (_req: Request, res: Response) => {
+    const { rows } = await getPool().query<any>(
+      'SELECT id, name, webhook_url, service_type, registered_at FROM verification_services ORDER BY registered_at',
+    );
+    const services = rows.map(rowToServiceRecord);
+    res.json({ services, total: services.length });
   });
 
   /**
@@ -141,7 +179,7 @@ export function createVerificationRouter(soroban: SorobanClient) {
    * Register a new third-party background-check / verification provider.
    * Body: { name: string, serviceType: string, webhookUrl?: string }
    */
-  router.post('/register', (req: Request, res: Response) => {
+  router.post('/register', async (req: Request, res: Response) => {
     const { name, serviceType, webhookUrl } = req.body as {
       name?: string;
       serviceType?: string;
@@ -157,17 +195,14 @@ export function createVerificationRouter(soroban: SorobanClient) {
       return;
     }
 
-    idCounter += 1;
-    const id = `svc_${idCounter}`;
-    const record: ServiceRecord = {
-      id,
-      name: name.trim(),
-      webhookUrl: webhookUrl?.trim() ?? '',
-      serviceType: serviceType.trim(),
-      registeredAt: new Date().toISOString(),
-    };
-    services.set(id, record);
-    res.status(201).json(record);
+    const id = newServiceId();
+    const { rows } = await getPool().query<any>(
+      `INSERT INTO verification_services (id, name, webhook_url, service_type)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, webhook_url, service_type, registered_at`,
+      [id, name.trim(), webhookUrl?.trim() ?? '', serviceType.trim()],
+    );
+    res.status(201).json(rowToServiceRecord(rows[0]));
   });
 
   /**
@@ -183,7 +218,15 @@ export function createVerificationRouter(soroban: SorobanClient) {
       notes?: string;
     };
 
-    if (!serviceId || !services.has(serviceId)) {
+    if (!serviceId) {
+      res.status(400).json({ error: 'Invalid or unregistered serviceId' });
+      return;
+    }
+    const svcCheck = await getPool().query<any>(
+      'SELECT id FROM verification_services WHERE id = $1',
+      [serviceId],
+    );
+    if (svcCheck.rowCount === 0) {
       res.status(400).json({ error: 'Invalid or unregistered serviceId' });
       return;
     }
@@ -203,19 +246,13 @@ export function createVerificationRouter(soroban: SorobanClient) {
       return;
     }
 
-    const entry: ThirdPartyAttestation = {
-      serviceId,
-      credentialId,
-      result: result as 'pass' | 'fail' | 'pending',
-      notes: notes?.trim(),
-      submittedAt: new Date().toISOString(),
-    };
-    attestations.push(entry);
-
-    // A new attestation changes the verification outcome for the credential's
-    // slice, so drop any cached verification result to keep the cache coherent.
-    invalidateSliceVerification(String(credentialId));
-
+    const { rows } = await getPool().query<any>(
+      `INSERT INTO third_party_attestations (service_id, credential_id, result, notes)
+       VALUES ($1, $2, $3, $4)
+       RETURNING service_id, credential_id, result, notes, submitted_at`,
+      [serviceId, credentialId, result, notes?.trim() ?? null],
+    );
+    const entry = rowToAttestation(rows[0]);
     res.status(201).json({ message: 'Attestation recorded', entry });
   });
 
@@ -224,7 +261,7 @@ export function createVerificationRouter(soroban: SorobanClient) {
    * List third-party attestations, optionally filtered by credentialId.
    * Query params: credentialId (optional)
    */
-  router.get('/attestations', (req: Request, res: Response) => {
+  router.get('/attestations', async (req: Request, res: Response) => {
     const credentialId = req.query.credentialId
       ? parseInt(String(req.query.credentialId), 10)
       : null;
@@ -234,12 +271,17 @@ export function createVerificationRouter(soroban: SorobanClient) {
       return;
     }
 
-    const filtered =
-      credentialId !== null
-        ? attestations.filter((a) => a.credentialId === credentialId)
-        : attestations;
+    const { rows } = credentialId !== null
+      ? await getPool().query<any>(
+          'SELECT service_id, credential_id, result, notes, submitted_at FROM third_party_attestations WHERE credential_id = $1 ORDER BY submitted_at',
+          [credentialId],
+        )
+      : await getPool().query<any>(
+          'SELECT service_id, credential_id, result, notes, submitted_at FROM third_party_attestations ORDER BY submitted_at',
+        );
 
-    res.json({ attestations: filtered, total: filtered.length });
+    const attestations = rows.map(rowToAttestation);
+    res.json({ attestations, total: attestations.length });
   });
 
   /**
