@@ -151,7 +151,16 @@ fn read_indexed_map(bytes: &[u8], offset: &mut usize) -> BbsResult<BTreeMap<u32,
     }
     let mut count_bytes = [0u8; 4];
     count_bytes.copy_from_slice(&bytes[*offset..*offset + 4]);
-    let count = u32::from_le_bytes(count_bytes) as usize;
+    let raw_count = u32::from_le_bytes(count_bytes);
+    // Reject any count that exceeds the per-credential message limit.  Without
+    // this bound a fuzzer can supply a 4-byte count of 0xFFFF_FFFF and cause
+    // the loop below to iterate ~4 billion times before running out of memory,
+    // even though the input byte slice is tiny (the inner bounds check exits on
+    // the first iteration, but the loop itself still executes).
+    if raw_count > crate::MAX_MESSAGES_PER_CREDENTIAL {
+        return Err(BbsError::DeserializationError);
+    }
+    let count = raw_count as usize;
     *offset += 4;
 
     // Each entry is a 4-byte index + 32-byte Fr scalar = 36 bytes.

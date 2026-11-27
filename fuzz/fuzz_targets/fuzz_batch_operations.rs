@@ -115,11 +115,14 @@ fn test_single_issuer_batch(
         }
     }
 
-    // Record at least one successful issuance; the exact count is
-    // non-deterministic because the contract may apply rate-limiting or
-    // quota enforcement at any point, so a hard percentage threshold
-    // would cause spurious failures on otherwise-correct batches.
-    assert!(issued_count > 0, "Single-issuer batch: no credentials were issued");
+    // The fuzz target must not assert a minimum success rate: the contract
+    // legitimately rejects issuance for many reasons (DuplicateCredential when
+    // type_seed is small, rate limiting, quota exhaustion).  Asserting here
+    // converts normal contract behaviour into a crash that the fuzzer reports
+    // as a bug.  We simply record the counts; the invariant we care about is
+    // "no unhandled panic" — which catch_unwind above already enforces.
+    let _ = issued_count;
+    let _ = failed_count;
 }
 
 /// Test multiple issuers issuing batches concurrently.
@@ -166,9 +169,10 @@ fn test_multiple_issuers_batch(
         }
     }
 
-    // Verify credentials from different issuers were created.
-    // A fuzz target must not assert on counts that depend on fuzz-controlled
-    // inputs — an empty batch is a valid (if uninteresting) outcome.
+    // Do not assert a minimum number of successful credentials: fuzz inputs
+    // that happen to trigger DuplicateCredential or other contract errors for
+    // every attempt are valid, not bugs.  The invariant we verify is simply
+    // "no unhandled panic", which catch_unwind above already enforces.
     let _ = all_credentials;
 }
 
@@ -275,13 +279,11 @@ fn test_maximum_batch_size(env: &Env, client: &QuorumProofContractClient, input:
             }
         }
 
-        // At least one credential must succeed per batch size.
-        assert!(
-            successful > 0,
-            "Batch size {}: no credentials were issued (issued=0, failed={})",
-            size,
-            failed
-        );
+        // Do not assert a minimum success rate: the contract legitimately
+        // rejects issuance (DuplicateCredential, rate limits, quota) for
+        // certain fuzz inputs.  Asserting here turns normal rejection into a
+        // reported crash.  The only property we check is "no unhandled panic".
+        let _ = (successful, failed);
     }
 }
 
