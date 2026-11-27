@@ -18,32 +18,6 @@ interface RecoveryRequest {
   rejectionReason?: string;
 }
 
-// Demo data shown when the API returns an empty list
-function makeDemoRequests(): RecoveryRequest[] {
-  return [
-    {
-      id: 'a1b2c3d4e5f6a7b8',
-      credentialId: '42',
-      lostWallet: 'GAHTESTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-      newWallet: 'GBNEWWALLETXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-      contactType: 'email',
-      status: 'pending_approval',
-      createdAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-      verifiedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'b2c3d4e5f6a7b8c9',
-      credentialId: '17',
-      lostWallet: 'GCTESTLOSTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-      newWallet: 'GDNEWWALLET2XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-      contactType: 'phone',
-      status: 'pending_approval',
-      createdAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
-      verifiedAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
-    },
-  ];
-}
-
 function shortenAddress(addr: string) {
   if (addr.length <= 12) return addr;
   return addr.slice(0, 8) + '…' + addr.slice(-6);
@@ -125,9 +99,10 @@ export default function AttestorRecoveryApprovals() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const items: RecoveryRequest[] = data.items ?? [];
-      setRequests(items.length > 0 ? items : makeDemoRequests());
+      setRequests(items);
     } catch {
-      setRequests(makeDemoRequests());
+      setRequests([]);
+      setError('Failed to load recovery requests. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -248,10 +223,6 @@ export default function AttestorRecoveryApprovals() {
           ))}
         </div>
 
-        {error && (
-          <div style={{ color: 'var(--red)', fontSize: 13, marginBottom: 20 }}>{error}</div>
-        )}
-
         {actionError && (
           <div style={{ color: 'var(--red)', fontSize: 13, marginBottom: 20, padding: '10px 14px', background: 'var(--red-subtle)', borderRadius: 'var(--radius-sm)' }}>
             {actionError}
@@ -260,6 +231,8 @@ export default function AttestorRecoveryApprovals() {
 
         {loading && requests.length === 0 ? (
           <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '40px 0' }}>Loading requests…</div>
+        ) : error ? (
+          <div style={{ color: 'var(--red)', fontSize: 13, marginBottom: 20 }}>{error}</div>
         ) : visibleRequests.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)', fontSize: 14 }}>
             No {filter === 'pending_approval' ? 'pending' : ''} recovery requests.
