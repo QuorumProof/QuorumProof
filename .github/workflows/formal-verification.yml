@@ -1,0 +1,68 @@
+# .github/workflows/formal-verification.yml
+#
+# Model-checks the TLA+ specs in formal-verification/ with TLC.
+#
+# Only specs that currently pass are enabled as required PR checks. The other
+# specs are listed under "CI Status" in formal-verification/README.md and can
+# be added to the matrix once their models are fixed.
+#
+# tla2tools.jar is pinned by version and SHA-1 (published in the release
+# notes) so a changed release asset cannot silently alter what CI runs.
+
+name: Formal Verification
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "formal-verification/**"
+      - ".github/workflows/formal-verification.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "formal-verification/**"
+      - ".github/workflows/formal-verification.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  TLA_TOOLS_VERSION: "1.7.4"
+  TLA_TOOLS_SHA1: "bee4a54f3ee3d4afc347c3240ec2d9e93b075104"
+
+jobs:
+  tlc:
+    name: TLC (${{ matrix.spec }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Add a spec here once it passes locally with its .cfg file.
+        spec:
+          - CredentialIssuance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download and verify TLC
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/tla2tools.jar" \
+            "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA_TOOLS_SHA1}  ${RUNNER_TEMP}/tla2tools.jar" | sha1sum --check --strict
+
+      - name: Model-check ${{ matrix.spec }}
+        working-directory: formal-verification
+        env:
+          SPEC: ${{ matrix.spec }}
+        run: |
+          java -Xmx2g -XX:+UseParallelGC \
+            -cp "${RUNNER_TEMP}/tla2tools.jar" tlc2.TLC \
+            -config "${SPEC}.cfg" \
+            -cleanup \
+            "${SPEC}.tla"

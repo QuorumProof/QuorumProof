@@ -127,6 +127,9 @@ monitoring/prometheus/alertmanager.rendered.yml
 mutants.out/
 mutants.out.old/
 
+# TLC model-checker state directory
+formal-verification/states/
+
 # Profiling and benchmark history output
 benches/history/*.json
 *.profraw

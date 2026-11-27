@@ -202,7 +202,20 @@ done
 echo "All formal specifications verified successfully."
 ```
 
-See [GitHub Actions workflow](./.github/workflows/formal-verification.yml) for CI/CD integration.
+See [GitHub Actions workflow](../.github/workflows/formal-verification.yml) for CI/CD integration.
+
+### CI Status
+
+The workflow pins TLC 1.7.4 (`tla2tools.jar`, verified by SHA-1) and runs on pull requests that touch `formal-verification/`.
+
+| Spec | Checked in CI | Notes |
+|------|---------------|-------|
+| CredentialIssuance.tla | Yes | Passes with `CredentialIssuance.cfg`. |
+| QuorumSliceAttestation.tla | Pending | `EventualAttestation` has a counterexample: repeated pause/challenge cycles defeat weak fairness on `UnpauseContract`. |
+| SbtNonTransferability.tla | Pending | Liveness checking runs longer than 15 minutes with `SbtNonTransferability.cfg`; needs smaller bounds. |
+| ZkVerifierVerificationTransition.tla | Pending | No TLC `.cfg` yet; the spec builds an unbounded `Request` set from `Nat` and the config parser rejects record literals. |
+
+To promote a spec into CI, first make it pass locally with `java -cp tla2tools.jar tlc2.TLC -config <spec>.cfg <spec>.tla`, then add its name to the workflow matrix.
 
 ---
 
