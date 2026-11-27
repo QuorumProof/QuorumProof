@@ -891,5 +891,59 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+
+  apiKeyCreate: {
+    body: {
+      schema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', minLength: 1, maxLength: 256 },
+        },
+        required: ['name'],
+        additionalProperties: false,
+      },
+      custom: (data) => {
+        if (typeof data !== 'object' || data === null) return true;
+        const name = (data as { name?: unknown }).name;
+        return typeof name === 'string' && name.trim().length > 0
+          ? true
+          : 'name is required and must be a non-empty string';
+      },
+    },
+  },
+
+  apiKeyRotate: {
+    params: {
+      type: 'object',
+      properties: { id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    body: {
+      custom: (data) => {
+        if (data === undefined || data === null) return true;
+        if (typeof data !== 'object' || Array.isArray(data)) {
+          return 'body must be an object';
+        }
+        const body = data as { gracePeriodMs?: unknown };
+        if ('gracePeriodMs' in body) {
+          const value = body.gracePeriodMs;
+          if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+            return 'gracePeriodMs must be a positive number';
+          }
+        }
+        return true;
+      },
+    },
+  },
+
+  apiKeyRevoke: {
+    params: {
+      type: 'object',
+      properties: { id: { type: 'string', minLength: 1, pattern: '\\S' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
 };
 export default validate;
