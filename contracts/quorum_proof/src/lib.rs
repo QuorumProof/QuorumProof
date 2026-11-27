@@ -35,6 +35,7 @@ pub mod credential_merging;
 pub mod cross_chain_bridge;
 pub mod fractional_transfer;
 pub mod credential_branching;
+pub mod state_validation;
 #[cfg(test)]
 mod simulation_agent_based;
 #[cfg(test)]
@@ -137,6 +138,11 @@ const DEFAULT_REPUTATION_SUSPENSION_THRESHOLD: u32 = 20;
 const DEFAULT_SLASH_FRACTION_BPS: u32 = 1_000;
 /// Starting reputation score for new attestors.
 const INITIAL_REPUTATION_SCORE: u32 = 100;
+/// Issue #1945: maximum number of recommendations [`recommend_attestors`]
+/// returns in a single call, bounding the response size.
+const MAX_RECOMMENDATIONS: u32 = 50;
+/// Issue #1946: recommendation-cache time-to-live in ledger seconds (1 hour).
+const RECOMMENDATION_CACHE_TTL_SECONDS: u64 = 3_600;
 
 // ── Multi-round challenge defaults ───────────────────────────────────────────
 /// Default duration of a single challenge voting round (48 hours).
@@ -1234,6 +1240,15 @@ pub enum DataKey10 {
     // ── Feature 1232: Slice Advisor Recommendations ──────────────────────────
     /// Cached attestor recommendations (credential_type, jurisdiction -> RecommendationCacheEntry)
     AttestorRecommendationCache(u32, Bytes),
+    /// Issue #1945: registry of every attestor address that has a reputation
+    /// record, so `recommend_attestors` can iterate them without iterable
+    /// storage.
+    AttestorRegistry,
+    /// Issue #1946: monotonic epoch bumped on every reputation-score change.
+    /// Recommendation cache entries store the epoch they were written at and
+    /// are treated as stale when it no longer matches, so a reputation update
+    /// is visible on the next call without waiting for the TTL to expire.
+    RecommendationCacheEpoch,
     // ── Feature 1234: Attestor Replacement ───────────────────────────────────
     /// Replacement history for attestors in a slice (slice_id -> Vec<AttestorReplacementRecord>)
     AttestorReplacementHistory(u64),
@@ -2351,6 +2366,10 @@ pub struct RecommendationCacheEntry {
     pub recommendations: Vec<AttestorRecommendation>,
     /// Ledger timestamp the entry was cached at; used for TTL checks.
     pub cached_at: u64,
+    /// Issue #1946: cache-epoch this entry was written at. If it differs from
+    /// the current `RecommendationCacheEpoch`, the entry is stale and ignored
+    /// so reputation updates are visible on the next call.
+    pub epoch: u64,
 }
 
 /// Feature #1234: One entry in a slice's attestor replacement history.
@@ -2952,6 +2971,14 @@ pub struct AttestorReputationRecord {
     pub pending_slash_amount: u64,
     /// Unix timestamp of last score update.
     pub last_updated_at: u64,
+    /// Issue #1945/#1946: credential type this attestor serves. Used by
+    /// [`QuorumProofContract::recommend_attestors`] to filter recommendations.
+    /// `0` means the attestor has not declared a credential type.
+    pub credential_type: u32,
+    /// Issue #1945/#1946: jurisdiction this attestor serves. Used by
+    /// [`QuorumProofContract::recommend_attestors`] to filter recommendations.
+    /// Empty [`Bytes`] means the attestor has not declared a jurisdiction.
+    pub jurisdiction: Bytes,
 }
 
 /// Configuration for reputation scoring and stake slashing.
@@ -16643,24 +16670,38 @@ impl QuorumProofContract {
                 stake: 0,
                 pending_slash_amount: 0,
                 last_updated_at: 0,
+                credential_type: 0,
+                jurisdiction: Bytes::new(&env),
             })
     }
 
     /// Internal helper: load or create an attestor reputation record.
     fn load_or_init_reputation(env: &Env, attestor: &Address) -> AttestorReputationRecord {
-        env.storage()
+        match env
+            .storage()
             .instance()
-            .get(&DataKey2::AttestorReputation(attestor.clone()))
-            .unwrap_or(AttestorReputationRecord {
-                attestor: attestor.clone(),
-                score: INITIAL_REPUTATION_SCORE,
-                total_attestations: 0,
-                confirmed_malicious: 0,
-                slash_count: 0,
-                stake: 0,
-                pending_slash_amount: 0,
-                last_updated_at: 0,
-            })
+            .get::<DataKey2, AttestorReputationRecord>(&DataKey2::AttestorReputation(
+                attestor.clone(),
+            )) {
+            Some(rec) => rec,
+            None => {
+                // Issue #1945: track every attestor that gains a record so
+                // `recommend_attestors` can iterate them.
+                Self::register_attestor(env, attestor);
+                AttestorReputationRecord {
+                    attestor: attestor.clone(),
+                    score: INITIAL_REPUTATION_SCORE,
+                    total_attestations: 0,
+                    confirmed_malicious: 0,
+                    slash_count: 0,
+                    stake: 0,
+                    pending_slash_amount: 0,
+                    last_updated_at: 0,
+                    credential_type: 0,
+                    jurisdiction: Bytes::new(env),
+                }
+            }
+        }
     }
 
     /// Internal helper: award a reputation point for an honest attestation.
@@ -16673,6 +16714,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey2::AttestorReputation(attestor.clone()), &rec);
+        // Issue #1946: a reputation-score change invalidates cached recommendations
+        // so the update is visible on the next `recommend_attestors` call.
+        Self::bump_recommendation_cache_epoch(env);
     }
 
     /// Internal helper: apply a reputation penalty for a confirmed malicious attestation.
@@ -16704,6 +16748,9 @@ impl QuorumProofContract {
         env.storage()
             .instance()
             .set(&DataKey2::AttestorReputation(attestor.clone()), &rec);
+        // Issue #1946: a reputation-score change invalidates cached recommendations
+        // so the update is visible on the next `recommend_attestors` call.
+        Self::bump_recommendation_cache_epoch(env);
 
         // Auto-suspend from the slice if score is at or below threshold.
         if rec.score <= config.suspension_threshold {
@@ -19349,55 +19396,184 @@ impl QuorumProofContract {
 
     // ── Feature 1232: Slice Advisor Recommendations ──────────────────────────
 
-    /// Recommend attestors for a credential type and jurisdiction
-    /// Ranks recommendations by reputation score
+    /// Issue #1945/#1946: add `attestor` to the attestor registry (idempotent).
+    /// The registry lets `recommend_attestors` iterate every attestor that has a
+    /// reputation record without needing iterable storage.
+    fn register_attestor(env: &Env, attestor: &Address) {
+        let mut registry: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey10::AttestorRegistry)
+            .unwrap_or_else(|| Vec::new(env));
+        for a in registry.iter() {
+            if a == *attestor {
+                return;
+            }
+        }
+        registry.push_back(attestor.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey10::AttestorRegistry, &registry);
+    }
+
+    /// Issue #1946: bump the recommendation-cache epoch, invalidating every
+    /// cached recommendation so a reputation change is visible on the next call.
+    fn bump_recommendation_cache_epoch(env: &Env) {
+        let epoch: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey10::RecommendationCacheEpoch)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey10::RecommendationCacheEpoch, &(epoch + 1));
+    }
+
+    /// Issue #1945: recommend attestors for a credential type and jurisdiction.
+    ///
+    /// Iterates the attestor registry, loads each reputation record, filters by
+    /// credential type and jurisdiction, and ranks the matches by reputation
+    /// score (highest first), capped at [`MAX_RECOMMENDATIONS`].
     pub fn recommend_attestors(
         env: Env,
         credential_type: u32,
         jurisdiction: soroban_sdk::Bytes,
     ) -> Vec<AttestorRecommendation> {
         let now = env.ledger().timestamp();
+        let epoch: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey10::RecommendationCacheEpoch)
+            .unwrap_or(0);
 
-        // Check cache first
+        // Check cache first. A hit must be within the TTL AND written at the
+        // current epoch, so any reputation change since the entry was cached
+        // forces a re-scan (Issue #1946).
         let cache_key = DataKey10::AttestorRecommendationCache(credential_type, jurisdiction.clone());
         if let Some(cached) = env.storage().instance().get::<_, RecommendationCacheEntry>(&cache_key) {
             let cache_age = now.saturating_sub(cached.cached_at);
-            // Cache TTL: 1 hour (3600 seconds)
-            if cache_age < 3600u64 {
+            if cache_age < RECOMMENDATION_CACHE_TTL_SECONDS && cached.epoch == epoch {
                 return cached.recommendations;
             }
         }
 
-        // Scan reputation records to build recommendations
+        // Scan the attestor registry, filter by credential type and
+        // jurisdiction, and rank by reputation score (Issue #1945).
+        let registry: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey10::AttestorRegistry)
+            .unwrap_or_else(|| Vec::new(&env));
+
         let mut recommendations: Vec<AttestorRecommendation> = Vec::new(&env);
+        for attestor in registry.iter() {
+            // Read-only load: skip attestors with no record (defensive — every
+            // registry member should have one).
+            let rec: AttestorReputationRecord = match env
+                .storage()
+                .instance()
+                .get::<DataKey2, AttestorReputationRecord>(&DataKey2::AttestorReputation(
+                    attestor.clone(),
+                )) {
+                Some(r) => r,
+                None => continue,
+            };
+            if rec.credential_type != credential_type || rec.jurisdiction != jurisdiction {
+                continue;
+            }
+            let cand = AttestorRecommendation {
+                attestor: rec.attestor.clone(),
+                score: rec.score as u64,
+                credential_type: rec.credential_type,
+                jurisdiction: rec.jurisdiction.clone(),
+            };
+            // Insertion sort: keep recommendations ordered by score descending.
+            let mut inserted = false;
+            for j in 0..recommendations.len() {
+                let existing = recommendations.get(j).unwrap();
+                if cand.score > existing.score {
+                    let mut shifted = Vec::new(&env);
+                    for k in 0..j {
+                        shifted.push_back(recommendations.get(k).unwrap());
+                    }
+                    shifted.push_back(cand.clone());
+                    for k in j..recommendations.len() {
+                        shifted.push_back(recommendations.get(k).unwrap());
+                    }
+                    recommendations = shifted;
+                    inserted = true;
+                    break;
+                }
+            }
+            if !inserted {
+                recommendations.push_back(cand);
+            }
+            // Cap the working set so ranking stays bounded.
+            if recommendations.len() > MAX_RECOMMENDATIONS {
+                let mut trimmed = Vec::new(&env);
+                for k in 0..MAX_RECOMMENDATIONS {
+                    trimmed.push_back(recommendations.get(k).unwrap());
+                }
+                recommendations = trimmed;
+            }
+        }
 
-        // In a real implementation, we would scan through all attestor reputation records
-        // For now, we provide the framework for collecting and ranking them
-        // This would iterate through stored attestor reputation records and rank by score
-
-        // Sort by reputation score descending
-        // (In practice, this would be done more efficiently)
-
-        // Cache the result
-        let cache_entry = RecommendationCacheEntry {
-            credential_type,
-            jurisdiction,
-            recommendations: recommendations.clone(),
-            cached_at: now,
-        };
-
-        env.storage()
-            .instance()
-            .set(&cache_key, &cache_entry);
-
-        env.storage()
-            .instance()
-            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        // Issue #1946: do not cache empty results, so a later call (after
+        // reputation data changes and matching attestors appear) re-scans
+        // instead of serving a stale empty list until the TTL expires.
+        if recommendations.len() > 0 {
+            let cache_entry = RecommendationCacheEntry {
+                credential_type,
+                jurisdiction,
+                recommendations: recommendations.clone(),
+                cached_at: now,
+                epoch,
+            };
+            env.storage().instance().set(&cache_key, &cache_entry);
+            env.storage()
+                .instance()
+                .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+        }
 
         recommendations
     }
 
-    /// Clear recommendation cache for a credential type and jurisdiction
+    /// Issue #1945/#1946: admin governance override that sets an attestor's
+    /// served credential type, jurisdiction, and reputation score in one call.
+    ///
+    /// This populates attestor reputation records so `recommend_attestors` can
+    /// filter and rank them. It registers the attestor and bumps the
+    /// recommendation-cache epoch so the change is visible on the next
+    /// `recommend_attestors` call. Existing attestation counters and stake are
+    /// preserved.
+    pub fn set_attestor_reputation(
+        env: Env,
+        admin: Address,
+        attestor: Address,
+        credential_type: u32,
+        jurisdiction: soroban_sdk::Bytes,
+        score: u32,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        assert!(score <= 100, "reputation score must be <= 100");
+
+        let mut rec = Self::load_or_init_reputation(&env, &attestor);
+        rec.credential_type = credential_type;
+        rec.jurisdiction = jurisdiction;
+        rec.score = score;
+        rec.last_updated_at = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey2::AttestorReputation(attestor.clone()), &rec);
+        Self::register_attestor(&env, &attestor);
+        Self::bump_recommendation_cache_epoch(&env);
+        env.storage()
+            .instance()
+            .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
+    }
+
+    /// Clear recommendation cache for a credential type and jurisdiction.
     pub fn clear_recommendation_cache(
         env: Env,
         admin: Address,
@@ -19408,10 +19584,12 @@ impl QuorumProofContract {
         Self::require_admin(&env, &admin);
 
         let cache_key = DataKey10::AttestorRecommendationCache(credential_type, jurisdiction);
-        // Note: In a real storage system, we would delete the key
-        // Soroban SDK may not have explicit delete, so this is a marker
-        // In practice, we rely on TTL expiration
-
+        // Actually remove the cached entry — Soroban instance storage supports
+        // `remove` — rather than relying on TTL expiration. Guarded with `has`
+        // so clearing a cache that was never populated is a no-op.
+        if env.storage().instance().has(&cache_key) {
+            env.storage().instance().remove(&cache_key);
+        }
         env.storage()
             .instance()
             .extend_ttl(STANDARD_TTL, EXTENDED_TTL);
@@ -26521,6 +26699,99 @@ mod tests {
         // The admin can, and the result is clamped to [min, max]
         client.update_congestion_and_adjust(&admin);
         assert_eq!(client.get_rate_limit_config_pub().max_calls, 1100u32);
+    }
+
+    // Issue #1945: recommend_attestors must iterate stored reputation records,
+    // filter by credential type and jurisdiction, and rank by score. Previously
+    // the scan was only a comment, so the result was always empty.
+    #[test]
+    fn test_recommend_attestors_populates_and_orders() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        let credential_type = 1u32;
+        let jurisdiction = soroban_sdk::Bytes::from_slice(&env, b"US");
+
+        // Three scored attestors serving the same (credential type, jurisdiction).
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let c = Address::generate(&env);
+        client.set_attestor_reputation(&admin, &a, &credential_type, &jurisdiction, &90);
+        client.set_attestor_reputation(&admin, &b, &credential_type, &jurisdiction, &80);
+        client.set_attestor_reputation(&admin, &c, &credential_type, &jurisdiction, &70);
+
+        let recommendations = client.recommend_attestors(&credential_type, &jurisdiction);
+
+        // Non-empty and ordered by reputation score descending.
+        assert_eq!(recommendations.len(), 3);
+        assert_eq!(recommendations.get(0).unwrap().attestor, a);
+        assert_eq!(recommendations.get(0).unwrap().score, 90u64);
+        assert_eq!(recommendations.get(1).unwrap().attestor, b);
+        assert_eq!(recommendations.get(1).unwrap().score, 80u64);
+        assert_eq!(recommendations.get(2).unwrap().attestor, c);
+        assert_eq!(recommendations.get(2).unwrap().score, 70u64);
+    }
+
+    // Issue #1946: a reputation update must be visible on the next call, even
+    // within the cache TTL. The cache is invalidated (via an epoch bump) on
+    // every score change, so the cached result is not served after an update.
+    #[test]
+    fn test_recommend_attestors_reputation_update_visible_next_call() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        let credential_type = 1u32;
+        let jurisdiction = soroban_sdk::Bytes::from_slice(&env, b"US");
+
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        client.set_attestor_reputation(&admin, &a, &credential_type, &jurisdiction, &90);
+        client.set_attestor_reputation(&admin, &b, &credential_type, &jurisdiction, &80);
+
+        // First call caches [a(90), b(80)].
+        let first = client.recommend_attestors(&credential_type, &jurisdiction);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.get(0).unwrap().attestor, a);
+
+        // B's score rises above A. Without cache invalidation the next call
+        // would still return the stale [a, b]; the update must be visible.
+        client.set_attestor_reputation(&admin, &b, &credential_type, &jurisdiction, &95);
+
+        let second = client.recommend_attestors(&credential_type, &jurisdiction);
+        assert_eq!(second.len(), 2);
+        assert_eq!(
+            second.get(0).unwrap().attestor,
+            b,
+            "reputation update must reorder recommendations on the next call"
+        );
+        assert_eq!(second.get(0).unwrap().score, 95u64);
+        assert_eq!(second.get(1).unwrap().attestor, a);
+        assert_eq!(second.get(1).unwrap().score, 90u64);
+    }
+
+    // Issue #1946: an empty result is not cached, so a later reputation update
+    // that introduces a matching attestor is visible on the next call instead
+    // of serving a stale empty list until the TTL expires.
+    #[test]
+    fn test_recommend_attestors_does_not_cache_empty_result() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        let credential_type = 1u32;
+        let jurisdiction = soroban_sdk::Bytes::from_slice(&env, b"US");
+
+        // No matching attestors yet: empty result, and it must not be cached.
+        let empty = client.recommend_attestors(&credential_type, &jurisdiction);
+        assert_eq!(empty.len(), 0);
+
+        // A matching attestor appears; the next call must see it immediately.
+        let a = Address::generate(&env);
+        client.set_attestor_reputation(&admin, &a, &credential_type, &jurisdiction, &88);
+
+        let recs = client.recommend_attestors(&credential_type, &jurisdiction);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs.get(0).unwrap().attestor, a);
+        assert_eq!(recs.get(0).unwrap().score, 88u64);
     }
 }
 
