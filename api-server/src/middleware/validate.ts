@@ -540,6 +540,52 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+  timeLockPuzzleGenerate: {
+    body: {
+      type: 'object',
+      properties: {
+        difficulty: {
+          type: 'string',
+          enum: ['low', 'medium', 'high'],
+          default: 'medium',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  timeLockPuzzleParams: {
+    params: {
+      type: 'object',
+      required: ['puzzle_id'],
+      properties: {
+        puzzle_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          pattern: '^puzzle_[A-Za-z0-9_-]+$',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  timeLockPuzzleVerify: {
+    body: {
+      type: 'object',
+      required: ['solution'],
+      properties: {
+        solution: {
+          type: 'string',
+          minLength: 64,
+          maxLength: 64,
+          pattern: '^[a-f0-9]{64}$',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+
   verifyBatch: {
     body: {
       type: 'object',
