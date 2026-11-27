@@ -124,6 +124,18 @@ describe('/api/v2/proof-requests', () => {
     expect(res.body.error).toBeTruthy();
   });
 
+  it('POST rejects invalid and unknown fields', async () => {
+    const res = await request(prApp).post('/api/v2/proof-requests').send({
+      credential_id: '1',
+      claim_type: 'degree',
+      requester: 'GABC',
+      unexpected: true,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.location).toBe('body');
+    expect(res.body.details).toBeInstanceOf(Array);
+  });
+
   it('GET returns paginated list with `cursor` (not `next_cursor`)', async () => {
     // Insert 3 items
     for (let i = 1; i <= 3; i++) {
@@ -183,6 +195,12 @@ describe('/api/v2/proof-requests', () => {
     const res = await request(prApp).delete(`/api/v2/proof-requests/${id}`);
     expect(res.status).toBe(409);
     expect(res.body.type).toMatch(/invalid-state/);
+  });
+
+  it('DELETE rejects an invalid proof-request id', async () => {
+    const res = await request(prApp).delete('/api/v2/proof-requests/nope');
+    expect(res.status).toBe(400);
+    expect(res.body.location).toBe('params');
   });
 });
 

@@ -520,6 +520,26 @@ export const credentialFilterValidator: CustomValidator = (data) => {
 // ---------------------------------------------------------------------------
 
 export const schemas = {
+  proofRequestCreate: {
+    body: {
+      type: 'object',
+      properties: {
+        credential_id: { type: 'integer', minimum: 1 },
+        claim_type: { type: 'string', minLength: 1, maxLength: 64, pattern: '\\S' },
+        requester: { type: 'string', minLength: 1, maxLength: 256, pattern: '\\S' },
+      },
+      required: ['credential_id', 'claim_type', 'requester'],
+      additionalProperties: false,
+    },
+  },
+  proofRequestParams: {
+    params: {
+      type: 'object',
+      properties: { id: { type: 'string', pattern: '^[a-f0-9]{16}$' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
   verifyBatch: {
     body: {
       type: 'object',
