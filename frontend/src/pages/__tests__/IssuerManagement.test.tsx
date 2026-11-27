@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import IssuerManagement from '../IssuerManagement';
 import { useWallet } from '../../hooks';
@@ -7,6 +7,7 @@ import {
   getCredential,
   getCredentialsBySubject,
   getAttestors,
+  revokeCredentials,
 } from '../../lib/contracts/quorumProof';
 import type { WalletState } from '../../context/WalletContextValue';
 
@@ -19,6 +20,9 @@ vi.mock('../../lib/contracts/quorumProof', () => ({
   getCredential: vi.fn(),
   getCredentialsBySubject: vi.fn(),
   getAttestors: vi.fn(),
+  getIssuerQuota: vi.fn(),
+  getIssuerQuotaUsage: vi.fn(),
+  revokeCredentials: vi.fn(),
 }));
 
 const ISSUER = 'GISSUER1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ12345678901234';
@@ -71,11 +75,44 @@ describe('IssuerManagement', () => {
     });
   });
 
-  it('allows selecting credentials and bulk revoking', async () => {
+  it('sends bulk revocation through the wallet and only reports success after confirmation', async () => {
     vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
     vi.mocked(getCredentialsBySubject).mockResolvedValue([BigInt(1)]);
     vi.mocked(getCredential).mockResolvedValue(mockCred(BigInt(1)));
     vi.mocked(getAttestors).mockResolvedValue([]);
+
+    let confirmRevocation!: () => void;
+    vi.mocked(revokeCredentials).mockImplementation(
+      () => new Promise<void>((resolve) => { confirmRevocation = resolve; }),
+    );
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText('#1')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText('Select credential 1'));
+    fireEvent.click(screen.getByLabelText('Bulk revoke selected credentials'));
+
+    expect(revokeCredentials).toHaveBeenCalledWith(
+      ISSUER,
+      [BigInt(1)],
+      { walletType: 'freighter', accountIndex: 0 },
+    );
+    // No optimistic update: still active and no success message while pending.
+    expect(screen.getByText('✓ Active')).toBeInTheDocument();
+    expect(screen.queryByText(/Revoked 1 credential on-chain/i)).not.toBeInTheDocument();
+
+    await act(async () => { confirmRevocation(); });
+
+    expect(screen.getByText(/Revoked 1 credential on-chain/i)).toBeInTheDocument();
+    expect(screen.getByText('⛔ Revoked')).toBeInTheDocument();
+  });
+
+  it('shows an error and keeps credentials active when on-chain revocation fails', async () => {
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
+    vi.mocked(getCredentialsBySubject).mockResolvedValue([BigInt(1)]);
+    vi.mocked(getCredential).mockResolvedValue(mockCred(BigInt(1)));
+    vi.mocked(getAttestors).mockResolvedValue([]);
+    vi.mocked(revokeCredentials).mockRejectedValue(new Error('User rejected the transaction'));
 
     renderPage();
     await waitFor(() => expect(screen.getByText('#1')).toBeInTheDocument());
@@ -84,8 +121,26 @@ describe('IssuerManagement', () => {
     fireEvent.click(screen.getByLabelText('Bulk revoke selected credentials'));
 
     await waitFor(() => {
-      expect(screen.getByText(/Marked 1 credential/i)).toBeInTheDocument();
+      expect(screen.getByText(/User rejected the transaction/)).toBeInTheDocument();
     });
+    expect(screen.getByText('✓ Active')).toBeInTheDocument();
+    expect(screen.queryByText(/Revoked 1 credential on-chain/i)).not.toBeInTheDocument();
+  });
+
+  it('does not send a transaction when no active credentials are selected', async () => {
+    vi.mocked(useWallet).mockReturnValue({ address: ISSUER } as unknown as WalletState);
+    vi.mocked(getCredentialsBySubject).mockResolvedValue([BigInt(1)]);
+    vi.mocked(getCredential).mockResolvedValue(mockCred(BigInt(1), true));
+    vi.mocked(getAttestors).mockResolvedValue([]);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText('#1')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText('Select credential 1'));
+    fireEvent.click(screen.getByLabelText('Bulk revoke selected credentials'));
+
+    expect(revokeCredentials).not.toHaveBeenCalled();
+    expect(screen.getByText(/No active credentials selected/)).toBeInTheDocument();
   });
 
   it('shows error for invalid attestor address', async () => {

@@ -7,6 +7,7 @@ import {
   getAttestors,
   getIssuerQuota,
   getIssuerQuotaUsage,
+  revokeCredentials,
 } from '../lib/contracts/quorumProof';
 import type { Credential, IssuerQuota, IssuerQuotaUsage } from '../lib/contracts/quorumProof';
 import { credTypeLabel, formatTimestamp, formatAddress } from '../lib/credentialUtils';
@@ -23,7 +24,7 @@ interface AttestorEntry {
 }
 
 export default function IssuerManagement() {
-  const { address } = useWallet();
+  const { address, walletType, accountIndex } = useWallet();
   const [credentials, setCredentials] = useState<ManagedCredential[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,18 +117,27 @@ export default function IssuerManagement() {
       setRevokeMsg('No active credentials selected.');
       return;
     }
+    if (!address) return;
     setBulkRevoking(true);
     setRevokeMsg(null);
     try {
-      // Optimistic UI update — actual revocation requires wallet signing (not implemented in read-only mode)
+      // Issue #1984: sign and submit the revocations through the wallet.
+      // Do not touch local state until the transaction is confirmed on-chain.
+      await revokeCredentials(
+        address,
+        selected.map((c) => c.credential.id),
+        { walletType: walletType ?? 'freighter', accountIndex: accountIndex ?? 0 },
+      );
       setCredentials((prev) =>
         prev.map((c) =>
-          c.selected ? { ...c, credential: { ...c.credential, revoked: true }, selected: false } : c
+          c.selected && !c.credential.revoked
+            ? { ...c, credential: { ...c.credential, revoked: true }, selected: false }
+            : c
         )
       );
-      setRevokeMsg(`✅ Marked ${selected.length} credential${selected.length !== 1 ? 's' : ''} as revoked. (Requires on-chain transaction to finalize.)`);
+      setRevokeMsg(`✅ Revoked ${selected.length} credential${selected.length !== 1 ? 's' : ''} on-chain.`);
     } catch (err) {
-      setRevokeMsg(`❌ ${err instanceof Error ? err.message : 'Revocation failed.'}`);
+      setRevokeMsg(`❌ ${err instanceof Error ? err.message : 'On-chain revocation failed.'}`);
     } finally {
       setBulkRevoking(false);
     }

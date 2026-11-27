@@ -1,5 +1,16 @@
-import { Contract, Address, nativeToScVal, scValToNative } from '@stellar/stellar-sdk';
+import {
+  Address,
+  BASE_FEE,
+  Contract,
+  nativeToScVal,
+  scValToNative,
+  TransactionBuilder,
+  xdr,
+} from '@stellar/stellar-sdk';
 import { getRpcClient } from '../rpcClient';
+import { getNetworkConfig } from '../networkConfig';
+import { CONTRACT_QUORUM_PROOF } from '../../config/env';
+import type { WalletType } from '../../wallets/types';
 import {
   getCredential as _getCredential,
   getAttestors as _getAttestors,
@@ -93,7 +104,85 @@ export async function createSlice(
 
 
 
-const CONTRACT_ID = import.meta.env.VITE_QUORUM_PROOF_CONTRACT_ID;
+// Use the shared, validated env config (VITE_CONTRACT_QUORUM_PROOF) so mutating
+// calls target the same contract as the read-only helpers in stellar.ts.
+const CONTRACT_ID = CONTRACT_QUORUM_PROOF;
+
+export interface RevokeCredentialsOptions {
+  walletType?: WalletType;
+  accountIndex?: number;
+}
+
+/**
+ * Revoke credentials on-chain via the connected wallet.
+ *
+ * The promise resolves only after the transaction has been confirmed by the
+ * network. Callers must not update local state or show success before it does,
+ * otherwise the UI can claim a revocation that never happened (issue #1984).
+ */
+export async function revokeCredentials(
+  issuer: string,
+  credentialIds: bigint[],
+  { walletType = 'freighter', accountIndex = 0 }: RevokeCredentialsOptions = {},
+): Promise<void> {
+  if (credentialIds.length === 0) return;
+  if (!CONTRACT_ID) {
+    throw new Error('Contract ID not configured. Set VITE_CONTRACT_QUORUM_PROOF in .env');
+  }
+
+  // Load wallet adapters lazily: most consumers of this module only perform
+  // read-only contract calls and should not pull wallet SDKs into their graph.
+  const { getWalletAdapter } = await import('../../wallets/registry');
+  const adapter = getWalletAdapter(walletType);
+  if (!adapter.signTransaction) {
+    throw new Error(`Connected wallet (${walletType}) does not support transaction signing`);
+  }
+
+  const { passphrase } = getNetworkConfig();
+  const server = getRpcClient();
+  const account = await server.getAccount(issuer);
+  const contract = new Contract(CONTRACT_ID);
+  const issuerScVal = new Address(issuer).toScVal();
+  // `reason` is Option<String>; scvVoid() is the canonical None value.
+  const noReason = xdr.ScVal.scvVoid();
+
+  let builder = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: passphrase,
+  });
+
+  for (const id of credentialIds) {
+    builder = builder.addOperation(
+      contract.call(
+        'revoke_credential',
+        issuerScVal,
+        nativeToScVal(id, { type: 'u64' }),
+        noReason,
+      ),
+    );
+  }
+
+  const prepared = await server.prepareTransaction(builder.setTimeout(60).build());
+  const signedXdr = await adapter.signTransaction(prepared.toXDR(), accountIndex);
+  const signedTx = TransactionBuilder.fromXDR(signedXdr, passphrase);
+  const sent = await server.sendTransaction(signedTx);
+
+  if (sent.status === 'ERROR') {
+    throw new Error(`Revocation transaction was rejected: ${sent.errorResult ?? 'unknown error'}`);
+  }
+
+  // Wait for the ledger to confirm the transaction before reporting success.
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const result = await server.getTransaction(sent.hash);
+    if (result.status === 'SUCCESS') return;
+    if (result.status === 'FAILED') {
+      throw new Error('Revocation transaction failed on-chain');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error('Timed out waiting for on-chain revocation confirmation');
+}
 
 // Feature #355: Proof Expiry
 export async function isProofExpired(credentialId: bigint, proofExpiresAt: bigint): Promise<boolean> {
