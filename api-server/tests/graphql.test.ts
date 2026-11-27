@@ -56,7 +56,44 @@ describe('POST /api/graphql', () => {
   it('returns 400 for missing query', async () => {
     const res = await request(app).post('/api/graphql').send({});
     expect(res.status).toBe(400);
-    expect(res.body.errors[0].message).toBeTruthy();
+    expect(res.body.location).toBe('body');
+    expect(Array.isArray(res.body.details)).toBe(true);
+    expect(res.body.details.length).toBeGreaterThan(0);
+  });
+
+  it('returns 400 for non-string or whitespace-only query', async () => {
+    const nonString = await request(app).post('/api/graphql').send({ query: 123 });
+    expect(nonString.status).toBe(400);
+    expect(nonString.body.location).toBe('body');
+
+    const whitespace = await request(app).post('/api/graphql').send({ query: '   ' });
+    expect(whitespace.status).toBe(400);
+    expect(whitespace.body.location).toBe('body');
+  });
+
+  it('returns 400 for invalid variables type', async () => {
+    const res = await request(app)
+      .post('/api/graphql')
+      .send({ query: '{ credentialCount }', variables: ['invalid'] });
+    expect(res.status).toBe(400);
+    expect(res.body.location).toBe('body');
+  });
+
+  it('enforces maximum operation size on POST /api/graphql', async () => {
+    const oversizedQuery = `{ credential(id: "${'a'.repeat(16_400)}") { id } }`;
+    const resQuery = await request(app).post('/api/graphql').send({ query: oversizedQuery });
+    expect(resQuery.status).toBe(400);
+    expect(resQuery.body.location).toBe('body');
+
+    const resVars = await request(app)
+      .post('/api/graphql')
+      .send({
+        query: '{ credentialCount }',
+        variables: { payload: 'x'.repeat(16_400) },
+      });
+    expect(resVars.status).toBe(400);
+    expect(resVars.body.location).toBe('body');
+    expect(resVars.body.details[0].message).toContain('exceeds maximum allowed size');
   });
 
   it('resolves credential query', async () => {
@@ -149,5 +186,40 @@ describe('POST /api/graphql', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.__schema).toBeTruthy();
+  });
+});
+
+describe('POST & DELETE /api/graphql/subscriptions', () => {
+  it('validates subscription request body and enforces max operation size', async () => {
+    const missing = await request(app).post('/api/graphql/subscriptions').send({});
+    expect(missing.status).toBe(400);
+    expect(missing.body.location).toBe('body');
+
+    const oversized = await request(app)
+      .post('/api/graphql/subscriptions')
+      .send({ query: `{ credential(id: "${'a'.repeat(16_400)}") { id } }` });
+    expect(oversized.status).toBe(400);
+    expect(oversized.body.location).toBe('body');
+  });
+
+  it('creates and deletes a valid subscription', async () => {
+    const createRes = await request(app)
+      .post('/api/graphql/subscriptions')
+      .send({ query: '{ credentialCount }', variables: { channel: 'events' } });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.subscription.id).toBeTruthy();
+    expect(createRes.body.subscription.variables).toEqual({ channel: 'events' });
+
+    const delRes = await request(app).delete(`/api/graphql/subscriptions/${createRes.body.subscription.id}`);
+    expect(delRes.status).toBe(204);
+
+    const notFound = await request(app).delete(`/api/graphql/subscriptions/${createRes.body.subscription.id}`);
+    expect(notFound.status).toBe(404);
+  });
+
+  it('rejects invalid subscription id param on DELETE', async () => {
+    const tooLong = await request(app).delete(`/api/graphql/subscriptions/${'a'.repeat(129)}`);
+    expect(tooLong.status).toBe(400);
+    expect(tooLong.body.location).toBe('params');
   });
 });
