@@ -139,7 +139,7 @@ Follow the step-by-step walkthrough in [demo/demo-script.md](demo/demo-script.md
 - [Code Examples in Python, JavaScript, Rust and Go](docs/code-examples.md)
 - [Migration Guides Between Versions](docs/migration-guides.md)
 - [Contract Module Index](contracts/quorum_proof/README.md) — maps each contract source file to its purpose and originating issue
-- [Trust Slice Model](docs/trust-slices.md)
+- [Trust Slice Model](docs/quorum-slice-guide.md)
 - [ZK Verification Design](docs/zk-verification-implementation.md)
 - [Threat Model & Security](docs/threat-model.md)
 - [Error Code Reference](docs/error-codes.md)
@@ -149,7 +149,7 @@ Follow the step-by-step walkthrough in [demo/demo-script.md](demo/demo-script.md
 - [Troubleshooting Guide](docs/troubleshooting-guide.md)
 - [Backup System](docs/backup-system.md)
 - [Batch Issuance Limits](docs/batch-issuance-limits.md)
-- [Roadmap](docs/roadmap.md)
+- [Roadmap](README.md#-roadmap)
 - [REST API Documentation Auto-Generation](api-server/docs/API_DOCUMENTATION.md) — OpenAPI 3.1, Swagger UI, ReDoc, TypeScript client
 
 ## 🎓 Smart Contract API
@@ -241,7 +241,7 @@ All specifications are model-checked with TLC to ensure properties hold in all r
 - **v3.0**: Frontend UI with Stellar wallet integration
 - **v4.0**: Mobile app, integration with national licensing APIs
 
-See [docs/roadmap.md](docs/roadmap.md) for details.
+See the [roadmap section](README.md#-roadmap) for details.
 
 ## 🤝 Contributing
 
@@ -253,13 +253,13 @@ We welcome contributions! Please:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-See our [Code of Conduct](CODE_OF_CONDUCT.md) and [Contributing Guidelines](CONTRIBUTING.md).
+See our [Contributing Guidelines](CONTRIBUTING.md).
 
 ## 🌊 Drips Wave Contributors
 
 This project participates in **Drips Wave** — a contributor funding program! Check out:
 
-- [Wave Contributor Guide](docs/wave-guide.md) — How to earn funding for contributions
+- [Wave Contributors](README.md#-drips-wave-contributors) — How to earn funding for contributions
 - [Wave-Ready Issues](https://github.com/issues?q=label%3Awave-ready) — Funded issues ready to tackle
 - GitHub Issues labeled `wave-ready` — Earn 100–200 points per issue
 
@@ -271,7 +271,7 @@ Issues are categorized as:
 
 ## 📄 License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
 
 ## 🙏 Acknowledgments
 

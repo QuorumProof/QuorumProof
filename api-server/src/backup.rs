@@ -1,12 +1,14 @@
-use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
 /// Credential Database Backup Module
 ///
 /// Implements automated daily backup of the credential database with integrity verification.
 /// Supports encryption, compression, and S3 storage.
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client as S3Client;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

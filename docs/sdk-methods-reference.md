@@ -804,4 +804,4 @@ def safe_issue_credential(issuer, subject, cred_type, metadata_hash):
 - [API Client Guide](./api-client-guide.md)
 - [Error Code Reference](./error-codes.md)
 - [Architecture Overview](./architecture.md)
-- [Trust Slice Model](./trust-slices.md)
+- [Trust Slice Model](./quorum-slice-guide.md)

@@ -322,12 +322,12 @@ With 70+ interlinked docs and ADRs, broken internal links and numbering
 collisions are an ongoing maintenance hazard. This section covers the known
 patterns and how to fix them.
 
-### Broken relative links in docs/
+### Broken relative links in Markdown
 
-Every PR that touches `docs/` runs the **Docs Link Check** CI workflow
+Every PR runs the **Docs Link Check** CI workflow
 (`.github/workflows/docs-link-check.yml`), which uses
-[lychee](https://github.com/lycheeverse/lychee) to check all relative links
-inside `docs/`. If the check fails:
+[lychee](https://github.com/lycheeverse/lychee) to check relative links in
+every Markdown file, including root-level READMEs. If the check fails:
 
 1. Download the `lychee-link-report` artifact from the failed workflow run —
    it lists every broken link with the source file and line number.
@@ -335,7 +335,10 @@ inside `docs/`. If the check fails:
    filename, or update the link to point at the correct file).
 3. Run lychee locally to confirm all links pass before pushing again:
    ```bash
-   lychee --offline --no-progress --base docs "docs/**/*.md"
+   lychee --offline --no-progress --include-verbatim \
+     --exclude-path "(^|/)node_modules/" \
+     --exclude-path "docs/adr/0000-adr-template.md" \
+     "**/*.md"
    ```
 
 For a full list of links found broken on the initial run (2026-08-30) and
