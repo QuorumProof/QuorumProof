@@ -147,9 +147,10 @@ fuzz_target!(|input: CredentialMetadataFuzzInput| {
                 }));
 
                 if let Ok(credential) = cred_result {
-                    // Verify metadata is preserved
+                    // Verify metadata is preserved.
+                    // soroban Bytes::len() returns u32; cast to usize before comparing.
                     assert_eq!(
-                        credential.metadata_hash.len(),
+                        credential.metadata_hash.len() as usize,
                         metadata.len(),
                         "Metadata size mismatch at iteration {}", i
                     );

@@ -7735,6 +7735,11 @@ impl QuorumProofContract {
             .get(&DataKey::Credential(credential_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CredentialNotFound));
         if let Some(expires_at) = credential.expires_at {
+            // A credential whose expires_at equals the current timestamp is already
+            // expired — the boundary is exclusive on the valid side.  Using `<=`
+            // instead of `<` matches `check_credential_validity` and
+            // `is_credential_expired`, which both treat `timestamp >= expires_at`
+            // as expired.
             assert!(
                 env.ledger().timestamp() < expires_at,
                 "credential has expired"

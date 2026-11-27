@@ -49,9 +49,15 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
     // Ensure credential_type is at least 1
     let ctype = input.credential_type.max(1);
 
+    // Sanitise expires_at so the credential is not immediately expired on retrieval.
+    // The test-environment ledger timestamp is 0, so any expires_at value of 0
+    // would cause get_credential to panic with "credential has expired".  Clamp to
+    // at least 1 (i.e. one second in the future relative to ts=0).
+    let expires_at = input.expires_at.map(|ts| ts.max(1));
+
     // Test single issuance
     let cid = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.issue_credential(&issuer, &subject, &ctype, &meta, &input.expires_at, &0u64)
+        client.issue_credential(&issuer, &subject, &ctype, &meta, &expires_at, &0u64)
     })) {
         Ok(id) => id,
         Err(_) => return, // Contract rejected input — expected for invalid cases
@@ -79,7 +85,7 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
         let ctype_i = (ctype.wrapping_add(i as u32)).max(1);
 
         let id_i = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.issue_credential(&issuer, &subject_i, &ctype_i, &meta, &input.expires_at, &0u64)
+            client.issue_credential(&issuer, &subject_i, &ctype_i, &meta, &expires_at, &0u64)
         })) {
             Ok(id) => id,
             Err(_) => continue,
@@ -101,20 +107,20 @@ fuzz_target!(|input: CredentialIssuanceFuzzInput| {
             Ok(c) => c,
             Err(_) => return,
         };
-        
-        // Metadata should be preserved.
-        // `Bytes::len()` returns `u32`; cast the local Vec length to match.
-        assert_eq!(cred.metadata_hash.len(), metadata.len() as u32, "Metadata size mismatch");
+
+        // Metadata should be preserved exactly as supplied
+        assert_eq!(
+            cred.metadata_hash.len() as usize,
+            metadata.len(),
+            "Metadata size mismatch"
+        );
     }
 });
 
 /// Generate metadata with various patterns for fuzzing.
-///
-/// Returns a plain `std::vec::Vec<u8>`.  This module imports
-/// `soroban_sdk::Vec` which shadows the standard `Vec` name; using the
-/// fully-qualified type here avoids the ambiguity that previously caused a
-/// compile error (and consequently a CI/fuzz crash: #1909).
-fn generate_metadata(size: u8, pattern: u8) -> std::vec::Vec<u8> {
+/// Size is clamped to [1, 256]: the contract rejects empty metadata and
+/// enforces a 256-byte upper bound via MAX_METADATA_SIZE.
+fn generate_metadata(size: u8, pattern: u8) -> Vec<u8> {
     let size = (size as usize).clamp(1, 256);
     let mut metadata = std::vec![0u8; size];
 

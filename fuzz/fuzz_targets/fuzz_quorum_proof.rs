@@ -27,12 +27,13 @@ fuzz_target!(|input: FuzzInput| {
     let issuer = Address::generate(&env);
     let subject = Address::generate(&env);
 
-    // Clamp to avoid trivially-invalid inputs that aren't interesting
+    // Clamp to avoid trivially-invalid inputs that aren't interesting.
+    // Metadata must be 1–256 bytes (contract enforces MAX_METADATA_SIZE = 256).
     let ctype = input.credential_type.max(1);
-    let meta_bytes = if input.metadata.is_empty() {
+    let meta_bytes: Vec<u8> = if input.metadata.is_empty() {
         b"QmFuzzHash000000000000000000000000".to_vec()
     } else {
-        input.metadata.clone()
+        input.metadata.iter().copied().take(256).collect()
     };
     let meta = Bytes::from_slice(&env, &meta_bytes);
 
@@ -62,8 +63,9 @@ fuzz_target!(|input: FuzzInput| {
     };
 
     // attest — first attestor attests
+    // attest(attestor, credential_id, slice_id, attestation_value: bool, expires_at: Option<u64>)
     let attestor = attestors.get(0).unwrap();
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.attest(&attestor, &cid, &slice_id, &None)
+        client.attest(&attestor, &cid, &slice_id, &true, &None::<u64>)
     }));
 });

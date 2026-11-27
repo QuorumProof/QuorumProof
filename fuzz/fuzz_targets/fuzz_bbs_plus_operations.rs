@@ -36,14 +36,12 @@ struct BbsPlusFuzzInput {
 fuzz_target!(|input: BbsPlusFuzzInput| {
     // ── Bound inputs to keep runtime tractable ──────────────────────────────
     // At most 16 messages; at least 1 so VerifyingKey::derive doesn't get 0.
-    let message_count_usize = (input.message_scalars.len() % 16) + 1;
-    // VerifyingKey::derive takes u32; cast is safe because message_count_usize ≤ 16.
-    let message_count: u32 = message_count_usize as u32;
-
+    // message_count must be u32 to match VerifyingKey::derive's parameter type.
+    let message_count: u32 = ((input.message_scalars.len() % 16) + 1) as u32;
     let messages: Vec<Fr> = input
         .message_scalars
         .iter()
-        .take(message_count_usize)
+        .take(message_count as usize)
         .map(|&v| Fr::from_u64(v))
         .collect();
 
