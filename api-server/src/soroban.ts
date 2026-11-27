@@ -11,6 +11,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { getDefaultRpcCircuitBreaker } from './services/rpcCircuitBreaker.js';
 import { getDefaultGasCostTracker } from './services/gasCostTracker.js';
+import { Histogram } from 'prom-client';
 
 const RPC_URL = process.env.STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org';
 const NETWORK = (process.env.STELLAR_NETWORK ?? 'testnet') as keyof typeof PASSPHRASES;
@@ -24,6 +25,13 @@ const PASSPHRASES = {
 
 const server = new StellarRpc.Server(RPC_URL);
 const networkPassphrase = PASSPHRASES[NETWORK] ?? Networks.TESTNET;
+
+export const contractInvocationDurationHistogram = new Histogram({
+  name: 'quorumproof_contract_invocation_duration_seconds',
+  help: 'Duration of Soroban contract invocations in seconds',
+  labelNames: ['operation', 'status'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+});
 
 export interface ContractCall {
   method: string;
@@ -149,27 +157,35 @@ export async function simulateCall(method: string, args: ReturnType<typeof nativ
     }
   });
 
-  return getDefaultRpcCircuitBreaker().execute(
-    async () => {
-      const contract = new Contract(CONTRACT_ID);
-      const dummyKeypair = Keypair.random();
-      const dummyAccount = new Account(dummyKeypair.publicKey(), '0');
+  const endTimer = contractInvocationDurationHistogram.startTimer({ operation: method });
+  try {
+    const res = await getDefaultRpcCircuitBreaker().execute(
+      async () => {
+        const contract = new Contract(CONTRACT_ID);
+        const dummyKeypair = Keypair.random();
+        const dummyAccount = new Account(dummyKeypair.publicKey(), '0');
 
-      const tx = new TransactionBuilder(dummyAccount, { fee: BASE_FEE, networkPassphrase })
-        .addOperation(contract.call(method, ...args))
-        .setTimeout(30)
-        .build();
+        const tx = new TransactionBuilder(dummyAccount, { fee: BASE_FEE, networkPassphrase })
+          .addOperation(contract.call(method, ...args))
+          .setTimeout(30)
+          .build();
 
-      const result = await server.simulateTransaction(tx);
-      if (StellarRpc.Api.isSimulationError(result)) {
-        throw new Error(result.error ?? 'Simulation failed');
-      }
-      if (!result.result) throw new Error('No result from simulation');
-      getDefaultGasCostTracker().record(method, result.minResourceFee);
-      return deserializeContractState(result.result.retval);
-    },
-    { method, args: cacheArgs }
-  );
+        const result = await server.simulateTransaction(tx);
+        if (StellarRpc.Api.isSimulationError(result)) {
+          throw new Error(result.error ?? 'Simulation failed');
+        }
+        if (!result.result) throw new Error('No result from simulation');
+        getDefaultGasCostTracker().record(method, result.minResourceFee);
+        return deserializeContractState(result.result.retval);
+      },
+      { method, args: cacheArgs }
+    );
+    endTimer({ status: 'success' });
+    return res;
+  } catch (err) {
+    endTimer({ status: 'error' });
+    throw err;
+  }
 }
 
 export function u64Val(n: number | bigint) {
