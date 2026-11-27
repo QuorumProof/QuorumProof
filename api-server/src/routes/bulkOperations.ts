@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { validate, schemas } from '../middleware/validate.js';
 import { GraphQLResolvers, type SorobanClient } from '../services/graphqlResolvers.js';
 
 type BulkOperationType =
@@ -16,26 +17,15 @@ interface BulkOperation {
   args?: Record<string, unknown>;
 }
 
-const MAX_BULK_OPERATIONS = 50;
-
 export function createBulkOperationsRouter(soroban: SorobanClient) {
   const router = Router();
 
-  router.post('/', async (req: Request, res: Response) => {
-    const operations = (req.body as { operations?: unknown }).operations;
-    if (!Array.isArray(operations) || operations.length === 0) {
-      res.status(400).json({ error: 'operations must be a non-empty array' });
-      return;
-    }
-    if (operations.length > MAX_BULK_OPERATIONS) {
-      res.status(413).json({ error: `operations cannot exceed ${MAX_BULK_OPERATIONS} items` });
-      return;
-    }
+  router.post('/', validate(schemas.bulkOperations), async (req: Request, res: Response) => {
+    const operations = (req.body as { operations: BulkOperation[] }).operations;
 
     const resolvers = new GraphQLResolvers({ soroban, startTime: Date.now() });
     const results = await Promise.all(
-      operations.map(async (raw, index) => {
-        const op = raw as BulkOperation;
+      operations.map(async (op, index) => {
         const id = op.id ?? String(index);
         const args = op.args ?? {};
         try {
