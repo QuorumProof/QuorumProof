@@ -48,3 +48,10 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:3001"]
     scrape_interval: 15s
+
+  # Issue #1996: Gas cost tracker metrics for the quorumproof-cost alerts.
+  - job_name: "api-server-costs"
+    metrics_path: /metrics/costs
+    static_configs:
+      - targets: ["host.docker.internal:3001"]
+    scrape_interval: 15s

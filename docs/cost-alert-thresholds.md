@@ -165,7 +165,8 @@ workspace if needed.
 ### Setting the daily budget
 
 The daily budget is controlled by the `quorumproof_cost_daily_budget_stroops`
-Prometheus gauge. The exporter reads this from the environment:
+Prometheus gauge. The API server reads this from the environment and exposes
+it at `/metrics/costs` for Prometheus:
 
 ```bash
 # .env or Kubernetes secret

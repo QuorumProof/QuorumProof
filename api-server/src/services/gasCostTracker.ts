@@ -199,6 +199,40 @@ export class GasCostTracker {
     });
   }
 
+  /** Prometheus text exposition of the persisted cost aggregates. */
+  getMetricsPrometheus(): string {
+    const report = this.getReport();
+    const configuredBudget = BigInt(
+      process.env.COST_DAILY_BUDGET_STROOPS &&
+      /^\d+$/.test(process.env.COST_DAILY_BUDGET_STROOPS)
+        ? process.env.COST_DAILY_BUDGET_STROOPS
+        : '100000000'
+    );
+
+    const escapeLabel = (value: string): string =>
+      value.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
+
+    const lines: string[] = [
+      '# HELP quorumproof_cost_operation_stroops Per-operation cumulative gas cost in stroops.',
+      '# TYPE quorumproof_cost_operation_stroops gauge',
+      '# HELP quorumproof_cost_operation_stroops_total Per-operation cumulative gas cost counter in stroops.',
+      '# TYPE quorumproof_cost_operation_stroops_total counter',
+      '# HELP quorumproof_cost_daily_budget_stroops Configured rolling-daily gas budget in stroops.',
+      '# TYPE quorumproof_cost_daily_budget_stroops gauge',
+      `quorumproof_cost_daily_budget_stroops ${configuredBudget.toString()}`,
+    ];
+
+    for (const op of report.byOperation) {
+      const operation = escapeLabel(op.operation);
+      lines.push(
+        `quorumproof_cost_operation_stroops{operation="${operation}"} ${op.totalStroops}`,
+        `quorumproof_cost_operation_stroops_total{operation="${operation}"} ${op.totalStroops}`
+      );
+    }
+
+    return `${lines.join('\n')}\n`;
+  }
+
   /** Reset all recorded stats — for testing only. */
   _resetForTest(): void {
     for (const key of this.log.keys()) this.log.delete(key);

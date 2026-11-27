@@ -35,6 +35,8 @@ import { createEventsRouter } from './routes/events.js';
 import docsRouter from './routes/docs.js';
 import { createDashboardRouter } from './routes/dashboard.js';
 import { requireAuth } from './middleware/auth.js';
+import costsRouter from './routes/costs.js';
+import { getDefaultGasCostTracker } from './services/gasCostTracker.js';
 import { cacheControl } from './middleware/cacheControl.js';
 import walletLinkRouter from './routes/walletLink.js';
 // #1303: CORS middleware
@@ -245,6 +247,7 @@ app.use('/api/api-keys', apiKeysRouter); // #999 API key management
 app.use('/auth/api-keys', apiKeysRouter); // #1297 API key management + rotation (spec-mandated path)
 app.use('/auth/oauth2', oauth2Router); // #1296 OAuth2 / OIDC support
 app.use('/api/plugins', pluginRegistry.router); // #1647 plugin routes (/api/plugins/<name>/...)
+app.use('/api/costs', costsRouter); // #1661 / #1996 gas cost reporting
 
 // #997 Credential Holder Dashboard API
 app.use('/api/me', requireAuth, createDashboardRouter(sorobanClient));
@@ -293,6 +296,12 @@ app.get('/metrics/ws', (_req, res) => {
 app.get('/metrics/rpc', (_req, res) => {
   res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(getDefaultRpcCircuitBreaker().getMetricsPrometheus());
+});
+
+// Issue #1996: Gas cost Prometheus exposition for the cost alert rules.
+app.get('/metrics/costs', (_req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(getDefaultGasCostTracker().getMetricsPrometheus());
 });
 
 app.get('/metrics/api', (_req, res) => {

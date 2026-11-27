@@ -302,8 +302,8 @@ groups:
   # Thresholds, routing, and tuning instructions are in
   # docs/cost-alert-thresholds.md.
   #
-  # Metrics are emitted by the api-server's /api/costs/report endpoint and
-  # scraped by the exporter via monitoring/exporter/exporter.py.
+  # Metrics are emitted by the api-server's /metrics/costs endpoint and
+  # scraped directly by Prometheus (api-server-costs job).
   #
   # quorumproof_cost_total_stroops_24h   — rolling 24-hour total gas cost (stroops)
   # quorumproof_cost_operation_stroops   — per-operation cumulative cost (stroops)

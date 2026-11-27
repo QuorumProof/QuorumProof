@@ -13,6 +13,7 @@ import request from 'supertest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import costsRouter from '../src/routes/costs.js';
 import {
   GasCostTracker,
@@ -24,6 +25,8 @@ import {
   _setDefaultSessionManagerForTest,
   _resetDefaultSessionManagerForTest,
 } from '../src/services/sessionManager.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe('Gas Cost Routes (/api/costs)', () => {
   let app: express.Express;
@@ -256,6 +259,45 @@ describe('Gas Cost Routes (/api/costs)', () => {
       expect(res.status).toBe(200);
       // Stellar account IDs are 56-char strings starting with G.
       expect(JSON.stringify(res.body)).not.toMatch(/G[A-Z2-7]{55}/);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // 4. Prometheus cost metric contract (#1996)
+  // ---------------------------------------------------------------------------
+  describe('Prometheus cost metric contract (#1996)', () => {
+    const monitoringDir = path.join(__dirname, '..', '..', 'monitoring');
+    const alertsYmlPath = path.join(monitoringDir, 'prometheus', 'alerts.yml');
+    const prometheusYmlPath = path.join(monitoringDir, 'prometheus', 'prometheus.yml');
+
+    it('exposes every cost metric sourced by the quorumproof-cost alert rules', () => {
+      tracker.record('is_attested', '10000000');
+      const exposition = tracker.getMetricsPrometheus();
+      const alertsYml = fs.readFileSync(alertsYmlPath, 'utf8');
+
+      expect(exposition).toMatch(/^quorumproof_cost_daily_budget_stroops\s/m);
+      expect(exposition).toMatch(/^quorumproof_cost_operation_stroops\s*\{operation=/m);
+      expect(exposition).toMatch(/^quorumproof_cost_operation_stroops_total\s*\{operation=/m);
+
+      const costStart = alertsYml.indexOf('- name: quorumproof-cost');
+      expect(costStart).toBeGreaterThanOrEqual(0);
+      const costRules = alertsYml.slice(costStart);
+      const referenced = [...new Set(costRules.match(/quorumproof_[a-zA-Z0-9_]+/g) ?? [])];
+
+      for (const name of referenced) {
+        if (name === 'quorumproof_cost_total_stroops_24h') {
+          expect(costRules).toMatch(/- record:\s*quorumproof_cost_total_stroops_24h/);
+        } else {
+          expect(exposition, `cost alert metric ${name} must have an emitter`).toMatch(
+            new RegExp(`^${name}(\\{|\\s)`, 'm')
+          );
+        }
+      }
+    });
+
+    it('defines a Prometheus scrape job for /metrics/costs', () => {
+      const prometheusYml = fs.readFileSync(prometheusYmlPath, 'utf8');
+      expect(prometheusYml).toMatch(/metrics_path:\s*\/metrics\/costs/);
     });
   });
 });
