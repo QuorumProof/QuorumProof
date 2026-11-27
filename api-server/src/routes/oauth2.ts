@@ -10,8 +10,10 @@ import {
   buildAuthorizationUrl,
   exchangeCodeForToken,
   resolveIdentity,
+  type OAuthProvider,
 } from '../services/oauth2.js';
 import { getDefaultOAuthIdentityStore } from '../services/oauthIdentityStore.js';
+import { validate, schemas } from '../middleware/validate.js';
 
 const router = Router();
 
@@ -61,30 +63,13 @@ router.get('/:provider/authorize', (req: Request, res: Response) => {
 });
 
 // POST /auth/oauth2/callback — exchange the auth code, verify identity, link to a Stellar address
-router.post('/callback', async (req: Request, res: Response) => {
+router.post('/callback', validate(schemas.oauth2Callback, { coerceTypes: false }), async (req: Request, res: Response) => {
   const { provider, code, stellarAddress, signature } = req.body as {
-    provider?: unknown;
-    code?: unknown;
-    stellarAddress?: unknown;
-    signature?: unknown;
+    provider: OAuthProvider;
+    code: string;
+    stellarAddress: string;
+    signature: string;
   };
-
-  if (typeof provider !== 'string' || !isSupportedProvider(provider)) {
-    res.status(400).json({ error: 'provider must be one of google, microsoft, github' });
-    return;
-  }
-  if (typeof code !== 'string' || !code) {
-    res.status(400).json({ error: 'code is required' });
-    return;
-  }
-  if (typeof stellarAddress !== 'string' || !stellarAddress) {
-    res.status(400).json({ error: 'stellarAddress is required' });
-    return;
-  }
-  if (typeof signature !== 'string' || !signature) {
-    res.status(400).json({ error: 'signature is required to prove ownership of stellarAddress' });
-    return;
-  }
 
   let identity;
   try {

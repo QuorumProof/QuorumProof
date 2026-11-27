@@ -991,5 +991,19 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+
+  oauth2Callback: {
+    body: {
+      type: 'object',
+      properties: {
+        provider: { type: 'string', enum: ['google', 'microsoft', 'github'] },
+        code: { type: 'string', minLength: 1, pattern: '\\S' },
+        stellarAddress: { type: 'string', minLength: 1, pattern: '\\S' },
+        signature: { type: 'string', minLength: 1, pattern: '\\S' },
+      },
+      required: ['provider', 'code', 'stellarAddress', 'signature'],
+      additionalProperties: false,
+    },
+  },
 };
 export default validate;
