@@ -50,7 +50,7 @@ jobs:
           # Full history so git rev-parse works and we can commit back
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

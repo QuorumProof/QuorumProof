@@ -31,6 +31,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Run examples against mock API
         run: ./scripts/check_code_examples.sh
