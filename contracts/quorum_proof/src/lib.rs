@@ -897,6 +897,64 @@ pub enum ContractError {
     IssuerIsAttestor = 97,
     /// Issue #1585: Credential escrow not found or invalid
     InvalidEscrow = 98,
+    /// #1951: Transaction expired before it could advance
+    TransactionExpired = 99,
+    /// #1951: Transaction not found in storage
+    TransactionNotFound = 100,
+    /// #1951: Transaction cannot be committed in its current phase
+    CannotCommitTransaction = 101,
+    /// #1951: Transaction cannot be rolled back in its current state
+    CannotRollbackTransaction = 102,
+    /// #1951: Veto request not found
+    VetoRequestNotFound = 103,
+    /// #1951: Caller is not authorized to perform the veto action
+    VetoNotAuthorized = 104,
+    /// #1951: Veto is not in a state that allows this operation
+    VetoInvalidState = 105,
+    /// #1951: Migration has not been initialized
+    MigrationNotInitialized = 106,
+    /// #1951: Migration path is not supported
+    MigrationNotSupported = 107,
+    /// #1951: Migration is in an invalid state for this operation
+    MigrationInvalidState = 108,
+    /// #1951: Migration checkpoint not found
+    MigrationCheckpointNotFound = 109,
+    /// #1951: Revocation accumulator has not been initialized
+    RevocationAccumulatorNotInitialized = 110,
+    /// #1951: Attestor has already attested for this credential
+    AttestorAlreadyAttested = 111,
+    /// #1951: Postcondition invariant violated
+    PostconditionViolated = 112,
+    /// #1951: Credential attributes exceed the 5 KB size limit
+    CredentialAttributesTooLarge = 113,
+    /// #1951: Attestor is not in the slice and no valid delegation was found
+    AttestorNotResolvable = 114,
+    /// #1951: Attestor account is suspended
+    AttestorSuspended = 115,
+    /// #1951: Attestation record not found
+    AttestationNotFound = 116,
+    /// #1951: Advance-phase value is not a recognised phase number
+    InvalidAtomicPhase = 117,
+    /// #1951: Derivative type discriminant is unrecognised
+    InvalidDerivativeType = 118,
+    /// #1951: Derivative not found
+    DerivativeNotFound = 119,
+    /// #1951: Stake not found
+    StakeNotFound = 120,
+    /// #1951: Cannot merge credentials belonging to different subjects
+    SubjectMismatch = 121,
+    /// #1951: Credential not found (cross-chain / fractional contexts)
+    CredentialNotFoundLocal = 122,
+    /// #1951: Only the issuer may perform this action
+    IssuerOnlyAction = 123,
+    /// #1951: Credential is not fractionalized
+    NotFractionalized = 124,
+    /// #1951: Branch not found
+    BranchNotFound = 125,
+    /// #1951: Cannot merge branches from different credentials
+    BranchCredentialMismatch = 126,
+    /// #1951: No migration defined for this schema version
+    NoMigrationForVersion = 127,
 }
 
 #[contracttype]
@@ -3664,7 +3722,7 @@ impl QuorumProofContract {
                 // v0 → v1: initial versioning baseline; no data transformation needed.
                 // Future migrations that need to rewrite stored structs go in subsequent arms.
             }
-            _ => panic!("no migration defined for this version"),
+            _ => panic_with_error!(env, ContractError::NoMigrationForVersion),
         }
 
         env.storage()
@@ -5761,7 +5819,7 @@ impl QuorumProofContract {
     /// Used to assert invariants after state mutations.
     fn postcondition(cond: bool, _msg: &str) {
         if !cond {
-            panic!("postcondition violated");
+            panic_with_error!(env, ContractError::PostconditionViolated);
         }
     }
 
@@ -9441,7 +9499,7 @@ impl QuorumProofContract {
         }
 
         if current_size.saturating_add(new_entry_size) > 5120 {
-            panic!("credential attributes exceed 5 KB limit");
+            panic_with_error!(&env, ContractError::CredentialAttributesTooLarge);
         }
 
         // Set the attribute
@@ -10372,7 +10430,7 @@ impl QuorumProofContract {
             return delegator;
         }
 
-        panic!("attestor not in slice and no valid delegation found");
+        panic_with_error!(&env, ContractError::AttestorNotResolvable);
     }
 
     /// Issue #897: Validate that slice threshold is achievable
@@ -10952,7 +11010,7 @@ impl QuorumProofContract {
 
         // Check if attestor (or delegator if delegated) is suspended
         if Self::is_attestor_suspended(env.clone(), slice_id, attestor_to_use.clone()) {
-            panic!("attestor is suspended");
+            panic_with_error!(&env, ContractError::AttestorSuspended);
         }
 
         // Check for fork before allowing attestation
@@ -11188,7 +11246,7 @@ impl QuorumProofContract {
         // Issue #1361: Resolve effective attestor, handling delegations
         let attestor_to_use = Self::resolve_attestor(&env, &attestor, slice_id, &slice);
         if Self::is_attestor_suspended(env.clone(), slice_id, attestor_to_use.clone()) {
-            panic!("attestor is suspended");
+            panic_with_error!(&env, ContractError::AttestorSuspended);
         }
 
         let now = env.ledger().timestamp();
@@ -11231,7 +11289,7 @@ impl QuorumProofContract {
                 .unwrap_or(Vec::new(&env));
             for rec in records.iter() {
                 if rec.attestor == attestor_to_use {
-                    panic!("attestor has already attested for this credential");
+                    panic_with_error!(&env, ContractError::AttestorAlreadyAttested);
                 }
             }
             records.push_back(AttestationRecord {
@@ -12651,7 +12709,7 @@ impl QuorumProofContract {
                 };
             }
         }
-        panic!("attestation not found");
+        panic_with_error!(&env, ContractError::AttestationNotFound);
     }
 
     /// Renew an attestation by extending its expiry. Only the original attestor may call this.
@@ -16196,7 +16254,6 @@ impl QuorumProofContract {
         }
 
         let credential_id = request.credential_id;
-        let old_subject = request.new_subject.clone(); // placeholder - will read from credential
 
         let mut credential: Credential = env
             .storage()
@@ -19623,7 +19680,7 @@ impl QuorumProofContract {
             2 => atomic_operations::TxnPhase::Phase2_SbtRegistry,
             3 => atomic_operations::TxnPhase::Phase3_ZkVerifier,
             4 => atomic_operations::TxnPhase::Committed,
-            _ => panic!("invalid phase"),
+            _ => panic_with_error!(&env, ContractError::InvalidAtomicPhase),
         };
         atomic_operations::advance_phase(&env, txn_id, phase, savepoint_data);
     }
@@ -19643,7 +19700,7 @@ impl QuorumProofContract {
             1 => atomic_operations::TxnPhase::Phase1_QuorumProof,
             2 => atomic_operations::TxnPhase::Phase2_SbtRegistry,
             3 => atomic_operations::TxnPhase::Phase3_ZkVerifier,
-            _ => panic!("invalid phase"),
+            _ => panic_with_error!(&env, ContractError::InvalidAtomicPhase),
         };
         atomic_operations::record_phase_result(&env, txn_id, phase_enum, succeeded, error_code, result_data);
     }
@@ -21420,7 +21477,7 @@ impl QuorumProofContract {
             0 => DerivativeType::Call,
             1 => DerivativeType::Put,
             2 => DerivativeType::Future,
-            _ => panic!("invalid derivative type"),
+            _ => panic_with_error!(&env, ContractError::InvalidDerivativeType),
         };
 
         let derivative_id: u64 = env
@@ -21483,7 +21540,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey12::CredentialDerivative(derivative_id))
-            .unwrap_or_else(|| panic!("derivative not found"));
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::DerivativeNotFound));
 
         assert_eq!(derivative.holder, holder, "only holder can exercise");
         assert!(!derivative.is_exercised, "derivative already exercised");
@@ -21822,7 +21879,7 @@ impl QuorumProofContract {
             .storage()
             .instance()
             .get(&DataKey12::CredentialStake(stake_id))
-            .unwrap_or_else(|| panic!("stake not found"));
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::StakeNotFound));
 
         assert!(!stake.is_liquidated, "stake already liquidated");
         assert!(env.ledger().timestamp() >= stake.lock_until, "stake still locked");
@@ -22375,7 +22432,7 @@ impl QuorumProofContract {
 
             if let Some(cred) = credential {
                 if cred.subject != subject {
-                    panic!("Cannot merge credentials from different subjects");
+                    panic_with_error!(&env, ContractError::SubjectMismatch);
                 }
                 total_attestations += cred.required_attestations as u64;
                 metadata_parts.push_back(cred.metadata_hash);
@@ -22529,7 +22586,7 @@ impl QuorumProofContract {
 
             wrapped_id
         } else {
-            panic!("Credential not found");
+            panic_with_error!(&env, ContractError::CredentialNotFoundLocal);
         }
     }
 
@@ -22550,7 +22607,7 @@ impl QuorumProofContract {
 
         if let Some(cred) = credential {
             if cred.issuer != issuer {
-                panic!("Only issuer can enable fractional transfer");
+                panic_with_error!(&env, ContractError::IssuerOnlyAction);
             }
 
             let ownership = fractional_transfer::FractionalOwnershipState {
@@ -22572,7 +22629,7 @@ impl QuorumProofContract {
                 created_at: env.ledger().timestamp(),
             });
         } else {
-            panic!("Credential not found");
+            panic_with_error!(&env, ContractError::CredentialNotFoundLocal);
         }
     }
 
@@ -22629,7 +22686,7 @@ impl QuorumProofContract {
 
             transfer_id
         } else {
-            panic!("Credential is not fractionalized");
+            panic_with_error!(&env, ContractError::NotFractionalized);
         }
     }
 
@@ -22684,7 +22741,7 @@ impl QuorumProofContract {
 
             branch_id
         } else {
-            panic!("Credential not found");
+            panic_with_error!(&env, ContractError::CredentialNotFoundLocal);
         }
     }
 
@@ -22746,7 +22803,7 @@ impl QuorumProofContract {
 
             commit_id
         } else {
-            panic!("Branch not found");
+            panic_with_error!(&env, ContractError::BranchNotFound);
         }
     }
 
@@ -22777,7 +22834,7 @@ impl QuorumProofContract {
 
         if let (Some(src), Some(mut tgt)) = (source, target) {
             if src.credential_id != tgt.credential_id {
-                panic!("Cannot merge branches from different credentials");
+                panic_with_error!(&env, ContractError::BranchCredentialMismatch);
             }
 
             let merged_metadata = if src.metadata_hash == tgt.metadata_hash {
@@ -22823,7 +22880,7 @@ impl QuorumProofContract {
 
             merge_id
         } else {
-            panic!("Branch not found");
+            panic_with_error!(&env, ContractError::BranchNotFound);
         }
     }
 }
@@ -26469,7 +26526,7 @@ mod tests {
 
 // ── New feature tests ─────────────────────────────────────────────────────────
 
-#[cfg(all(test, any()))]
+#[cfg(test)]
 mod feature_tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo};
@@ -28132,7 +28189,6 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_detect_fork_no_conflict() {
         let env = Env::default();
         env.mock_all_auths();
@@ -28158,7 +28214,6 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_detect_fork_with_conflict() {
         let env = Env::default();
         env.mock_all_auths();
@@ -28184,7 +28239,6 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     #[should_panic(expected = "ForkDetected")]
     fn test_attest_prevents_conflicting_attestation() {
         let env = Env::default();
@@ -28207,7 +28261,6 @@ mod feature_tests {
     }
 
     #[test]
-    #[ignore]
     fn test_fork_detection_stores_info() {
         let env = Env::default();
         env.mock_all_auths();

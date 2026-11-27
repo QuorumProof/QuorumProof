@@ -4,9 +4,9 @@
 //! Provides seamless upgrade path for schema changes while ensuring
 //! backward compatibility and data integrity.
 
-use soroban_sdk::{contracttype, Address, Bytes, Env, String, Symbol, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, Bytes, Env, String, Symbol, Vec};
 
-use crate::{migration, Credential, DataKey, EXTENDED_TTL, STANDARD_TTL};
+use crate::{migration, ContractError, Credential, DataKey, EXTENDED_TTL, STANDARD_TTL};
 
 /// Version tag written to each credential once it passes the V1→V2 transform (Issue #1731).
 const V2_VERSION_TAG: &str = "v2";
@@ -110,7 +110,7 @@ fn require_stored_admin(env: &Env, admin: &Address) {
         .storage()
         .instance()
         .get(&DataKey::Admin)
-        .unwrap_or_else(|| panic!("not initialized"));
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::MigrationNotInitialized));
     assert!(stored == *admin, "unauthorized");
 }
 
@@ -124,7 +124,7 @@ pub fn init_migration_v2(env: &Env) {
 pub fn start_migration_v1_to_v2(env: &Env, admin: &Address) -> u32 {
     let current = get_schema_version(env);
     if current != SchemaVersion::V1 {
-        panic!("migration only supported from V1 to V2");
+        panic_with_error!(env, ContractError::MigrationNotSupported);
     }
 
     admin.require_auth();
@@ -179,7 +179,7 @@ pub fn start_migration_v1_to_v2(env: &Env, admin: &Address) -> u32 {
 pub fn migrate_chunk_v1_to_v2(env: &Env, admin: &Address, chunk_size: u32) -> MigrationCheckpoint {
     let current = get_schema_version(env);
     if current != SchemaVersion::V1 {
-        panic!("migration already completed or not started");
+        panic_with_error!(env, ContractError::MigrationInvalidState);
     }
 
     admin.require_auth();
@@ -187,11 +187,11 @@ pub fn migrate_chunk_v1_to_v2(env: &Env, admin: &Address, chunk_size: u32) -> Mi
 
     // Get the migration job
     let job = migration::get_job(env, 2).unwrap_or_else(|| {
-        panic!("migration not started");
+        panic_with_error!(env, ContractError::MigrationInvalidState);
     });
 
     if job.is_completed() {
-        panic!("migration already completed");
+        panic_with_error!(env, ContractError::MigrationInvalidState);
     }
 
     // Get checkpoint
@@ -201,7 +201,7 @@ pub fn migrate_chunk_v1_to_v2(env: &Env, admin: &Address, chunk_size: u32) -> Mi
         .persistent()
         .get::<DataKeyMigrationV2, MigrationCheckpoint>(&key)
         .unwrap_or_else(|| {
-            panic!("migration checkpoint not found");
+            panic_with_error!(env, ContractError::MigrationCheckpointNotFound);
         });
 
     let clamped_size = migration::clamp_chunk_size(chunk_size);

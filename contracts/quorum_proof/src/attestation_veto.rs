@@ -44,9 +44,9 @@
 //! `integration_nested_slices.rs` for tests exercising both mechanisms
 //! active on the same credential simultaneously.
 
-use soroban_sdk::{contracttype, Address, Bytes, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, Bytes, Env, Symbol, Vec};
 
-use crate::{EXTENDED_TTL, STANDARD_TTL};
+use crate::{ContractError, EXTENDED_TTL, STANDARD_TTL};
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -217,7 +217,7 @@ pub fn request_veto(
 ) -> u64 {
     // Verify authority is authorized
     if !is_veto_authority(env, &veto_authority) {
-        panic!("not authorized to request veto");
+        panic_with_error!(env, ContractError::VetoNotAuthorized);
     }
 
     let now = env.ledger().timestamp();
@@ -281,18 +281,18 @@ pub fn cancel_veto(env: &Env, canceller: &Address, veto_id: u64) {
     {
         // Only the authority who created it can cancel
         if veto.veto_authority != *canceller {
-            panic!("only veto authority can cancel");
+            panic_with_error!(env, ContractError::VetoNotAuthorized);
         }
 
         if veto.status == VetoStatus::Executed || veto.status == VetoStatus::Cancelled {
-            panic!("cannot cancel executed or already-cancelled veto");
+            panic_with_error!(env, ContractError::VetoInvalidState);
         }
 
         veto.status = VetoStatus::Cancelled;
         env.storage().instance().set(&key, &veto);
         env.storage().instance().extend_ttl(STANDARD_TTL, EXTENDED_TTL);
     } else {
-        panic!("veto request not found");
+        panic_with_error!(env, ContractError::VetoRequestNotFound);
     }
 }
 
@@ -307,11 +307,11 @@ pub fn execute_veto(env: &Env, executor: &Address, veto_id: u64) -> bool {
     {
         // Only admin or veto authority can execute
         if veto.veto_authority != *executor {
-            panic!("not authorized to execute this veto");
+            panic_with_error!(env, ContractError::VetoNotAuthorized);
         }
 
         if veto.status != VetoStatus::Pending && veto.status != VetoStatus::Ready {
-            panic!("veto is not in executable state");
+            panic_with_error!(env, ContractError::VetoInvalidState);
         }
 
         let now = env.ledger().timestamp();
@@ -333,7 +333,7 @@ pub fn execute_veto(env: &Env, executor: &Address, veto_id: u64) -> bool {
 
         true
     } else {
-        panic!("veto request not found");
+        panic_with_error!(env, ContractError::VetoRequestNotFound);
     }
 }
 
