@@ -244,7 +244,45 @@ describe('credential tiers routes', () => {
       .send({ points: 0 });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Points must be a positive number');
+    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.location).toBe('body');
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid credential ID and non-empty body on tier advance', async () => {
+    const invalidIdRes = await request(tiersApp).post('/api/credentials/abc/tier/advance');
+    expect(invalidIdRes.status).toBe(400);
+    expect(invalidIdRes.body.error).toBe('Validation failed');
+    expect(invalidIdRes.body.location).toBe('params');
+
+    const nonEmptyBodyRes = await request(tiersApp)
+      .post('/api/credentials/42/tier/advance')
+      .send({ unexpected: true });
+    expect(nonEmptyBodyRes.status).toBe(400);
+    expect(nonEmptyBodyRes.body.error).toBe('Validation failed');
+    expect(nonEmptyBodyRes.body.location).toBe('body');
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing points, invalid reason, or unknown fields on tier points', async () => {
+    const missingPointsRes = await request(tiersApp)
+      .post('/api/credentials/42/tier/points')
+      .send({ reason: 'bonus' });
+    expect(missingPointsRes.status).toBe(400);
+    expect(missingPointsRes.body.error).toBe('Validation failed');
+    expect(missingPointsRes.body.location).toBe('body');
+
+    const invalidReasonRes = await request(tiersApp)
+      .post('/api/credentials/42/tier/points')
+      .send({ points: 10, reason: '' });
+    expect(invalidReasonRes.status).toBe(400);
+    expect(invalidReasonRes.body.error).toBe('Validation failed');
+
+    const invalidIdRes = await request(tiersApp)
+      .post('/api/credentials/0/tier/points')
+      .send({ points: 10 });
+    expect(invalidIdRes.status).toBe(400);
+    expect(invalidIdRes.body.location).toBe('params');
     expect(pool.query).not.toHaveBeenCalled();
   });
 

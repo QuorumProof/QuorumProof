@@ -1005,5 +1005,42 @@ export const schemas = {
       additionalProperties: false,
     },
   },
+  credentialTierAdvance: {
+    params: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', pattern: '^[1-9]\\d*$' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    body: {
+      custom: (data) => data === undefined || (
+        typeof data === 'object' &&
+        data !== null &&
+        !Array.isArray(data) &&
+        Object.keys(data).length === 0
+      ) ? true : 'Request body must be empty',
+    },
+  },
+  credentialTierPoints: {
+    params: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', pattern: '^[1-9]\\d*$' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    body: {
+      type: 'object',
+      properties: {
+        points: { type: 'number', exclusiveMinimum: 0 },
+        reason: { type: 'string', minLength: 1, maxLength: 500 },
+      },
+      required: ['points'],
+      additionalProperties: false,
+    },
+  },
 };
 export default validate;
