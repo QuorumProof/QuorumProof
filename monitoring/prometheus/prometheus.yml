@@ -16,6 +16,12 @@ scrape_configs:
       - targets: ["host.docker.internal:9101"]
     scrape_interval: 15s
 
+  - job_name: "api-server-api-metering"
+    metrics_path: /metrics/api
+    static_configs:
+      - targets: ["host.docker.internal:3001"]
+    scrape_interval: 15s
+
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]

@@ -115,9 +115,9 @@ backup_verification_status = Gauge(
 )
 
 # Histograms
-api_request_duration_seconds = Histogram(
-    'quorumproof_api_request_duration_seconds',
-    'RPC call latency',
+rpc_scrape_duration_seconds = Histogram(
+    'quorumproof_rpc_scrape_duration_seconds',
+    'RPC scrape latency',
     buckets=(0.1, 0.5, 1, 2, 5),
     registry=registry
 )

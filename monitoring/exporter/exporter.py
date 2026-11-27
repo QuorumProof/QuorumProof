@@ -25,7 +25,7 @@ from metrics import (
     active_slices_total,
     contract_gas_usage,
     contract_state_size,
-    api_request_duration_seconds,
+    rpc_scrape_duration_seconds,
     contract_invocation_duration_seconds,
     backup_last_success_timestamp,
     backup_verification_status,
@@ -100,7 +100,7 @@ class QuorumProofExporter:
             # Fetch contract events from RPC
             events = self._fetch_events()
             duration = time.time() - start_time
-            api_request_duration_seconds.observe(duration)
+            rpc_scrape_duration_seconds.observe(duration)
 
             # Process events
             for event in events:

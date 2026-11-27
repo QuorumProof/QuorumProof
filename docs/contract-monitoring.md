@@ -91,7 +91,8 @@ All metrics are prefixed `quorumproof_`.
 
 | Metric | Description | Labels |
 |---|---|---|
-| `quorumproof_api_request_duration_seconds` | RPC call latency | - |
+| `quorumproof_api_request_duration_seconds` | API request latency | `route` |
+| `quorumproof_rpc_scrape_duration_seconds` | Exporter RPC scrape latency | - |
 | `quorumproof_contract_invocation_duration_seconds` | Contract invocation latency | `operation` |
 
 ---
