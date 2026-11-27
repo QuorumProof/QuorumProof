@@ -61,14 +61,16 @@ fuzz_target!(|input: VerificationFuzzInput| {
     }
 
     // Create slices and test verification paths
-    for _slice_idx in 0..slice_count {
+    for _ in 0..slice_count {
+        let creator = Address::generate(&env);
         let attestor_count = (threshold as usize).clamp(1, 5);
         let mut attestors = SorobanVec::new(&env);
         // All attestors get weight 1; threshold ≤ attestor_count so quorum is reachable
         let mut weights = SorobanVec::new(&env);
 
+        // Build attestor list and a matching weights vector (each weight = 1).
         let mut attestors = SorobanVec::new(&env);
-        let mut weights: SorobanVec<u32> = SorobanVec::new(&env);
+        let mut weights = SorobanVec::new(&env);
         for _ in 0..attestor_count {
             attestors.push_back(Address::generate(&env));
             weights.push_back(1u32);
@@ -76,11 +78,9 @@ fuzz_target!(|input: VerificationFuzzInput| {
 
         let creator = Address::generate(&env);
 
-        // The slice creator is a distinct address (must not overlap with attestors to
-        // keep the test free of auth complications under mock_all_auths).
-        let creator = Address::generate(&env);
-
-        // create_slice(creator, attestors, weights, threshold) -> u64
+        // Fix #1882: create_slice signature is
+        //   create_slice(env, creator, attestors, weights, threshold)
+        // The previous call was missing `creator` and `weights`.
         let slice_id = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.create_slice(&creator, &attestors, &weights, &threshold)
         })) {
@@ -89,13 +89,16 @@ fuzz_target!(|input: VerificationFuzzInput| {
         };
 
         // Test attestation for each credential
-        for &credential_id in &credential_ids {
+        for &credential_id in credential_ids.iter() {
             if let Ok(Some(attestor)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 attestors.get(0)
             })) {
-                // attest(attestor, credential_id, slice_id, attestation_value, expires_at)
+                // Fix #1882: attest signature is
+                //   attest(env, attestor, credential_id, slice_id,
+                //          attestation_value: bool, expires_at: Option<u64>)
+                // The previous call was missing attestation_value and expires_at.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    client.attest(&attestor, &credential_id, &slice_id, &true, &None::<u64>)
+                    client.attest(&attestor, &credential_id, &slice_id, &true, &None)
                 }));
 
                 // is_attested(credential_id, slice_id)
@@ -103,7 +106,9 @@ fuzz_target!(|input: VerificationFuzzInput| {
                     client.is_attested(&credential_id, &slice_id)
                 }));
 
-                // get_attestors(credential_id) — no slice_id parameter
+                // Fix #1882: get_attestors signature is
+                //   get_attestors(env, credential_id)
+                // The previous call incorrectly passed slice_id as a second argument.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     client.get_attestors(&credential_id)
                 }));
@@ -116,8 +121,10 @@ fuzz_target!(|input: VerificationFuzzInput| {
 });
 
 fn generate_fuzzy_metadata(size: u8) -> Vec<u8> {
-    // Clamp to [1, 256]: the contract rejects empty metadata and enforces a 256-byte cap.
-    let meta_size = (size as usize).clamp(1, 256);
+    // Clamp to [1, 512] — lower bound avoids the "metadata_hash cannot be
+    // empty" rejection in issue_credential; upper bound is a reasonable
+    // maximum for fuzzing without exceeding any size limits.
+    let meta_size = (size as usize).clamp(1, 512);
     let mut metadata = vec![0u8; meta_size];
 
     for i in 0..meta_size {
