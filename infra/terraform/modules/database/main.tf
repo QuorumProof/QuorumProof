@@ -61,7 +61,8 @@ resource "aws_rds_cluster" "this" {
   kms_key_id        = var.kms_key_arn
 
   backup_retention_period         = var.backup_retention_days
-  preferred_backup_window         = "03:00-04:00"
+  preferred_backup_window         = var.preferred_backup_window
+  preferred_maintenance_window    = var.preferred_maintenance_window
   copy_tags_to_snapshot           = true
   deletion_protection             = var.deletion_protection
   skip_final_snapshot             = false
@@ -74,6 +75,26 @@ resource "aws_rds_cluster" "this" {
     # After a failover the global cluster membership / replication source
     # changes out-of-band; do not let Terraform revert it.
     ignore_changes = [global_cluster_identifier, replication_source_identifier]
+
+    precondition {
+      condition     = var.deletion_protection != null
+      error_message = "deletion_protection must be explicitly configured on aws_rds_cluster."
+    }
+
+    precondition {
+      condition     = var.backup_retention_days != null ? var.backup_retention_days >= 1 : false
+      error_message = "backup_retention_days must be explicitly configured to at least 1 day."
+    }
+
+    precondition {
+      condition     = var.preferred_backup_window != null ? length(trimspace(var.preferred_backup_window)) > 0 : false
+      error_message = "preferred_backup_window must be explicitly configured on aws_rds_cluster."
+    }
+
+    precondition {
+      condition     = var.preferred_maintenance_window != null ? length(trimspace(var.preferred_maintenance_window)) > 0 : false
+      error_message = "preferred_maintenance_window must be explicitly configured on aws_rds_cluster."
+    }
   }
 }
 

@@ -72,15 +72,43 @@ variable "kms_key_arn" {
 }
 
 variable "backup_retention_days" {
-  description = "Automated backup retention."
+  description = "Automated backup / point-in-time recovery retention window in days (1–35). Must be set explicitly per environment."
   type        = number
-  default     = 14
+
+  validation {
+    condition     = var.backup_retention_days != null ? (var.backup_retention_days >= 1 && var.backup_retention_days <= 35) : false
+    error_message = "backup_retention_days must be set explicitly to a value between 1 and 35 days."
+  }
+}
+
+variable "preferred_backup_window" {
+  description = "Daily UTC time range for automated backups (HH:MM-HH:MM). Must be set explicitly per environment."
+  type        = string
+
+  validation {
+    condition     = var.preferred_backup_window != null ? can(regex("^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$", var.preferred_backup_window)) : false
+    error_message = "preferred_backup_window must be set explicitly in HH:MM-HH:MM UTC format."
+  }
+}
+
+variable "preferred_maintenance_window" {
+  description = "Weekly UTC maintenance window (ddd:HH:MM-ddd:HH:MM). Must be set explicitly per environment."
+  type        = string
+
+  validation {
+    condition     = var.preferred_maintenance_window != null ? can(regex("^(mon|tue|wed|thu|fri|sat|sun):([01][0-9]|2[0-3]):[0-5][0-9]-(mon|tue|wed|thu|fri|sat|sun):([01][0-9]|2[0-3]):[0-5][0-9]$", var.preferred_maintenance_window)) : false
+    error_message = "preferred_maintenance_window must be set explicitly in ddd:HH:MM-ddd:HH:MM UTC format."
+  }
 }
 
 variable "deletion_protection" {
-  description = "Prevent accidental cluster deletion."
+  description = "Prevent accidental cluster deletion. Must be set explicitly per environment."
   type        = bool
-  default     = true
+
+  validation {
+    condition     = var.deletion_protection != null
+    error_message = "deletion_protection must be set explicitly for every environment."
+  }
 }
 
 variable "replication_lag_alarm_ms" {
