@@ -55,14 +55,16 @@ module "compute" {
 module "database" {
   source = "../../modules/database"
 
-  name                       = local.name
-  vpc_id                     = module.network.vpc_id
-  private_subnet_ids         = module.network.private_subnet_ids
-  allowed_security_group_ids = [module.compute.task_security_group_id]
-  instance_class             = "db.t4g.medium"
-  instance_count             = 1
-  deletion_protection        = true
-  backup_retention_days      = 3
+  name                         = local.name
+  vpc_id                       = module.network.vpc_id
+  private_subnet_ids           = module.network.private_subnet_ids
+  allowed_security_group_ids   = [module.compute.task_security_group_id]
+  instance_class               = "db.t4g.medium"
+  instance_count               = 1
+  deletion_protection          = true
+  backup_retention_days        = 3
+  preferred_backup_window      = "03:00-04:00"
+  preferred_maintenance_window = "sun:05:00-sun:06:00"
 }
 
 module "log_archive" {

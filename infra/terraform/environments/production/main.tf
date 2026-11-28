@@ -141,27 +141,35 @@ module "database_primary" {
   source    = "../../modules/database"
   providers = { aws = aws.primary }
 
-  name                       = local.name_primary
-  vpc_id                     = module.network_primary.vpc_id
-  private_subnet_ids         = module.network_primary.private_subnet_ids
-  allowed_security_group_ids = [module.compute_primary.task_security_group_id]
-  global_cluster_identifier  = local.global_db_id
-  kms_key_arn                = aws_kms_key.primary.arn
+  name                         = local.name_primary
+  vpc_id                       = module.network_primary.vpc_id
+  private_subnet_ids           = module.network_primary.private_subnet_ids
+  allowed_security_group_ids   = [module.compute_primary.task_security_group_id]
+  global_cluster_identifier    = local.global_db_id
+  kms_key_arn                  = aws_kms_key.primary.arn
+  deletion_protection          = true
+  backup_retention_days        = 14
+  preferred_backup_window      = "03:00-04:00"
+  preferred_maintenance_window = "sun:05:00-sun:06:00"
 }
 
 module "database_secondary" {
   source    = "../../modules/database"
   providers = { aws = aws.secondary }
 
-  name                       = local.name_secondary
-  vpc_id                     = module.network_secondary.vpc_id
-  private_subnet_ids         = module.network_secondary.private_subnet_ids
-  allowed_security_group_ids = [module.compute_secondary.task_security_group_id]
-  global_cluster_identifier  = local.global_db_id
-  is_secondary               = true
-  kms_key_arn                = aws_kms_replica_key.secondary.arn
-  instance_count             = 1
-  alarm_sns_topic_arns       = [aws_sns_topic.secondary_alarms.arn]
+  name                         = local.name_secondary
+  vpc_id                       = module.network_secondary.vpc_id
+  private_subnet_ids           = module.network_secondary.private_subnet_ids
+  allowed_security_group_ids   = [module.compute_secondary.task_security_group_id]
+  global_cluster_identifier    = local.global_db_id
+  is_secondary                 = true
+  kms_key_arn                  = aws_kms_replica_key.secondary.arn
+  instance_count               = 1
+  deletion_protection          = true
+  backup_retention_days        = 14
+  preferred_backup_window      = "03:00-04:00"
+  preferred_maintenance_window = "sun:05:00-sun:06:00"
+  alarm_sns_topic_arns         = [aws_sns_topic.secondary_alarms.arn]
 
   depends_on = [module.database_primary]
 }
